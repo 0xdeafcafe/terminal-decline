@@ -24,6 +24,7 @@ fn main() {
         layers.push(p);
     }
     let mut command = None;
+    let mut restore = Vec::new();
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -40,6 +41,13 @@ fn main() {
                 match args.get(i) {
                     Some(p) => layers.push(PathBuf::from(p)),
                     None => die("--config needs a file"),
+                }
+            }
+            // A dogfood build restarting into a newer one.
+            "--restore" => {
+                i += 1;
+                if let Some(p) = args.get(i) {
+                    restore = decline::reload::take(std::path::Path::new(p));
                 }
             }
             "-e" | "--command" => {
@@ -62,7 +70,7 @@ fn main() {
         config.command = cmd;
     }
     let name = pin::own_app_name(&paths).unwrap_or_else(|| "decline".into());
-    app::run(config, &name);
+    app::run(config, &name, restore);
 }
 
 fn die(msg: &str) -> ! {

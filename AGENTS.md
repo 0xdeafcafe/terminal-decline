@@ -28,3 +28,10 @@ Use [Conventional Commits](https://www.conventionalcommits.org/):
   `cargo bench -p term-render`, `scripts/pressure/run.py`, and
   `/usr/bin/footprint -p <pid>` for memory (not RSS).
 - `term-core` must stay free of platform code.
+
+## Dogfooding
+
+Alex uses `~/Applications/Decline.app`, installed by `scripts/dogfood.sh`.
+After merging changes to `main` that affect the app, run
+`scripts/dogfood.sh`: the running copy restarts into the new build and
+reopens its windows in the same folders and places.

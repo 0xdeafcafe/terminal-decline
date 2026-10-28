@@ -69,6 +69,12 @@ ${icon_entry}
 </plist>
 EOF
 
+# DOGFOOD=1 marks a local build that restarts itself when a newer one is
+# installed (see crates/term-app/src/reload.rs and scripts/dogfood.sh).
+if [[ "${DOGFOOD:-}" == "1" ]]; then
+  touch "$app/Contents/Resources/dogfood"
+fi
+
 # CODESIGN_IDENTITY defaults to ad-hoc ("-"); set it for real Developer ID signing.
 identity=${CODESIGN_IDENTITY:--}
 sign_args=(--force --deep --sign "$identity")

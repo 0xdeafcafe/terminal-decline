@@ -20,6 +20,8 @@ use crate::view::{Launch, TerminalView, content_size, delegate_of};
 
 pub struct AppIvars {
     config: Rc<Config>,
+    /// Windows to reopen after a dogfood build restarted into a newer one.
+    restore: RefCell<Vec<crate::reload::SavedWindow>>,
     windows: RefCell<Vec<(Retained<NSWindow>, Retained<TerminalView>)>>,
 }
 
@@ -35,7 +37,16 @@ define_class!(
     unsafe impl NSApplicationDelegate for AppDelegate {
         #[unsafe(method(applicationDidFinishLaunching:))]
         fn did_finish_launching(&self, _n: &NSNotification) {
-            self.open_window(None);
+            let restore = std::mem::take(&mut *self.ivars().restore.borrow_mut());
+            if restore.is_empty() {
+                self.open_window(None, None);
+            }
+            for w in restore {
+                let [x, y, width, height] = w.frame;
+                let frame = NSRect::new(NSPoint::new(x, y), objc2_foundation::NSSize::new(width, height));
+                self.open_window(w.cwd, Some(frame));
+            }
+            self.watch_for_new_build();
             let mtm = MainThreadMarker::from(self);
             #[allow(deprecated)]
             NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
@@ -45,7 +56,7 @@ define_class!(
         fn should_handle_reopen(&self, _app: &NSApplication, has_visible: bool) -> bool {
             // Dock icon clicked with no windows open: open one.
             if !has_visible {
-                self.open_window(None);
+                self.open_window(None, None);
             }
             true
         }
@@ -61,7 +72,7 @@ define_class!(
         fn new_window(&self, _sender: Option<&AnyObject>) {
             // Open in the same directory as the window in front.
             let cwd = self.key_view().and_then(|v| v.foreground_cwd());
-            self.open_window(cwd);
+            self.open_window(cwd, None);
         }
 
         #[unsafe(method(windowClosed:))]
@@ -73,12 +84,56 @@ define_class!(
 );
 
 impl AppDelegate {
-    pub fn new(mtm: MainThreadMarker, config: Config) -> Retained<AppDelegate> {
+    pub fn new(mtm: MainThreadMarker, config: Config, restore: Vec<crate::reload::SavedWindow>) -> Retained<AppDelegate> {
         let this = Self::alloc(mtm).set_ivars(AppIvars {
             config: Rc::new(config),
+            restore: RefCell::new(restore),
             windows: RefCell::new(Vec::new()),
         });
-        unsafe { msg_send![super(this), init] }
+        let delegate: Retained<AppDelegate> = unsafe { msg_send![super(this), init] };
+        DELEGATE.with(|d| *d.borrow_mut() = Some(objc2::rc::Weak::from_retained(&delegate)));
+        delegate
+    }
+
+    /// Dogfood builds: restart into a newer build when one is installed.
+    fn watch_for_new_build(&self) {
+        let Some(bundle) = crate::reload::own_bundle() else { return };
+        if !crate::reload::is_dogfood_bundle(&bundle) {
+            return;
+        }
+        let Ok(exe) = std::env::current_exe() else { return };
+        let _ = crate::reload::watch(exe, || {
+            dispatch2::DispatchQueue::main().exec_async(|| {
+                let delegate = DELEGATE.with(|d| d.borrow().as_ref().and_then(|w| w.load()));
+                if let Some(delegate) = delegate {
+                    delegate.restart_into_new_build();
+                }
+            });
+        });
+    }
+
+    fn restart_into_new_build(&self) {
+        let Some(bundle) = crate::reload::own_bundle() else { return };
+        let saved: Vec<crate::reload::SavedWindow> = self
+            .ivars()
+            .windows
+            .borrow()
+            .iter()
+            .map(|(w, v)| {
+                let f = w.frame();
+                crate::reload::SavedWindow {
+                    cwd: v.foreground_cwd(),
+                    frame: [f.origin.x, f.origin.y, f.size.width, f.size.height],
+                }
+            })
+            .collect();
+        let restored = crate::reload::save(&saved).and_then(|file| crate::reload::relaunch(&bundle, &file));
+        if let Err(e) = restored {
+            eprintln!("decline: couldn't start the new build: {e}");
+            return;
+        }
+        let mtm = MainThreadMarker::from(self);
+        NSApplication::sharedApplication(mtm).terminate(None);
     }
 
     fn key_view(&self) -> Option<Retained<TerminalView>> {
@@ -92,7 +147,7 @@ impl AppDelegate {
             .map(|(_, v)| v.clone())
     }
 
-    fn open_window(&self, cwd: Option<String>) {
+    fn open_window(&self, cwd: Option<String>, frame: Option<NSRect>) {
         let mtm = MainThreadMarker::from(self);
         let config = self.ivars().config.clone();
         let scale = NSScreen::mainScreen(mtm).map(|s| s.backingScaleFactor()).unwrap_or(2.0);
@@ -149,14 +204,18 @@ impl AppDelegate {
         if let Some(dir) = &command.cwd {
             command.cwd = Some(expand_home(dir));
         }
-        // Cascade from the window in front, otherwise centre.
-        match self.ivars().windows.borrow().last() {
-            Some((prev, _)) => {
-                let f = prev.frame();
-                window.cascadeTopLeftFromPoint(NSPoint::new(f.origin.x, f.origin.y + f.size.height));
-                let _ = window.cascadeTopLeftFromPoint(NSPoint::new(f.origin.x + 22.0, f.origin.y + f.size.height - 22.0));
+        // Restored frame, else cascade from the window in front, else centre.
+        if let Some(frame) = frame {
+            window.setFrame_display(frame, false);
+        } else {
+            match self.ivars().windows.borrow().last() {
+                Some((prev, _)) => {
+                    let f = prev.frame();
+                    window.cascadeTopLeftFromPoint(NSPoint::new(f.origin.x, f.origin.y + f.size.height));
+                    let _ = window.cascadeTopLeftFromPoint(NSPoint::new(f.origin.x + 22.0, f.origin.y + f.size.height - 22.0));
+                }
+                None => window.center(),
             }
-            None => window.center(),
         }
         window.makeKeyAndOrderFront(None);
         if std::env::var_os("DECLINE_DEBUG").is_some() {
@@ -279,11 +338,15 @@ pub fn build_menus(mtm: MainThreadMarker, app_name: &str) -> Retained<NSMenu> {
     bar
 }
 
-pub fn run(config: Config, app_name: &str) {
+thread_local! {
+    static DELEGATE: RefCell<Option<objc2::rc::Weak<AppDelegate>>> = const { RefCell::new(None) };
+}
+
+pub fn run(config: Config, app_name: &str, restore: Vec<crate::reload::SavedWindow>) {
     let mtm = MainThreadMarker::new().expect("must run on the main thread");
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
-    let delegate = AppDelegate::new(mtm, config);
+    let delegate = AppDelegate::new(mtm, config, restore);
     app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
     app.setMainMenu(Some(&build_menus(mtm, app_name)));
     app.run();

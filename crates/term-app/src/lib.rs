@@ -14,6 +14,7 @@ pub mod layout;
 pub mod mouse;
 pub mod paths;
 pub mod pin;
+pub mod reload;
 pub mod session;
 #[cfg(test)]
 mod testutil;

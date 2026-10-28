@@ -1441,6 +1441,9 @@ impl Terminal {
 pub struct Term {
     parser: vte::Parser,
     pub state: Terminal,
+    /// The start of a UTF-8 character that the last chunk ended in the
+    /// middle of, held back until the rest arrives (see [`Term::advance`]).
+    held: Vec<u8>,
 }
 
 impl Term {
@@ -1448,14 +1451,53 @@ impl Term {
         Term {
             parser: vte::Parser::new(),
             state: Terminal::new(cols, lines, scrollback_limit),
+            held: Vec::new(),
         }
     }
 
+    /// Parse a chunk of program output.
+    ///
+    /// A UTF-8 character split across two chunks is held back and parsed
+    /// with the next chunk, so the parser never sees a chunk that ends in
+    /// the middle of one. vte 0.15 mishandles that case: if an invalid byte
+    /// follows within three bytes of the split, it drops the valid text
+    /// between (`"é"` sent as `[0xC3]`, `[0xA9, b'a', 0xFF]` loses the `a`).
     pub fn advance(&mut self, bytes: &[u8]) {
-        self.parser.advance(&mut self.state, bytes);
+        if self.held.is_empty() {
+            let n = bytes.len() - incomplete_utf8_tail(bytes);
+            self.parser.advance(&mut self.state, &bytes[..n]);
+            self.held.extend_from_slice(&bytes[n..]);
+        } else {
+            // Rare (the last chunk ended mid-character): join the two.
+            let mut joined = std::mem::take(&mut self.held);
+            joined.extend_from_slice(bytes);
+            let n = joined.len() - incomplete_utf8_tail(&joined);
+            self.parser.advance(&mut self.state, &joined[..n]);
+            joined.drain(..n);
+            self.held = joined;
+        }
         #[cfg(debug_assertions)]
         if let Err(e) = self.state.check_invariants() {
             panic!("terminal invariant broken: {e}");
         }
     }
+}
+
+/// How many bytes at the end of `bytes` are the start of a UTF-8 character
+/// whose remaining bytes haven't arrived yet (0 if none).
+fn incomplete_utf8_tail(bytes: &[u8]) -> usize {
+    for back in 1..=bytes.len().min(3) {
+        let b = bytes[bytes.len() - back];
+        if b & 0xC0 == 0x80 {
+            continue; // continuation byte: keep looking for the lead byte
+        }
+        let len = match b {
+            0xC2..=0xDF => 2,
+            0xE0..=0xEF => 3,
+            0xF0..=0xF4 => 4,
+            _ => return 0,
+        };
+        return if back < len { back } else { 0 };
+    }
+    0
 }

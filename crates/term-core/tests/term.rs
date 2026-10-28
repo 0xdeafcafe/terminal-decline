@@ -264,6 +264,35 @@ fn vs16_does_not_break_the_next_wide_char() {
     ");
 }
 
+#[test]
+fn utf8_split_across_chunks_keeps_the_text_after_it() {
+    // Regression (vte 0.15): completing a split character next to an
+    // invalid byte dropped the valid text in between.
+    let cases: &[&[&[u8]]] = &[
+        &[&[0xC3], &[0xA9, b'a', 0xFF]],
+        &[&[0xCC], &[0x81, b'0', 0xA9]],
+        &[&[0xE6, 0xBC], &[0xA2, b'a', 0xFF]],
+        &[&[0xE6], &[0xBC], &[0xA2, b'a', 0xFF]],
+        &[&[0xF0, 0x9F], &[0x98], &[], &[0x80, b'b', 0xC3]],
+    ];
+    for chunks in cases {
+        let mut whole = Term::new(10, 1, 0);
+        whole.advance(&chunks.concat());
+        let mut split = Term::new(10, 1, 0);
+        for c in *chunks {
+            split.advance(c);
+        }
+        assert_eq!(split.state.dump(), whole.state.dump(), "{chunks:?}");
+    }
+    let mut t = Term::new(10, 1, 0);
+    t.advance(&[0xC3]);
+    t.advance(&[0xA9, b'a', 0xFF]);
+    assert_snapshot!(t.state.dump(), @r"
+    éa�|
+    cursor=(0,3) alt=false offset=0
+    ");
+}
+
 fn select(t: &mut Term, from: (usize, usize), to: (usize, usize)) {
     let anchor = t.state.visible_point(from.0, from.1);
     let head = t.state.visible_point(to.0, to.1);

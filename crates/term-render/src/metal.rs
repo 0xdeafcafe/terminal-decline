@@ -23,8 +23,10 @@ use crate::frame::{Frame, FrameInput, GlyphSlot, GlyphSource};
 use crate::packer::{NoRoom, ShelfPacker};
 
 type Device = ProtocolObject<dyn MTLDevice>;
-type Texture = ProtocolObject<dyn MTLTexture>;
 type Buffer = ProtocolObject<dyn MTLBuffer>;
+pub type CommandBuffer = ProtocolObject<dyn MTLCommandBuffer>;
+/// A Metal texture, as taken by [`Renderer::encode`].
+pub type Texture = ProtocolObject<dyn MTLTexture>;
 
 const FRAMES_IN_FLIGHT: usize = 2;
 /// Caps keep the glyph textures within 16 MB each (R8 at 4096², BGRA at 2048²).
@@ -319,6 +321,19 @@ impl Renderer {
 
     /// Encode and present the prepared frame.
     pub fn present(&mut self, layer: &CAMetalLayer) {
+        let Some(drawable) = layer.nextDrawable() else {
+            return;
+        };
+        let cmd = self.encode(&drawable.texture());
+        cmd.presentDrawable(ProtocolObject::from_ref(&*drawable));
+        cmd.commit();
+    }
+
+    /// Encode the prepared frame into `target` (a `BGRA8Unorm` render
+    /// target), waiting first while two frames are already on
+    /// the GPU. The returned command buffer is not committed yet: the caller
+    /// must commit it (it counts as in flight until it completes).
+    pub fn encode(&mut self, target: &Texture) -> Retained<CommandBuffer> {
         {
             let (lock, cvar) = &*self.in_flight;
             let mut n = lock.lock().unwrap();
@@ -327,11 +342,6 @@ impl Renderer {
             }
             *n += 1;
         }
-        let Some(drawable) = layer.nextDrawable() else {
-            self.frame_done();
-            return;
-        };
-        let target = drawable.texture();
         let viewport = [target.width() as f32, target.height() as f32];
 
         let i = self.frame_index;
@@ -341,7 +351,7 @@ impl Renderer {
 
         let pass = MTLRenderPassDescriptor::renderPassDescriptor();
         let att = unsafe { pass.colorAttachments().objectAtIndexedSubscript(0) };
-        att.setTexture(Some(&target));
+        att.setTexture(Some(target));
         att.setLoadAction(MTLLoadAction::Clear);
         att.setStoreAction(MTLStoreAction::Store);
         let c = self.frame.clear;
@@ -376,23 +386,15 @@ impl Renderer {
         enc.endEncoding();
 
         let in_flight = self.in_flight.clone();
-        let done = RcBlock::new(move |_: NonNull<ProtocolObject<dyn MTLCommandBuffer>>| {
+        let done = RcBlock::new(move |_: NonNull<CommandBuffer>| {
             let (lock, cvar) = &*in_flight;
             *lock.lock().unwrap() -= 1;
             cvar.notify_one();
         });
         unsafe { cmd.addCompletedHandler(RcBlock::as_ptr(&done)) };
-        cmd.presentDrawable(ProtocolObject::from_ref(&*drawable));
-        cmd.commit();
-    }
-
-    fn frame_done(&self) {
-        let (lock, cvar) = &*self.in_flight;
-        *lock.lock().unwrap() -= 1;
-        cvar.notify_one();
+        cmd
     }
 }
-
 #[cfg(precompiled_shaders)]
 fn load_shaders(device: &Device) -> Retained<ProtocolObject<dyn MTLLibrary>> {
     static METALLIB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/shaders.metallib"));

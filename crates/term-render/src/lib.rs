@@ -5,5 +5,5 @@ mod metal;
 pub mod packer;
 
 pub use frame::{Frame, FrameInput, GlyphInstance, GlyphSlot, GlyphSource, RectInstance, Rgba, Theme, rgb};
-pub use metal::{GlyphCache, Renderer, configure_layer};
+pub use metal::{CommandBuffer, GlyphCache, Renderer, Texture, configure_layer};
 pub use packer::ShelfPacker;

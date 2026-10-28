@@ -48,6 +48,22 @@ pub struct GlyphInstance {
     pub is_color: u32,
 }
 
+// These layouts must match `struct Rect` and `struct Glyph` in shaders.metal,
+// which read the instance buffers directly.
+const _: () = {
+    use std::mem::{offset_of, size_of};
+    assert!(size_of::<RectInstance>() == 12);
+    assert!(offset_of!(RectInstance, x) == 0);
+    assert!(offset_of!(RectInstance, w) == 4);
+    assert!(offset_of!(RectInstance, color) == 8);
+    assert!(size_of::<GlyphInstance>() == 20);
+    assert!(offset_of!(GlyphInstance, x) == 0);
+    assert!(offset_of!(GlyphInstance, w) == 4);
+    assert!(offset_of!(GlyphInstance, u) == 8);
+    assert!(offset_of!(GlyphInstance, color) == 12);
+    assert!(offset_of!(GlyphInstance, is_color) == 16);
+};
+
 /// Where a rasterised glyph sits in the glyph texture.
 #[derive(Clone, Copy, Debug)]
 pub struct GlyphSlot {

@@ -345,6 +345,73 @@ mod tests {
     }
 
     #[test]
+    fn varint_edge_values() {
+        let cases: &[(u32, usize)] = &[
+            (0, 1),
+            (1, 1),
+            (127, 1),
+            (128, 2),
+            (16_383, 2),
+            (16_384, 3),
+            ((1 << 21) - 1, 3),
+            (1 << 21, 4),
+            ((1 << 28) - 1, 4),
+            (1 << 28, 5),
+            (u32::MAX, 5),
+        ];
+        for &(v, len) in cases {
+            let mut out = vec![0xAA];
+            put_varint(&mut out, v);
+            out.push(0x55);
+            assert_eq!(out.len(), len + 2, "{v} takes {len} bytes");
+            let mut pos = 1;
+            assert_eq!(get_varint(&out, &mut pos), v);
+            assert_eq!(pos, len + 1, "{v} read to its end");
+        }
+        // All values back to back.
+        let mut out = Vec::new();
+        for &(v, _) in cases {
+            put_varint(&mut out, v);
+        }
+        let mut pos = 0;
+        for &(v, _) in cases {
+            assert_eq!(get_varint(&out, &mut pos), v);
+        }
+        assert_eq!(pos, out.len());
+    }
+
+    #[test]
+    fn varint_truncated_input_stops_at_the_end() {
+        let mut pos = 0;
+        assert_eq!(get_varint(&[0x80, 0x81], &mut pos), 0x80);
+        assert_eq!(pos, 2);
+        let mut pos = 5;
+        assert_eq!(get_varint(&[1], &mut pos), 0);
+    }
+
+    #[test]
+    fn freeing_keeps_at_most_one_spare_block_and_clear_frees_all() {
+        let mut sb = Scrollback::new(500);
+        let mut row = Row::new(200, Cell::BLANK);
+        for c in &mut row.cells {
+            c.packed = 'x' as u32;
+        }
+        for _ in 0..20_000 {
+            sb.push(&row);
+            // 500 lines of ~205 bytes span two blocks; a third may be filling.
+            assert!(sb.blocks.len() <= 3, "{} blocks", sb.blocks.len());
+        }
+        assert_eq!(sb.len(), 500);
+        sb.clear();
+        assert!(sb.is_empty());
+        assert_eq!(sb.memory_bytes(), 0);
+        assert!(sb.get(0).is_none());
+        sb.push(&row);
+        assert_eq!(sb.len(), 1);
+        assert_eq!(sb.get(0).unwrap().cells.len(), 200);
+    }
+
+    #[test]
     fn limit_and_block_freeing() {
         let mut sb = Scrollback::new(1000);
         let mut row = Row::new(80, Cell::BLANK);

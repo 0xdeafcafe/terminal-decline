@@ -251,3 +251,25 @@ fn dump_follows_view_and_alt_screen() {
     cursor=(0,2) alt=true offset=0
     ");
 }
+
+#[test]
+fn vs16_does_not_break_the_next_wide_char() {
+    // Regression: widening ⚠ wrote its spacer over the left half of 漢,
+    // leaving 漢's spacer without its wide cell.
+    let mut t = Term::new(6, 1, 0);
+    t.advance("a漢\r⚠\u{FE0F}".as_bytes());
+    assert_snapshot!(t.state.dump(), @r"
+    ⚠|
+    cursor=(0,2) alt=false offset=0
+    ");
+}
+
+#[test]
+fn vs16_next_to_a_narrow_char_overwrites_it() {
+    let mut t = Term::new(6, 1, 0);
+    t.advance("abc\r⚠\u{FE0F}".as_bytes());
+    assert_snapshot!(t.state.dump(), @r"
+    ⚠c|
+    cursor=(0,2) alt=false offset=0
+    ");
+}

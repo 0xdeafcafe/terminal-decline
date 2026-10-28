@@ -624,6 +624,11 @@ impl Terminal {
         if cell.has(flags::WIDE | flags::WIDE_SPACER) || cell.codepoint() < 0x2000 {
             return;
         }
+        // The spacer goes where the next cell is; if that is the left half of
+        // a wide character, erase the whole of it rather than half.
+        if self.screen[row].cells[col + 1].has(flags::WIDE) {
+            self.erase_cells(row, col + 1..col + 2);
+        }
         let cells = &mut self.screen[row].cells;
         cells[col].packed |= flags::WIDE;
         cells[col + 1] = Cell {

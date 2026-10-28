@@ -200,8 +200,12 @@ fn smoke_font_bigger_changes_the_cells() {
     assert_eq!(num(&d[1], "font_size"), num(&d[0], "font_size") + 1.0);
     assert!(num(&d[1], "cell_height") > num(&d[0], "cell_height"), "{} vs {}", d[0], d[1]);
     assert!(num(&d[1], "cell_width") >= num(&d[0], "cell_width"));
-    // The window stays the same size, so fewer cells fit.
-    assert!(num(&d[1], "cols") < num(&d[0], "cols"));
+    // The window stays the same size, so the grid shrinks. At 1x scale a
+    // point more can round to the same cell width, so only one direction is
+    // guaranteed to shrink; neither may grow.
+    let (c0, c1) = (num(&d[0], "cols"), num(&d[1], "cols"));
+    let (l0, l1) = (num(&d[0], "lines"), num(&d[1], "lines"));
+    assert!(c1 <= c0 && l1 <= l0 && (c1 < c0 || l1 < l0), "{} vs {}", d[0], d[1]);
 }
 
 /// Without `DECLINE_TEST_DUMP` the control OSC is ignored: `quit` doesn't

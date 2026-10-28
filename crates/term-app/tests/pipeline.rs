@@ -632,7 +632,24 @@ impl FakeLoop {
         }
     }
 
+    /// Wait until the loop is idle and its last frame shows `screen()`. A wake
+    /// may be in flight when the program exits, so "paused" alone isn't
+    /// enough; a lost wake-up never catches up and times out here.
+    fn wait_settled(&self, within: Duration, screen: impl Fn() -> String) -> bool {
+        let until = Instant::now() + within;
+        loop {
+            if self.paused.load(Ordering::Acquire) && *self.last_drawn.lock().unwrap() == screen() {
+                return true;
+            }
+            if Instant::now() >= until {
+                return false;
+            }
+            std::thread::sleep(TICK);
+        }
+    }
+
     /// Wait until the loop has paused (nothing left to draw).
+    #[allow(dead_code)]
     fn wait_paused(&self, within: Duration) -> bool {
         let until = Instant::now() + within;
         while !self.paused.load(Ordering::Acquire) {
@@ -674,12 +691,13 @@ fn no_lost_wake_up() {
         "for i in 1 2 3 4 5 6 7 8; do printf 'burst %s ' $i; printf 'x%.0s' 1 2 3 4 5 6 7 8 9 10; echo; sleep 0.15; done; printf done";
     let (session, signal, fake, _home) = with_loop("wakeup", script, size(80, 24));
     assert!(signal.wait_exit(DEADLINE), "program didn't exit");
-    assert!(fake.wait_paused(Duration::from_secs(5)), "the loop never went idle");
+    let screen = || session.term().lock().unwrap().state.dump();
+    let settled = fake.wait_settled(Duration::from_secs(5), screen);
     let last = fake.last_drawn.lock().unwrap().clone();
     let draws = fake.stop();
-    let fin = session.term().lock().unwrap().state.dump();
+    let fin = screen();
     assert!(fin.contains("burst 8 xxxxxxxxxx|\ndone|"), "{fin}");
-    assert_eq!(last, fin, "the last frame drawn isn't the final screen");
+    assert!(settled, "the last frame drawn never became the final screen:\n{last}\n---\n{fin}");
     assert!(draws >= 8, "only {draws} draws for 8 bursts with pauses");
     assert!(signal.wakes() >= 8, "{} wakes", signal.wakes());
     finish(session);
@@ -693,13 +711,13 @@ fn flood_wakes_at_most_once_per_frame() {
     let script = "yes 'flood flood flood flood flood flood flood flood flood flood' | head -n 300000";
     let (session, signal, fake, _home) = with_loop("flood", script, size(120, 40));
     assert!(signal.wait_exit(Duration::from_secs(60)), "program didn't exit");
-    assert!(fake.wait_paused(Duration::from_secs(5)), "the loop never went idle");
-    let last = fake.last_drawn.lock().unwrap().clone();
+    let screen = || session.term().lock().unwrap().state.dump();
+    let settled = fake.wait_settled(Duration::from_secs(5), screen);
     let draws = fake.stop();
     let wakes = signal.wakes();
     assert!(wakes >= 1);
     assert!(wakes <= draws + 1, "{wakes} wakes for {draws} draws");
-    assert_eq!(last, session.term().lock().unwrap().state.dump());
+    assert!(settled, "the last frame drawn never became the final screen");
     finish(session);
 }
 

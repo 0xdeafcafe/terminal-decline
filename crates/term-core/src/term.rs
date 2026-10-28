@@ -565,7 +565,9 @@ impl Terminal {
         fresh.replies = std::mem::take(&mut self.replies);
         fresh.default_colors = self.default_colors;
         fresh.cell_pixels = self.cell_pixels;
+        // Like xterm, a full reset clears scrollback too.
         fresh.scrollback = std::mem::replace(&mut self.scrollback, Scrollback::new(0));
+        fresh.scrollback.clear();
         // Keep line numbers counting up from the primary screen's.
         let primary_top = if self.alt_active { self.other_top_line } else { self.top_line };
         fresh.top_line = primary_top;
@@ -747,7 +749,17 @@ impl Terminal {
             7 => self.modes.autowrap = on,
             12 => self.cursor_blink = on,
             25 => self.modes.cursor_visible = on,
-            47 | 1047 => self.set_alt_screen(on, mode == 1047),
+            47 => self.set_alt_screen(on, false),
+            // 1047 clears the alternate screen when leaving it, not on entry.
+            1047 => {
+                if !on && self.alt_active {
+                    let blank = self.blank();
+                    for row in &mut self.screen {
+                        row.reset(self.cols, blank);
+                    }
+                }
+                self.set_alt_screen(on, false);
+            }
             1048 => {
                 if on {
                     self.save_cursor()

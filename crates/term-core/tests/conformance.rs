@@ -845,7 +845,6 @@ fn alt_47_roundtrip_preserves_contents() {
 }
 
 #[test]
-#[ignore = "BUG: 1047h clears the alt screen on entry; xterm only clears on 1047l exit"]
 fn alt_1047_entry_preserves_contents() {
     let mut t = new(10, 2);
     t.advance(b"\x1b[?47hkeepme\x1b[?47l");
@@ -854,7 +853,6 @@ fn alt_1047_entry_preserves_contents() {
 }
 
 #[test]
-#[ignore = "BUG: 1047l leaves the alt screen contents; xterm clears it before switching back"]
 fn alt_1047_exit_clears_contents() {
     let mut t = new(10, 2);
     t.advance(b"\x1b[?1047hjunk\x1b[?1047l");
@@ -1097,7 +1095,6 @@ fn ris_full_reset() {
 }
 
 #[test]
-#[ignore = "BUG: RIS (ESC c) keeps scrollback; xterm clears saved lines on a full reset"]
 fn ris_clears_scrollback() {
     let mut t = new(5, 3);
     t.advance(b"aa\r\nbb\r\ncc\r\ndd");

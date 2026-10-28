@@ -330,12 +330,15 @@ fn selection_on_alt_screen_does_not_slide_to_the_next_line() {
 fn selection_after_reset_and_alt_screen_round_trip() {
     let mut t = Term::new(10, 2, 100);
     t.advance(b"one\r\ntwo\r\nthree\x1bc");
+    // A full reset clears scrollback, like xterm.
+    assert_eq!(t.state.scrollback_len(), 0);
     t.advance(b"\x1b[?1049h\x1b[?1049lnew");
     select(&mut t, (0, 0), (0, 2));
     assert_eq!(t.state.selection_text().unwrap(), "new");
-    t.state.scroll_view(2);
-    select(&mut t, (0, 0), (1, 2));
-    assert_eq!(t.state.selection_text().unwrap(), "one\nnew");
+    t.advance(b"\r\nmore\r\nlast");
+    t.state.scroll_view(1);
+    select(&mut t, (0, 0), (1, 3));
+    assert_eq!(t.state.selection_text().unwrap(), "new\nmore");
 }
 
 #[test]

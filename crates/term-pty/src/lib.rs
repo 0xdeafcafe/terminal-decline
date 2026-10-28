@@ -91,9 +91,23 @@ impl Pty {
 
         let mut ws = size.winsize();
         let mut master: libc::c_int = -1;
-        let pid = unsafe { libc::forkpty(&mut master, std::ptr::null_mut(), std::ptr::null_mut(), &raw mut ws) };
+        // Opening a PTY fails now and then when several processes open PTYs
+        // at once (seen on macOS 27: posix_openpt fails with errno -6, a
+        // negated ENXIO, about once in 400 under load), so retry a few times.
+        let mut tries = 0;
+        let pid = loop {
+            let pid = unsafe { libc::forkpty(&mut master, std::ptr::null_mut(), std::ptr::null_mut(), &raw mut ws) };
+            tries += 1;
+            if pid >= 0 || tries == 5 {
+                break pid;
+            }
+        };
         if pid < 0 {
-            return Err(io::Error::last_os_error());
+            let e = io::Error::last_os_error();
+            return Err(match e.raw_os_error() {
+                Some(code) if code < 0 => io::Error::from_raw_os_error(-code),
+                _ => e,
+            });
         }
         if pid == 0 {
             unsafe {

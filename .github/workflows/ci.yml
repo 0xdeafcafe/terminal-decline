@@ -94,7 +94,7 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-fuzz
-      - run: cargo fuzz build parse
+      - run: cargo fuzz build --target x86_64-unknown-linux-gnu parse
 
   smoke:
     name: app smoke tests (macOS)

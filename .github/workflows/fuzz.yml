@@ -54,7 +54,7 @@ jobs:
           key: fuzz-corpus-${{ github.run_id }}
           restore-keys: fuzz-corpus-
 
-      - run: cargo fuzz build parse
+      - run: cargo fuzz build --target x86_64-unknown-linux-gnu parse
 
       - name: Fuzz
         id: run
@@ -64,7 +64,7 @@ jobs:
         run: |
           set +e
           before=$(find fuzz/corpus/parse -type f | wc -l)
-          cargo fuzz run parse -- \
+          cargo fuzz run --target x86_64-unknown-linux-gnu parse -- \
             -max_total_time=$((MINUTES * 60)) -timeout=10 -rss_limit_mb=2048 \
             -dict="$GITHUB_WORKSPACE/fuzz/parse.dict" -print_final_stats=1 2>&1 | tee fuzz.log
           code=${PIPESTATUS[0]}
@@ -98,14 +98,14 @@ jobs:
         run: |
           mkdir -p crash
           cp "$INPUT" crash/raw-input
-          cargo fuzz tmin parse "$INPUT" -r 2000 2>&1 | tee tmin.log || true
+          cargo fuzz tmin --target x86_64-unknown-linux-gnu parse "$INPUT" -r 2000 2>&1 | tee tmin.log || true
           min=$(find fuzz/artifacts/parse -type f -name 'minimized-from-*' | head -n 1)
           if [ -n "$min" ]; then
             cp "$min" crash/minimized-input
             # Log of the minimised input alone, for the signature.
-            cargo fuzz run parse crash/minimized-input 2>&1 | tee crash/minimized.log || true
+            cargo fuzz run --target x86_64-unknown-linux-gnu parse crash/minimized-input 2>&1 | tee crash/minimized.log || true
           fi
-          cargo fuzz fmt parse "${min:-$INPUT}" > crash/steps.txt 2>&1 || true
+          cargo fuzz fmt --target x86_64-unknown-linux-gnu parse "${min:-$INPUT}" > crash/steps.txt 2>&1 || true
 
       - name: Work out signature
         id: signature
@@ -131,7 +131,7 @@ jobs:
 
       - name: Minimise corpus
         if: github.event.schedule == '0 2 * * 0' || inputs.cmin
-        run: cargo fuzz cmin parse fuzz/corpus/parse
+        run: cargo fuzz cmin --target x86_64-unknown-linux-gnu parse fuzz/corpus/parse
 
       - name: Save corpus
         if: always()

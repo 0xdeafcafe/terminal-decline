@@ -1,0 +1,181 @@
+name: Fuzz
+
+# Nightly: 20 minutes of the `parse` target (fuzz/), starting from the
+# committed seeds plus the corpus kept in the Actions cache. Sundays also
+# minimise the corpus (cmin). A crash is minimised (tmin), uploaded, and
+# reported: one open issue per signature (panic message + top frame).
+
+on:
+  schedule:
+    - cron: "0 2 * * 1-6"
+    - cron: "0 2 * * 0" # Sunday: also minimise the corpus
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: Minutes to fuzz
+        default: "20"
+      cmin:
+        description: Minimise the corpus afterwards
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      crashed: ${{ steps.run.outputs.crashed }}
+      signature: ${{ steps.signature.outputs.signature }}
+      title: ${{ steps.signature.outputs.title }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz -> target
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+
+      - name: Restore corpus
+        uses: actions/cache/restore@v4
+        with:
+          path: fuzz/corpus/parse
+          key: fuzz-corpus-${{ github.run_id }}
+          restore-keys: fuzz-corpus-
+
+      - run: cargo fuzz build parse
+
+      - name: Fuzz
+        id: run
+        env:
+          MINUTES: ${{ inputs.minutes || '20' }}
+          RUST_BACKTRACE: "1"
+        run: |
+          set +e
+          before=$(find fuzz/corpus/parse -type f | wc -l)
+          cargo fuzz run parse -- \
+            -max_total_time=$((MINUTES * 60)) -timeout=10 -rss_limit_mb=2048 \
+            -dict="$GITHUB_WORKSPACE/fuzz/parse.dict" -print_final_stats=1 2>&1 | tee fuzz.log
+          code=${PIPESTATUS[0]}
+          after=$(find fuzz/corpus/parse -type f | wc -l)
+          crash=$(find fuzz/artifacts/parse -type f \( -name 'crash-*' -o -name 'oom-*' -o -name 'timeout-*' -o -name 'leak-*' \) 2>/dev/null | head -n 1)
+          {
+            echo "### Fuzz \`parse\`"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| exit code | $code |"
+            echo "| corpus files | $before → $after |"
+            echo "| final stats | $(grep -E '^stat::(number_of_executed_units|average_exec_per_sec|new_units_added|peak_rss_mb)' fuzz.log | tr '\n' ' ') |"
+            echo "| crash | ${crash:-none} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$crash" ]; then
+            echo "crashed=true" >> "$GITHUB_OUTPUT"
+            echo "input=$crash" >> "$GITHUB_OUTPUT"
+          else
+            echo "crashed=false" >> "$GITHUB_OUTPUT"
+            # Failed without leaving an input behind: nothing to report, but
+            # still a failure.
+            exit "$code"
+          fi
+
+      - name: Minimise crash
+        if: steps.run.outputs.crashed == 'true'
+        env:
+          INPUT: ${{ steps.run.outputs.input }}
+          RUST_BACKTRACE: "1"
+        run: |
+          mkdir -p crash
+          cp "$INPUT" crash/raw-input
+          cargo fuzz tmin parse "$INPUT" -r 2000 2>&1 | tee tmin.log || true
+          min=$(find fuzz/artifacts/parse -type f -name 'minimized-from-*' | head -n 1)
+          if [ -n "$min" ]; then
+            cp "$min" crash/minimized-input
+            # Log of the minimised input alone, for the signature.
+            cargo fuzz run parse crash/minimized-input 2>&1 | tee crash/minimized.log || true
+          fi
+          cargo fuzz fmt parse "${min:-$INPUT}" > crash/steps.txt 2>&1 || true
+
+      - name: Work out signature
+        id: signature
+        if: steps.run.outputs.crashed == 'true'
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          mkdir -p crash
+          cp fuzz.log crash/fuzz.log
+          [ -f tmin.log ] && cp tmin.log crash/tmin.log
+          log=crash/fuzz.log
+          [ -s crash/minimized.log ] && log=crash/minimized.log
+          python3 scripts/fuzz-signature.py "$log" --report crash/issue.md \
+            --input crash/raw-input --minimized crash/minimized-input --run-url "$RUN_URL"
+
+      - name: Upload crash
+        if: steps.run.outputs.crashed == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crash
+          path: crash/
+          retention-days: 90
+
+      - name: Minimise corpus
+        if: github.event.schedule == '0 2 * * 0' || inputs.cmin
+        run: cargo fuzz cmin parse fuzz/corpus/parse
+
+      - name: Save corpus
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: fuzz/corpus/parse
+          key: fuzz-corpus-${{ github.run_id }}
+
+      - name: Fail on crash
+        if: steps.run.outputs.crashed == 'true'
+        env:
+          TITLE: ${{ steps.signature.outputs.title }}
+        run: |
+          echo "::error title=fuzz crash::$TITLE"
+          exit 1
+
+  report:
+    needs: fuzz
+    if: always() && needs.fuzz.outputs.crashed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      SIGNATURE: ${{ needs.fuzz.outputs.signature }}
+      TITLE: ${{ needs.fuzz.outputs.title }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: fuzz-crash
+          path: crash
+      - name: Open or update issue
+        run: |
+          gh label create fuzz --color B60205 --description "Found by the nightly fuzz run" 2>/dev/null || true
+          existing=$(gh issue list --label fuzz --state open --limit 200 --json number,body \
+            --jq ".[] | select(.body | contains(\"fuzz-signature: $SIGNATURE\")) | .number" | head -n 1)
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "Found again by $RUN_URL (same signature \`$SIGNATURE\`)."
+            echo "Commented on #$existing" >> "$GITHUB_STEP_SUMMARY"
+          else
+            url=$(gh issue create --label fuzz --title "$TITLE" --body-file crash/issue.md)
+            echo "Opened $url" >> "$GITHUB_STEP_SUMMARY"
+          fi

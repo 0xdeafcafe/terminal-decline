@@ -1,0 +1,121 @@
+name: Bench
+
+# Nightly benchmarks. Only deterministic numbers gate: scrollback bytes per
+# line (scripts/bench-limits.json). Criterion wall-clock numbers vary between
+# runners, so they are posted as a table and kept as history for the trend,
+# never failing the run. History lives on the `bench-history` branch.
+
+on:
+  schedule:
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bench
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  bench:
+    # term-render needs macOS (Metal types), and macOS is what we ship.
+    runs-on: macos-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write # push to bench-history
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: bench
+
+      - name: Scrollback bytes per line
+        id: gate
+        continue-on-error: true
+        run: python3 scripts/bench-gate.py --json bytes-per-line.json
+
+      - name: Criterion benchmarks
+        run: cargo bench --locked -p term-core -p term-render
+
+      - name: Summarise
+        run: python3 scripts/bench-summary.py --throughput throughput.json --time time.json
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-results
+          path: |
+            bytes-per-line.json
+            throughput.json
+            time.json
+            target/criterion/
+          if-no-files-found: ignore
+
+      - name: Create bench-history branch if missing
+        if: github.ref == 'refs/heads/main'
+        run: |
+          if ! git ls-remote --exit-code --heads origin bench-history > /dev/null; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            commit=$(git commit-tree "$(git hash-object -t tree /dev/null)" -m "Start benchmark history")
+            git push origin "$commit:refs/heads/bench-history"
+          fi
+
+      # Alerts: github-action-benchmark can only compare with the previous
+      # run, so a single noisy run would alert. It comments nowhere and never
+      # fails; the history and its charts are what we look at.
+      - name: History (scrollback bytes per line)
+        if: always() && github.ref == 'refs/heads/main' && hashFiles('bytes-per-line.json') != ''
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: Scrollback bytes per line
+          tool: customSmallerIsBetter
+          output-file-path: bytes-per-line.json
+          gh-pages-branch: bench-history
+          benchmark-data-dir-path: bytes-per-line
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: true
+          comment-on-alert: false
+          fail-on-alert: false
+          alert-threshold: "110%"
+
+      - name: History (parse throughput)
+        if: github.ref == 'refs/heads/main' && hashFiles('throughput.json') != ''
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: Throughput
+          tool: customBiggerIsBetter
+          output-file-path: throughput.json
+          gh-pages-branch: bench-history
+          benchmark-data-dir-path: throughput
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: true
+          comment-on-alert: false
+          fail-on-alert: false
+          alert-threshold: "150%"
+
+      - name: History (time per iteration)
+        if: github.ref == 'refs/heads/main' && hashFiles('time.json') != ''
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: Time per iteration
+          tool: customSmallerIsBetter
+          output-file-path: time.json
+          gh-pages-branch: bench-history
+          benchmark-data-dir-path: time
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: true
+          comment-on-alert: false
+          fail-on-alert: false
+          alert-threshold: "150%"
+
+      - name: Fail if scrollback bytes per line are over the limits
+        if: steps.gate.outcome == 'failure'
+        run: |
+          echo "::error::scrollback bytes per line over scripts/bench-limits.json (see the job summary)"
+          exit 1

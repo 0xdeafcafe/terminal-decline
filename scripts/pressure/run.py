@@ -3,8 +3,13 @@
 time, CPU, memory (physical footprint) and whether it survived.
 
 usage: run.py BINARY WORKDIR [SCENARIO...]
+
+WORKDIR must hold the inputs, made with gen.py: big.txt (`gen.py big`),
+fuzz.bin (`gen.py fuzz ... 64000000`) and glyphs.txt (`gen.py glyphs`).
+Prints one JSON line per scenario. Scenarios needing a program that isn't
+installed (htop) are skipped. Exits 1 if any scenario didn't survive.
 """
-import json, os, re, subprocess, sys, time
+import json, os, re, shutil, subprocess, sys, time
 
 BIN, WORK = os.path.abspath(sys.argv[1]), os.path.abspath(sys.argv[2])
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -23,6 +28,11 @@ def scenarios():
         "blink-idle-20s": "printf '\\033[1 q'; sleep 20",
         "plain-idle-20s": "sleep 20",
     }
+
+# Programs a scenario needs beyond the base system; skipped when missing.
+REQUIRES = {
+    "tui-htop-20s": "htop",
+}
 
 def footprint(pid):
     out = subprocess.run(["/usr/bin/footprint", "-p", str(pid)], capture_output=True, text=True).stdout
@@ -109,5 +119,17 @@ def run(name, cmd):
 if __name__ == "__main__":
     all_s = scenarios()
     names = sys.argv[3:] or list(all_s)
+    unknown = [n for n in names if n not in all_s]
+    if unknown:
+        sys.exit(f"unknown scenario(s): {', '.join(unknown)}; known: {', '.join(all_s)}")
+    failed = []
     for n in names:
-        run(n, all_s[n])
+        need = REQUIRES.get(n)
+        if need and shutil.which(need) is None:
+            print(json.dumps({"scenario": n, "skipped": f"{need} not installed"}), flush=True)
+            continue
+        if not run(n, all_s[n])["survived"]:
+            failed.append(n)
+    if failed:
+        print(f"did not survive: {', '.join(failed)}", file=sys.stderr)
+        sys.exit(1)

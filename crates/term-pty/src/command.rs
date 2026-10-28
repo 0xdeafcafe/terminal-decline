@@ -55,6 +55,13 @@ pub fn build_argv(shell: &str, argv: &[String]) -> Vec<String> {
     out
 }
 
+/// The directory to start in: `cwd` if it is an existing directory,
+/// otherwise `home`. With no cwd the app's own would be used, which is `/`
+/// when started from the Dock, so that falls back to `home` too.
+pub fn resolve_cwd(cwd: Option<&str>, home: Option<&str>) -> Option<String> {
+    cwd.filter(|d| Path::new(d).is_dir()).or(home).map(str::to_owned)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,5 +146,26 @@ mod tests {
     fn argv_runs_through_the_shell() {
         let argv = build_argv("/bin/sh", &s(&["vim", "a file.txt"]));
         assert_eq!(argv, s(&["-sh", "-c", "exec \"$0\" \"$@\"", "vim", "a file.txt"]));
+    }
+
+    #[test]
+    fn cwd_existing_is_kept() {
+        let tmp = std::env::temp_dir();
+        let tmp = tmp.to_str().unwrap();
+        assert_eq!(resolve_cwd(Some(tmp), Some("/home")).as_deref(), Some(tmp));
+    }
+
+    #[test]
+    fn cwd_missing_falls_back_to_home() {
+        assert_eq!(
+            resolve_cwd(Some("/nonexistent/decline-test"), Some("/home/me")).as_deref(),
+            Some("/home/me")
+        );
+    }
+
+    #[test]
+    fn cwd_none_falls_back_to_home() {
+        assert_eq!(resolve_cwd(None, Some("/home/me")).as_deref(), Some("/home/me"));
+        assert_eq!(resolve_cwd(None, None), None);
     }
 }

@@ -7,7 +7,7 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
 mod command;
 
-pub use command::{Command, build_argv, build_env};
+pub use command::{Command, build_argv, build_env, resolve_cwd};
 
 #[derive(Clone, Copy, Debug)]
 pub struct Size {
@@ -48,6 +48,19 @@ pub fn login_shell() -> String {
     "/bin/zsh".into()
 }
 
+/// The user's home directory from the password database, for when HOME is
+/// unset.
+fn passwd_home() -> Option<String> {
+    unsafe {
+        let pw = libc::getpwuid(libc::getuid());
+        if pw.is_null() || (*pw).pw_dir.is_null() {
+            return None;
+        }
+        let dir = std::ffi::CStr::from_ptr((*pw).pw_dir).to_string_lossy().into_owned();
+        (!dir.is_empty()).then_some(dir)
+    }
+}
+
 fn cstr(s: &str) -> io::Result<CString> {
     CString::new(s).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "nul byte in argument"))
 }
@@ -62,14 +75,19 @@ impl Pty {
         let mut argv_ptrs: Vec<*const libc::c_char> = argv.iter().map(|a| a.as_ptr()).collect();
         argv_ptrs.push(std::ptr::null());
 
-        let env: Vec<CString> = build_env(std::env::vars(), &cmd.env)
+        let env = build_env(std::env::vars(), &cmd.env);
+        // HOME as the child will see it, so a caller's HOME is honoured.
+        let home = env
             .iter()
-            .map(|(k, v)| cstr(&format!("{k}={v}")))
-            .collect::<io::Result<_>>()?;
+            .find(|(k, _)| k == "HOME")
+            .map(|(_, v)| v.clone())
+            .filter(|h| !h.is_empty())
+            .or_else(passwd_home);
+        let cwd = resolve_cwd(cmd.cwd.as_deref(), home.as_deref()).map(|d| cstr(&d)).transpose()?;
+        let home = home.map(|h| cstr(&h)).transpose()?;
+        let env: Vec<CString> = env.iter().map(|(k, v)| cstr(&format!("{k}={v}"))).collect::<io::Result<_>>()?;
         let mut env_ptrs: Vec<*const libc::c_char> = env.iter().map(|e| e.as_ptr()).collect();
         env_ptrs.push(std::ptr::null());
-        let cwd = cmd.cwd.as_deref().map(cstr).transpose()?;
-        let home = std::env::var("HOME").ok().map(|h| cstr(&h)).transpose()?;
 
         let mut ws = size.winsize();
         let mut master: libc::c_int = -1;
@@ -79,8 +97,13 @@ impl Pty {
         }
         if pid == 0 {
             unsafe {
-                if let Some(dir) = cwd.as_ref().or(home.as_ref()) {
-                    libc::chdir(dir.as_ptr());
+                // The directory was checked before forking; if it vanished
+                // since, still start in HOME rather than the app's own cwd.
+                if let Some(dir) = &cwd
+                    && libc::chdir(dir.as_ptr()) != 0
+                    && let Some(home) = &home
+                {
+                    libc::chdir(home.as_ptr());
                 }
                 // Undo signal state inherited from the app.
                 let mut set: libc::sigset_t = std::mem::zeroed();

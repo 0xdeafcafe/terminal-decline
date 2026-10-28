@@ -97,3 +97,33 @@ E1. Pins are separate processes (each has its own bundle id), so each pays
     ~20 MB of framework baseline. Accept; A1–A3 shrink the rest when the
     pin is in the background.
 E2. Multiple windows of the main app share one process (Cmd+N) — already.
+
+## Outcome of the reviews (Opus xhigh, Astra; both measured prototypes)
+
+Measured facts that changed the plan: a macOS PTY returns ≤ 1 KB per read and
+buffers ~2 KB, so batches are 1–3 KB (the "drain 1 MB" design never happens);
+decline's own heap at idle is < 0.5 MB (the rest is AppKit/CoreSVG/CF);
+`malloc_zone_pressure_relief` returns 0 bytes on this macOS (xzone
+allocator); the window server spends 1.7–2.7 s CPU per 500 MB flood while
+the window is visible.
+
+Build order:
+1. A1 step 1 — free the spare drawable after ~2 s idle (−6.6 MB per window,
+   pixel-identical).
+2. B2/D1 — frame-rate modes: 120 Hz for 250 ms after input, 60 Hz while
+   output flows, 30 Hz when not key window (halves window-server CPU during
+   floods).
+3. Hidden windows: glyph textures `Volatile` (−1.3…5.3 MB), displayed
+   surface purgeable via `IOSurfaceSetPurgeable` except when minimised
+   (−13 MB), reader buffer 64 KB.
+4. PTY reader: blocking-style read into 64 KB, poll only after EAGAIN
+   (−8–10% reader CPU, +12% throughput).
+5. Parser: vendored vte with an ASCII-run fast path + 8-bytes-at-a-time
+   control scan, `write_ascii` per row segment, faster scrollback encoding,
+   screen as a ring (`VecDeque<Row>`), zero-fill row reset: plain text
+   114 → 433 MB/s, coloured 1.27×, TUI 1.58×.
+6. B3 — per-row stop after the last non-blank cell (33 → 12 µs per frame).
+7. Memory-pressure dispatch source.
+Later: CSI/SGR fast path, CAMetalDisplayLink, scrollback compression (A4)
+when idle only, 16-byte glyph instances, lazy colour texture / alt screen.
+Dropped: A2, A5, B1, B4, B5, C3, C6, D2, D3.

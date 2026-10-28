@@ -217,6 +217,17 @@ impl Config {
     }
 }
 
+/// A theme colour (0xAABBGGRR, as the renderer stores it) as 0xRRGGBB.
+pub fn rgb_of(c: u32) -> u32 {
+    (c & 0xFF) << 16 | (c & 0xFF00) | (c >> 16) & 0xFF
+}
+
+/// Foreground, background and cursor colours as 0xRRGGBB, for answering
+/// colour queries (OSC 10, 11 and 12).
+pub fn query_colors(theme: &Theme) -> [u32; 3] {
+    [theme.foreground, theme.background, theme.cursor].map(rgb_of)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

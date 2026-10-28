@@ -1,18 +1,9 @@
-mod app;
-mod config;
-mod keys;
-mod pin;
-mod view;
+//! The `decline` binary: reads its arguments and starts the app; everything
+//! else is in the library.
 
 use std::path::PathBuf;
 
-pub const USAGE: &str = "\
-usage: decline [--config FILE] [-e PROGRAM [ARGS...]]
-       decline pin NAME [--icon FILE] [--config FILE] [--cwd DIR] [--dir DIR] [--dock] -- PROGRAM [ARGS...]
-       decline pin --list | --remove NAME | --update
-
-Runs a terminal window. With -e, runs PROGRAM instead of your login shell.
-`decline pin` makes PROGRAM its own macOS app, with its own Dock icon.";
+use decline::{USAGE, app, config, pin};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();

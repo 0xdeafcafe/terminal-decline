@@ -6,6 +6,10 @@ description = "A fast, GPU-accelerated terminal for macOS"
 license.workspace = true
 repository.workspace = true
 
+[lib]
+name = "decline"
+path = "src/lib.rs"
+
 [[bin]]
 name = "decline"
 path = "src/main.rs"

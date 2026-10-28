@@ -1,4 +1,148 @@
 //! Keyboard input to bytes, following xterm.
+//!
+//! [`translate`] decides what a key press does: send bytes to the program,
+//! go to the input method (text, dead keys, IME), or go to the menus (Cmd
+//! shortcuts). The view only builds a [`KeyInput`] from the `NSEvent`.
+
+use crate::config::OptionAsMeta;
+
+/// `NSEventModifierFlags` bits used here.
+pub mod flags {
+    /// Device-dependent bit: the left Option key is held.
+    pub const LEFT_OPTION: usize = 0x20;
+    /// Device-dependent bit: the right Option key is held.
+    pub const RIGHT_OPTION: usize = 0x40;
+    pub const SHIFT: usize = 1 << 17;
+    pub const CONTROL: usize = 1 << 18;
+    pub const OPTION: usize = 1 << 19;
+    pub const COMMAND: usize = 1 << 20;
+    pub const NUMERIC_PAD: usize = 1 << 21;
+}
+
+/// A key press, as read from the `NSEvent`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct KeyInput {
+    /// macOS virtual key code.
+    pub keycode: u16,
+    /// `characters`: the text the key types with all modifiers applied.
+    pub chars: String,
+    /// `charactersIgnoringModifiers`.
+    pub chars_ignoring_mods: String,
+    /// The characters with only Shift applied (not Option), for
+    /// Option-as-Meta.
+    pub chars_shift_only: String,
+    /// Raw `NSEventModifierFlags` bits, including the left/right Option
+    /// device bits; see [`flags`].
+    pub flags: usize,
+    /// The key is on the numeric keypad (`NSEventModifierFlagNumericPad`).
+    pub numpad: bool,
+}
+
+/// What the terminal and settings say about how keys are encoded.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct KeyModes {
+    /// DECCKM: arrows send SS3 sequences.
+    pub app_cursor: bool,
+    /// DECKPAM: the keypad sends SS3 sequences.
+    pub app_keypad: bool,
+    /// Kitty keyboard protocol flags (0 = legacy).
+    pub kitty_flags: u8,
+    pub option_as_meta: OptionAsMeta,
+    /// An input method is composing text; every key goes to it.
+    pub composing: bool,
+}
+
+/// What to do with a key press.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum KeyAction {
+    /// Send these bytes to the program.
+    Send(Vec<u8>),
+    /// Hand the event to the input system (`interpretKeyEvents`).
+    ToTextInput,
+    /// A Cmd shortcut: the menus handle it; nothing goes to the program.
+    ToMenu,
+}
+
+/// Decide what a key press does.
+pub fn translate(input: &KeyInput, modes: KeyModes) -> KeyAction {
+    if input.flags & flags::COMMAND != 0 {
+        // Cmd shortcuts belong to the menus and are never sent to the
+        // program, except the Mac line-editing ones.
+        let bytes: &[u8] = match input.keycode {
+            0x7B => b"\x01", // Cmd+Left: start of line
+            0x7C => b"\x05", // Cmd+Right: end of line
+            0x33 => b"\x15", // Cmd+Backspace: delete line
+            _ => return KeyAction::ToMenu,
+        };
+        return KeyAction::Send(bytes.to_vec());
+    }
+    if modes.composing {
+        return KeyAction::ToTextInput;
+    }
+    match key_bytes(input, modes) {
+        Some(b) => KeyAction::Send(b),
+        None => KeyAction::ToTextInput,
+    }
+}
+
+/// Bytes for keys that bypass text input: special keys, Ctrl combos and
+/// Option-as-Meta. `None`: the key types text.
+fn key_bytes(input: &KeyInput, modes: KeyModes) -> Option<Vec<u8>> {
+    let f = input.flags;
+    // Device-dependent bits for which Option key is held.
+    let (left_alt, right_alt) = (f & flags::LEFT_OPTION != 0, f & flags::RIGHT_OPTION != 0);
+    let meta = match modes.option_as_meta {
+        OptionAsMeta::Left => left_alt,
+        OptionAsMeta::Right => right_alt,
+        OptionAsMeta::Both => left_alt || right_alt,
+        OptionAsMeta::None => false,
+    };
+    let mods = Mods {
+        shift: f & flags::SHIFT != 0,
+        alt: f & flags::OPTION != 0,
+        ctrl: f & flags::CONTROL != 0,
+    };
+    let code = input.keycode;
+    let kitty = modes.kitty_flags & 1 != 0;
+    let keypad = input.numpad && !(0x7B..=0x7E).contains(&code);
+    if keypad
+        && modes.app_keypad
+        && !mods.any()
+        && let Some(b) = keypad_app_bytes(code)
+    {
+        return Some(b.to_vec());
+    }
+    if let Some(key) = key_from_keycode(code) {
+        if kitty && let Some(b) = encode_kitty_key(key, mods) {
+            return Some(b);
+        }
+        return Some(encode_key(key, mods, modes.app_cursor));
+    }
+    let c = input.chars_ignoring_mods.chars().next()?;
+    if kitty && (mods.ctrl || meta) && !c.is_control() {
+        let mods = Mods { alt: meta, ..mods };
+        return Some(encode_kitty_char(c, mods));
+    }
+    if mods.ctrl
+        && let Some(b) = ctrl_byte(c)
+    {
+        let mut out = if meta { vec![0x1b] } else { Vec::new() };
+        out.push(b);
+        return Some(out);
+    }
+    if meta {
+        // The character with Shift applied but not Option.
+        let text = if input.chars_shift_only.is_empty() {
+            &input.chars_ignoring_mods
+        } else {
+            &input.chars_shift_only
+        };
+        let mut out = vec![0x1b];
+        out.extend_from_slice(text.as_bytes());
+        return Some(out);
+    }
+    None
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Key {

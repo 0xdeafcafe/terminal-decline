@@ -20,6 +20,8 @@ use crate::view::{Launch, TerminalView, content_size, delegate_of};
 
 pub struct AppIvars {
     config: Rc<Config>,
+    /// Config errors, shown at the top of each window.
+    notices: Rc<[String]>,
     windows: RefCell<Vec<(Retained<NSWindow>, Retained<TerminalView>)>>,
 }
 
@@ -73,9 +75,10 @@ define_class!(
 );
 
 impl AppDelegate {
-    pub fn new(mtm: MainThreadMarker, config: Config) -> Retained<AppDelegate> {
+    pub fn new(mtm: MainThreadMarker, config: Config, notices: Vec<String>) -> Retained<AppDelegate> {
         let this = Self::alloc(mtm).set_ivars(AppIvars {
             config: Rc::new(config),
+            notices: notices.into(),
             windows: RefCell::new(Vec::new()),
         });
         unsafe { msg_send![super(this), init] }
@@ -164,8 +167,16 @@ impl AppDelegate {
             eprintln!("decline: window {}", window.windowNumber());
         }
 
-        if let Err(e) = view.start(config, Launch { command, fonts, scale }) {
-            eprintln!("decline: could not start program: {e}");
+        if let Err(e) = view.start(
+            config,
+            Launch {
+                command,
+                fonts,
+                scale,
+                notices: self.ivars().notices.clone(),
+            },
+        ) {
+            eprintln!("decline: could not open a window: {e}");
             window.close();
             return;
         }
@@ -279,11 +290,11 @@ pub fn build_menus(mtm: MainThreadMarker, app_name: &str) -> Retained<NSMenu> {
     bar
 }
 
-pub fn run(config: Config, app_name: &str) {
+pub fn run(config: Config, notices: Vec<String>, app_name: &str) {
     let mtm = MainThreadMarker::new().expect("must run on the main thread");
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
-    let delegate = AppDelegate::new(mtm, config);
+    let delegate = AppDelegate::new(mtm, config, notices);
     app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
     app.setMainMenu(Some(&build_menus(mtm, app_name)));
     app.run();

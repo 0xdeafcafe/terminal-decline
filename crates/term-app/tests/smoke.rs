@@ -224,6 +224,101 @@ fn smoke_control_osc_ignored_without_the_env_var() {
     assert!(!dir.dump_file().exists());
 }
 
+/// Launch `decline <args>` with the dump file, for a program that fails at
+/// once. The window then stays open and (under test control) dumps what it
+/// shows: return that dump once the app has stayed running past it, then
+/// kill the app.
+fn held_window(dir: &TempDir, args: &[&str]) -> Value {
+    let mut cmd = Command::new(APP);
+    cmd.args(args)
+        .env("XDG_CONFIG_HOME", dir.config_home())
+        .env("DECLINE_TEST_DUMP", dir.dump_file())
+        .env("SHELL", "/bin/sh")
+        .current_dir(dir.path());
+    let mut child = cmd.spawn().unwrap_or_else(|e| panic!("launching {cmd:?}: {e}"));
+    let start = Instant::now();
+    let dump = loop {
+        if let Some(d) = dumps(dir).into_iter().next() {
+            break d;
+        }
+        if let Some(status) = child.try_wait().unwrap() {
+            panic!("the app exited ({status}) instead of keeping the window open");
+        }
+        if start.elapsed() > TIMEOUT {
+            let _ = child.kill();
+            panic!("no dump after {TIMEOUT:?}");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    std::thread::sleep(Duration::from_millis(500));
+    let still_running = child.try_wait().unwrap().is_none();
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(still_running, "the window closed by itself");
+    dump
+}
+
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_quick_failure_keeps_the_window() {
+    if !have_metal() {
+        return;
+    }
+    let dir = TempDir::new("exit3");
+    let d = held_window(&dir, &["-e", "/bin/sh", "-c", "echo failing; exit 3"]);
+    check_dump(&d);
+    let s = screen(&d);
+    assert!(
+        s.starts_with("failing|\n|\n[process exited with status 3]|\npress any key to close"),
+        "{s}"
+    );
+}
+
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_missing_program_keeps_the_window() {
+    if !have_metal() {
+        return;
+    }
+    let dir = TempDir::new("missing");
+    let d = held_window(&dir, &["-e", "/nonexistent"]);
+    let s = screen(&d);
+    assert!(s.contains("/nonexistent"), "{s}");
+    assert!(s.contains("[process exited with status 12"), "{s}");
+    assert!(s.contains("press any key to close"), "{s}");
+}
+
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_quick_success_closes_the_window() {
+    if !have_metal() {
+        return;
+    }
+    let dir = TempDir::new("exit0");
+    let (status, _) = decline(&dir, "exit 0", true);
+    assert!(status.success(), "{status}");
+    assert!(dumps(&dir).is_empty());
+}
+
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_config_errors_show_in_the_window() {
+    if !have_metal() {
+        return;
+    }
+    let dir = TempDir::new("badconfig");
+    std::fs::create_dir_all(dir.config_home().join("decline")).unwrap();
+    std::fs::write(dir.config_home().join("decline/config.toml"), "font_sise = 3\n").unwrap();
+    let script = format!("echo program output; {}{}sleep 20", osc("dump"), osc("quit"));
+    let (status, _) = decline(&dir, &script, true);
+    assert!(status.success(), "{status}");
+    let d = dumps(&dir);
+    assert_eq!(d.len(), 1, "{d:?}");
+    let s = screen(&d[0]);
+    assert!(s.starts_with("decline: config: font_sise: unknown field"), "{s}");
+    assert!(s.contains("ignored|\nprogram output|"), "{s}");
+}
+
 /// A pin bundle made by the pin module in a temp dir, with a unique bundle
 /// id, launched the way the Dock does (LaunchServices, via `open`).
 #[test]

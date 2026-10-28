@@ -33,7 +33,7 @@ use crate::frame_policy::{self, Decision};
 use crate::keys::{KeyAction, KeyInput, KeyModes, Mods, encode_key, paste_bytes};
 use crate::layout::{self, CellSize, Padding};
 use crate::mouse;
-use crate::session::{Hooks, Session};
+use crate::session::{Hooks, Outcome, Session};
 
 const BLINK_INTERVAL: Duration = Duration::from_millis(530);
 
@@ -61,6 +61,9 @@ struct State {
     /// Mouse button held while reporting to the program.
     mouse_button: Option<u8>,
     selecting: bool,
+    /// The session has ended, but the window stays open to show why; a key
+    /// closes it.
+    held: bool,
     /// Only with `DECLINE_TEST_DUMP` set: see [`crate::control`].
     test: Option<TestControl>,
 }
@@ -206,7 +209,7 @@ define_class!(
 
         #[unsafe(method(copy:))]
         fn copy(&self, _sender: Option<&AnyObject>) {
-            let text = self.with_state(|st| st.session.term().lock().unwrap().state.selection_text()).flatten();
+            let text = self.with_state(|st| st.session.lock_term().state.selection_text()).flatten();
             if let Some(text) = text.filter(|t| !t.is_empty()) {
                 let pb = NSPasteboard::generalPasteboard();
                 pb.clearContents();
@@ -218,14 +221,14 @@ define_class!(
         fn paste(&self, _sender: Option<&AnyObject>) {
             let pb = NSPasteboard::generalPasteboard();
             let Some(text) = pb.stringForType(unsafe { NSPasteboardTypeString }) else { return };
-            let bracketed = self.with_state(|st| st.session.term().lock().unwrap().state.modes.bracketed_paste).unwrap_or(false);
+            let bracketed = self.with_state(|st| st.session.lock_term().state.modes.bracketed_paste).unwrap_or(false);
             self.send_input(paste_bytes(&text.to_string(), bracketed));
         }
 
         #[unsafe(method(selectAll:))]
         fn select_all(&self, _sender: Option<&AnyObject>) {
             self.with_state(|st| {
-                let mut t = st.session.term().lock().unwrap();
+                let mut t = st.session.lock_term();
                 let s = &mut t.state;
                 let first = s.visible_point(0, 0).line - (s.scrollback_len() - s.display_offset()) as u64;
                 let last = s.visible_point(s.lines() - 1, s.cols() - 1);
@@ -236,7 +239,7 @@ define_class!(
 
         #[unsafe(method(clearBuffer:))]
         fn clear_buffer(&self, _sender: Option<&AnyObject>) {
-            self.with_state(|st| st.session.term().lock().unwrap().advance(b"\x1b[H\x1b[2J\x1b[3J"));
+            self.with_state(|st| st.session.lock_term().advance(b"\x1b[H\x1b[2J\x1b[3J"));
             // Ask the shell to redraw its prompt.
             self.send_input(b"\x0c".to_vec());
         }
@@ -353,7 +356,7 @@ define_class!(
             let rect = self.with_state(|st| {
                 let m = st.renderer.metrics();
                 let pad = self.padding(st);
-                let t = st.session.term().lock().unwrap();
+                let t = st.session.lock_term();
                 let (x, y) = layout::cell_origin(t.state.cursor.row, t.state.cursor.col, m.into(), pad);
                 let (x, y) = (x as f64 / st.scale, y as f64 / st.scale);
                 NSRect::new(NSPoint::new(x, y), NSSize::new(m.cell_width as f64 / st.scale, m.cell_height as f64 / st.scale))
@@ -381,6 +384,8 @@ pub struct Launch {
     pub command: Command,
     pub fonts: Fonts,
     pub scale: f64,
+    /// Shown at the top of the window, before the program's output.
+    pub notices: Rc<[String]>,
 }
 
 impl TerminalView {
@@ -418,9 +423,12 @@ impl TerminalView {
 
         let mut t = Term::new(cols, lines, config.scrollback);
         t.state.default_colors = crate::config::query_colors(&theme);
+        for n in launch.notices.iter() {
+            crate::session::write_notice(&mut t, n);
+        }
         let mut hooks = Hooks::new(
             Arc::new(move || wake(id)),
-            Box::new(move || DispatchQueue::main().exec_async(move || with_view(id, |v| v.program_exited()))),
+            Box::new(move |outcome| DispatchQueue::main().exec_async(move || with_view(id, |v| v.program_exited(outcome)))),
         );
         let test = std::env::var_os(control::ENV).filter(|p| !p.is_empty()).map(|p| TestControl {
             path: PathBuf::from(p),
@@ -459,6 +467,7 @@ impl TerminalView {
             scroll_accum: 0.0,
             mouse_button: None,
             selecting: false,
+            held: false,
             test,
         });
         self.resize();
@@ -471,17 +480,8 @@ impl TerminalView {
     }
 
     pub fn foreground_cwd(&self) -> Option<String> {
-        self.with_state(|st| {
-            st.session
-                .term()
-                .lock()
-                .unwrap()
-                .state
-                .cwd
-                .clone()
-                .or_else(|| st.session.foreground_cwd())
-        })
-        .flatten()
+        self.with_state(|st| st.session.lock_term().state.cwd.clone().or_else(|| st.session.foreground_cwd()))
+            .flatten()
     }
 
     fn titlebar_height(&self) -> f64 {
@@ -530,7 +530,7 @@ impl TerminalView {
         let term = st.session.term().clone();
         let dirty = st.session.take_dirty();
         // Only a frame that may be drawn needs the terminal's lock.
-        let mut t = (dirty && visible).then(|| term.lock().unwrap());
+        let mut t = (dirty && visible).then(|| crate::session::lock(&term));
         let synchronized = t.as_ref().is_some_and(|t| t.state.modes.synchronized);
         let sync_elapsed = if synchronized {
             st.sync_since.get_or_insert_with(Instant::now).elapsed()
@@ -688,7 +688,7 @@ impl TerminalView {
             with_view(id, |v| {
                 let again = v.with_state(|st| {
                     st.blink_scheduled = false;
-                    let blinking = st.focused && st.session.term().lock().unwrap().state.cursor_blink;
+                    let blinking = st.focused && st.session.lock_term().state.cursor_blink;
                     st.cursor_on = !st.cursor_on || !blinking;
                     blinking
                 });
@@ -739,7 +739,7 @@ impl TerminalView {
         let report = self.with_state(|st| {
             st.focused = focused;
             st.cursor_on = true;
-            st.session.term().lock().unwrap().state.modes.focus_events
+            st.session.lock_term().state.modes.focus_events
         });
         if report == Some(true) {
             self.send_raw(if focused { b"\x1b[I".to_vec() } else { b"\x1b[O".to_vec() });
@@ -756,7 +756,27 @@ impl TerminalView {
         VIEWS.with(|v| v.borrow_mut().remove(&self.ivars().id));
     }
 
-    fn program_exited(&self) {
+    fn program_exited(&self, outcome: Outcome) {
+        match outcome {
+            Outcome::Closed => self.close_window(),
+            Outcome::Hold => {
+                // The session wrote why into the terminal.
+                let testing = self.with_state(|st| {
+                    st.held = true;
+                    st.session.mark_dirty();
+                    st.test.is_some()
+                });
+                self.request_redraw();
+                if testing == Some(true) {
+                    // Smoke tests can't send a dump command once the
+                    // program is gone: dump what the held window shows.
+                    self.control("dump");
+                }
+            }
+        }
+    }
+
+    fn close_window(&self) {
         if let Some(window) = self.window() {
             window.close();
         }
@@ -767,7 +787,7 @@ impl TerminalView {
         self.with_state(|st| {
             st.cursor_on = true;
             st.last_input = Instant::now();
-            let mut t = st.session.term().lock().unwrap();
+            let mut t = st.session.lock_term();
             t.state.scroll_view_to_bottom();
             t.state.selection = None;
         });
@@ -781,8 +801,14 @@ impl TerminalView {
 
     fn handle_key(&self, event: &NSEvent) {
         let input = key_input(event);
+        // A held window closes on any key; Cmd shortcuts (copy the error,
+        // close, quit) still go to the menus.
+        if input.flags & crate::keys::flags::COMMAND == 0 && self.with_state(|st| st.held) == Some(true) {
+            self.close_window();
+            return;
+        }
         let modes = self.with_state(|st| {
-            let t = st.session.term().lock().unwrap();
+            let t = st.session.lock_term();
             KeyModes {
                 app_cursor: t.state.modes.app_cursor,
                 app_keypad: t.state.modes.app_keypad,
@@ -814,7 +840,7 @@ impl TerminalView {
         self.with_state(|st| {
             let m = st.renderer.metrics();
             let pad = padding_for(&st.config, titlebar, st.scale);
-            let t = st.session.term().lock().unwrap();
+            let t = st.session.lock_term();
             layout::cell_at((p.x, p.y), st.scale, m.into(), pad, t.state.cols(), t.state.lines())
         })
     }
@@ -832,7 +858,7 @@ impl TerminalView {
     fn reporting(&self, event: &NSEvent) -> Option<(term_core::MouseMode, bool)> {
         let shift = event.modifierFlags().contains(NSEventModifierFlags::Shift);
         let (mode, sgr) = self.with_state(|st| {
-            let t = st.session.term().lock().unwrap();
+            let t = st.session.lock_term();
             (t.state.modes.mouse, t.state.modes.mouse_sgr)
         })?;
         mouse::reports(mode, shift).then_some((mode, sgr))
@@ -862,7 +888,7 @@ impl TerminalView {
         let clicks = event.clickCount();
         self.with_state(|st| {
             st.selecting = true;
-            let mut t = st.session.term().lock().unwrap();
+            let mut t = st.session.lock_term();
             let s = &mut t.state;
             let point = s.visible_point(line, col);
             s.selection = match clicks {
@@ -901,7 +927,7 @@ impl TerminalView {
         if clicks == 1 {
             // A plain click clears any visible selection until a drag starts.
             self.with_state(|st| {
-                let mut t = st.session.term().lock().unwrap();
+                let mut t = st.session.lock_term();
                 if let Some(sel) = &mut t.state.selection {
                     sel.head = sel.anchor;
                 }
@@ -926,7 +952,7 @@ impl TerminalView {
             if !st.selecting {
                 return false;
             }
-            let mut t = st.session.term().lock().unwrap();
+            let mut t = st.session.lock_term();
             let head = t.state.visible_point(line, col);
             match &mut t.state.selection {
                 Some(sel) if sel.head != head => {
@@ -967,7 +993,7 @@ impl TerminalView {
             return;
         }
         let alt = self.with_state(|st| {
-            let t = st.session.term().lock().unwrap();
+            let t = st.session.lock_term();
             t.state.alt_screen_active().then_some(t.state.modes.app_cursor)
         });
         if let Some(Some(app_cursor)) = alt {
@@ -979,7 +1005,7 @@ impl TerminalView {
             }
             return;
         }
-        self.with_state(|st| st.session.term().lock().unwrap().state.scroll_view(lines));
+        self.with_state(|st| st.session.lock_term().state.scroll_view(lines));
         self.request_redraw();
     }
 }
@@ -1124,7 +1150,7 @@ fn write_dump(st: &mut State) {
     test.seq += 1;
     test.dump = DumpState::Idle;
     let (screen, cols, lines) = {
-        let t = st.session.term().lock().unwrap();
+        let t = st.session.lock_term();
         (t.state.dump(), t.state.cols(), t.state.lines())
     };
     let m = st.renderer.metrics();

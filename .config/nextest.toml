@@ -1,0 +1,31 @@
+# cargo-nextest settings. Run locally with `cargo nextest run --workspace`;
+# CI uses `--profile ci`. nextest does not run doctests: use
+# `cargo test --workspace --doc` for those.
+
+[profile.default]
+# A test running for 15 s is reported as slow; after 4 periods (60 s) it is
+# killed, so a hung PTY or GUI test can't stall a run.
+slow-timeout = { period = "15s", terminate-after = 4 }
+# No retries: a flaky test is a bug to fix, not to hide.
+retries = 0
+
+# Tests that drive the real app (window server, Dock, LaunchServices) can't
+# share the machine with each other, so they run one at a time.
+#
+# TODO: switch to `binary(smoke)` once the smoke test binary exists. nextest
+# rejects a binary() filter that matches no binary, which would break every
+# run until then, so for now this matches on the test name instead.
+[[profile.default.overrides]]
+filter = 'test(/smoke/)'
+test-group = "gui"
+
+[profile.ci]
+fail-fast = false
+failure-output = "immediate-final"
+
+[profile.ci.junit]
+# Written to target/nextest/ci/junit.xml
+path = "junit.xml"
+
+[test-groups]
+gui = { max-threads = 1 }

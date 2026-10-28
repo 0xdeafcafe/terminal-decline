@@ -1,0 +1,29 @@
+[package]
+name = "decline-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "MIT"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+arbitrary = "1"
+libfuzzer-sys = "0.4"
+term-core = { path = "../crates/term-core" }
+
+# Its own workspace, so the main workspace (and `cargo test --workspace`)
+# never builds this crate, which needs a nightly toolchain to link.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "parse"
+path = "fuzz_targets/parse.rs"
+test = false
+doc = false
+bench = false
+
+[profile.release]
+debug = 1

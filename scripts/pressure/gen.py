@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Generators for pressure-test inputs. Deterministic (fixed seeds)."""
+"""Generators for pressure-test inputs. Deterministic (fixed seeds).
+
+usage: gen.py big PATH [BYTES]     # text for flood-1gb (default 100 MB)
+       gen.py fuzz PATH BYTES      # escape-sequence soup for fuzz-64mb
+       gen.py glyphs PATH          # every CJK/emoji/symbol, for glyphs-30k
+       gen.py sync SECONDS         # writes synchronized-update frames to stdout
+"""
 import os, random, sys
 
 def fuzz(path, size):
@@ -31,6 +37,28 @@ def fuzz(path, size):
         n += len(b)
     with open(path, "wb") as f:
         f.write(b"".join(parts) + b"\x1bc\x1b[0m\r\nALIVE\r\n")
+
+def big(path, size):
+    """About `size` bytes of plain and coloured lines, like a big log or build
+    output: 4096 distinct lines repeated with increasing line numbers."""
+    r = random.Random(1)
+    words = "the quick brown fox jumps over lazy dog error warning info debug build test src main lib".split()
+    lines = []
+    for _ in range(4096):
+        text = " ".join(r.choice(words) for _ in range(r.randint(0, 24)))
+        k = r.random()
+        if k < 0.1:
+            text = f"\x1b[1;31merror\x1b[0m: {text}"
+        elif k < 0.2:
+            text = f"\x1b[38;5;{r.randint(0, 255)}m{text}\x1b[0m"
+        lines.append(text)
+    written, n = 0, 0
+    with open(path, "w") as f:
+        while written < size:
+            out = "".join(f"{n + i:09} {line}\n" for i, line in enumerate(lines))
+            f.write(out)
+            written += len(out.encode())
+            n += len(lines)
 
 def glyphs(path):
     """Every CJK ideograph, emoji and symbol block: fills the glyph textures."""
@@ -66,6 +94,8 @@ if __name__ == "__main__":
     cmd = sys.argv[1]
     if cmd == "fuzz":
         fuzz(sys.argv[2], int(sys.argv[3]))
+    elif cmd == "big":
+        big(sys.argv[2], int(sys.argv[3]) if len(sys.argv) > 3 else 100_000_000)
     elif cmd == "glyphs":
         glyphs(sys.argv[2])
     elif cmd == "sync":

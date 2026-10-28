@@ -1,5 +1,8 @@
 name: CI
 
+# Budget: the whole PR run should finish in about 10 minutes. Jobs run in
+# parallel; the macOS job is the long pole.
+
 on:
   push:
     branches: [main]
@@ -14,49 +17,105 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
 
 jobs:
   fmt:
-    runs-on: macos-latest
+    name: fmt and scripts
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
+      - name: fmt (fuzz crate, outside the workspace)
+        run: cargo fmt --manifest-path fuzz/Cargo.toml -- --check
+      - name: Script self-tests
+        run: |
+          python3 scripts/bench-gate.py --self-test
+          python3 scripts/fuzz-signature.py --self-test
+      - name: Seed corpus is up to date
+        run: python3 scripts/fuzz-seed.py --check
 
-  clippy:
+  core-linux:
+    name: term-core and term-pty (ubuntu)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Unit, integration, property and doctests, plus the fuzz corpus replay.
+      - name: cargo test -p term-core
+        run: cargo test -p term-core --locked
+      # TODO: drop continue-on-error once term-pty builds on Linux.
+      - name: cargo test -p term-pty
+        continue-on-error: true
+        run: cargo test -p term-pty --locked
+
+  macos:
+    name: clippy and tests (macOS)
     runs-on: macos-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-
-  test-macos:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: macos
       - uses: taiki-e/install-action@v2
         with:
           tool: nextest
-      - run: cargo nextest run --workspace --locked
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo nextest run --workspace --locked --profile ci
       # nextest does not run doctests
       - run: cargo test --workspace --doc --locked
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: junit-macos
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: ignore
 
-  test-core-linux:
-    name: test term-core (ubuntu)
+  fuzz-build:
+    name: fuzz target builds (nightly)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz -> target
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+      - run: cargo fuzz build parse
+
+  smoke:
+    name: app smoke tests (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 15
+    # TODO: make this required once the smoke tests exist.
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: macos
+          save-if: false
       - uses: taiki-e/install-action@v2
         with:
           tool: nextest
-      - run: cargo nextest run -p term-core --locked
-      - run: cargo test -p term-core --doc --locked
+      - run: cargo nextest run --workspace --locked --profile ci --run-ignored only -E 'binary(smoke)'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: smoke
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: ignore

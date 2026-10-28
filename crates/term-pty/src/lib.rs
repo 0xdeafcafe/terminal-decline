@@ -204,6 +204,11 @@ impl Drop for Pty {
                 }
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
+            // The child leads its own session and process group (forkpty
+            // calls setsid). Kill the group too, so programs it started that
+            // also ignore SIGHUP don't keep the PTY open, which would leave
+            // the reader thread waiting forever.
+            libc::kill(-pid, libc::SIGKILL);
             libc::kill(pid, libc::SIGKILL);
             libc::waitpid(pid, std::ptr::null_mut(), 0);
         });

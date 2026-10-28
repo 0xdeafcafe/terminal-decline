@@ -82,8 +82,11 @@ impl Default for Modes {
     }
 }
 
-/// A point in the whole buffer. `line` counts from the first line ever written,
-/// so it stays valid while new output scrolls in.
+/// A point in the whole buffer. `line` counts every line that has scrolled
+/// off the top of the screen, stored in scrollback or not, so a point stays
+/// attached to its text while new output scrolls in. Lines no longer stored
+/// (dropped from scrollback, or scrolled off the alternate screen) have no
+/// text.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct Point {
     pub line: u64,
@@ -123,6 +126,12 @@ pub struct Terminal {
     scrollback: Scrollback,
     /// How many rows the view is scrolled back by (0 = following output).
     display_offset: usize,
+    /// Buffer line number ([`Point::line`]) of the screen's first row: the
+    /// count of rows that have scrolled off its top. On the primary screen
+    /// the scrollback holds the lines just before it.
+    top_line: u64,
+    /// The same for the other screen.
+    other_top_line: u64,
 
     pub cursor: Cursor,
     saved_primary: Option<SavedCursor>,
@@ -172,6 +181,8 @@ impl Terminal {
             alt_active: false,
             scrollback: Scrollback::new(scrollback_limit),
             display_offset: 0,
+            top_line: 0,
+            other_top_line: 0,
             cursor: Cursor::default(),
             saved_primary: None,
             saved_alt: None,
@@ -266,22 +277,26 @@ impl Terminal {
     /// The buffer position of visible line `line`.
     pub fn visible_point(&self, line: usize, col: usize) -> Point {
         Point {
-            line: self.scrollback.total() - self.display_offset as u64 + line as u64,
+            line: self.top_line - self.display_offset as u64 + line as u64,
             col,
         }
     }
 
+    /// The row at buffer line `line`, or None if it is not stored (any more).
     fn row_at(&self, line: u64) -> Option<Cow<'_, Row>> {
-        let first = self.scrollback.total() - self.scrollback.len() as u64;
-        if line < first {
+        if line >= self.top_line {
+            return self.screen.get((line - self.top_line) as usize).map(Cow::Borrowed);
+        }
+        if self.alt_active {
+            // Rows that scroll off the alternate screen are not kept.
             return None;
         }
-        let idx = (line - first) as usize;
-        if idx < self.scrollback.len() {
-            self.scrollback.get(idx).map(Cow::Owned)
-        } else {
-            self.screen.get(idx - self.scrollback.len()).map(Cow::Borrowed)
+        let back = self.top_line - line;
+        let sb = self.scrollback.len();
+        if back > sb as u64 {
+            return None;
         }
+        self.scrollback.get(sb - back as usize).map(Cow::Owned)
     }
 
     pub fn selection_text(&self) -> Option<String> {
@@ -320,12 +335,14 @@ impl Terminal {
         // On the primary screen, rows pushed off the top go into scrollback so
         // the cursor stays visible.
         let removed = resize_screen(&mut self.screen, &mut self.cursor, cols, lines);
+        self.top_line += removed.len() as u64;
         if self.alt_active {
             // The primary screen is hidden; its cursor is the saved one.
             let mut cursor = self.saved_primary.map(|s| s.cursor).unwrap_or_default();
             let mut other = std::mem::take(&mut self.other_screen);
             let removed = resize_screen(&mut other, &mut cursor, cols, lines);
             self.other_screen = other;
+            self.other_top_line += removed.len() as u64;
             for row in removed {
                 self.push_scrollback(&row);
             }
@@ -363,7 +380,8 @@ impl Terminal {
     }
 
     /// Copy a row into scrollback. The row itself is left for the caller to
-    /// reuse as the new blank line.
+    /// reuse as the new blank line. Callers also advance the screen's
+    /// `top_line`, which counts rows whether or not they were stored.
     fn push_scrollback(&mut self, row: &Row) {
         if self.scrollback.limit() == 0 {
             return;
@@ -380,6 +398,9 @@ impl Terminal {
         let n = n.min(bottom - top + 1);
         let blank = self.blank();
         let to_history = top == 0 && !self.alt_active;
+        if top == 0 {
+            self.top_line += n as u64;
+        }
         for i in 0..n {
             if to_history {
                 let row = std::mem::take(&mut self.screen[top + i]);
@@ -521,6 +542,12 @@ impl Terminal {
             return;
         }
         std::mem::swap(&mut self.screen, &mut self.other_screen);
+        std::mem::swap(&mut self.top_line, &mut self.other_top_line);
+        if on {
+            // Number the alternate screen's rows after the primary's, so a
+            // point on one can't be taken for a point on the other.
+            self.top_line = self.top_line.max(self.other_top_line + self.lines as u64);
+        }
         self.alt_active = on;
         if on && clear {
             let blank = self.blank();
@@ -539,6 +566,10 @@ impl Terminal {
         fresh.default_colors = self.default_colors;
         fresh.cell_pixels = self.cell_pixels;
         fresh.scrollback = std::mem::replace(&mut self.scrollback, Scrollback::new(0));
+        // Keep line numbers counting up from the primary screen's.
+        let primary_top = if self.alt_active { self.other_top_line } else { self.top_line };
+        fresh.top_line = primary_top;
+        fresh.other_top_line = primary_top;
         *self = fresh;
     }
 
@@ -1335,6 +1366,13 @@ impl Terminal {
             return Err(format!(
                 "scroll region {}..={} invalid for {lines} lines",
                 self.scroll_top, self.scroll_bottom
+            ));
+        }
+        let primary_top = if self.alt_active { self.other_top_line } else { self.top_line };
+        if primary_top < self.scrollback.len() as u64 {
+            return Err(format!(
+                "primary screen starts at line {primary_top}, before its {} scrollback lines",
+                self.scrollback.len()
             ));
         }
         if self.tabs.len() != cols {

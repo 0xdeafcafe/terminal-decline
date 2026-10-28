@@ -264,6 +264,51 @@ fn vs16_does_not_break_the_next_wide_char() {
     ");
 }
 
+fn select(t: &mut Term, from: (usize, usize), to: (usize, usize)) {
+    let anchor = t.state.visible_point(from.0, from.1);
+    let head = t.state.visible_point(to.0, to.1);
+    t.state.selection = Some(term_core::Selection { anchor, head });
+}
+
+#[test]
+fn selection_without_scrollback_does_not_slide_to_the_next_line() {
+    // Regression: with scrollback off, line numbers only counted stored
+    // lines, so after a scroll the selection pointed at the next line.
+    let mut t = Term::new(10, 2, 0);
+    t.advance(b"aaa\r\nbbb");
+    select(&mut t, (0, 0), (0, 2));
+    assert_eq!(t.state.selection_text().unwrap(), "aaa");
+    t.advance(b"\r\nccc");
+    assert_eq!(t.state.selection_text().unwrap(), "");
+    // A selection over both rows keeps only the part still on screen.
+    select(&mut t, (0, 0), (1, 2));
+    t.advance(b"\r\nddd");
+    assert_eq!(t.state.selection_text().unwrap(), "ccc");
+}
+
+#[test]
+fn selection_on_alt_screen_does_not_slide_to_the_next_line() {
+    let mut t = Term::new(10, 2, 100);
+    t.advance(b"shell\x1b[?1049h\x1b[Haaa\r\nbbb");
+    select(&mut t, (0, 0), (0, 2));
+    assert_eq!(t.state.selection_text().unwrap(), "aaa");
+    t.advance(b"\r\nccc");
+    assert_eq!(t.state.selection_text().unwrap(), "");
+    assert_eq!(t.state.scrollback_len(), 0);
+}
+
+#[test]
+fn selection_after_reset_and_alt_screen_round_trip() {
+    let mut t = Term::new(10, 2, 100);
+    t.advance(b"one\r\ntwo\r\nthree\x1bc");
+    t.advance(b"\x1b[?1049h\x1b[?1049lnew");
+    select(&mut t, (0, 0), (0, 2));
+    assert_eq!(t.state.selection_text().unwrap(), "new");
+    t.state.scroll_view(2);
+    select(&mut t, (0, 0), (1, 2));
+    assert_eq!(t.state.selection_text().unwrap(), "one\nnew");
+}
+
 #[test]
 fn vs16_next_to_a_narrow_char_overwrites_it() {
     let mut t = Term::new(6, 1, 0);

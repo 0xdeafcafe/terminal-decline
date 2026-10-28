@@ -5,11 +5,12 @@
 use std::cell::{Cell as StdCell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
-
+use std::ptr::NonNull;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use block2::RcBlock;
 use dispatch2::{DispatchQueue, DispatchTime};
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, ProtocolObject, Sel};
@@ -21,7 +22,8 @@ use objc2_foundation::{
     NSArray, NSAttributedString, NSAttributedStringKey, NSNotFound, NSNotification, NSObjectProtocol, NSPoint, NSRange, NSRect, NSRunLoop,
     NSRunLoopCommonModes, NSSize, NSString,
 };
-use objc2_quartz_core::{CADisplayLink, CALayer, CAMetalLayer};
+use objc2_metal::{MTLCommandBuffer, MTLDrawable};
+use objc2_quartz_core::{CADisplayLink, CALayer, CAMetalDrawable, CAMetalLayer};
 use term_core::{Point, Selection, Term};
 use term_font::Fonts;
 use term_pty::{Command, Size};
@@ -31,6 +33,7 @@ use crate::config::Config;
 use crate::control::{self, Control, Dump};
 use crate::frame_policy::{self, Decision};
 use crate::keys::{KeyAction, KeyInput, KeyModes, Mods, encode_key, paste_bytes};
+use crate::latency::{self, FrameKeys, Latency};
 use crate::layout::{self, CellSize, Padding};
 use crate::mouse;
 use crate::session::{Hooks, Outcome, Session};
@@ -66,6 +69,9 @@ struct State {
     held: bool,
     /// Only with `DECLINE_TEST_DUMP` set: see [`crate::control`].
     test: Option<TestControl>,
+    /// Only with `DECLINE_LATENCY_LOG` set: the key event being handled,
+    /// its timestamp and when `keyDown` got it (see [`crate::latency`]).
+    key_t0: Option<(f64, f64)>,
 }
 
 /// Test-only control commands waiting to run, and the dump in progress.
@@ -441,6 +447,9 @@ impl TerminalView {
                 DispatchQueue::main().exec_async(move || with_view(id, |v| v.control(&cmd)));
             }));
         }
+        if let Some(lat) = latency::get() {
+            hooks.on_parsed = Some(Box::new(move || lat.parsed(id)));
+        }
         let session = Session::spawn(&launch.command, pty_size(cols, lines, m), t, hooks)?;
 
         let link = unsafe { self.displayLinkWithTarget_selector(self, sel!(tick:)) };
@@ -469,6 +478,7 @@ impl TerminalView {
             selecting: false,
             held: false,
             test,
+            key_t0: None,
         });
         self.resize();
         Ok(())
@@ -579,7 +589,7 @@ impl TerminalView {
                 st.link.setPaused(false);
                 return;
             }
-            Decision::Draw { rate } => rate,
+            Decision::Draw { rate } => latency::get().and_then(|l| l.hz()).unwrap_or(rate),
         };
         st.idle_ticks = 0;
         st.renderer.show();
@@ -617,8 +627,13 @@ impl TerminalView {
             };
             st.renderer.prepare(&input);
         }
+        // With the terminal still locked: the keys whose output this frame shows.
+        let timed = latency::get().map(|l| (l, l.take_for_frame(self.ivars().id, rate)));
         drop(t);
-        st.renderer.present(&self.ivars().layer);
+        match timed {
+            Some((lat, keys)) if !keys.is_empty() => present_timed(&mut st.renderer, &self.ivars().layer, lat, keys),
+            _ => st.renderer.present(&self.ivars().layer),
+        }
         st.frames += 1;
         let mut poll_dump = false;
         if let Some(test) = &mut st.test
@@ -784,13 +799,21 @@ impl TerminalView {
 
     /// Input typed by the user: snaps the view back to the live screen.
     fn send_input(&self, bytes: Vec<u8>) {
-        self.with_state(|st| {
+        let len = bytes.len();
+        let key_t0 = self.with_state(|st| {
             st.cursor_on = true;
             st.last_input = Instant::now();
             let mut t = st.session.lock_term();
             t.state.scroll_view_to_bottom();
             t.state.selection = None;
+            drop(t);
+            st.key_t0.take()
         });
+        // Logged before the writer has the bytes, so the echo can't be
+        // parsed before the key is waited for.
+        if let (Some(lat), Some(Some((t0, key_down)))) = (latency::get(), key_t0) {
+            lat.key_sent(self.ivars().id, t0, key_down, len);
+        }
         self.send_raw(bytes);
         self.request_redraw();
     }
@@ -800,6 +823,15 @@ impl TerminalView {
     }
 
     fn handle_key(&self, event: &NSEvent) {
+        if latency::get().is_some() {
+            let times = (event.timestamp(), latency::now());
+            self.with_state(|st| st.key_t0 = Some(times));
+        }
+        self.handle_key_event(event);
+        self.with_state(|st| st.key_t0 = None);
+    }
+
+    fn handle_key_event(&self, event: &NSEvent) {
         let input = key_input(event);
         // A held window closes on any key; Cmd shortcuts (copy the error,
         // close, quit) still go to the menus.
@@ -1008,6 +1040,32 @@ impl TerminalView {
         self.with_state(|st| st.session.lock_term().state.scroll_view(lines));
         self.request_redraw();
     }
+}
+
+/// Present like [`Renderer::present`], with handlers that time the frame
+/// for the keys it shows (latency harness only). The renderer doesn't see
+/// this drawable, so a window hidden right after such a frame keeps its
+/// previous surface instead of offering it for purging.
+fn present_timed(renderer: &mut Renderer, layer: &CAMetalLayer, lat: &'static Latency, keys: Vec<latency::Key>) {
+    let Some(drawable) = layer.nextDrawable() else {
+        lat.write(&keys);
+        return;
+    };
+    let cmd = renderer.encode(&drawable.texture());
+    let frame = Arc::new(FrameKeys::new(keys));
+    let on_gpu = frame.clone();
+    let done = RcBlock::new(move |cb: NonNull<ProtocolObject<dyn MTLCommandBuffer>>| {
+        on_gpu.gpu_done(lat, unsafe { cb.as_ref() }.GPUEndTime());
+    });
+    unsafe { cmd.addCompletedHandler(RcBlock::as_ptr(&done)) };
+    let on_glass = frame.clone();
+    let shown = RcBlock::new(move |d: NonNull<ProtocolObject<dyn MTLDrawable>>| {
+        on_glass.presented(lat, unsafe { d.as_ref() }.presentedTime());
+    });
+    unsafe { drawable.addPresentedHandler(RcBlock::as_ptr(&shown)) };
+    cmd.presentDrawable(ProtocolObject::from_ref(&*drawable));
+    frame.committed();
+    cmd.commit();
 }
 
 fn padding_for(config: &Config, titlebar: f64, scale: f64) -> Padding {

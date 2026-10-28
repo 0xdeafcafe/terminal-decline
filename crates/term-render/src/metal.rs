@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::ptr::NonNull;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 use block2::RcBlock;
@@ -160,6 +161,12 @@ impl GlyphCache {
         self.forget(|_| true);
     }
 
+    /// Side lengths in pixels of the coverage (text) and colour (emoji)
+    /// glyph textures.
+    pub fn texture_sizes(&self) -> (u32, u32) {
+        (self.mask.packer.size(), self.color.packer.size())
+    }
+
     fn forget(&mut self, drop: impl Fn(Option<GlyphSlot>) -> bool) {
         for entry in self.ascii.iter_mut() {
             if entry.is_some_and(&drop) {
@@ -254,6 +261,10 @@ pub struct Renderer {
     /// the window is hidden.
     last_surface: Option<Retained<objc2_io_surface::IOSurfaceRef>>,
     hidden: bool,
+    /// Command buffers encoded, and those the GPU has finished (counted in
+    /// their completion handler).
+    submitted: u64,
+    completed: Arc<AtomicU64>,
 }
 
 impl Renderer {
@@ -292,6 +303,8 @@ impl Renderer {
             frame: Frame::default(),
             last_surface: None,
             hidden: false,
+            submitted: 0,
+            completed: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -336,6 +349,18 @@ impl Renderer {
             // kIOSurfacePurgeableNonVolatile
             unsafe { s.set_purgeable(0, std::ptr::null_mut()) };
         }
+    }
+
+    /// Frames the GPU has finished drawing (counted when each command
+    /// buffer completes, not when it is presented).
+    pub fn frames_completed(&self) -> u64 {
+        self.completed.load(Ordering::Acquire)
+    }
+
+    /// Frames encoded so far. Frames complete in order, so frame `n` is done
+    /// once [`frames_completed`](Self::frames_completed) reaches `n`.
+    pub fn frames_submitted(&self) -> u64 {
+        self.submitted
     }
 
     pub fn is_hidden(&self) -> bool {
@@ -440,8 +465,11 @@ impl Renderer {
         }
         enc.endEncoding();
 
+        self.submitted += 1;
         let in_flight = self.in_flight.clone();
+        let completed = self.completed.clone();
         let done = RcBlock::new(move |_: NonNull<CommandBuffer>| {
+            completed.fetch_add(1, Ordering::AcqRel);
             let (lock, cvar) = &*in_flight;
             *lock.lock().unwrap() -= 1;
             cvar.notify_one();

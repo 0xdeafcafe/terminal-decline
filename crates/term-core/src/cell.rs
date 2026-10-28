@@ -132,14 +132,6 @@ impl Row {
         self.wrapped = false;
     }
 
-    /// Drop trailing blank cells and spare capacity. Used for rows moving into
-    /// scrollback, where most lines are much shorter than the window width.
-    pub fn compact(&mut self) {
-        let len = self.cells.iter().rposition(|c| !c.is_blank()).map_or(0, |i| i + 1);
-        self.cells.truncate(len);
-        self.cells.shrink_to_fit();
-    }
-
     pub fn get(&self, col: usize) -> Cell {
         self.cells.get(col).copied().unwrap_or(Cell::BLANK)
     }

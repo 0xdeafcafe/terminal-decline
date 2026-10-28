@@ -100,8 +100,6 @@ jobs:
     name: app smoke tests (macOS)
     runs-on: macos-latest
     timeout-minutes: 15
-    # TODO: make this required once the smoke tests exist.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

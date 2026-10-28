@@ -11,12 +11,8 @@ retries = 0
 
 # Tests that drive the real app (window server, Dock, LaunchServices) can't
 # share the machine with each other, so they run one at a time.
-#
-# TODO: switch to `binary(smoke)` once the smoke test binary exists. nextest
-# rejects a binary() filter that matches no binary, which would break every
-# run until then, so for now this matches on the test name instead.
 [[profile.default.overrides]]
-filter = 'test(/smoke/)'
+filter = 'binary(smoke)'
 test-group = "gui"
 
 [profile.ci]

@@ -33,6 +33,10 @@ use crate::keys::{Mods, ctrl_byte, encode_key, encode_kitty_char, encode_kitty_k
 const BLINK_INTERVAL: Duration = Duration::from_millis(530);
 /// Longest we hold drawing while a program is mid synchronized update.
 const SYNC_TIMEOUT: Duration = Duration::from_millis(150);
+/// How long after input the display runs at its full refresh rate.
+const INPUT_BOOST: Duration = Duration::from_millis(250);
+/// Idle time before the spare drawable is given back.
+const IDLE_TRIM: Duration = Duration::from_secs(2);
 
 /// Shared between the reader thread and the main thread.
 struct Shared {
@@ -55,6 +59,12 @@ struct State {
     cursor_on: bool,
     blink_scheduled: bool,
     idle_ticks: u8,
+    /// Frames presented; lets a delayed buffer trim see if anything was drawn since.
+    frames: u64,
+    /// Display refresh rate currently asked for (Hz).
+    rate: u16,
+    /// Last key, paste, scroll or click: typing gets the full refresh rate.
+    last_input: Instant,
     sync_since: Option<Instant>,
     marked: String,
     scroll_accum: f64,
@@ -256,7 +266,14 @@ define_class!(
 
         #[unsafe(method(windowDidChangeOcclusionState:))]
         fn window_did_change_occlusion(&self, _n: &NSNotification) {
-            self.request_redraw();
+            if self.visible() {
+                self.request_redraw();
+            } else {
+                // Free what can be rebuilt while nothing can be seen.
+                let minimised = self.window().is_some_and(|w| w.isMiniaturized());
+                self.with_state(|st| st.renderer.hide(minimised));
+                self.trim_drawables();
+            }
         }
 
         #[unsafe(method(windowWillClose:))]
@@ -423,7 +440,8 @@ impl TerminalView {
         let mut reader = pty.reader()?;
         let (term2, shared2, tx2) = (term.clone(), shared.clone(), tx.clone());
         std::thread::Builder::new().name("pty-reader".into()).spawn(move || {
-            let mut buf = vec![0u8; 1 << 20];
+            // A macOS PTY hands out ~1 KB per read, so 64 KB is plenty.
+            let mut buf = vec![0u8; 64 * 1024];
             loop {
                 let n = reader.read_batch(&mut buf);
                 if n == 0 {
@@ -467,6 +485,9 @@ impl TerminalView {
             cursor_on: true,
             blink_scheduled: false,
             idle_ticks: 0,
+            frames: 0,
+            rate: 0,
+            last_input: Instant::now(),
             sync_since: None,
             marked: String::new(),
             scroll_accum: 0.0,
@@ -528,8 +549,11 @@ impl TerminalView {
         if !st.shared.dirty.swap(false, Ordering::AcqRel) {
             // Nothing new: stop the display link until something changes.
             st.idle_ticks += 1;
-            if st.idle_ticks >= 2 {
+            if st.idle_ticks == 2 {
                 st.link.setPaused(true);
+                let token = st.frames;
+                drop(guard);
+                self.schedule_trim(token);
             }
             return;
         }
@@ -538,7 +562,29 @@ impl TerminalView {
             // Hidden or fully covered: keep the change and draw when shown.
             st.shared.dirty.store(true, Ordering::Release);
             st.link.setPaused(true);
+            let minimised = self.window().is_some_and(|w| w.isMiniaturized());
+            st.renderer.hide(minimised);
             return;
+        }
+        st.renderer.show();
+        // Full refresh rate right after input; 60 Hz while output streams
+        // (no one reads text scrolling at 120 Hz, and the window server's
+        // cost scales with frames); 30 Hz in a window that isn't focused.
+        let rate = if st.last_input.elapsed() < INPUT_BOOST {
+            120
+        } else if !st.focused {
+            30
+        } else {
+            60
+        };
+        if rate != st.rate {
+            st.rate = rate;
+            let r = rate as f32;
+            st.link.setPreferredFrameRateRange(objc2_quartz_core::CAFrameRateRange {
+                minimum: r / 2.0,
+                maximum: r,
+                preferred: r,
+            });
         }
         let (px, py, _) = padding_for(&st.config, self.titlebar_height(), st.scale);
         let mut title = None;
@@ -577,6 +623,7 @@ impl TerminalView {
             st.renderer.prepare(&input);
         }
         st.renderer.present(&self.ivars().layer);
+        st.frames += 1;
 
         let need_blink = blink && st.focused && !st.blink_scheduled;
         if need_blink {
@@ -605,6 +652,28 @@ impl TerminalView {
                 app.requestUserAttention(objc2_app_kit::NSRequestUserAttentionType::InformationalRequest);
             }
         }
+    }
+
+    /// After a couple of seconds with nothing drawn, give back the spare
+    /// drawable: resizing the layer's drawables to 1×1 and back releases the
+    /// one not on screen (6.6 MB at 1624×1018) without changing what's shown.
+    fn schedule_trim(&self, token: u64) {
+        let id = self.ivars().id;
+        let _ = DispatchQueue::main().after(DispatchTime::NOW.time(IDLE_TRIM.as_nanos() as i64), move || {
+            with_view(id, |v| {
+                let idle = v.with_state(|st| st.frames == token && st.link.isPaused() && !st.blink_scheduled);
+                if idle == Some(true) {
+                    v.trim_drawables();
+                }
+            })
+        });
+    }
+
+    fn trim_drawables(&self) {
+        let layer = &self.ivars().layer;
+        let size = layer.drawableSize();
+        layer.setDrawableSize(NSSize::new(1.0, 1.0));
+        layer.setDrawableSize(size);
     }
 
     fn schedule_blink(&self) {
@@ -701,6 +770,7 @@ impl TerminalView {
     fn send_input(&self, bytes: Vec<u8>) {
         self.with_state(|st| {
             st.cursor_on = true;
+            st.last_input = Instant::now();
             let mut t = st.term.lock().unwrap();
             t.state.scroll_view_to_bottom();
             t.state.selection = None;
@@ -863,6 +933,7 @@ impl TerminalView {
     }
 
     fn mouse_button_event(&self, event: &NSEvent, button: u8, press: bool) {
+        self.with_state(|st| st.last_input = Instant::now());
         let Some((line, col)) = self.cell_at(event) else { return };
         if let Some((_, sgr)) = self.reporting(event) {
             self.with_state(|st| st.mouse_button = press.then_some(button));
@@ -977,6 +1048,7 @@ impl TerminalView {
     }
 
     fn handle_scroll(&self, event: &NSEvent) {
+        self.with_state(|st| st.last_input = Instant::now());
         let precise = event.hasPreciseScrollingDeltas();
         let reporting = self.reporting(event);
         let Some((line, col)) = self.cell_at(event) else { return };

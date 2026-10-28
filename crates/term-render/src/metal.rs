@@ -12,9 +12,9 @@ use objc2::runtime::ProtocolObject;
 use objc2_foundation::NSString;
 use objc2_metal::{
     MTLBlendFactor, MTLBuffer, MTLClearColor, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLCreateSystemDefaultDevice,
-    MTLDevice, MTLLibrary, MTLLoadAction, MTLOrigin, MTLPixelFormat, MTLPrimitiveType, MTLRegion, MTLRenderCommandEncoder,
-    MTLRenderPassDescriptor, MTLRenderPipelineDescriptor, MTLRenderPipelineState, MTLResourceOptions, MTLSize, MTLStoreAction, MTLTexture,
-    MTLTextureDescriptor, MTLTextureUsage,
+    MTLDevice, MTLLibrary, MTLLoadAction, MTLOrigin, MTLPixelFormat, MTLPrimitiveType, MTLPurgeableState, MTLRegion,
+    MTLRenderCommandEncoder, MTLRenderPassDescriptor, MTLRenderPipelineDescriptor, MTLRenderPipelineState, MTLResource, MTLResourceOptions,
+    MTLSize, MTLStoreAction, MTLTexture, MTLTextureDescriptor, MTLTextureUsage,
 };
 use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
 use term_font::{Fonts, Style};
@@ -250,6 +250,10 @@ pub struct Renderer {
     frame_index: usize,
     in_flight: Arc<(Mutex<usize>, Condvar)>,
     pub frame: Frame,
+    /// The surface last shown on screen, so it can be marked purgeable while
+    /// the window is hidden.
+    last_surface: Option<Retained<objc2_io_surface::IOSurfaceRef>>,
+    hidden: bool,
 }
 
 impl Renderer {
@@ -286,7 +290,56 @@ impl Renderer {
             frame_index: 0,
             in_flight,
             frame: Frame::default(),
+            last_surface: None,
+            hidden: false,
         }
+    }
+
+    fn wait_idle(&self) {
+        let (lock, cvar) = &*self.in_flight;
+        let mut n = lock.lock().unwrap();
+        while *n > 0 {
+            n = cvar.wait(n).unwrap();
+        }
+    }
+
+    /// The window can't be seen: let macOS reclaim the glyph textures and,
+    /// unless `keep_surface` (minimised windows show it in the Dock), the
+    /// surface on screen. Both come back in `show`.
+    pub fn hide(&mut self, keep_surface: bool) {
+        if self.hidden {
+            return;
+        }
+        self.wait_idle();
+        self.hidden = true;
+        self.glyphs.mask.texture.setPurgeableState(MTLPurgeableState::Volatile);
+        self.glyphs.color.texture.setPurgeableState(MTLPurgeableState::Volatile);
+        if !keep_surface && let Some(s) = &self.last_surface {
+            // kIOSurfacePurgeableVolatile
+            unsafe { s.set_purgeable(1, std::ptr::null_mut()) };
+        }
+    }
+
+    /// Undo `hide`. Must run before the next frame is built or drawn.
+    pub fn show(&mut self) {
+        if !self.hidden {
+            return;
+        }
+        self.hidden = false;
+        let mask = self.glyphs.mask.texture.setPurgeableState(MTLPurgeableState::NonVolatile);
+        let color = self.glyphs.color.texture.setPurgeableState(MTLPurgeableState::NonVolatile);
+        if mask == MTLPurgeableState::Empty || color == MTLPurgeableState::Empty {
+            // macOS took them: rasterise again as glyphs are needed.
+            self.glyphs.clear();
+        }
+        if let Some(s) = &self.last_surface {
+            // kIOSurfacePurgeableNonVolatile
+            unsafe { s.set_purgeable(0, std::ptr::null_mut()) };
+        }
+    }
+
+    pub fn is_hidden(&self) -> bool {
+        self.hidden
     }
 
     pub fn device(&self) -> &Device {
@@ -324,7 +377,9 @@ impl Renderer {
         let Some(drawable) = layer.nextDrawable() else {
             return;
         };
-        let cmd = self.encode(&drawable.texture());
+        let texture = drawable.texture();
+        self.last_surface = texture.iosurface();
+        let cmd = self.encode(&texture);
         cmd.presentDrawable(ProtocolObject::from_ref(&*drawable));
         cmd.commit();
     }

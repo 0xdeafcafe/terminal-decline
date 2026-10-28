@@ -2,6 +2,7 @@
 //! grid, scrollback and selection.
 
 pub mod cell;
+pub mod scrollback;
 pub mod term;
 
 pub use cell::{Cell, Color, ColorKind, Row, flags};

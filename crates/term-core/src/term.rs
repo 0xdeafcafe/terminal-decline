@@ -1,12 +1,13 @@
 //! Terminal state: the visible screen, scrollback, cursor and modes, driven by
 //! escape codes from the `vte` parser.
 
-use std::collections::VecDeque;
+use std::borrow::Cow;
 
 use unicode_width::UnicodeWidthChar;
 use vte::{Params, Perform};
 
 use crate::cell::{Cell, Color, Row, flags};
+use crate::scrollback::Scrollback;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum CursorShape {
@@ -117,10 +118,9 @@ pub struct Terminal {
     /// The other screen: the alternate one while on the primary, and vice versa.
     other_screen: Vec<Row>,
     alt_active: bool,
-    scrollback: VecDeque<Row>,
-    scrollback_limit: usize,
-    /// How many rows have ever been pushed into scrollback (see [`Point`]).
-    history_total: u64,
+    /// Lines that scrolled off the top (primary screen only). Its total
+    /// count of lines ever pushed is the base for [`Point`] line numbers.
+    scrollback: Scrollback,
     /// How many rows the view is scrolled back by (0 = following output).
     display_offset: usize,
 
@@ -170,9 +170,7 @@ impl Terminal {
             screen: blank_screen(cols, lines),
             other_screen: blank_screen(cols, lines),
             alt_active: false,
-            scrollback: VecDeque::new(),
-            scrollback_limit,
-            history_total: 0,
+            scrollback: Scrollback::new(scrollback_limit),
             display_offset: 0,
             cursor: Cursor::default(),
             saved_primary: None,
@@ -248,30 +246,41 @@ impl Terminal {
 
     /// The row shown at visible line `line`, taking the scroll position into
     /// account. Rows from scrollback may be shorter than `cols`.
-    pub fn visible_row(&self, line: usize) -> &Row {
+    /// History lines are expanded from their compact form, so they come back
+    /// owned; screen lines are borrowed.
+    pub fn visible_row(&self, line: usize) -> Cow<'_, Row> {
         let sb = self.scrollback.len();
         let idx = sb - self.display_offset + line;
-        if idx < sb { &self.scrollback[idx] } else { &self.screen[idx - sb] }
+        if idx < sb {
+            Cow::Owned(self.scrollback.get(idx).unwrap_or_default())
+        } else {
+            Cow::Borrowed(&self.screen[idx - sb])
+        }
+    }
+
+    /// Bytes used by scrollback, for measuring.
+    pub fn scrollback_bytes(&self) -> usize {
+        self.scrollback.memory_bytes()
     }
 
     /// The buffer position of visible line `line`.
     pub fn visible_point(&self, line: usize, col: usize) -> Point {
         Point {
-            line: self.history_total - self.display_offset as u64 + line as u64,
+            line: self.scrollback.total() - self.display_offset as u64 + line as u64,
             col,
         }
     }
 
-    fn row_at(&self, line: u64) -> Option<&Row> {
-        let first = self.history_total - self.scrollback.len() as u64;
+    fn row_at(&self, line: u64) -> Option<Cow<'_, Row>> {
+        let first = self.scrollback.total() - self.scrollback.len() as u64;
         if line < first {
             return None;
         }
         let idx = (line - first) as usize;
         if idx < self.scrollback.len() {
-            Some(&self.scrollback[idx])
+            self.scrollback.get(idx).map(Cow::Owned)
         } else {
-            self.screen.get(idx - self.scrollback.len())
+            self.screen.get(idx - self.scrollback.len()).map(Cow::Borrowed)
         }
     }
 
@@ -353,33 +362,17 @@ impl Terminal {
         Cell::erased(self.cursor.pen.bg)
     }
 
-    /// Move a row's contents into scrollback. The row itself is left for the
-    /// caller to reuse as the new blank line, so steady scrolling allocates
-    /// nothing: the copy goes into the storage of the evicted oldest line.
+    /// Copy a row into scrollback. The row itself is left for the caller to
+    /// reuse as the new blank line.
     fn push_scrollback(&mut self, row: &Row) {
-        if self.scrollback_limit == 0 {
+        if self.scrollback.limit() == 0 {
             return;
         }
-        let len = row.cells.iter().rposition(|c| !c.is_blank()).map_or(0, |i| i + 1);
-        let full = self.scrollback.len() == self.scrollback_limit;
-        let mut hist = if full {
-            self.scrollback.pop_front().unwrap_or_default()
-        } else {
-            Row::default()
-        };
+        self.scrollback.push(row);
         if self.display_offset > 0 {
             // Keep the view still while output arrives underneath it.
-            let len = self.scrollback.len() + 1;
-            self.display_offset = (self.display_offset + 1).min(len);
+            self.display_offset = (self.display_offset + 1).min(self.scrollback.len());
         }
-        hist.cells.clear();
-        hist.cells.extend_from_slice(&row.cells[..len]);
-        if hist.cells.capacity() > len * 2 + 16 {
-            hist.cells.shrink_to_fit();
-        }
-        hist.wrapped = row.wrapped;
-        self.scrollback.push_back(hist);
-        self.history_total += 1;
     }
 
     fn scroll_up(&mut self, n: usize) {
@@ -540,13 +533,12 @@ impl Terminal {
     }
 
     fn reset(&mut self) {
-        let mut fresh = Terminal::new(self.cols, self.lines, self.scrollback_limit);
+        let mut fresh = Terminal::new(self.cols, self.lines, self.scrollback.limit());
         fresh.generation = self.generation.wrapping_add(1);
-        fresh.history_total = self.history_total;
         fresh.replies = std::mem::take(&mut self.replies);
         fresh.default_colors = self.default_colors;
         fresh.cell_pixels = self.cell_pixels;
-        fresh.scrollback = std::mem::take(&mut self.scrollback);
+        fresh.scrollback = std::mem::replace(&mut self.scrollback, Scrollback::new(0));
         *self = fresh;
     }
 
@@ -1060,7 +1052,6 @@ impl Perform for Terminal {
                     }
                     3 => {
                         self.scrollback.clear();
-                        self.scrollback.shrink_to_fit();
                         self.display_offset = 0;
                         self.selection = None;
                     }

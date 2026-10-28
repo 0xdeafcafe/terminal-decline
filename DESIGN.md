@@ -41,10 +41,14 @@ any command as its own Dock app.
   bits (bold, italic, underline, wide, …), and one `u32` each for foreground
   and background (default / palette index / 24-bit RGB, tagged in the top byte).
 - The visible screen is `Vec<Row>`, a row is `Vec<Cell>` plus a soft-wrap flag.
-- Scrollback is a `VecDeque<Row>` with a line limit (default 10,000). When a
-  row moves into scrollback its trailing blank cells are dropped and spare
-  capacity released, so a typical 40-character line costs ~500 bytes instead
-  of `cols × 12`. Later: compress old scrollback blocks (LZ4) for 100k+ lines.
+- Scrollback (`term-core/src/scrollback.rs`) stores each line as UTF-8 text
+  plus style runs (only non-default colours/styles are written), packed into
+  ~64 KB blocks that are freed whole from the oldest end. Lines are expanded
+  back into cells only when shown or copied. Measured per line: plain 52 B,
+  `ls` colours 93 B, compiler errors 81 B, full-width background 183 B, CJK
+  90 B (was 518 / 674 / – / ~1500 / – with full cell rows): 10k lines take
+  0.5–1.8 MB. Encoding costs ~10% parse throughput; end-to-end `cat` speed is
+  unchanged (the limit is elsewhere).
 - Points in the buffer use an ever-increasing line number so a selection stays
   attached to its text while output scrolls.
 - Known gap for the first milestone: combining marks / grapheme clusters are
@@ -199,9 +203,7 @@ pin identity collisions, pin signing and quarantine.
 
 ## Next milestone
 
-1. **Scrollback as text + style runs** in 64 KB blocks (WezTerm's approach):
-   ~60–100 B/line instead of ~500–1500, room for grapheme clusters and links,
-   and blocks ready for LZ4 compression.
+1. ~~Scrollback as text + style runs~~ (done). Next: compress sealed blocks.
 2. **Wider live cells** (16 bytes or a style table) for underline styles and
    colours, hyperlinks (OSC 8) and grapheme clusters.
 3. **Parse plain-text runs in bulk** instead of one character at a time.

@@ -3,12 +3,13 @@
 
 use std::path::PathBuf;
 
-use decline::{USAGE, app, config, pin};
+use decline::{Paths, USAGE, app, config, pin};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    let paths = Paths::from_env();
     if args.first().map(String::as_str) == Some("pin") {
-        std::process::exit(match pin::run(&args[1..]) {
+        std::process::exit(match pin::run(&args[1..], &paths, &mut pin::system_runner) {
             Ok(()) => 0,
             Err(e) => {
                 eprintln!("decline pin: {e}");
@@ -17,11 +18,10 @@ fn main() {
         });
     }
 
-    let mut layers: Vec<PathBuf> = Vec::new();
-    // Running as a pin: its config sits in the bundle's Resources.
-    let pin = pin::own_pin_config();
-    if let Some(p) = &pin {
-        layers.push(p.clone());
+    let mut layers: Vec<PathBuf> = vec![paths.config_file()];
+    // Running as a pin: its settings, on top of the user's config.
+    if let Some(p) = pin::own_pin_config(&paths) {
+        layers.push(p);
     }
     let mut command = None;
     let mut i = 0;
@@ -61,7 +61,7 @@ fn main() {
     if let Some(cmd) = command.filter(|c| !c.is_empty()) {
         config.command = cmd;
     }
-    let name = pin::own_app_name().unwrap_or_else(|| "decline".into());
+    let name = pin::own_app_name(&paths).unwrap_or_else(|| "decline".into());
     app::run(config, &name);
 }
 

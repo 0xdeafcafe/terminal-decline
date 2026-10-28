@@ -2,7 +2,7 @@
 //! (inside its app bundle) layered on top.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde::Deserialize;
 use term_render::Theme;
@@ -97,13 +97,6 @@ impl Default for Config {
     }
 }
 
-pub fn user_config_path() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".config")))?;
-    Some(base.join("decline").join("config.toml"))
-}
-
 fn read_table(path: &Path) -> Result<toml::Table, String> {
     match std::fs::read_to_string(path) {
         Ok(s) => s.parse::<toml::Table>().map_err(|e| format!("{}: {e}", path.display())),
@@ -124,12 +117,14 @@ fn merge(base: &mut toml::Table, over: toml::Table) {
     }
 }
 
-/// Loads the user config, then each of `layers` on top. Errors are reported
-/// and the defaults used, so a typo never stops the terminal from opening.
+/// Loads each of `layers` in order, later ones on top (the user's
+/// config.toml first, then a pin's settings, then `--config`). A missing
+/// file counts as empty. Errors are reported and the defaults used, so a
+/// typo never stops the terminal from opening.
 pub fn load(layers: &[&Path]) -> (Config, Vec<String>) {
     let mut errors = Vec::new();
     let mut table = toml::Table::new();
-    for path in user_config_path().iter().map(|p| p.as_path()).chain(layers.iter().copied()) {
+    for &path in layers {
         match read_table(path) {
             Ok(t) => merge(&mut table, t),
             Err(e) => errors.push(e),
@@ -268,5 +263,123 @@ mod tests {
         let c: Config = toml::Value::Table(good).try_into().unwrap();
         assert_eq!(c.font_size, 16.0);
         assert_eq!(errors.len(), 1, "{errors:?}");
+    }
+
+    use crate::testutil::TempDir;
+
+    #[test]
+    fn missing_files_give_defaults() {
+        let dir = TempDir::new("cfg-missing");
+        let (c, errors) = load(&[&dir.join("config.toml"), &dir.join("pin.toml")]);
+        assert_eq!(errors, Vec::<String>::new());
+        assert_eq!(c.font_size, Config::default().font_size);
+        assert_eq!(c.columns, 100);
+        let (c, errors) = load(&[]);
+        assert!(errors.is_empty());
+        assert_eq!(c.font_family, "Menlo");
+    }
+
+    #[test]
+    fn files_layer_in_order() {
+        let dir = TempDir::new("cfg-layers");
+        let user = dir.join("config.toml");
+        let pin = dir.join("pin.toml");
+        std::fs::write(
+            &user,
+            "font_size = 14\npadding = 2\n[colors]\nforeground = '#010203'\nbackground = '#040506'\n",
+        )
+        .unwrap();
+        std::fs::write(&pin, "font_size = 18\ncommand = ['htop']\n[colors]\nbackground = '#0a0b0c'\n").unwrap();
+        let (c, errors) = load(&[&user, &pin]);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(c.font_size, 18.0);
+        assert_eq!(c.padding, 2.0);
+        assert_eq!(c.command, ["htop"]);
+        assert_eq!(c.colors.foreground, "#010203");
+        assert_eq!(c.colors.background, "#0a0b0c");
+    }
+
+    #[test]
+    fn unreadable_or_unknown_settings_report_errors() {
+        let dir = TempDir::new("cfg-errors");
+        let broken = dir.join("broken.toml");
+        std::fs::write(&broken, "font_size = = 3").unwrap();
+        let typo = dir.join("typo.toml");
+        std::fs::write(&typo, "font_sise = 14\nlines = 40\n").unwrap();
+        let (c, errors) = load(&[&broken, &typo]);
+        assert_eq!(c.lines, 40);
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        assert!(errors[0].starts_with(&broken.display().to_string()), "{errors:?}");
+        assert!(errors[1].contains("font_sise"), "{errors:?}");
+        // A directory can't be read as a file.
+        let (_, errors) = load(&[dir.path()]);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+    }
+
+    #[test]
+    fn option_as_meta_values() {
+        for (text, want) in [
+            ("left", Some(OptionAsMeta::Left)),
+            ("right", Some(OptionAsMeta::Right)),
+            ("both", Some(OptionAsMeta::Both)),
+            ("none", Some(OptionAsMeta::None)),
+            ("Left", None),
+            ("yes", None),
+        ] {
+            let t: toml::Table = format!("option_as_meta = '{text}'").parse().unwrap();
+            let (good, errors) = keep_valid(t);
+            let c: Config = toml::Value::Table(good).try_into().unwrap();
+            match want {
+                Some(w) => assert_eq!((c.option_as_meta, errors.len()), (w, 0), "{text}"),
+                None => assert_eq!((c.option_as_meta, errors.len()), (OptionAsMeta::None, 1), "{text}"),
+            }
+        }
+    }
+
+    #[test]
+    fn hex_colours() {
+        for (text, want) in [
+            ("#112233", Some(0x112233)),
+            ("112233", Some(0x112233)),
+            ("#ABCdef", Some(0xabcdef)),
+            ("#123", None),
+            ("#1122334", None),
+            ("#gg0000", None),
+            ("", None),
+        ] {
+            assert_eq!(parse_hex(text), want, "{text:?}");
+        }
+    }
+
+    /// Bad colours fall back one by one; the query colours (OSC 10/11/12)
+    /// come back as 0xRRGGBB.
+    #[test]
+    fn theme_and_query_colours() {
+        let mut c = Config::default();
+        c.colors.foreground = "#112233".into();
+        c.colors.background = "nonsense".into();
+        c.colors.cursor = "#a1b2c3".into();
+        c.colors.palette = vec!["#ff0000".into(), "bad".into()];
+        let theme = c.theme();
+        assert_eq!(query_colors(&theme), [0x112233, 0x16181c, 0xa1b2c3]);
+        assert_eq!(rgb_of(theme.palette[0]), 0xff0000);
+        assert_eq!(rgb_of(theme.palette[1]), 0xcc6666, "falls back to the default");
+        assert_eq!(rgb_of(theme.palette[15]), 0xeaeaea, "missing entries use the defaults");
+        assert_eq!(rgb_of(theme.selection), 0x2e3a4f);
+        assert_eq!(query_colors(&Config::default().theme()), [0xd8dee9, 0x16181c, 0xd8dee9]);
+        for (r, g, b) in [(0x12, 0x34, 0x56), (0xff, 0, 0), (0, 0, 0xff)] {
+            assert_eq!(rgb_of(term_render::rgb(r << 16 | g << 8 | b)), r << 16 | g << 8 | b);
+        }
+    }
+
+    #[test]
+    fn opacity_clamps() {
+        for (opacity, want) in [(1.0, 255), (0.5, 128), (0.0, 0), (-1.0, 0), (2.0, 255)] {
+            let c = Config {
+                opacity,
+                ..Config::default()
+            };
+            assert_eq!(c.theme().background_opacity, want, "{opacity}");
+        }
     }
 }

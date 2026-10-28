@@ -11,9 +11,14 @@ pub mod frame_policy;
 pub mod keys;
 pub mod layout;
 pub mod mouse;
+pub mod paths;
 pub mod pin;
 pub mod session;
+#[cfg(test)]
+mod testutil;
 mod view;
+
+pub use paths::Paths;
 
 pub const USAGE: &str = "\
 usage: decline [--config FILE] [-e PROGRAM [ARGS...]]

@@ -1,4 +1,9 @@
-//! Fonts through Core Text: cell metrics and glyph rasterising.
+//! Fonts through Core Text: cell metrics and glyph rasterising. Box
+//! drawing, blocks, braille and Powerline are drawn in code ([`sprite`]).
+
+pub mod sprite;
+
+pub use sprite::{SpriteId, is_code_drawn};
 
 use std::ffi::c_void;
 use std::ptr::NonNull;
@@ -112,7 +117,14 @@ impl Fonts {
         &self.faces[style as usize]
     }
 
+    /// The glyph for `ch`: a coverage bitmap (or BGRA for colour glyphs),
+    /// `None` for glyphs with no ink. Code-drawn characters
+    /// ([`is_code_drawn`]) come from [`sprite`], sized exactly to the cell
+    /// and the same in every style.
     pub fn rasterize(&self, ch: char, style: Style) -> Option<RasterGlyph> {
+        if let Some(id) = SpriteId::for_char(ch) {
+            return sprite::rasterize(id, &self.metrics, 1);
+        }
         let base = self.face(style);
         let (font, glyph) = glyph_for(base, ch)?;
         let color = unsafe { font.symbolic_traits() }.contains(CTFontSymbolicTraits::ColorGlyphsTrait);

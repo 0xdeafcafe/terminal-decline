@@ -72,7 +72,7 @@ fn border_is_empty(g: &RasterGlyph) -> bool {
 fn bitmaps_have_an_empty_border() {
     let f = Fonts::new("Menlo", 26.0);
     for style in [Style::Regular, Style::Bold, Style::Italic, Style::BoldItalic] {
-        for ch in ['A', 'g', 'W', 'j', 'f', '_', '|', '@', '█', '漢', '→', '😀'] {
+        for ch in ['A', 'g', 'W', 'j', 'f', '_', '|', '@', '■', '漢', '→', '😀'] {
             let g = f.rasterize(ch, style).unwrap_or_else(|| panic!("{ch:?} {style:?}"));
             assert!(g.width >= 3 && g.height >= 3);
             assert_eq!(g.data.len(), (g.width * g.height) as usize * if g.color { 4 } else { 1 });

@@ -143,7 +143,18 @@ tables and landing pads: 1.34 → 1.50 MB) and no measurable parse speed.
   like native Mac text) and a `BGRA8` texture for colour emoji. Shelf-packed;
   only the texture that fills up grows (caps: 4096² and 2048², 16 MB each);
   at the cap it is emptied and refilled with what's on screen. Glyphs are
-  rasterised once by Core Text; ASCII is pre-rasterised at start. Uploading a
+  rasterised once by Core Text; ASCII is pre-rasterised at start.
+- Box drawing (U+2500–257F), block elements (U+2580–259F), braille
+  (U+2800–28FF), Powerline (U+E0A0–E0A3, U+E0B0–E0BF) and the legacy
+  computing sextants, wedges and eighth blocks (U+1FB00–1FB8B) are drawn
+  in code (`term_font::sprite`), not taken from the font: bitmaps exactly
+  the cell's size, straight lines in whole pixels centred in the cell (light
+  = the underline thickness, heavy twice that, double = two light strokes a
+  light thickness apart), so neighbours join with no seam at any size.
+  Rounded corners, diagonals, Powerline triangles and wedges are
+  anti-aliased; shades (░▒▓) are even 25/50/75 % coverage, since a pixel
+  pattern can't repeat across odd-width cells. Each shape has a `SpriteId`
+  for the glyph keys of the cell design (docs/design/cells.md §10.4). Uploading a
   new glyph waits for in-flight frames, since `replaceRegion` doesn't
   synchronise with the GPU.
 - Shaders are compiled to a `.metallib` at build time (falls back to runtime
@@ -286,7 +297,7 @@ pin identity collisions, pin signing and quarantine.
 3. ~~Parse plain-text runs in bulk~~ (done). Next: a CSI/SGR fast path.
 4. **Copy cells under the lock, build GPU instances outside it**, with
    per-row dirty flags so a spinner doesn't rebuild the whole screen.
-5. **Box-drawing and Powerline glyphs drawn in code** (seamless borders).
+5. ~~Box-drawing and Powerline glyphs drawn in code~~ (done).
 6. **Pin launcher** (see Dock pins).
 7. Reflow on resize; Ctrl keys on non-Latin layouts; OSC 8 links.
 

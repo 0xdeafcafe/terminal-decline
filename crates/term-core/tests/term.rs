@@ -266,8 +266,8 @@ fn vs16_does_not_break_the_next_wide_char() {
 
 #[test]
 fn utf8_split_across_chunks_keeps_the_text_after_it() {
-    // Regression (vte 0.15): completing a split character next to an
-    // invalid byte dropped the valid text in between.
+    // Regression (vte 0.15, fixed in vendor/vte): completing a split
+    // character next to an invalid byte dropped the valid text in between.
     let cases: &[&[&[u8]]] = &[
         &[&[0xC3], &[0xA9, b'a', 0xFF]],
         &[&[0xCC], &[0x81, b'0', 0xA9]],

@@ -297,6 +297,165 @@ proptest! {
 }
 
 // ---------------------------------------------------------------------------
+// The bulk ASCII path against one character at a time.
+
+/// Input that steers printable-ASCII runs into the cases the bulk path must
+/// get right: runs that wrap (often several times), runs over wide
+/// characters, insert mode, DEC line drawing, autowrap off, scroll regions,
+/// the alternate screen, repeat (REP) and history.
+fn bulk_piece() -> impl Strategy<Value = Vec<u8>> {
+    let modes = select(vec![
+        "\x1b[4h",
+        "\x1b[4l",
+        "\x1b(0",
+        "\x1b(B",
+        "\x1b)0",
+        "\x1b)B",
+        "\x0e",
+        "\x0f",
+        "\x1b[?7l",
+        "\x1b[?7h",
+        "\x1b[?6h",
+        "\x1b[?6l",
+        "\x1b[?1049h",
+        "\x1b[?1049l",
+        "\x1b[?47h",
+        "\x1b[?47l",
+        "\x1b7",
+        "\x1b8",
+        "\x1bM",
+        "\x1bD",
+        "\x1bE",
+        "\x1b[L",
+        "\x1b[2M",
+        "\x1b[2@",
+        "\x1b[3P",
+        "\x1b[5X",
+        "\x1b[K",
+        "\x1b[1K",
+        "\x1b[2J",
+        "\x1b[r",
+        "\x1b[S",
+        "\x1b[2T",
+        "\x1b[!p",
+        "\x1bc",
+        "\x1b[1m",
+        "\x1b[7m",
+        "\x1b[4m",
+        "\x1b[0m",
+        "\x1b[6n",
+        "\x1b[?25$p",
+        "\x1b[3J",
+    ]);
+    prop_oneof![
+        8 => prop::collection::vec(0x20u8..0x7f, 1..300),
+        3 => ascii(),
+        4 => unicode(),
+        3 => cluster(),
+        4 => movement(),
+        2 => c0(),
+        5 => modes.prop_map(|s| s.as_bytes().to_vec()),
+        2 => (0u16..14, 0u16..14).prop_map(|(t, b)| format!("\x1b[{t};{b}r").into_bytes()),
+        1 => (0u16..30).prop_map(|n| format!("\x1b[{n}b").into_bytes()),
+        2 => sgr_colour(),
+        1 => csi(),
+        1 => prop::collection::vec(any::<u8>(), 1..16),
+    ]
+}
+
+#[derive(Clone, Debug)]
+enum BulkStep {
+    Output(Vec<u8>),
+    Resize(usize, usize),
+    ScrollView(isize),
+}
+
+fn bulk_step() -> impl Strategy<Value = BulkStep> {
+    prop_oneof![
+        14 => prop::collection::vec(bulk_piece(), 1..12).prop_map(|ps| BulkStep::Output(ps.concat())),
+        1 => (1usize..=90, 1usize..=14).prop_map(|(c, l)| BulkStep::Resize(c, l)),
+        1 => (-20isize..=20).prop_map(BulkStep::ScrollView),
+    ]
+}
+
+/// Dump, rows cell by cell, cursor (row, col, pending wrap, pen), replies
+/// and scrollback length.
+type ScreenState = (String, Vec<(Vec<Cell>, bool)>, (usize, usize, bool, Cell), Vec<u8>, usize);
+
+/// Everything about the screen a reader can see, cell by cell.
+fn screen_state(t: &Term) -> ScreenState {
+    let rows = (0..t.state.lines())
+        .map(|l| {
+            let r = t.state.visible_row(l);
+            (r.cells.clone(), r.wrapped)
+        })
+        .collect();
+    let c = t.state.cursor;
+    (
+        t.state.dump(),
+        rows,
+        (c.row, c.col, c.pending_wrap, c.pen),
+        t.state.replies.clone(),
+        t.state.scrollback_len(),
+    )
+}
+
+/// Every stored history line, read by scrolling the view through it.
+fn history(t: &mut Term) -> Vec<(Vec<Cell>, bool)> {
+    let mut out = Vec::new();
+    t.state.scroll_view(isize::MAX / 2);
+    loop {
+        let r = t.state.visible_row(0);
+        out.push((r.cells.clone(), r.wrapped));
+        if t.state.display_offset() == 0 {
+            break;
+        }
+        t.state.scroll_view(-1);
+    }
+    out
+}
+
+proptest! {
+    #![proptest_config(config())]
+
+    /// Printable ASCII written in bulk gives exactly what writing it one
+    /// character at a time gives. The reference also gets its input one byte
+    /// per `advance` call, so the parser's fast path is checked against its
+    /// byte-at-a-time handling at the same time.
+    #[test]
+    fn bulk_ascii_matches_one_char_at_a_time(
+        cols in 1usize..=90,
+        lines in 1usize..=14,
+        limit in select(vec![0usize, 3, 100]),
+        steps in prop::collection::vec(bulk_step(), 1..16),
+    ) {
+        let mut fast = Term::new(cols, lines, limit);
+        let mut slow = Term::new(cols, lines, limit);
+        slow.state.set_bulk_ascii(false);
+        for step in &steps {
+            match step {
+                BulkStep::Output(bytes) => {
+                    fast.advance(bytes);
+                    for b in bytes {
+                        slow.advance(std::slice::from_ref(b));
+                    }
+                }
+                BulkStep::Resize(c, l) => {
+                    fast.state.resize(*c, *l);
+                    slow.state.resize(*c, *l);
+                }
+                BulkStep::ScrollView(d) => {
+                    fast.state.scroll_view(*d);
+                    slow.state.scroll_view(*d);
+                }
+            }
+            prop_assert_eq!(screen_state(&fast), screen_state(&slow), "after {:?}", step);
+        }
+        prop_assert_eq!(history(&mut fast), history(&mut slow));
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Scrollback.
 
 fn colour() -> impl Strategy<Value = Color> {

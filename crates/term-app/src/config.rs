@@ -135,11 +135,57 @@ pub fn load(layers: &[&Path]) -> (Config, Vec<String>) {
             Err(e) => errors.push(e),
         }
     }
+    let (table, bad) = keep_valid(table);
+    errors.extend(bad);
     let config = toml::Value::Table(table).try_into::<Config>().unwrap_or_else(|e| {
         errors.push(format!("config: {e}"));
         Config::default()
     });
     (config, errors)
+}
+
+fn accepts(table: toml::Table) -> Result<(), String> {
+    toml::Value::Table(table)
+        .try_into::<Config>()
+        .map(|_| ())
+        .map_err(|e| e.message().to_string())
+}
+
+/// Drops settings that are unknown or of the wrong type, one by one, so a
+/// typo costs only that line rather than the whole file.
+fn keep_valid(table: toml::Table) -> (toml::Table, Vec<String>) {
+    let mut good = toml::Table::new();
+    let mut errors = Vec::new();
+    for (key, value) in table {
+        match value {
+            // Nested tables (colours) are checked key by key too.
+            toml::Value::Table(inner) => {
+                let mut kept = toml::Table::new();
+                for (k, v) in inner {
+                    let probe =
+                        toml::Table::from_iter([(key.clone(), toml::Value::Table(toml::Table::from_iter([(k.clone(), v.clone())])))]);
+                    match accepts(probe) {
+                        Ok(()) => {
+                            kept.insert(k, v);
+                        }
+                        Err(e) => errors.push(format!("config: {key}.{k}: {e}; ignored")),
+                    }
+                }
+                if accepts(toml::Table::from_iter([(key.clone(), toml::Value::Table(kept.clone()))])).is_ok() {
+                    good.insert(key, toml::Value::Table(kept));
+                } else {
+                    errors.push(format!("config: {key}: not a table of settings; ignored"));
+                }
+            }
+            v => match accepts(toml::Table::from_iter([(key.clone(), v.clone())])) {
+                Ok(()) => {
+                    good.insert(key, v);
+                }
+                Err(e) => errors.push(format!("config: {key}: {e}; ignored")),
+            },
+        }
+    }
+    (good, errors)
 }
 
 pub fn parse_hex(s: &str) -> Option<u32> {
@@ -189,8 +235,27 @@ mod tests {
     }
 
     #[test]
-    fn unknown_keys_rejected() {
-        let t: toml::Table = "font_sise = 13".parse().unwrap();
-        assert!(toml::Value::Table(t).try_into::<Config>().is_err());
+    fn bad_settings_dropped_one_by_one() {
+        let t: toml::Table = "font_size = 15\nfont_sise = 14\npadding = 'wide'\n[colors]\nbackground = '#000000'\nbackgrund = '#ffffff'"
+            .parse()
+            .unwrap();
+        let (good, errors) = keep_valid(t);
+        let c: Config = toml::Value::Table(good).try_into().unwrap();
+        assert_eq!(c.font_size, 15.0);
+        assert_eq!(c.padding, Config::default().padding);
+        assert_eq!(c.colors.background, "#000000");
+        assert_eq!(errors.len(), 3, "{errors:?}");
+        assert!(errors.iter().any(|e| e.contains("font_sise")));
+        assert!(errors.iter().any(|e| e.contains("colors.backgrund")));
+        assert!(errors.iter().any(|e| e.starts_with("config: padding")));
+    }
+
+    #[test]
+    fn colors_not_a_table_is_ignored() {
+        let t: toml::Table = "font_size = 16\ncolors = 3".parse().unwrap();
+        let (good, errors) = keep_valid(t);
+        let c: Config = toml::Value::Table(good).try_into().unwrap();
+        assert_eq!(c.font_size, 16.0);
+        assert_eq!(errors.len(), 1, "{errors:?}");
     }
 }

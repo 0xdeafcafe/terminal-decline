@@ -250,9 +250,7 @@ fn wait_fd(fd: libc::c_int, events: libc::c_short) -> bool {
     }
 }
 
-/// Reads program output in batches. A macOS PTY hands out at most ~1 KB per
-/// read, so after waiting for data this drains everything available (up to
-/// `max`) before returning, letting the caller parse it under one lock.
+/// Reads program output, waiting when none is available.
 pub struct BatchReader {
     file: File,
 }
@@ -263,25 +261,22 @@ impl BatchReader {
     pub fn read_batch(&mut self, buf: &mut [u8]) -> usize {
         use std::io::Read;
         let fd = self.file.as_raw_fd();
-        let mut n = 0;
-        while n < buf.len() {
-            match self.file.read(&mut buf[n..]) {
-                Ok(0) => break,
-                Ok(k) => n += k,
+        // A macOS PTY returns at most ~1 KB per read and buffers ~2 KB, so
+        // draining until empty costs an extra failing read per batch for
+        // nothing: return what one read gives and wait only when empty.
+        loop {
+            match self.file.read(buf) {
+                Ok(n) => return n,
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    if n > 0 {
-                        break;
-                    }
                     if !wait_fd(fd, libc::POLLIN) {
-                        break;
+                        return 0;
                     }
                 }
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
                 // EIO: the program and everything it started have exited.
-                Err(_) => break,
+                Err(_) => return 0,
             }
         }
-        n
     }
 }
 

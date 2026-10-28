@@ -81,3 +81,251 @@ pub fn decide(
     };
     Decision::Draw { rate }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MS: Duration = Duration::from_millis(1);
+
+    /// One row per branch: (what, dirty, visible, synchronized,
+    /// sync_elapsed, idle_ticks, minimised, last_input_elapsed, focused,
+    /// decision).
+    #[test]
+    fn every_branch() {
+        let long = Duration::from_secs(5);
+        type Row = (&'static str, bool, bool, bool, Duration, u8, bool, Duration, bool, Decision);
+        let rows: &[Row] = &[
+            (
+                "first idle tick",
+                false,
+                true,
+                false,
+                Duration::ZERO,
+                0,
+                false,
+                long,
+                true,
+                Decision::Skip,
+            ),
+            (
+                "second idle tick pauses",
+                false,
+                true,
+                false,
+                Duration::ZERO,
+                1,
+                false,
+                long,
+                true,
+                Decision::Pause { trim_after: IDLE_TRIM },
+            ),
+            (
+                "later idle ticks skip",
+                false,
+                true,
+                false,
+                Duration::ZERO,
+                2,
+                false,
+                long,
+                true,
+                Decision::Skip,
+            ),
+            (
+                "idle at the counter's cap",
+                false,
+                true,
+                false,
+                Duration::ZERO,
+                u8::MAX,
+                false,
+                long,
+                true,
+                Decision::Skip,
+            ),
+            (
+                "idle beats hidden",
+                false,
+                false,
+                true,
+                Duration::ZERO,
+                1,
+                true,
+                long,
+                true,
+                Decision::Pause { trim_after: IDLE_TRIM },
+            ),
+            (
+                "hidden",
+                true,
+                false,
+                false,
+                Duration::ZERO,
+                0,
+                false,
+                long,
+                true,
+                Decision::Hide { keep_surface: false },
+            ),
+            (
+                "minimised keeps its surface",
+                true,
+                false,
+                false,
+                Duration::ZERO,
+                0,
+                true,
+                long,
+                true,
+                Decision::Hide { keep_surface: true },
+            ),
+            (
+                "hidden beats synchronized",
+                true,
+                false,
+                true,
+                Duration::ZERO,
+                0,
+                false,
+                long,
+                true,
+                Decision::Hide { keep_surface: false },
+            ),
+            (
+                "synchronized just started",
+                true,
+                true,
+                true,
+                Duration::ZERO,
+                0,
+                false,
+                long,
+                true,
+                Decision::Hold,
+            ),
+            (
+                "synchronized 149 ms",
+                true,
+                true,
+                true,
+                149 * MS,
+                0,
+                false,
+                long,
+                true,
+                Decision::Hold,
+            ),
+            (
+                "synchronized timed out",
+                true,
+                true,
+                true,
+                150 * MS,
+                0,
+                false,
+                long,
+                true,
+                Decision::Draw { rate: RATE_STREAMING },
+            ),
+            (
+                "not synchronized ignores elapsed",
+                true,
+                true,
+                false,
+                Duration::ZERO,
+                0,
+                false,
+                long,
+                true,
+                Decision::Draw { rate: 60 },
+            ),
+            (
+                "just typed",
+                true,
+                true,
+                false,
+                Duration::ZERO,
+                0,
+                false,
+                10 * MS,
+                true,
+                Decision::Draw { rate: 120 },
+            ),
+            (
+                "typed 249 ms ago",
+                true,
+                true,
+                false,
+                Duration::ZERO,
+                0,
+                false,
+                249 * MS,
+                true,
+                Decision::Draw { rate: 120 },
+            ),
+            (
+                "typed 250 ms ago",
+                true,
+                true,
+                false,
+                Duration::ZERO,
+                0,
+                false,
+                250 * MS,
+                true,
+                Decision::Draw { rate: 60 },
+            ),
+            (
+                "just typed, unfocused",
+                true,
+                true,
+                false,
+                Duration::ZERO,
+                0,
+                false,
+                10 * MS,
+                false,
+                Decision::Draw { rate: 120 },
+            ),
+            (
+                "unfocused",
+                true,
+                true,
+                false,
+                Duration::ZERO,
+                0,
+                false,
+                long,
+                false,
+                Decision::Draw { rate: 30 },
+            ),
+            (
+                "dirty resets idle",
+                true,
+                true,
+                false,
+                Duration::ZERO,
+                1,
+                false,
+                long,
+                true,
+                Decision::Draw { rate: 60 },
+            ),
+        ];
+        for &(what, dirty, visible, sync, elapsed, idle, minimised, input, focused, want) in rows {
+            assert_eq!(
+                decide(dirty, visible, sync, elapsed, idle, minimised, input, focused),
+                want,
+                "{what}"
+            );
+        }
+    }
+
+    #[test]
+    fn constants_match_the_design() {
+        assert_eq!(SYNC_TIMEOUT, 150 * MS);
+        assert_eq!(IDLE_TICKS_BEFORE_PAUSE, 2);
+        assert_eq!((RATE_INPUT, RATE_STREAMING, RATE_UNFOCUSED), (120, 60, 30));
+    }
+}

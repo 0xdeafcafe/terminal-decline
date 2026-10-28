@@ -31,7 +31,29 @@ env:
   CARGO_PROFILE_CI_PROP_INCREMENTAL: "false"
 
 jobs:
+  changed:
+    # Scheduled macOS runs cost 10x while the repo is private: skip them
+    # when main hasn't changed since the last scheduled run.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.check.outputs.run }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: check
+        run: |
+          if [[ "${{ github.event_name }}" != "schedule" ]] || [[ -n "$(git log --since='25 hours ago' --format=%H -1)" ]]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "main unchanged since the last scheduled run; skipping" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
   proptest:
+    needs: changed
+    if: needs.changed.outputs.run == 'true'
     name: property tests (${{ matrix.name }})
     strategy:
       fail-fast: false

@@ -21,7 +21,29 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  changed:
+    # Scheduled macOS runs cost 10x while the repo is private: skip them
+    # when main hasn't changed since the last scheduled run.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.check.outputs.run }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: check
+        run: |
+          if [[ "${{ github.event_name }}" != "schedule" ]] || [[ -n "$(git log --since='25 hours ago' --format=%H -1)" ]]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "main unchanged since the last scheduled run; skipping" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
   bench:
+    needs: changed
+    if: needs.changed.outputs.run == 'true'
     # term-render needs macOS (Metal types), and macOS is what we ship.
     runs-on: macos-latest
     timeout-minutes: 45

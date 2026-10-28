@@ -14,7 +14,29 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  changed:
+    # Scheduled macOS runs cost 10x while the repo is private: skip them
+    # when main hasn't changed since the last scheduled run.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.check.outputs.run }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: check
+        run: |
+          if [[ "${{ github.event_name }}" != "schedule" ]] || [[ -n "$(git log --since='25 hours ago' --format=%H -1)" ]]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "main unchanged since the last scheduled run; skipping" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
   build:
+    needs: changed
+    if: needs.changed.outputs.run == 'true'
     runs-on: macos-latest
     outputs:
       version: ${{ steps.meta.outputs.version }}
@@ -28,6 +50,8 @@ jobs:
       APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Work out version
         id: meta
@@ -38,7 +62,12 @@ jobs:
             base=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name=="decline") | .version')
             version="${base}-nightly.$(date -u +%Y%m%d)"
           fi
-          echo "version=$version" >> "$GITHUB_OUTPUT"
+          # CFBundleVersion: an integer that only goes up.
+          build=$(git rev-list --count HEAD)
+          {
+            echo "version=$version"
+            echo "build=$build"
+          } >> "$GITHUB_OUTPUT"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -80,7 +109,7 @@ jobs:
           SIGN_IDENTITY: ${{ steps.cert.outputs.identity }}
         run: |
           # Falls back to ad-hoc signing when no certificate was imported.
-          CODESIGN_IDENTITY="${SIGN_IDENTITY:--}" scripts/bundle.sh dist/decline dist "${{ steps.meta.outputs.version }}"
+          CODESIGN_IDENTITY="${SIGN_IDENTITY:--}" scripts/bundle.sh dist/decline dist "${{ steps.meta.outputs.version }}" "${{ steps.meta.outputs.build }}"
 
       - name: Notarize and staple
         if: steps.cert.outputs.identity != '' && env.APPLE_ID != '' && env.APPLE_APP_PASSWORD != ''

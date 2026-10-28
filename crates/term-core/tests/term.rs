@@ -342,6 +342,36 @@ fn selection_after_reset_and_alt_screen_round_trip() {
 }
 
 #[test]
+fn region_scrolls_after_the_screen_ring_has_turned() {
+    // The screen is a ring of rows that turns as output scrolls. Scrolling a
+    // region, inserting and deleting lines and reverse index must work the
+    // same whether or not it has turned: build the same screen by scrolling
+    // (turned) and by cursor moves (not turned), then edit both alike.
+    let edits: &[&[u8]] = &[
+        b"\x1b[2;4r\x1b[2HM\x1b[2;1H\x1bM\x1bMRI",
+        b"\x1b[2;4r\x1b[3H\x1b[L\x1b[2L+",
+        b"\x1b[2;4r\x1b[2H\x1b[M\x1b[4H\x1b[3M-",
+        b"\x1b[2;5r\x1b[5H\n\n\x1b[S\x1b[T\x1b[2T",
+        b"\x1b[r\x1b[5H\n\n\x1bM\x1b[L\x1b[M",
+    ];
+    for (i, edit) in edits.iter().enumerate() {
+        let mut turned = Term::new(8, 5, 0);
+        turned.advance(b"line0");
+        for n in 1..17 {
+            turned.advance(format!("\r\nline{n}").as_bytes());
+        }
+        let mut fresh = Term::new(8, 5, 0);
+        for (row, n) in (12..17).enumerate() {
+            fresh.advance(format!("\x1b[{};1Hline{n}", row + 1).as_bytes());
+        }
+        assert_eq!(turned.state.dump(), fresh.state.dump(), "same start");
+        turned.advance(edit);
+        fresh.advance(edit);
+        assert_eq!(turned.state.dump(), fresh.state.dump(), "edit {i}");
+    }
+}
+
+#[test]
 fn vs16_next_to_a_narrow_char_overwrites_it() {
     let mut t = Term::new(6, 1, 0);
     t.advance("abc\r⚠\u{FE0F}".as_bytes());

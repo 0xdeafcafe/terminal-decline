@@ -2,6 +2,7 @@
 //! escape codes from the `vte` parser.
 
 use std::borrow::Cow;
+use std::collections::VecDeque;
 
 use unicode_width::UnicodeWidthChar;
 use vte::{Params, Perform};
@@ -117,9 +118,11 @@ impl Selection {
 pub struct Terminal {
     cols: usize,
     lines: usize,
-    screen: Vec<Row>,
+    /// A ring of rows, so scrolling the whole screen moves the top row to the
+    /// bottom without shifting the others.
+    screen: VecDeque<Row>,
     /// The other screen: the alternate one while on the primary, and vice versa.
-    other_screen: Vec<Row>,
+    other_screen: VecDeque<Row>,
     alt_active: bool,
     /// Lines that scrolled off the top (primary screen only). Its total
     /// count of lines ever pushed is the base for [`Point`] line numbers.
@@ -405,6 +408,19 @@ impl Terminal {
         if top == 0 {
             self.top_line += n as u64;
         }
+        if top == 0 && bottom == self.lines - 1 {
+            // Common case, the whole screen: each top row goes round the ring
+            // to the bottom, and the others stay where they are.
+            for _ in 0..n {
+                let mut row = self.screen.pop_front().expect("screen has rows");
+                if to_history {
+                    self.push_scrollback(&row);
+                }
+                row.reset(self.cols, blank);
+                self.screen.push_back(row);
+            }
+            return;
+        }
         for i in 0..n {
             if to_history {
                 let row = std::mem::take(&mut self.screen[top + i]);
@@ -413,20 +429,15 @@ impl Terminal {
             }
             self.screen[top + i].reset(self.cols, blank);
         }
-        if n == 1 && top == 0 && bottom == self.lines - 1 {
-            // Common case: whole screen up by one.
-            self.screen.rotate_left(1);
-        } else {
-            self.screen[top..=bottom].rotate_left(n);
-        }
+        self.screen.make_contiguous()[top..=bottom].rotate_left(n);
     }
 
     fn scroll_down(&mut self, n: usize) {
         let (top, bottom) = (self.scroll_top, self.scroll_bottom);
         let n = n.min(bottom - top + 1);
-        self.screen[top..=bottom].rotate_right(n);
+        self.screen.make_contiguous()[top..=bottom].rotate_right(n);
         let blank = self.blank();
-        for row in &mut self.screen[top..top + n] {
+        for row in self.screen.range_mut(top..top + n) {
             row.reset(self.cols, blank);
         }
     }
@@ -929,7 +940,7 @@ fn extended_color(first: &[u16], rest: &mut vte::ParamsIter<'_>) -> Option<Color
     }
 }
 
-fn blank_screen(cols: usize, lines: usize) -> Vec<Row> {
+fn blank_screen(cols: usize, lines: usize) -> VecDeque<Row> {
     (0..lines).map(|_| Row::new(cols, Cell::BLANK)).collect()
 }
 
@@ -938,7 +949,7 @@ fn default_tabs(cols: usize) -> Vec<bool> {
 }
 
 /// Returns the rows removed from the top.
-fn resize_screen(screen: &mut Vec<Row>, cursor: &mut Cursor, cols: usize, lines: usize) -> Vec<Row> {
+fn resize_screen(screen: &mut VecDeque<Row>, cursor: &mut Cursor, cols: usize, lines: usize) -> Vec<Row> {
     let mut removed = Vec::new();
     for row in screen.iter_mut() {
         row.cells.resize(cols, Cell::BLANK);
@@ -950,15 +961,15 @@ fn resize_screen(screen: &mut Vec<Row>, cursor: &mut Cursor, cols: usize, lines:
     }
     while screen.len() > lines {
         // Remove blank rows below the cursor first, then rows from the top.
-        if screen.len() - 1 > cursor.row && screen.last().is_some_and(|r| r.cells.iter().all(|c| c.is_blank())) {
-            screen.pop();
+        if screen.len() - 1 > cursor.row && screen.back().is_some_and(|r| r.cells.iter().all(|c| c.is_blank())) {
+            screen.pop_back();
         } else {
-            removed.push(screen.remove(0));
+            removed.extend(screen.pop_front());
             cursor.row = cursor.row.saturating_sub(1);
         }
     }
     while screen.len() < lines {
-        screen.push(Row::new(cols, Cell::BLANK));
+        screen.push_back(Row::new(cols, Cell::BLANK));
     }
     removed
 }
@@ -1517,9 +1528,9 @@ impl Terminal {
     fn scroll_up_no_history(&mut self, n: usize) {
         let (top, bottom) = (self.scroll_top, self.scroll_bottom);
         let n = n.min(bottom - top + 1);
-        self.screen[top..=bottom].rotate_left(n);
+        self.screen.make_contiguous()[top..=bottom].rotate_left(n);
         let blank = self.blank();
-        for row in &mut self.screen[bottom + 1 - n..=bottom] {
+        for row in self.screen.range_mut(bottom + 1 - n..=bottom) {
             row.reset(self.cols, blank);
         }
     }

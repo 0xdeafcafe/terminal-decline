@@ -63,6 +63,12 @@ unsafe impl Send for Fonts {}
 
 impl Fonts {
     /// `size_px` is the font size in device pixels (points × backing scale).
+    ///
+    /// This never fails: Core Text substitutes another font for a family it
+    /// can't find, usually Helvetica, which is not monospaced. That includes
+    /// "SF Mono": it ships inside Terminal and Xcode rather than as a system
+    /// font, so asking for it by name silently gives Helvetica unless the
+    /// user installed it. [`Fonts::family`] tells what was actually loaded.
     pub fn new(family: &str, size_px: f64) -> Fonts {
         let name = CFString::from_str(family);
         let regular = unsafe { CTFont::with_name(&name, size_px as CGFloat, std::ptr::null()) };
@@ -80,6 +86,26 @@ impl Fonts {
             metrics,
             rgb: CGColorSpace::new_device_rgb().expect("rgb colour space"),
         }
+    }
+
+    /// Family name of the regular face actually loaded.
+    pub fn family(&self) -> String {
+        unsafe { self.faces[0].family_name() }.to_string()
+    }
+
+    /// Family name of the font that draws `ch`: the loaded one, or the system
+    /// fallback Core Text picks for it.
+    pub fn family_for(&self, ch: char, style: Style) -> Option<String> {
+        let (font, _) = glyph_for(self.face(style), ch)?;
+        Some(unsafe { font.family_name() }.to_string())
+    }
+
+    /// Horizontal advance of `ch`, in device pixels.
+    pub fn advance(&self, ch: char, style: Style) -> Option<f64> {
+        let (font, mut g) = glyph_for(self.face(style), ch)?;
+        let mut adv = CGSize::default();
+        unsafe { font.advances_for_glyphs(CTFontOrientation::Horizontal, NonNull::from(&mut g), &mut adv, 1) };
+        Some(adv.width)
     }
 
     fn face(&self, style: Style) -> &CTFont {

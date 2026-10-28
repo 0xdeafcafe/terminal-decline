@@ -76,7 +76,7 @@ set, not only perf work: shaping, images and the updater each cost something.
 | E.4 | Fonts: fallback list, bold/italic overrides, Nerd Font icon fitting, line height / cell width adjust | M |
 | E.5 | Shell integration (OSC 133) via documented snippets for zsh/bash/fish (not injected): jump between prompts, select output, Option-click to move the cursor | M |
 | E.6 | Notifications: OSC 9/777 and bell when unfocused (named: what Claude Code sends); guarded for the bare binary; Dock progress (OSC 9;4) | S |
-| E.7 | Search: Cmd+F with AppKit's find bar over scrollback | M |
+| E.7 | Search: Cmd+F with AppKit's find bar over all of history; in-view hits first, then history outwards, using fast block search (SIMD substring search plus a per-block filter so most blocks are skipped) | M |
 | E.8 | Selection: auto-scroll past the edge, rectangular (Option-drag), copy-on-select option | S |
 | E.9 | Config: reload on change (FSEvents), list of live settings, `theme =` + a small built-in theme set + themes dir, `decline import ghostty` / `import iterm`, deprecation policy for renamed keys | M |
 | E.10 | macOS: drag files in → escaped paths; folder on Dock icon / `open -a` → window there; Services "New decline Window/Tab at Folder"; right-click menu when mouse reporting is off; confirm before closing a running program (config off) | M |

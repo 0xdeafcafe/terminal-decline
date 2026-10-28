@@ -25,5 +25,9 @@ test = false
 doc = false
 bench = false
 
+# The same vendored vte as the main workspace.
+[patch.crates-io]
+vte = { path = "../vendor/vte" }
+
 [profile.release]
 debug = 1

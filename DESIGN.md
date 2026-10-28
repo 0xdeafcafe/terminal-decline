@@ -35,6 +35,20 @@ any command as its own Dock app.
 
 `term-core` has no platform code and is tested and benchmarked on its own.
 
+`term-app` (the `decline` package) is a library plus a thin `main.rs`. The
+AppKit code (`app`, `view`) only turns events into the inputs of plain
+modules, each tested on its own: `session` (the program, its PTY, the
+reader and writer threads, the shared terminal and the dirty flag),
+`keys::translate` (a key press → bytes, input method or menu), `mouse`
+(reporting encodings, selection spans), `layout` (padding, grid size, cell
+under a point), `frame_policy::decide` (draw, skip, pause, hold or hide on
+each display tick), `config` and `pin`. Paths (config dir, apps dir, the
+executable) are passed in from `main`, and pins run other programs through
+an injected runner, so tests use temp dirs. `tests/pipeline.rs` runs real
+programs through `session` with no window; `tests/smoke.rs` drives the real
+app through a test-only control sequence (`ESC ] 7770 ; cmd BEL`, honoured
+only with `DECLINE_TEST_DUMP=<file>` set) that writes JSON dumps.
+
 ## Screen storage
 
 - A cell is 12 bytes: `u32` with the 21-bit Unicode scalar plus 11 style flag
@@ -145,6 +159,9 @@ login shell, so it gets the user's `PATH` even when started from the Dock.
 A missing or nonexistent `cwd` starts in `HOME` (the app's own working
 directory is `/` when started from the Dock).
 `decline pin --update` re-clones the binary after upgrades.
+`decline pin --remove` deletes a bundle only if it is a `.app` inside the
+apps dir containing `Contents/MacOS/<id>`, since the settings file naming it
+can be edited. Pin names can't contain `/` or `..`.
 
 Known limit: an ad-hoc signature is tied to the binary's hash, so after
 `--update` macOS asks again for permissions the pin was granted (Documents,

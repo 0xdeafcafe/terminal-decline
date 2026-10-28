@@ -1,13 +1,13 @@
-//! The terminal view: one per window. Owns the shell process, the terminal
-//! state and the renderer, and turns keyboard/mouse input into bytes.
+//! The terminal view: one per window. Owns the session (program, PTY,
+//! terminal state) and the renderer, and turns AppKit events into the inputs
+//! of the pure modules (`keys`, `mouse`, `layout`, `frame_policy`).
 
 use std::cell::{Cell as StdCell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::path::PathBuf;
 
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use dispatch2::{DispatchQueue, DispatchTime};
@@ -22,33 +22,23 @@ use objc2_foundation::{
     NSRunLoopCommonModes, NSSize, NSString,
 };
 use objc2_quartz_core::{CADisplayLink, CALayer, CAMetalLayer};
-use term_core::{MouseMode, Point, Selection, Term};
+use term_core::{Point, Selection, Term};
 use term_font::Fonts;
-use term_pty::{Command, Pty, Size};
+use term_pty::{Command, Size};
 use term_render::{FrameInput, Renderer, Theme};
 
-use crate::config::{Config, OptionAsMeta};
-use crate::keys::{Mods, ctrl_byte, encode_key, encode_kitty_char, encode_kitty_key, key_from_keycode, keypad_app_bytes, paste_bytes};
+use crate::config::Config;
+use crate::control::{self, Control, Dump};
+use crate::frame_policy::{self, Decision};
+use crate::keys::{KeyAction, KeyInput, KeyModes, Mods, encode_key, paste_bytes};
+use crate::layout::{self, CellSize, Padding};
+use crate::mouse;
+use crate::session::{Hooks, Session};
 
 const BLINK_INTERVAL: Duration = Duration::from_millis(530);
-/// Longest we hold drawing while a program is mid synchronized update.
-const SYNC_TIMEOUT: Duration = Duration::from_millis(150);
-/// How long after input the display runs at its full refresh rate.
-const INPUT_BOOST: Duration = Duration::from_millis(250);
-/// Idle time before the spare drawable is given back.
-const IDLE_TRIM: Duration = Duration::from_secs(2);
-
-/// Shared between the reader thread and the main thread.
-struct Shared {
-    /// Something changed since the last frame.
-    dirty: AtomicBool,
-}
 
 struct State {
-    term: Arc<Mutex<Term>>,
-    shared: Arc<Shared>,
-    input: Sender<Vec<u8>>,
-    pty: Pty,
+    session: Session,
     renderer: Renderer,
     link: Retained<CADisplayLink>,
     config: Rc<Config>,
@@ -71,6 +61,25 @@ struct State {
     /// Mouse button held while reporting to the program.
     mouse_button: Option<u8>,
     selecting: bool,
+    /// Only with `DECLINE_TEST_DUMP` set: see [`crate::control`].
+    test: Option<TestControl>,
+}
+
+/// Test-only control commands waiting to run, and the dump in progress.
+struct TestControl {
+    path: PathBuf,
+    queue: VecDeque<Control>,
+    dump: DumpState,
+    seq: u64,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DumpState {
+    Idle,
+    /// Waiting for the next frame to be drawn.
+    Requested,
+    /// Waiting for the GPU to finish this frame.
+    Drawn(u64),
 }
 
 pub struct Ivars {
@@ -197,7 +206,7 @@ define_class!(
 
         #[unsafe(method(copy:))]
         fn copy(&self, _sender: Option<&AnyObject>) {
-            let text = self.with_state(|st| st.term.lock().unwrap().state.selection_text()).flatten();
+            let text = self.with_state(|st| st.session.term().lock().unwrap().state.selection_text()).flatten();
             if let Some(text) = text.filter(|t| !t.is_empty()) {
                 let pb = NSPasteboard::generalPasteboard();
                 pb.clearContents();
@@ -209,14 +218,14 @@ define_class!(
         fn paste(&self, _sender: Option<&AnyObject>) {
             let pb = NSPasteboard::generalPasteboard();
             let Some(text) = pb.stringForType(unsafe { NSPasteboardTypeString }) else { return };
-            let bracketed = self.with_state(|st| st.term.lock().unwrap().state.modes.bracketed_paste).unwrap_or(false);
+            let bracketed = self.with_state(|st| st.session.term().lock().unwrap().state.modes.bracketed_paste).unwrap_or(false);
             self.send_input(paste_bytes(&text.to_string(), bracketed));
         }
 
         #[unsafe(method(selectAll:))]
         fn select_all(&self, _sender: Option<&AnyObject>) {
             self.with_state(|st| {
-                let mut t = st.term.lock().unwrap();
+                let mut t = st.session.term().lock().unwrap();
                 let s = &mut t.state;
                 let first = s.visible_point(0, 0).line - (s.scrollback_len() - s.display_offset()) as u64;
                 let last = s.visible_point(s.lines() - 1, s.cols() - 1);
@@ -227,7 +236,7 @@ define_class!(
 
         #[unsafe(method(clearBuffer:))]
         fn clear_buffer(&self, _sender: Option<&AnyObject>) {
-            self.with_state(|st| st.term.lock().unwrap().advance(b"\x1b[H\x1b[2J\x1b[3J"));
+            self.with_state(|st| st.session.term().lock().unwrap().advance(b"\x1b[H\x1b[2J\x1b[3J"));
             // Ask the shell to redraw its prompt.
             self.send_input(b"\x0c".to_vec());
         }
@@ -343,10 +352,10 @@ define_class!(
             let Some(window) = self.window() else { return NSRect::ZERO };
             let rect = self.with_state(|st| {
                 let m = st.renderer.metrics();
-                let (px, py) = self.padding_px(st);
-                let t = st.term.lock().unwrap();
-                let x = (px + t.state.cursor.col as u32 * m.cell_width) as f64 / st.scale;
-                let y = (py + t.state.cursor.row as u32 * m.cell_height) as f64 / st.scale;
+                let pad = self.padding(st);
+                let t = st.session.term().lock().unwrap();
+                let (x, y) = layout::cell_origin(t.state.cursor.row, t.state.cursor.col, m.into(), pad);
+                let (x, y) = (x as f64 / st.scale, y as f64 / st.scale);
                 NSRect::new(NSPoint::new(x, y), NSSize::new(m.cell_width as f64 / st.scale, m.cell_height as f64 / st.scale))
             });
             let Some(rect) = rect else { return NSRect::ZERO };
@@ -404,77 +413,34 @@ impl TerminalView {
         let theme = config.theme();
         let m = renderer.metrics();
         let size = self.frame().size;
-        let (px, py, pb) = padding_for(&config, self.titlebar_height(), launch.scale);
-        let (cols, lines) = grid_size(size, launch.scale, m, (px, py, pb));
+        let pad = padding_for(&config, self.titlebar_height(), launch.scale);
+        let (cols, lines) = layout::grid_size((size.width, size.height), launch.scale, m.into(), pad);
 
         let mut t = Term::new(cols, lines, config.scrollback);
-        t.state.default_colors =
-            [theme.foreground, theme.background, theme.cursor].map(|c| (c & 0xFF) << 16 | (c & 0xFF00) | (c >> 16) & 0xFF);
-        let term = Arc::new(Mutex::new(t));
-        let pty = Pty::spawn(
-            &launch.command,
-            Size {
-                cols: cols as u16,
-                lines: lines as u16,
-                cell_width: m.cell_width as u16,
-                cell_height: m.cell_height as u16,
-            },
-        )?;
-        let shared = Arc::new(Shared {
-            dirty: AtomicBool::new(true),
+        t.state.default_colors = crate::config::query_colors(&theme);
+        let mut hooks = Hooks::new(
+            Arc::new(move || wake(id)),
+            Box::new(move || DispatchQueue::main().exec_async(move || with_view(id, |v| v.program_exited()))),
+        );
+        let test = std::env::var_os(control::ENV).filter(|p| !p.is_empty()).map(|p| TestControl {
+            path: PathBuf::from(p),
+            queue: VecDeque::new(),
+            dump: DumpState::Idle,
+            seq: 0,
         });
-
-        // Writer thread: input and query replies go out without ever blocking
-        // the main thread on a full pipe.
-        let (tx, rx) = mpsc::channel::<Vec<u8>>();
-        let mut writer = pty.writer()?;
-        // Writes wait for room in the PTY on this thread, never the main one.
-        std::thread::Builder::new().name("pty-writer".into()).spawn(move || {
-            for bytes in rx {
-                if writer.write_all(&bytes).is_err() {
-                    break;
-                }
-            }
-        })?;
-
-        let mut reader = pty.reader()?;
-        let (term2, shared2, tx2) = (term.clone(), shared.clone(), tx.clone());
-        std::thread::Builder::new().name("pty-reader".into()).spawn(move || {
-            // A macOS PTY hands out ~1 KB per read, so 64 KB is plenty.
-            let mut buf = vec![0u8; 64 * 1024];
-            loop {
-                let n = reader.read_batch(&mut buf);
-                if n == 0 {
-                    break;
-                }
-                // Parse in slices, releasing the lock between them so a
-                // flood of output never holds off drawing or typing for long.
-                for chunk in buf[..n].chunks(64 * 1024) {
-                    let replies = {
-                        let mut t = term2.lock().unwrap();
-                        t.advance(chunk);
-                        std::mem::take(&mut t.state.replies)
-                    };
-                    if !replies.is_empty() {
-                        let _ = tx2.send(replies);
-                    }
-                }
-                if !shared2.dirty.swap(true, Ordering::AcqRel) {
-                    wake(id);
-                }
-            }
-            DispatchQueue::main().exec_async(move || with_view(id, |v| v.program_exited()));
-        })?;
+        if test.is_some() {
+            hooks.on_control = Some(Box::new(move |cmd| {
+                DispatchQueue::main().exec_async(move || with_view(id, |v| v.control(&cmd)));
+            }));
+        }
+        let session = Session::spawn(&launch.command, pty_size(cols, lines, m), t, hooks)?;
 
         let link = unsafe { self.displayLinkWithTarget_selector(self, sel!(tick:)) };
         unsafe { link.addToRunLoop_forMode(&NSRunLoop::mainRunLoop(), NSRunLoopCommonModes) };
         link.setPaused(false);
 
         *self.ivars().state.borrow_mut() = Some(State {
-            term,
-            shared,
-            input: tx,
-            pty,
+            session,
             renderer,
             link,
             font_size: config.font_size,
@@ -493,6 +459,7 @@ impl TerminalView {
             scroll_accum: 0.0,
             mouse_button: None,
             selecting: false,
+            test,
         });
         self.resize();
         Ok(())
@@ -504,8 +471,17 @@ impl TerminalView {
     }
 
     pub fn foreground_cwd(&self) -> Option<String> {
-        self.with_state(|st| st.term.lock().unwrap().state.cwd.clone().or_else(|| st.pty.foreground_cwd()))
-            .flatten()
+        self.with_state(|st| {
+            st.session
+                .term()
+                .lock()
+                .unwrap()
+                .state
+                .cwd
+                .clone()
+                .or_else(|| st.session.foreground_cwd())
+        })
+        .flatten()
     }
 
     fn titlebar_height(&self) -> f64 {
@@ -515,9 +491,8 @@ impl TerminalView {
         }
     }
 
-    fn padding_px(&self, st: &State) -> (u32, u32) {
-        let (px, py, _) = padding_for(&st.config, self.titlebar_height(), st.scale);
-        (px, py)
+    fn padding(&self, st: &State) -> Padding {
+        padding_for(&st.config, self.titlebar_height(), st.scale)
     }
 
     fn unpause(&self) {
@@ -534,7 +509,7 @@ impl TerminalView {
     }
 
     fn request_redraw(&self) {
-        self.with_state(|st| st.shared.dirty.store(true, Ordering::Release));
+        self.with_state(|st| st.session.mark_dirty());
         self.unpause();
     }
 
@@ -544,39 +519,70 @@ impl TerminalView {
     }
 
     fn draw(&self) {
+        let titlebar = self.titlebar_height();
+        let visible = self.visible();
+        let minimised = self.window().is_some_and(|w| w.isMiniaturized());
         let mut guard = self.ivars().state.borrow_mut();
         let Some(st) = guard.as_mut() else { return };
-        if !st.shared.dirty.swap(false, Ordering::AcqRel) {
-            // Nothing new: stop the display link until something changes.
-            st.idle_ticks += 1;
-            if st.idle_ticks == 2 {
+        // Under test control, draw even when covered by other windows, so a
+        // dump never waits forever for a frame.
+        let visible = visible || st.test.is_some();
+        let term = st.session.term().clone();
+        let dirty = st.session.take_dirty();
+        // Only a frame that may be drawn needs the terminal's lock.
+        let mut t = (dirty && visible).then(|| term.lock().unwrap());
+        let synchronized = t.as_ref().is_some_and(|t| t.state.modes.synchronized);
+        let sync_elapsed = if synchronized {
+            st.sync_since.get_or_insert_with(Instant::now).elapsed()
+        } else {
+            if t.is_some() {
+                st.sync_since = None;
+            }
+            Duration::ZERO
+        };
+        let decision = frame_policy::decide(
+            dirty,
+            visible,
+            synchronized,
+            sync_elapsed,
+            st.idle_ticks,
+            minimised,
+            st.last_input.elapsed(),
+            st.focused,
+        );
+        let rate = match decision {
+            Decision::Skip => {
+                st.idle_ticks = st.idle_ticks.saturating_add(1);
+                return;
+            }
+            Decision::Pause { trim_after } => {
+                st.idle_ticks = st.idle_ticks.saturating_add(1);
                 st.link.setPaused(true);
                 let token = st.frames;
+                drop(t);
                 drop(guard);
-                self.schedule_trim(token);
+                self.schedule_trim(token, trim_after);
+                return;
             }
-            return;
-        }
-        st.idle_ticks = 0;
-        if !self.visible() {
-            // Hidden or fully covered: keep the change and draw when shown.
-            st.shared.dirty.store(true, Ordering::Release);
-            st.link.setPaused(true);
-            let minimised = self.window().is_some_and(|w| w.isMiniaturized());
-            st.renderer.hide(minimised);
-            return;
-        }
-        st.renderer.show();
-        // Full refresh rate right after input; 60 Hz while output streams
-        // (no one reads text scrolling at 120 Hz, and the window server's
-        // cost scales with frames); 30 Hz in a window that isn't focused.
-        let rate = if st.last_input.elapsed() < INPUT_BOOST {
-            120
-        } else if !st.focused {
-            30
-        } else {
-            60
+            Decision::Hide { keep_surface } => {
+                // Hidden or fully covered: keep the change and draw when shown.
+                st.idle_ticks = 0;
+                st.session.mark_dirty();
+                st.link.setPaused(true);
+                st.renderer.hide(keep_surface);
+                return;
+            }
+            Decision::Hold => {
+                // Keep ticking so the timeout is noticed.
+                st.idle_ticks = 0;
+                st.session.mark_dirty();
+                st.link.setPaused(false);
+                return;
+            }
+            Decision::Draw { rate } => rate,
         };
+        st.idle_ticks = 0;
+        st.renderer.show();
         if rate != st.rate {
             st.rate = rate;
             let r = rate as f32;
@@ -586,24 +592,13 @@ impl TerminalView {
                 preferred: r,
             });
         }
-        let (px, py, _) = padding_for(&st.config, self.titlebar_height(), st.scale);
+        let pad = padding_for(&st.config, titlebar, st.scale);
         let mut title = None;
         let blink;
         let bell;
         let clipboard;
         {
-            let mut t = st.term.lock().unwrap();
-            if t.state.modes.synchronized {
-                let since = *st.sync_since.get_or_insert_with(Instant::now);
-                if since.elapsed() < SYNC_TIMEOUT {
-                    // Keep ticking so the timeout is noticed.
-                    st.shared.dirty.store(true, Ordering::Release);
-                    st.link.setPaused(false);
-                    return;
-                }
-            } else {
-                st.sync_since = None;
-            }
+            let Some(t) = t.as_mut() else { return };
             if t.state.title_changed {
                 t.state.title_changed = false;
                 title = t.state.title.clone();
@@ -615,15 +610,23 @@ impl TerminalView {
                 term: &t.state,
                 theme: &st.theme,
                 metrics: st.renderer.metrics(),
-                padding: (px, py),
+                padding: (pad.x, pad.top),
                 cursor_on: st.cursor_on,
                 focused: st.focused,
                 preedit: Some(st.marked.as_str()),
             };
             st.renderer.prepare(&input);
         }
+        drop(t);
         st.renderer.present(&self.ivars().layer);
         st.frames += 1;
+        let mut poll_dump = false;
+        if let Some(test) = &mut st.test
+            && test.dump == DumpState::Requested
+        {
+            test.dump = DumpState::Drawn(st.renderer.frames_submitted());
+            poll_dump = true;
+        }
 
         let need_blink = blink && st.focused && !st.blink_scheduled;
         if need_blink {
@@ -652,14 +655,17 @@ impl TerminalView {
                 app.requestUserAttention(objc2_app_kit::NSRequestUserAttentionType::InformationalRequest);
             }
         }
+        if poll_dump {
+            self.poll_dump();
+        }
     }
 
     /// After a couple of seconds with nothing drawn, give back the spare
     /// drawable: resizing the layer's drawables to 1×1 and back releases the
     /// one not on screen (6.6 MB at 1624×1018) without changing what's shown.
-    fn schedule_trim(&self, token: u64) {
+    fn schedule_trim(&self, token: u64, after: Duration) {
         let id = self.ivars().id;
-        let _ = DispatchQueue::main().after(DispatchTime::NOW.time(IDLE_TRIM.as_nanos() as i64), move || {
+        let _ = DispatchQueue::main().after(DispatchTime::NOW.time(after.as_nanos() as i64), move || {
             with_view(id, |v| {
                 let idle = v.with_state(|st| st.frames == token && st.link.isPaused() && !st.blink_scheduled);
                 if idle == Some(true) {
@@ -682,7 +688,7 @@ impl TerminalView {
             with_view(id, |v| {
                 let again = v.with_state(|st| {
                     st.blink_scheduled = false;
-                    let blinking = st.focused && st.term.lock().unwrap().state.cursor_blink;
+                    let blinking = st.focused && st.session.term().lock().unwrap().state.cursor_blink;
                     st.cursor_on = !st.cursor_on || !blinking;
                     blinking
                 });
@@ -703,19 +709,9 @@ impl TerminalView {
             layer.setContentsScale(st.scale);
             layer.setDrawableSize(NSSize::new((size.width * st.scale).round(), (size.height * st.scale).round()));
             let m = st.renderer.metrics();
-            let (cols, lines) = grid_size(size, st.scale, m, padding_for(&st.config, titlebar, st.scale));
-            {
-                let mut t = st.term.lock().unwrap();
-                t.state.resize(cols, lines);
-                t.state.cell_pixels = (m.cell_width as u16, m.cell_height as u16);
-            }
-            let _ = st.pty.resize(Size {
-                cols: cols as u16,
-                lines: lines as u16,
-                cell_width: m.cell_width as u16,
-                cell_height: m.cell_height as u16,
-            });
-            st.shared.dirty.store(true, Ordering::Release);
+            let pad = padding_for(&st.config, titlebar, st.scale);
+            let (cols, lines) = layout::grid_size((size.width, size.height), st.scale, m.into(), pad);
+            let _ = st.session.resize(pty_size(cols, lines, m));
         });
         // Draw now so live resizing doesn't show a stretched old frame.
         self.draw();
@@ -743,7 +739,7 @@ impl TerminalView {
         let report = self.with_state(|st| {
             st.focused = focused;
             st.cursor_on = true;
-            st.term.lock().unwrap().state.modes.focus_events
+            st.session.term().lock().unwrap().state.modes.focus_events
         });
         if report == Some(true) {
             self.send_raw(if focused { b"\x1b[I".to_vec() } else { b"\x1b[O".to_vec() });
@@ -771,7 +767,7 @@ impl TerminalView {
         self.with_state(|st| {
             st.cursor_on = true;
             st.last_input = Instant::now();
-            let mut t = st.term.lock().unwrap();
+            let mut t = st.session.term().lock().unwrap();
             t.state.scroll_view_to_bottom();
             t.state.selection = None;
         });
@@ -780,108 +776,35 @@ impl TerminalView {
     }
 
     fn send_raw(&self, bytes: Vec<u8>) {
-        self.with_state(|st| {
-            let _ = st.input.send(bytes);
-        });
+        self.with_state(|st| st.session.send(bytes));
     }
 
     fn handle_key(&self, event: &NSEvent) {
-        let flags = event.modifierFlags();
-        if flags.contains(NSEventModifierFlags::Command) {
-            // Cmd shortcuts belong to the menus and are never sent to the
-            // program, except the Mac line-editing ones.
-            let bytes: Option<&[u8]> = match event.keyCode() {
-                0x7B => Some(b"\x01"), // Cmd+Left: start of line
-                0x7C => Some(b"\x05"), // Cmd+Right: end of line
-                0x33 => Some(b"\x15"), // Cmd+Backspace: delete line
-                _ => None,
-            };
-            if let Some(b) = bytes {
-                self.send_input(b.to_vec());
+        let input = key_input(event);
+        let modes = self.with_state(|st| {
+            let t = st.session.term().lock().unwrap();
+            KeyModes {
+                app_cursor: t.state.modes.app_cursor,
+                app_keypad: t.state.modes.app_keypad,
+                kitty_flags: t.state.kitty_keyboard_flags(),
+                option_as_meta: st.config.option_as_meta,
+                composing: !st.marked.is_empty(),
             }
-            return;
+        });
+        let Some(modes) = modes else { return };
+        let action = crate::keys::translate(&input, modes);
+        if input.flags & crate::keys::flags::COMMAND == 0 {
+            NSCursor::setHiddenUntilMouseMoves(true);
         }
-        NSCursor::setHiddenUntilMouseMoves(true);
-        let composing = self.with_state(|st| !st.marked.is_empty()).unwrap_or(false);
-        if !composing && let Some(bytes) = self.key_bytes(event) {
-            self.send_input(bytes);
-            return;
-        }
-        // Text, dead keys and input methods.
-        let events = NSArray::from_slice(&[event]);
-        self.interpretKeyEvents(&events);
-    }
-
-    /// Bytes for keys that bypass text input: special keys, Ctrl combos and
-    /// Option-as-Meta.
-    fn key_bytes(&self, event: &NSEvent) -> Option<Vec<u8>> {
-        let flags = event.modifierFlags();
-        let (app_cursor, app_keypad, kitty, meta_side) = self.with_state(|st| {
-            let t = st.term.lock().unwrap();
-            (
-                t.state.modes.app_cursor,
-                t.state.modes.app_keypad,
-                t.state.kitty_keyboard_flags(),
-                st.config.option_as_meta,
-            )
-        })?;
-        let raw = flags.0;
-        // Device-dependent bits for which Option key is held.
-        let (left_alt, right_alt) = (raw & 0x20 != 0, raw & 0x40 != 0);
-        let meta = match meta_side {
-            OptionAsMeta::Left => left_alt,
-            OptionAsMeta::Right => right_alt,
-            OptionAsMeta::Both => left_alt || right_alt,
-            OptionAsMeta::None => false,
-        };
-        let mods = Mods {
-            shift: flags.contains(NSEventModifierFlags::Shift),
-            alt: flags.contains(NSEventModifierFlags::Option),
-            ctrl: flags.contains(NSEventModifierFlags::Control),
-        };
-        let code = event.keyCode();
-        let keypad = flags.contains(NSEventModifierFlags::NumericPad) && !(0x7B..=0x7E).contains(&code);
-        if keypad
-            && app_keypad
-            && !mods.any()
-            && let Some(b) = keypad_app_bytes(code)
-        {
-            return Some(b.to_vec());
-        }
-        if let Some(key) = key_from_keycode(code) {
-            if kitty & 1 != 0
-                && let Some(b) = encode_kitty_key(key, mods)
-            {
-                return Some(b);
+        match action {
+            KeyAction::Send(bytes) => self.send_input(bytes),
+            KeyAction::ToMenu => {}
+            KeyAction::ToTextInput => {
+                // Text, dead keys and input methods.
+                let events = NSArray::from_slice(&[event]);
+                self.interpretKeyEvents(&events);
             }
-            return Some(encode_key(key, mods, app_cursor));
         }
-        let plain = event.charactersIgnoringModifiers()?.to_string();
-        let c = plain.chars().next()?;
-        if kitty & 1 != 0 && (mods.ctrl || meta) && !c.is_control() {
-            let mods = Mods { alt: meta, ..mods };
-            return Some(encode_kitty_char(c, mods));
-        }
-        if mods.ctrl
-            && let Some(b) = ctrl_byte(c)
-        {
-            let mut out = if meta { vec![0x1b] } else { Vec::new() };
-            out.push(b);
-            return Some(out);
-        }
-        if meta {
-            // The character with Shift applied but not Option.
-            let shifted = if mods.shift {
-                NSEventModifierFlags::Shift
-            } else {
-                NSEventModifierFlags::empty()
-            };
-            let text = event.charactersByApplyingModifiers(shifted).map(|s| s.to_string()).unwrap_or(plain);
-            let mut out = vec![0x1b];
-            out.extend_from_slice(text.as_bytes());
-            return Some(out);
-        }
-        None
     }
 
     /// Visible line and column under the mouse, clamped to the grid.
@@ -890,46 +813,35 @@ impl TerminalView {
         let titlebar = self.titlebar_height();
         self.with_state(|st| {
             let m = st.renderer.metrics();
-            let (px, py, _) = padding_for(&st.config, titlebar, st.scale);
-            let t = st.term.lock().unwrap();
-            let x = (p.x * st.scale - px as f64).max(0.0);
-            let y = (p.y * st.scale - py as f64).max(0.0);
-            let col = ((x / m.cell_width as f64) as usize).min(t.state.cols() - 1);
-            let line = ((y / m.cell_height as f64) as usize).min(t.state.lines() - 1);
-            (line, col)
+            let pad = padding_for(&st.config, titlebar, st.scale);
+            let t = st.session.term().lock().unwrap();
+            layout::cell_at((p.x, p.y), st.scale, m.into(), pad, t.state.cols(), t.state.lines())
         })
     }
 
     fn mods_of(event: &NSEvent) -> u8 {
         let f = event.modifierFlags();
-        (f.contains(NSEventModifierFlags::Shift) as u8) * 4
-            + (f.contains(NSEventModifierFlags::Option) as u8) * 8
-            + (f.contains(NSEventModifierFlags::Control) as u8) * 16
+        mouse::modifier_bits(
+            f.contains(NSEventModifierFlags::Shift),
+            f.contains(NSEventModifierFlags::Option),
+            f.contains(NSEventModifierFlags::Control),
+        )
     }
 
     /// Whether the program wants this mouse event (Shift forces selection).
-    fn reporting(&self, event: &NSEvent) -> Option<(MouseMode, bool)> {
-        if event.modifierFlags().contains(NSEventModifierFlags::Shift) {
-            return None;
-        }
+    fn reporting(&self, event: &NSEvent) -> Option<(term_core::MouseMode, bool)> {
+        let shift = event.modifierFlags().contains(NSEventModifierFlags::Shift);
         let (mode, sgr) = self.with_state(|st| {
-            let t = st.term.lock().unwrap();
+            let t = st.session.term().lock().unwrap();
             (t.state.modes.mouse, t.state.modes.mouse_sgr)
         })?;
-        (mode != MouseMode::Off).then_some((mode, sgr))
+        mouse::reports(mode, shift).then_some((mode, sgr))
     }
 
     fn send_mouse(&self, code: u8, line: usize, col: usize, press: bool, sgr: bool) {
-        let bytes = if sgr {
-            format!("\x1b[<{code};{};{}{}", col + 1, line + 1, if press { 'M' } else { 'm' }).into_bytes()
-        } else {
-            if col > 222 || line > 222 {
-                return;
-            }
-            let b = if press { code } else { 3 | (code & !3) };
-            vec![0x1b, b'[', b'M', 32 + b, 33 + col as u8, 33 + line as u8]
-        };
-        self.send_raw(bytes);
+        if let Some(bytes) = mouse::encode(code, line, col, press, sgr) {
+            self.send_raw(bytes);
+        }
     }
 
     fn mouse_button_event(&self, event: &NSEvent, button: u8, press: bool) {
@@ -940,7 +852,7 @@ impl TerminalView {
             self.send_mouse(button + Self::mods_of(event), line, col, press, sgr);
             return;
         }
-        if button != 0 {
+        if button != mouse::LEFT {
             return;
         }
         if !press {
@@ -950,44 +862,32 @@ impl TerminalView {
         let clicks = event.clickCount();
         self.with_state(|st| {
             st.selecting = true;
-            let mut t = st.term.lock().unwrap();
+            let mut t = st.session.term().lock().unwrap();
             let s = &mut t.state;
             let point = s.visible_point(line, col);
             s.selection = match clicks {
                 1 => None,
                 2 => {
                     let row = s.visible_row(line);
-                    let is_word = |c: usize| {
-                        let ch = row.get(c).ch();
-                        !ch.is_whitespace() && !"()[]{}<>'\"`|,;".contains(ch)
-                    };
-                    if !is_word(col) {
-                        Some(Selection {
+                    let chars: Vec<char> = (0..s.cols()).map(|c| row.get(c).ch()).collect();
+                    match mouse::word_at(&chars, col) {
+                        None => Some(Selection {
                             anchor: point,
                             head: point,
-                        })
-                    } else {
-                        let mut a = col;
-                        while a > 0 && is_word(a - 1) {
-                            a -= 1;
-                        }
-                        let mut b = col;
-                        while b + 1 < s.cols() && is_word(b + 1) {
-                            b += 1;
-                        }
-                        Some(Selection {
+                        }),
+                        Some((a, b)) => Some(Selection {
                             anchor: Point { col: a, ..point },
                             head: Point { col: b, ..point },
-                        })
+                        }),
                     }
                 }
-                _ => Some(Selection {
-                    anchor: Point { col: 0, ..point },
-                    head: Point {
-                        col: s.cols() - 1,
-                        ..point
-                    },
-                }),
+                _ => {
+                    let (a, b) = mouse::line_span(s.cols());
+                    Some(Selection {
+                        anchor: Point { col: a, ..point },
+                        head: Point { col: b, ..point },
+                    })
+                }
             };
             if clicks == 1 {
                 // Remember the anchor in an empty selection; dragging extends it.
@@ -1001,7 +901,7 @@ impl TerminalView {
         if clicks == 1 {
             // A plain click clears any visible selection until a drag starts.
             self.with_state(|st| {
-                let mut t = st.term.lock().unwrap();
+                let mut t = st.session.term().lock().unwrap();
                 if let Some(sel) = &mut t.state.selection {
                     sel.head = sel.anchor;
                 }
@@ -1014,25 +914,19 @@ impl TerminalView {
         let Some((line, col)) = self.cell_at(event) else { return };
         if let Some((mode, sgr)) = self.reporting(event) {
             let held = self.with_state(|st| st.mouse_button).flatten();
-            let send = match mode {
-                MouseMode::Motion => true,
-                MouseMode::Drag => held.is_some(),
-                _ => false,
-            };
-            if send {
-                let b = held.or(button).unwrap_or(3);
-                self.send_mouse(32 + b + Self::mods_of(event), line, col, true, sgr);
+            if mouse::reports_motion(mode, held) {
+                self.send_mouse(mouse::motion_code(held, button, Self::mods_of(event)), line, col, true, sgr);
             }
             return;
         }
-        if button != Some(0) {
+        if button != Some(mouse::LEFT) {
             return;
         }
         let changed = self.with_state(|st| {
             if !st.selecting {
                 return false;
             }
-            let mut t = st.term.lock().unwrap();
+            let mut t = st.session.term().lock().unwrap();
             let head = t.state.visible_point(line, col);
             match &mut t.state.selection {
                 Some(sel) if sel.head != head => {
@@ -1066,14 +960,14 @@ impl TerminalView {
         });
         let Some(lines) = lines.filter(|&l| l != 0) else { return };
         if let Some((_, sgr)) = reporting {
-            let code = if lines > 0 { 64 } else { 65 } + Self::mods_of(event);
-            for _ in 0..lines.unsigned_abs().min(10) {
+            let code = mouse::wheel_code(lines, Self::mods_of(event));
+            for _ in 0..lines.unsigned_abs().min(mouse::MAX_WHEEL_REPORTS) {
                 self.send_mouse(code, line, col, true, sgr);
             }
             return;
         }
         let alt = self.with_state(|st| {
-            let t = st.term.lock().unwrap();
+            let t = st.session.term().lock().unwrap();
             t.state.alt_screen_active().then_some(t.state.modes.app_cursor)
         });
         if let Some(Some(app_cursor)) = alt {
@@ -1085,36 +979,179 @@ impl TerminalView {
             }
             return;
         }
-        self.with_state(|st| st.term.lock().unwrap().state.scroll_view(lines));
+        self.with_state(|st| st.session.term().lock().unwrap().state.scroll_view(lines));
         self.request_redraw();
     }
 }
 
-/// Padding in pixels: (left/right, top, bottom). The top includes the title
-/// bar, which the content extends under.
-fn padding_for(config: &Config, titlebar: f64, scale: f64) -> (u32, u32, u32) {
-    let p = (config.padding * scale).round() as u32;
-    (p, ((config.padding + titlebar) * scale).round() as u32, p)
+fn padding_for(config: &Config, titlebar: f64, scale: f64) -> Padding {
+    layout::padding(config.padding, titlebar, scale)
 }
 
-fn grid_size(size: NSSize, scale: f64, m: term_font::Metrics, (px, py, pb): (u32, u32, u32)) -> (usize, usize) {
-    let w = (size.width * scale) as u32;
-    let h = (size.height * scale) as u32;
-    // GPU positions are 16-bit; no display is near 32k pixels, but cap anyway.
-    let (w, h) = (w.min(32_000), h.min(32_000));
-    let cols = (w.saturating_sub(2 * px) / m.cell_width).clamp(2, 4000) as usize;
-    let lines = (h.saturating_sub(py + pb) / m.cell_height).clamp(1, 2000) as usize;
-    (cols, lines)
+fn pty_size(cols: usize, lines: usize, m: term_font::Metrics) -> Size {
+    Size {
+        cols: cols as u16,
+        lines: lines as u16,
+        cell_width: m.cell_width as u16,
+        cell_height: m.cell_height as u16,
+    }
 }
 
-/// Window content size (points) for a grid.
+/// Window content size (points) for the configured grid.
 pub fn content_size(config: &Config, m: term_font::Metrics, scale: f64, titlebar: f64) -> NSSize {
-    let (px, py, pb) = padding_for(config, titlebar, scale);
-    let w = config.columns as u32 * m.cell_width + 2 * px;
-    let h = config.lines as u32 * m.cell_height + py + pb;
-    NSSize::new(w as f64 / scale, h as f64 / scale)
+    let cell = CellSize::from(m);
+    let (w, h) = layout::content_size(
+        config.columns as usize,
+        config.lines as usize,
+        scale,
+        cell,
+        padding_for(config, titlebar, scale),
+    );
+    NSSize::new(w, h)
+}
+
+/// What `keys::translate` needs from a key event.
+fn key_input(event: &NSEvent) -> KeyInput {
+    let flags = event.modifierFlags();
+    let plain = event.charactersIgnoringModifiers().map(|s| s.to_string()).unwrap_or_default();
+    let shifted = if flags.contains(NSEventModifierFlags::Shift) {
+        NSEventModifierFlags::Shift
+    } else {
+        NSEventModifierFlags::empty()
+    };
+    KeyInput {
+        keycode: event.keyCode(),
+        chars: event.characters().map(|s| s.to_string()).unwrap_or_default(),
+        chars_shift_only: event
+            .charactersByApplyingModifiers(shifted)
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| plain.clone()),
+        chars_ignoring_mods: plain,
+        flags: flags.0,
+        numpad: flags.contains(NSEventModifierFlags::NumericPad),
+    }
 }
 
 pub fn delegate_of(view: &TerminalView) -> &ProtocolObject<dyn NSWindowDelegate> {
     ProtocolObject::from_ref(view)
+}
+
+/// Test-only control (`DECLINE_TEST_DUMP`); see [`crate::control`].
+impl TerminalView {
+    fn control(&self, cmd: &str) {
+        let Some(c) = Control::parse(cmd) else {
+            eprintln!("decline: unknown test control command {cmd:?}");
+            return;
+        };
+        self.with_state(|st| {
+            if let Some(test) = &mut st.test {
+                test.queue.push_back(c);
+            }
+        });
+        self.run_controls();
+    }
+
+    /// Run queued commands until one has to wait (a dump in progress).
+    fn run_controls(&self) {
+        loop {
+            let next = self.with_state(|st| {
+                let test = st.test.as_mut()?;
+                if test.dump != DumpState::Idle {
+                    return None;
+                }
+                test.queue.pop_front()
+            });
+            match next.flatten() {
+                None => return,
+                Some(Control::Dump) => {
+                    self.with_state(|st| {
+                        if let Some(test) = &mut st.test {
+                            test.dump = DumpState::Requested;
+                        }
+                    });
+                    self.request_redraw();
+                }
+                Some(Control::Resize { cols, lines }) => self.set_grid(cols as usize, lines as usize),
+                Some(Control::Font(delta)) => {
+                    let size = self.with_state(|st| (st.font_size + delta as f64).max(6.0));
+                    self.reload_fonts(size);
+                }
+                Some(Control::Quit) => {
+                    objc2_app_kit::NSApplication::sharedApplication(MainThreadMarker::from(self)).terminate(None);
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Resize the window to show `cols` × `lines`.
+    fn set_grid(&self, cols: usize, lines: usize) {
+        let Some(window) = self.window() else { return };
+        let titlebar = self.titlebar_height();
+        let size = self.with_state(|st| {
+            let pad = padding_for(&st.config, titlebar, st.scale);
+            layout::content_size(cols, lines, st.scale, st.renderer.metrics().into(), pad)
+        });
+        if let Some((w, h)) = size {
+            window.setContentSize(NSSize::new(w, h));
+        }
+    }
+
+    /// Write the dump once the GPU has finished the frame drawn for it.
+    fn poll_dump(&self) {
+        let ready = self.with_state(|st| {
+            let test = st.test.as_ref()?;
+            let DumpState::Drawn(frame) = test.dump else { return None };
+            Some(st.renderer.frames_completed() >= frame)
+        });
+        match ready.flatten() {
+            None => {}
+            Some(false) => {
+                let id = self.ivars().id;
+                let _ = DispatchQueue::main().after(DispatchTime::NOW.time(2_000_000), move || with_view(id, |v| v.poll_dump()));
+            }
+            Some(true) => {
+                self.with_state(write_dump);
+                self.run_controls();
+            }
+        }
+    }
+}
+
+fn write_dump(st: &mut State) {
+    use std::io::Write;
+    let Some(test) = &mut st.test else { return };
+    test.seq += 1;
+    test.dump = DumpState::Idle;
+    let (screen, cols, lines) = {
+        let t = st.session.term().lock().unwrap();
+        (t.state.dump(), t.state.cols(), t.state.lines())
+    };
+    let m = st.renderer.metrics();
+    let (mask_texture, color_texture) = st.renderer.glyphs.texture_sizes();
+    let dump = Dump {
+        seq: test.seq,
+        screen,
+        cols,
+        lines,
+        frames: st.renderer.frames_completed(),
+        glyphs: st.renderer.frame.glyphs.len(),
+        rects: st.renderer.frame.rects.len(),
+        mask_texture,
+        color_texture,
+        cell_width: m.cell_width,
+        cell_height: m.cell_height,
+        font_size: st.font_size,
+        scale: st.scale,
+        phys_footprint: control::phys_footprint(),
+    };
+    let line = serde_json::to_string(&dump).expect("dump serialises");
+    let written = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&test.path)
+        .and_then(|mut f| writeln!(f, "{line}"));
+    if let Err(e) = written {
+        eprintln!("decline: writing {}: {e}", test.path.display());
+    }
 }

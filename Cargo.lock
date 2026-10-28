@@ -246,6 +246,7 @@ dependencies = [
  "objc2-metal",
  "objc2-quartz-core",
  "serde",
+ "serde_json",
  "term-core",
  "term-font",
  "term-pty",

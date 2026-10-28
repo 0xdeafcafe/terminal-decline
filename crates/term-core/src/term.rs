@@ -1288,6 +1288,98 @@ impl Perform for Terminal {
     }
 }
 
+/// Testing aids: shared by the unit, property, conformance and fuzz tests.
+impl Terminal {
+    /// Check the rules the rest of the code relies on: the cursor is on the
+    /// screen; both screens have `lines` rows of exactly `cols` cells; every
+    /// WIDE cell is followed by a WIDE_SPACER and every spacer follows a WIDE
+    /// cell; the view is not scrolled back further than the scrollback; the
+    /// scroll region is inside the screen. Costs one pass over the screens.
+    #[doc(hidden)]
+    pub fn check_invariants(&self) -> Result<(), String> {
+        let (cols, lines) = (self.cols, self.lines);
+        if self.cursor.row >= lines || self.cursor.col >= cols {
+            return Err(format!("cursor ({}, {}) outside {cols}x{lines}", self.cursor.row, self.cursor.col));
+        }
+        for (name, screen) in [("screen", &self.screen), ("other screen", &self.other_screen)] {
+            if screen.len() != lines {
+                return Err(format!("{name} has {} rows, expected {lines}", screen.len()));
+            }
+            for (r, row) in screen.iter().enumerate() {
+                if row.cells.len() != cols {
+                    return Err(format!("{name} row {r} has {} cells, expected {cols}", row.cells.len()));
+                }
+                for (c, cell) in row.cells.iter().enumerate() {
+                    if cell.has(flags::WIDE) && !row.cells.get(c + 1).is_some_and(|n| n.has(flags::WIDE_SPACER)) {
+                        return Err(format!("{name} row {r} col {c}: wide cell without a spacer after it"));
+                    }
+                    if cell.has(flags::WIDE_SPACER) && (c == 0 || !row.cells[c - 1].has(flags::WIDE)) {
+                        return Err(format!("{name} row {r} col {c}: spacer without a wide cell before it"));
+                    }
+                }
+            }
+        }
+        if self.display_offset > self.scrollback.len() {
+            return Err(format!(
+                "display offset {} beyond scrollback length {}",
+                self.display_offset,
+                self.scrollback.len()
+            ));
+        }
+        if self.scroll_top > self.scroll_bottom || self.scroll_bottom >= lines {
+            return Err(format!(
+                "scroll region {}..={} invalid for {lines} lines",
+                self.scroll_top, self.scroll_bottom
+            ));
+        }
+        if self.tabs.len() != cols {
+            return Err(format!("{} tab stops for {cols} columns", self.tabs.len()));
+        }
+        Ok(())
+    }
+
+    /// The visible rows as text, for tests. One line per visible row (taking
+    /// the view's scroll position into account), then a status line:
+    ///
+    /// ```text
+    /// hello world··|
+    /// a long line that wra⏎
+    /// ps here|
+    /// |
+    /// cursor=(2,7) alt=false offset=0
+    /// ```
+    ///
+    /// Each row is written up to its last non-blank cell ([`Cell::is_blank`]:
+    /// a typed space or an erased cell with a coloured background is not
+    /// blank). Spaces at the end of that span are shown as `·` so they can be
+    /// seen; spaces before other text are left as spaces. Wide characters
+    /// appear once (their spacer cell is skipped). The row ends with `⏎` if it
+    /// soft-wraps onto the next row, otherwise `|`.
+    #[doc(hidden)]
+    pub fn dump(&self) -> String {
+        let mut out = String::new();
+        for line in 0..self.lines {
+            let row = self.visible_row(line);
+            let len = row.cells.iter().rposition(|c| !c.is_blank()).map_or(0, |i| i + 1);
+            let text: String = row.cells[..len]
+                .iter()
+                .filter(|c| !c.has(flags::WIDE_SPACER))
+                .map(|c| c.ch())
+                .collect();
+            let kept = text.trim_end_matches(' ');
+            out.push_str(kept);
+            out.extend(std::iter::repeat_n('·', text.len() - kept.len()));
+            out.push(if row.wrapped { '⏎' } else { '|' });
+            out.push('\n');
+        }
+        out.push_str(&format!(
+            "cursor=({},{}) alt={} offset={}",
+            self.cursor.row, self.cursor.col, self.alt_active, self.display_offset
+        ));
+        out
+    }
+}
+
 impl Terminal {
     /// Delete lines inside the scroll region; unlike output scrolling, these
     /// never go to scrollback.
@@ -1318,5 +1410,9 @@ impl Term {
 
     pub fn advance(&mut self, bytes: &[u8]) {
         self.parser.advance(&mut self.state, bytes);
+        #[cfg(debug_assertions)]
+        if let Err(e) = self.state.check_invariants() {
+            panic!("terminal invariant broken: {e}");
+        }
     }
 }

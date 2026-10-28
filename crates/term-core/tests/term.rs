@@ -1,3 +1,8 @@
+//! Screen behaviour per feature: printing, wrapping, scrolling, colours,
+//! modes, queries, plus regression tests for bugs found in review. Screen
+//! state is compared through `Terminal::dump` with insta inline snapshots.
+
+use insta::assert_snapshot;
 use term_core::{Color, Term, flags};
 
 fn text(t: &Term, line: usize) -> String {
@@ -214,4 +219,35 @@ fn osc_clipboard_and_cwd() {
     t.advance(b"\x1b]52;c;aGVsbG8=\x07\x1b]7;file://host/Users/a%20b\x07");
     assert_eq!(t.state.clipboard.as_deref(), Some("hello"));
     assert_eq!(t.state.cwd.as_deref(), Some("/Users/a b"));
+}
+
+#[test]
+fn dump_shows_wraps_trailing_spaces_and_cursor() {
+    let mut t = Term::new(6, 4, 10);
+    t.advance("ab  \r\n漢x wrapped\r\n\x1b[41m \x1b[0m".as_bytes());
+    assert_snapshot!(t.state.dump(), @r"
+    ab··|
+    漢x wr⏎
+    apped|
+    ·|
+    cursor=(3,1) alt=false offset=0
+    ");
+}
+
+#[test]
+fn dump_follows_view_and_alt_screen() {
+    let mut t = Term::new(4, 2, 10);
+    t.advance(b"1\r\n2\r\n3");
+    t.state.scroll_view(1);
+    assert_snapshot!(t.state.dump(), @r"
+    1|
+    2|
+    cursor=(1,1) alt=false offset=1
+    ");
+    t.advance(b"\x1b[?1049h\x1b[Hvi");
+    assert_snapshot!(t.state.dump(), @r"
+    vi|
+    |
+    cursor=(0,2) alt=true offset=0
+    ");
 }

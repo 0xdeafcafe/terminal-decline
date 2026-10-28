@@ -37,5 +37,9 @@ vte = { path = "vendor/vte" }
 [profile.release]
 lto = "thin"
 codegen-units = 1
-panic = "abort"
+# Unwind, so a bug in one window's parser stops only that window (see
+# crates/term-app/src/crash.rs). A panic on the main thread still aborts.
+panic = "unwind"
 debug = "line-tables-only"
+# A decline.dSYM next to the binary, kept per release to symbolicate crashes.
+split-debuginfo = "packed"

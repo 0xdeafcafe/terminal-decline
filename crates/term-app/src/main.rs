@@ -3,11 +3,13 @@
 
 use std::path::PathBuf;
 
-use decline::{Paths, USAGE, app, config, pin};
+use decline::{Paths, USAGE, app, config, crash, pin};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let paths = Paths::from_env();
+    let home = std::env::var_os("HOME").filter(|h| !h.is_empty()).map(PathBuf::from);
+    crash::install(crash::logs_dir(&home.unwrap_or_else(std::env::temp_dir)), true);
     if args.first().map(String::as_str) == Some("pin") {
         std::process::exit(match pin::run(&args[1..], &paths, &mut pin::system_runner) {
             Ok(()) => 0,
@@ -63,14 +65,15 @@ fn main() {
 
     let refs: Vec<&std::path::Path> = layers.iter().map(|p| p.as_path()).collect();
     let (mut config, errors) = config::load(&refs);
-    for e in errors {
+    for e in &errors {
         eprintln!("decline: {e}");
     }
     if let Some(cmd) = command.filter(|c| !c.is_empty()) {
         config.command = cmd;
     }
     let name = pin::own_app_name(&paths).unwrap_or_else(|| "decline".into());
-    app::run(config, &name, restore);
+    // Shown in each window too: an app started from the Dock has no stderr.
+    app::run(config, errors, &name, restore);
 }
 
 fn die(msg: &str) -> ! {

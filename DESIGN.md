@@ -100,6 +100,35 @@ only with `DECLINE_TEST_DUMP=<file>` set) that writes JSON dumps.
    window is hidden or covered. When the display link was paused, a wake-up
    draws immediately rather than waiting a refresh.
 
+## Failures and crashes
+
+An app started from the Dock or as a pin has no stderr, so failures are
+written into the window as dim red text (and to stderr):
+
+- Config errors appear at the top of each window, before the program's
+  output: `decline: config: font_sise: unknown field …; ignored`.
+- A program that can't be started leaves its error and "press any key to
+  close". One that exits within 1 s with a non-zero status (a broken pin,
+  `decline -e /nonexistent`) leaves `[process exited with status N]`. In
+  both cases the window stays open until a key is pressed (Cmd shortcuts
+  still work, so the message can be copied). A program that exits with
+  status 0, or after the first second, closes its window as before. The
+  exit status comes from term-pty's `Child`, which reaps and signals under
+  one lock, so no signal can reach a process that reused the pid.
+
+Release builds unwind (`panic = "unwind"`). A panic hook writes the
+message, a backtrace and the version to
+`~/Library/Logs/decline/crash-<time>.log` and logs a fault to os_log
+(subsystem `red.forbes.decline`, a few lines of FFI to `_os_log_impl`). A
+panic while a reader thread parses output is caught inside the terminal's
+lock, so the lock is never poisoned: that session's terminal is replaced by
+a fresh one saying "decline hit a bug and stopped this session; details in
+…", its program is killed, and other windows keep running. A panic on the
+main thread (AppKit) aborts once it has been logged. Each release keeps
+its `decline.dSYM` (`split-debuginfo = "packed"`) as a release download,
+for symbolicating crash logs. Unwinding costs 157 KB of binary (unwind
+tables and landing pads: 1.34 → 1.50 MB) and no measurable parse speed.
+
 ## Rendering (Metal)
 
 - One `CAMetalLayer`, `presentsWithTransaction = false`, triple-buffered
@@ -210,7 +239,7 @@ Read once at start; later: reload on file change (FSEvents, no polling).
 | `cat` 100 MB coloured text | 1.44–1.53 s | 1.90 s |
 | CPU time during that `cat` | 1.6 s | 4.4 s |
 | Footprint after it (10k lines scrollback) | 59 MB | 145–177 MB |
-| Binary size | 1.1 MB | — |
+| Binary size | 1.5 MB (unwinding; 1.3 MB aborting) | — |
 | Parse, plain text (1 KB pieces) | 423 MB/s | — |
 | Parse, coloured / TUI / `seq` / Unicode | 172 / 289 / 110 / 131 MB/s | — |
 

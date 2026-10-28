@@ -4,6 +4,9 @@ use std::ffi::CString;
 use std::fs::File;
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::unix::process::ExitStatusExt;
+use std::process::ExitStatus;
+use std::sync::{Arc, Mutex};
 
 mod command;
 
@@ -31,6 +34,58 @@ impl Size {
 pub struct Pty {
     master: OwnedFd,
     pid: libc::pid_t,
+    child: Child,
+}
+
+/// The program's process, shared between the [`Pty`] (which hangs up on it
+/// and reaps it when dropped) and whoever wants its exit status. Reaping and
+/// signalling take the same lock, so a signal never reaches a process that
+/// reused the pid after it was reaped.
+#[derive(Clone)]
+pub struct Child {
+    pid: libc::pid_t,
+    /// The raw `waitpid` status, once reaped.
+    status: Arc<Mutex<Option<libc::c_int>>>,
+}
+
+impl Child {
+    fn new(pid: libc::pid_t) -> Child {
+        Child {
+            pid,
+            status: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// The exit status if the program has exited (reaping it), without
+    /// waiting.
+    pub fn try_wait(&self) -> Option<ExitStatus> {
+        self.wait_with(libc::WNOHANG)
+    }
+
+    fn wait_with(&self, flags: libc::c_int) -> Option<ExitStatus> {
+        let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
+        if status.is_none() {
+            let mut raw: libc::c_int = 0;
+            if unsafe { libc::waitpid(self.pid, &mut raw, flags) } == self.pid {
+                *status = Some(raw);
+            }
+        }
+        status.map(ExitStatus::from_raw)
+    }
+
+    /// Send `sig` to the program (and with `group`, to its process group
+    /// too), unless it has already been reaped.
+    pub fn signal(&self, sig: libc::c_int, group: bool) {
+        let status = self.status.lock().unwrap_or_else(|e| e.into_inner());
+        if status.is_none() {
+            unsafe {
+                if group {
+                    libc::kill(-self.pid, sig);
+                }
+                libc::kill(self.pid, sig);
+            }
+        }
+    }
 }
 
 pub fn login_shell() -> String {
@@ -71,6 +126,9 @@ impl Pty {
         // async-signal-safe calls are allowed.
         let shell = cmd.shell.clone().filter(|s| !s.is_empty()).unwrap_or_else(login_shell);
         let program = cstr(&shell)?;
+        // Written to the terminal by the child if exec fails (it can't
+        // format anything after forking).
+        let exec_failed = format!("decline: could not start {shell}\r\n");
         let argv: Vec<CString> = build_argv(&shell, &cmd.argv).iter().map(|a| cstr(a)).collect::<io::Result<_>>()?;
         let mut argv_ptrs: Vec<*const libc::c_char> = argv.iter().map(|a| a.as_ptr()).collect();
         argv_ptrs.push(std::ptr::null());
@@ -135,6 +193,7 @@ impl Pty {
                     libc::signal(sig, libc::SIG_DFL);
                 }
                 libc::execve(program.as_ptr(), argv_ptrs.as_ptr(), env_ptrs.as_ptr());
+                libc::write(libc::STDERR_FILENO, exec_failed.as_ptr().cast(), exec_failed.len());
                 libc::_exit(127);
             }
         }
@@ -143,11 +202,20 @@ impl Pty {
             libc::fcntl(master.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC);
         }
         set_nonblocking(master.as_raw_fd());
-        Ok(Pty { master, pid })
+        Ok(Pty {
+            master,
+            pid,
+            child: Child::new(pid),
+        })
     }
 
     pub fn pid(&self) -> libc::pid_t {
         self.pid
+    }
+
+    /// A handle on the program's process, for its exit status.
+    pub fn child(&self) -> Child {
+        self.child.clone()
     }
 
     /// A handle for reading the program's output.
@@ -206,14 +274,12 @@ impl Pty {
 
 impl Drop for Pty {
     fn drop(&mut self) {
-        let pid = self.pid;
-        unsafe {
-            libc::kill(pid, libc::SIGHUP);
-        }
+        let child = self.child.clone();
+        child.signal(libc::SIGHUP, false);
         // Reap off the main thread; force it after a grace period.
-        let _ = std::thread::Builder::new().name("pty-reaper".into()).spawn(move || unsafe {
+        let _ = std::thread::Builder::new().name("pty-reaper".into()).spawn(move || {
             for _ in 0..20 {
-                if libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) != 0 {
+                if child.try_wait().is_some() {
                     return;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(100));
@@ -222,9 +288,8 @@ impl Drop for Pty {
             // calls setsid). Kill the group too, so programs it started that
             // also ignore SIGHUP don't keep the PTY open, which would leave
             // the reader thread waiting forever.
-            libc::kill(-pid, libc::SIGKILL);
-            libc::kill(pid, libc::SIGKILL);
-            libc::waitpid(pid, std::ptr::null_mut(), 0);
+            child.signal(libc::SIGKILL, true);
+            child.wait_with(0);
         });
     }
 }

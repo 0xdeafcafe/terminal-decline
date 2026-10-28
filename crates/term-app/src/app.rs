@@ -22,6 +22,8 @@ pub struct AppIvars {
     config: Rc<Config>,
     /// Windows to reopen after a dogfood build restarted into a newer one.
     restore: RefCell<Vec<crate::reload::SavedWindow>>,
+    /// Config errors, shown at the top of each window.
+    notices: Rc<[String]>,
     windows: RefCell<Vec<(Retained<NSWindow>, Retained<TerminalView>)>>,
 }
 
@@ -84,10 +86,16 @@ define_class!(
 );
 
 impl AppDelegate {
-    pub fn new(mtm: MainThreadMarker, config: Config, restore: Vec<crate::reload::SavedWindow>) -> Retained<AppDelegate> {
+    pub fn new(
+        mtm: MainThreadMarker,
+        config: Config,
+        notices: Vec<String>,
+        restore: Vec<crate::reload::SavedWindow>,
+    ) -> Retained<AppDelegate> {
         let this = Self::alloc(mtm).set_ivars(AppIvars {
             config: Rc::new(config),
             restore: RefCell::new(restore),
+            notices: notices.into(),
             windows: RefCell::new(Vec::new()),
         });
         let delegate: Retained<AppDelegate> = unsafe { msg_send![super(this), init] };
@@ -223,8 +231,16 @@ impl AppDelegate {
             eprintln!("decline: window {}", window.windowNumber());
         }
 
-        if let Err(e) = view.start(config, Launch { command, fonts, scale }) {
-            eprintln!("decline: could not start program: {e}");
+        if let Err(e) = view.start(
+            config,
+            Launch {
+                command,
+                fonts,
+                scale,
+                notices: self.ivars().notices.clone(),
+            },
+        ) {
+            eprintln!("decline: could not open a window: {e}");
             window.close();
             return;
         }
@@ -342,11 +358,11 @@ thread_local! {
     static DELEGATE: RefCell<Option<objc2::rc::Weak<AppDelegate>>> = const { RefCell::new(None) };
 }
 
-pub fn run(config: Config, app_name: &str, restore: Vec<crate::reload::SavedWindow>) {
+pub fn run(config: Config, notices: Vec<String>, app_name: &str, restore: Vec<crate::reload::SavedWindow>) {
     let mtm = MainThreadMarker::new().expect("must run on the main thread");
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
-    let delegate = AppDelegate::new(mtm, config, restore);
+    let delegate = AppDelegate::new(mtm, config, notices, restore);
     app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
     app.setMainMenu(Some(&build_menus(mtm, app_name)));
     app.run();

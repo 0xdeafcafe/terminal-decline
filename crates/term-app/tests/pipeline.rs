@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use decline::frame_policy::{self, Decision};
 use decline::keys::{self, KeyAction, KeyInput, KeyModes, flags};
-use decline::session::{Hooks, Session};
+use decline::session::{Hooks, Outcome, Session};
 use term_core::{ColorKind, Term, Terminal};
 use term_pty::{Command, Size};
 
@@ -60,6 +60,7 @@ impl Drop for TempDir {
 struct Events {
     wakes: u64,
     exits: u64,
+    outcome: Option<Outcome>,
 }
 
 #[derive(Default)]
@@ -76,8 +77,11 @@ impl Signal {
                 a.events.lock().unwrap().wakes += 1;
                 a.cv.notify_all();
             }),
-            Box::new(move || {
-                b.events.lock().unwrap().exits += 1;
+            Box::new(move |outcome| {
+                let mut ev = b.events.lock().unwrap();
+                ev.exits += 1;
+                ev.outcome = Some(outcome);
+                drop(ev);
                 b.cv.notify_all();
             }),
         )
@@ -85,6 +89,10 @@ impl Signal {
 
     fn wakes(&self) -> u64 {
         self.events.lock().unwrap().wakes
+    }
+
+    fn outcome(&self) -> Option<Outcome> {
+        self.events.lock().unwrap().outcome
     }
 
     fn exits(&self) -> u64 {
@@ -370,6 +378,167 @@ fn exit_status_and_on_exit() {
     h.type_text("exit 7\n");
     h.wait_exit();
     assert_eq!(h.signal.exits(), 1, "on_exit fires once");
+}
+
+// --- Failures shown in the window -------------------------------------------
+
+/// Run `argv` on a `cols`-wide terminal until the session ends; the outcome
+/// and the final screen.
+fn run_to_end(name: &str, argv: &[&str], cols: u16) -> (Outcome, String) {
+    let mut h = Harness::start_sized(name, argv, size(cols, 24), |_| {});
+    h.wait_exit();
+    (h.signal.outcome().unwrap(), h.dump())
+}
+
+#[test]
+fn quick_failure_keeps_the_window_with_its_status() {
+    let (outcome, screen) = run_to_end("exit3", &["/bin/sh", "-c", "echo oops; exit 3"], 80);
+    assert_eq!(outcome, Outcome::Hold);
+    assert!(has_line(&screen, "oops"), "{screen}");
+    assert!(has_line(&screen, "[process exited with status 3]"), "{screen}");
+    assert!(has_line(&screen, "press any key to close"), "{screen}");
+}
+
+#[test]
+fn quick_success_closes() {
+    let (outcome, screen) = run_to_end("exit0", &["/bin/sh", "-c", "echo fine; exit 0"], 80);
+    assert_eq!(outcome, Outcome::Closed);
+    assert!(!screen.contains("[process exited"), "{screen}");
+}
+
+#[test]
+fn failure_after_a_second_closes() {
+    let (outcome, screen) = run_to_end("slow-exit3", &["/bin/sh", "-c", "sleep 1.2; exit 3"], 80);
+    assert_eq!(outcome, Outcome::Closed);
+    assert!(!screen.contains("[process exited"), "{screen}");
+}
+
+/// `decline -e /nonexistent`: the shell says why and exits with 127.
+#[test]
+fn missing_program_keeps_the_window() {
+    let (outcome, screen) = run_to_end("missing", &["/nonexistent"], 80);
+    assert_eq!(outcome, Outcome::Hold);
+    assert!(screen.contains("/nonexistent"), "{screen}");
+    // 127 from sh; bash (which /bin/sh is on macOS) says 126.
+    assert!(
+        has_line(&screen, "[process exited with status 127]") || has_line(&screen, "[process exited with status 126]"),
+        "{screen}"
+    );
+}
+
+/// A command that can't even be started (a NUL byte can't be passed to
+/// exec): no program, the error in the terminal, and on_exit right away.
+#[test]
+fn program_that_cannot_start_says_why() {
+    let home = TempDir::new("nostart");
+    let cmd = command(&["bad\0name"], home.path());
+    let signal = Arc::new(Signal::default());
+    let session = Session::spawn(&cmd, size(80, 24), Term::new(80, 24, 100), signal.hooks()).expect("spawn");
+    assert_eq!(signal.exits(), 1);
+    assert_eq!(signal.outcome(), Some(Outcome::Hold));
+    assert_eq!(session.pid(), None);
+    let screen = session.lock_term().state.dump();
+    assert!(
+        screen.starts_with("decline: could not start \"bad\\0name\": nul byte in argument|"),
+        "{screen}"
+    );
+    assert!(has_line(&screen, "press any key to close"), "{screen}");
+    // Typing into it and resizing it do nothing harmful.
+    session.send(b"x".to_vec());
+    session.resize(size(60, 20)).unwrap();
+    session.shut_down();
+}
+
+/// Config errors go into the terminal (dim red) before the program's output.
+#[test]
+fn config_errors_show_before_the_output() {
+    let home = TempDir::new("badconfig");
+    let file = home.path().join("config.toml");
+    std::fs::write(&file, "font_sise = 3\nfont_size = 15\n").unwrap();
+    let (config, errors) = decline::config::load(&[file.as_path()]);
+    assert_eq!(config.font_size, 15.0);
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    let cmd = command(&["/bin/sh", "-c", "echo program output; sleep 0.3"], home.path());
+    let signal = Arc::new(Signal::default());
+    let mut term = Term::new(300, 24, 100);
+    for e in &errors {
+        decline::session::write_notice(&mut term, e);
+    }
+    let mut h = Harness {
+        session: Some(Session::spawn(&cmd, size(300, 24), term, signal.clone().hooks()).unwrap()),
+        signal,
+        _home: home,
+    };
+    h.wait_for("the output", |d| has_line(d, "program output"));
+    let lines: Vec<String> = h.dump().lines().map(String::from).collect();
+    assert!(lines[0].starts_with("decline: config: font_sise: unknown field"), "{lines:?}");
+    assert!(lines[0].trim_end_matches(['|', '⏎', '·']).ends_with("; ignored"), "{lines:?}");
+    assert!(lines[1].starts_with("program output"), "{lines:?}");
+    {
+        let t = h.session().lock_term();
+        let cell = t.state.visible_row(0).get(0);
+        assert!(
+            cell.has(term_core::flags::DIM) && cell.fg.kind() == ColorKind::Indexed(1),
+            "{cell:?}"
+        );
+    }
+    h.wait_exit();
+    assert_eq!(h.signal.outcome(), Some(Outcome::Closed));
+}
+
+/// A panic while parsing one session's output (forced through the
+/// `test-hooks` feature) stops that session only: it shows where the crash
+/// log is, its program is killed, its terminal's lock isn't poisoned, and
+/// another session keeps working.
+#[test]
+fn parser_panic_stops_only_that_session() {
+    let logs = TempDir::new("crash-logs");
+    decline::crash::install(logs.path().to_path_buf(), false);
+
+    let other = Harness::shell("survivor");
+    let script = "printf 'before the bug\\n'; printf '\\033]7770;test-panic\\007'; echo after; sleep 30";
+    let mut broken = Harness::start_sized("panic", &["/bin/sh", "-c", script], size(300, 24), |_| {});
+    let pid = broken.session().pid().unwrap();
+    broken.wait_exit();
+    assert_eq!(broken.signal.outcome(), Some(Outcome::Hold));
+    assert!(!broken.session().term().is_poisoned());
+
+    // Other tests failing in this process would leave logs here too.
+    let (log, text) = std::fs::read_dir(logs.path())
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .map(|p| (p.clone(), std::fs::read_to_string(p).unwrap()))
+        .find(|(_, text)| text.contains("test-hooks: the parse step was asked to panic"))
+        .expect("a crash log");
+    assert!(text.contains(concat!("decline ", env!("CARGO_PKG_VERSION"))), "{text}");
+    assert!(text.contains("thread 'pty-reader'") && text.contains("backtrace:"), "{text}");
+
+    let screen = broken.dump();
+    let expected = format!(
+        "decline hit a bug and stopped this session; details in {}",
+        decline::crash::tilde(&log)
+    );
+    assert!(has_line(&screen, &expected), "{screen}");
+    assert!(has_line(&screen, "press any key to close"), "{screen}");
+    assert!(!screen.contains("after"), "{screen}");
+
+    // The program was killed: only a zombie is left until the session goes.
+    let until = Instant::now() + DEADLINE;
+    loop {
+        let out = std::process::Command::new("/bin/ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .unwrap();
+        let stat = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if stat.is_empty() || stat.starts_with('Z') {
+            break;
+        }
+        assert!(Instant::now() < until, "program still running: {stat}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    other.type_text("echo still-alive\n");
+    other.wait_for("the other session", |d| has_line(d, "still-alive"));
 }
 
 // --- Full-screen programs ---------------------------------------------------

@@ -82,8 +82,11 @@ impl Default for Modes {
     }
 }
 
-/// A point in the whole buffer. `line` counts from the first line ever written,
-/// so it stays valid while new output scrolls in.
+/// A point in the whole buffer. `line` counts every line that has scrolled
+/// off the top of the screen, stored in scrollback or not, so a point stays
+/// attached to its text while new output scrolls in. Lines no longer stored
+/// (dropped from scrollback, or scrolled off the alternate screen) have no
+/// text.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct Point {
     pub line: u64,
@@ -123,6 +126,12 @@ pub struct Terminal {
     scrollback: Scrollback,
     /// How many rows the view is scrolled back by (0 = following output).
     display_offset: usize,
+    /// Buffer line number ([`Point::line`]) of the screen's first row: the
+    /// count of rows that have scrolled off its top. On the primary screen
+    /// the scrollback holds the lines just before it.
+    top_line: u64,
+    /// The same for the other screen.
+    other_top_line: u64,
 
     pub cursor: Cursor,
     saved_primary: Option<SavedCursor>,
@@ -172,6 +181,8 @@ impl Terminal {
             alt_active: false,
             scrollback: Scrollback::new(scrollback_limit),
             display_offset: 0,
+            top_line: 0,
+            other_top_line: 0,
             cursor: Cursor::default(),
             saved_primary: None,
             saved_alt: None,
@@ -266,22 +277,26 @@ impl Terminal {
     /// The buffer position of visible line `line`.
     pub fn visible_point(&self, line: usize, col: usize) -> Point {
         Point {
-            line: self.scrollback.total() - self.display_offset as u64 + line as u64,
+            line: self.top_line - self.display_offset as u64 + line as u64,
             col,
         }
     }
 
+    /// The row at buffer line `line`, or None if it is not stored (any more).
     fn row_at(&self, line: u64) -> Option<Cow<'_, Row>> {
-        let first = self.scrollback.total() - self.scrollback.len() as u64;
-        if line < first {
+        if line >= self.top_line {
+            return self.screen.get((line - self.top_line) as usize).map(Cow::Borrowed);
+        }
+        if self.alt_active {
+            // Rows that scroll off the alternate screen are not kept.
             return None;
         }
-        let idx = (line - first) as usize;
-        if idx < self.scrollback.len() {
-            self.scrollback.get(idx).map(Cow::Owned)
-        } else {
-            self.screen.get(idx - self.scrollback.len()).map(Cow::Borrowed)
+        let back = self.top_line - line;
+        let sb = self.scrollback.len();
+        if back > sb as u64 {
+            return None;
         }
+        self.scrollback.get(sb - back as usize).map(Cow::Owned)
     }
 
     pub fn selection_text(&self) -> Option<String> {
@@ -320,12 +335,14 @@ impl Terminal {
         // On the primary screen, rows pushed off the top go into scrollback so
         // the cursor stays visible.
         let removed = resize_screen(&mut self.screen, &mut self.cursor, cols, lines);
+        self.top_line += removed.len() as u64;
         if self.alt_active {
             // The primary screen is hidden; its cursor is the saved one.
             let mut cursor = self.saved_primary.map(|s| s.cursor).unwrap_or_default();
             let mut other = std::mem::take(&mut self.other_screen);
             let removed = resize_screen(&mut other, &mut cursor, cols, lines);
             self.other_screen = other;
+            self.other_top_line += removed.len() as u64;
             for row in removed {
                 self.push_scrollback(&row);
             }
@@ -363,7 +380,8 @@ impl Terminal {
     }
 
     /// Copy a row into scrollback. The row itself is left for the caller to
-    /// reuse as the new blank line.
+    /// reuse as the new blank line. Callers also advance the screen's
+    /// `top_line`, which counts rows whether or not they were stored.
     fn push_scrollback(&mut self, row: &Row) {
         if self.scrollback.limit() == 0 {
             return;
@@ -380,6 +398,9 @@ impl Terminal {
         let n = n.min(bottom - top + 1);
         let blank = self.blank();
         let to_history = top == 0 && !self.alt_active;
+        if top == 0 {
+            self.top_line += n as u64;
+        }
         for i in 0..n {
             if to_history {
                 let row = std::mem::take(&mut self.screen[top + i]);
@@ -521,6 +542,12 @@ impl Terminal {
             return;
         }
         std::mem::swap(&mut self.screen, &mut self.other_screen);
+        std::mem::swap(&mut self.top_line, &mut self.other_top_line);
+        if on {
+            // Number the alternate screen's rows after the primary's, so a
+            // point on one can't be taken for a point on the other.
+            self.top_line = self.top_line.max(self.other_top_line + self.lines as u64);
+        }
         self.alt_active = on;
         if on && clear {
             let blank = self.blank();
@@ -539,6 +566,10 @@ impl Terminal {
         fresh.default_colors = self.default_colors;
         fresh.cell_pixels = self.cell_pixels;
         fresh.scrollback = std::mem::replace(&mut self.scrollback, Scrollback::new(0));
+        // Keep line numbers counting up from the primary screen's.
+        let primary_top = if self.alt_active { self.other_top_line } else { self.top_line };
+        fresh.top_line = primary_top;
+        fresh.other_top_line = primary_top;
         *self = fresh;
     }
 
@@ -623,6 +654,11 @@ impl Terminal {
         let cell = self.screen[row].cells[col];
         if cell.has(flags::WIDE | flags::WIDE_SPACER) || cell.codepoint() < 0x2000 {
             return;
+        }
+        // The spacer goes where the next cell is; if that is the left half of
+        // a wide character, erase the whole of it rather than half.
+        if self.screen[row].cells[col + 1].has(flags::WIDE) {
+            self.erase_cells(row, col + 1..col + 2);
         }
         let cells = &mut self.screen[row].cells;
         cells[col].packed |= flags::WIDE;
@@ -1288,6 +1324,105 @@ impl Perform for Terminal {
     }
 }
 
+/// Testing aids: shared by the unit, property, conformance and fuzz tests.
+impl Terminal {
+    /// Check the rules the rest of the code relies on: the cursor is on the
+    /// screen; both screens have `lines` rows of exactly `cols` cells; every
+    /// WIDE cell is followed by a WIDE_SPACER and every spacer follows a WIDE
+    /// cell; the view is not scrolled back further than the scrollback; the
+    /// scroll region is inside the screen. Costs one pass over the screens.
+    #[doc(hidden)]
+    pub fn check_invariants(&self) -> Result<(), String> {
+        let (cols, lines) = (self.cols, self.lines);
+        if self.cursor.row >= lines || self.cursor.col >= cols {
+            return Err(format!("cursor ({}, {}) outside {cols}x{lines}", self.cursor.row, self.cursor.col));
+        }
+        for (name, screen) in [("screen", &self.screen), ("other screen", &self.other_screen)] {
+            if screen.len() != lines {
+                return Err(format!("{name} has {} rows, expected {lines}", screen.len()));
+            }
+            for (r, row) in screen.iter().enumerate() {
+                if row.cells.len() != cols {
+                    return Err(format!("{name} row {r} has {} cells, expected {cols}", row.cells.len()));
+                }
+                for (c, cell) in row.cells.iter().enumerate() {
+                    if cell.has(flags::WIDE) && !row.cells.get(c + 1).is_some_and(|n| n.has(flags::WIDE_SPACER)) {
+                        return Err(format!("{name} row {r} col {c}: wide cell without a spacer after it"));
+                    }
+                    if cell.has(flags::WIDE_SPACER) && (c == 0 || !row.cells[c - 1].has(flags::WIDE)) {
+                        return Err(format!("{name} row {r} col {c}: spacer without a wide cell before it"));
+                    }
+                }
+            }
+        }
+        if self.display_offset > self.scrollback.len() {
+            return Err(format!(
+                "display offset {} beyond scrollback length {}",
+                self.display_offset,
+                self.scrollback.len()
+            ));
+        }
+        if self.scroll_top > self.scroll_bottom || self.scroll_bottom >= lines {
+            return Err(format!(
+                "scroll region {}..={} invalid for {lines} lines",
+                self.scroll_top, self.scroll_bottom
+            ));
+        }
+        let primary_top = if self.alt_active { self.other_top_line } else { self.top_line };
+        if primary_top < self.scrollback.len() as u64 {
+            return Err(format!(
+                "primary screen starts at line {primary_top}, before its {} scrollback lines",
+                self.scrollback.len()
+            ));
+        }
+        if self.tabs.len() != cols {
+            return Err(format!("{} tab stops for {cols} columns", self.tabs.len()));
+        }
+        Ok(())
+    }
+
+    /// The visible rows as text, for tests. One line per visible row (taking
+    /// the view's scroll position into account), then a status line:
+    ///
+    /// ```text
+    /// hello world··|
+    /// a long line that wra⏎
+    /// ps here|
+    /// |
+    /// cursor=(2,7) alt=false offset=0
+    /// ```
+    ///
+    /// Each row is written up to its last non-blank cell ([`Cell::is_blank`]:
+    /// a typed space or an erased cell with a coloured background is not
+    /// blank). Spaces at the end of that span are shown as `·` so they can be
+    /// seen; spaces before other text are left as spaces. Wide characters
+    /// appear once (their spacer cell is skipped). The row ends with `⏎` if it
+    /// soft-wraps onto the next row, otherwise `|`.
+    #[doc(hidden)]
+    pub fn dump(&self) -> String {
+        let mut out = String::new();
+        for line in 0..self.lines {
+            let row = self.visible_row(line);
+            let len = row.cells.iter().rposition(|c| !c.is_blank()).map_or(0, |i| i + 1);
+            let text: String = row.cells[..len]
+                .iter()
+                .filter(|c| !c.has(flags::WIDE_SPACER))
+                .map(|c| c.ch())
+                .collect();
+            let kept = text.trim_end_matches(' ');
+            out.push_str(kept);
+            out.extend(std::iter::repeat_n('·', text.len() - kept.len()));
+            out.push(if row.wrapped { '⏎' } else { '|' });
+            out.push('\n');
+        }
+        out.push_str(&format!(
+            "cursor=({},{}) alt={} offset={}",
+            self.cursor.row, self.cursor.col, self.alt_active, self.display_offset
+        ));
+        out
+    }
+}
+
 impl Terminal {
     /// Delete lines inside the scroll region; unlike output scrolling, these
     /// never go to scrollback.
@@ -1306,6 +1441,9 @@ impl Terminal {
 pub struct Term {
     parser: vte::Parser,
     pub state: Terminal,
+    /// The start of a UTF-8 character that the last chunk ended in the
+    /// middle of, held back until the rest arrives (see [`Term::advance`]).
+    held: Vec<u8>,
 }
 
 impl Term {
@@ -1313,10 +1451,53 @@ impl Term {
         Term {
             parser: vte::Parser::new(),
             state: Terminal::new(cols, lines, scrollback_limit),
+            held: Vec::new(),
         }
     }
 
+    /// Parse a chunk of program output.
+    ///
+    /// A UTF-8 character split across two chunks is held back and parsed
+    /// with the next chunk, so the parser never sees a chunk that ends in
+    /// the middle of one. vte 0.15 mishandles that case: if an invalid byte
+    /// follows within three bytes of the split, it drops the valid text
+    /// between (`"é"` sent as `[0xC3]`, `[0xA9, b'a', 0xFF]` loses the `a`).
     pub fn advance(&mut self, bytes: &[u8]) {
-        self.parser.advance(&mut self.state, bytes);
+        if self.held.is_empty() {
+            let n = bytes.len() - incomplete_utf8_tail(bytes);
+            self.parser.advance(&mut self.state, &bytes[..n]);
+            self.held.extend_from_slice(&bytes[n..]);
+        } else {
+            // Rare (the last chunk ended mid-character): join the two.
+            let mut joined = std::mem::take(&mut self.held);
+            joined.extend_from_slice(bytes);
+            let n = joined.len() - incomplete_utf8_tail(&joined);
+            self.parser.advance(&mut self.state, &joined[..n]);
+            joined.drain(..n);
+            self.held = joined;
+        }
+        #[cfg(debug_assertions)]
+        if let Err(e) = self.state.check_invariants() {
+            panic!("terminal invariant broken: {e}");
+        }
     }
+}
+
+/// How many bytes at the end of `bytes` are the start of a UTF-8 character
+/// whose remaining bytes haven't arrived yet (0 if none).
+fn incomplete_utf8_tail(bytes: &[u8]) -> usize {
+    for back in 1..=bytes.len().min(3) {
+        let b = bytes[bytes.len() - back];
+        if b & 0xC0 == 0x80 {
+            continue; // continuation byte: keep looking for the lead byte
+        }
+        let len = match b {
+            0xC2..=0xDF => 2,
+            0xE0..=0xEF => 3,
+            0xF0..=0xF4 => 4,
+            _ => return 0,
+        };
+        return if back < len { back } else { 0 };
+    }
+    0
 }

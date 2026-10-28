@@ -1,3 +1,8 @@
+//! Screen behaviour per feature: printing, wrapping, scrolling, colours,
+//! modes, queries, plus regression tests for bugs found in review. Screen
+//! state is compared through `Terminal::dump` with insta inline snapshots.
+
+use insta::assert_snapshot;
 use term_core::{Color, Term, flags};
 
 fn text(t: &Term, line: usize) -> String {
@@ -214,4 +219,131 @@ fn osc_clipboard_and_cwd() {
     t.advance(b"\x1b]52;c;aGVsbG8=\x07\x1b]7;file://host/Users/a%20b\x07");
     assert_eq!(t.state.clipboard.as_deref(), Some("hello"));
     assert_eq!(t.state.cwd.as_deref(), Some("/Users/a b"));
+}
+
+#[test]
+fn dump_shows_wraps_trailing_spaces_and_cursor() {
+    let mut t = Term::new(6, 4, 10);
+    t.advance("ab  \r\n漢x wrapped\r\n\x1b[41m \x1b[0m".as_bytes());
+    assert_snapshot!(t.state.dump(), @r"
+    ab··|
+    漢x wr⏎
+    apped|
+    ·|
+    cursor=(3,1) alt=false offset=0
+    ");
+}
+
+#[test]
+fn dump_follows_view_and_alt_screen() {
+    let mut t = Term::new(4, 2, 10);
+    t.advance(b"1\r\n2\r\n3");
+    t.state.scroll_view(1);
+    assert_snapshot!(t.state.dump(), @r"
+    1|
+    2|
+    cursor=(1,1) alt=false offset=1
+    ");
+    t.advance(b"\x1b[?1049h\x1b[Hvi");
+    assert_snapshot!(t.state.dump(), @r"
+    vi|
+    |
+    cursor=(0,2) alt=true offset=0
+    ");
+}
+
+#[test]
+fn vs16_does_not_break_the_next_wide_char() {
+    // Regression: widening ⚠ wrote its spacer over the left half of 漢,
+    // leaving 漢's spacer without its wide cell.
+    let mut t = Term::new(6, 1, 0);
+    t.advance("a漢\r⚠\u{FE0F}".as_bytes());
+    assert_snapshot!(t.state.dump(), @r"
+    ⚠|
+    cursor=(0,2) alt=false offset=0
+    ");
+}
+
+#[test]
+fn utf8_split_across_chunks_keeps_the_text_after_it() {
+    // Regression (vte 0.15): completing a split character next to an
+    // invalid byte dropped the valid text in between.
+    let cases: &[&[&[u8]]] = &[
+        &[&[0xC3], &[0xA9, b'a', 0xFF]],
+        &[&[0xCC], &[0x81, b'0', 0xA9]],
+        &[&[0xE6, 0xBC], &[0xA2, b'a', 0xFF]],
+        &[&[0xE6], &[0xBC], &[0xA2, b'a', 0xFF]],
+        &[&[0xF0, 0x9F], &[0x98], &[], &[0x80, b'b', 0xC3]],
+    ];
+    for chunks in cases {
+        let mut whole = Term::new(10, 1, 0);
+        whole.advance(&chunks.concat());
+        let mut split = Term::new(10, 1, 0);
+        for c in *chunks {
+            split.advance(c);
+        }
+        assert_eq!(split.state.dump(), whole.state.dump(), "{chunks:?}");
+    }
+    let mut t = Term::new(10, 1, 0);
+    t.advance(&[0xC3]);
+    t.advance(&[0xA9, b'a', 0xFF]);
+    assert_snapshot!(t.state.dump(), @r"
+    éa�|
+    cursor=(0,3) alt=false offset=0
+    ");
+}
+
+fn select(t: &mut Term, from: (usize, usize), to: (usize, usize)) {
+    let anchor = t.state.visible_point(from.0, from.1);
+    let head = t.state.visible_point(to.0, to.1);
+    t.state.selection = Some(term_core::Selection { anchor, head });
+}
+
+#[test]
+fn selection_without_scrollback_does_not_slide_to_the_next_line() {
+    // Regression: with scrollback off, line numbers only counted stored
+    // lines, so after a scroll the selection pointed at the next line.
+    let mut t = Term::new(10, 2, 0);
+    t.advance(b"aaa\r\nbbb");
+    select(&mut t, (0, 0), (0, 2));
+    assert_eq!(t.state.selection_text().unwrap(), "aaa");
+    t.advance(b"\r\nccc");
+    assert_eq!(t.state.selection_text().unwrap(), "");
+    // A selection over both rows keeps only the part still on screen.
+    select(&mut t, (0, 0), (1, 2));
+    t.advance(b"\r\nddd");
+    assert_eq!(t.state.selection_text().unwrap(), "ccc");
+}
+
+#[test]
+fn selection_on_alt_screen_does_not_slide_to_the_next_line() {
+    let mut t = Term::new(10, 2, 100);
+    t.advance(b"shell\x1b[?1049h\x1b[Haaa\r\nbbb");
+    select(&mut t, (0, 0), (0, 2));
+    assert_eq!(t.state.selection_text().unwrap(), "aaa");
+    t.advance(b"\r\nccc");
+    assert_eq!(t.state.selection_text().unwrap(), "");
+    assert_eq!(t.state.scrollback_len(), 0);
+}
+
+#[test]
+fn selection_after_reset_and_alt_screen_round_trip() {
+    let mut t = Term::new(10, 2, 100);
+    t.advance(b"one\r\ntwo\r\nthree\x1bc");
+    t.advance(b"\x1b[?1049h\x1b[?1049lnew");
+    select(&mut t, (0, 0), (0, 2));
+    assert_eq!(t.state.selection_text().unwrap(), "new");
+    t.state.scroll_view(2);
+    select(&mut t, (0, 0), (1, 2));
+    assert_eq!(t.state.selection_text().unwrap(), "one\nnew");
+}
+
+#[test]
+fn vs16_next_to_a_narrow_char_overwrites_it() {
+    let mut t = Term::new(6, 1, 0);
+    t.advance("abc\r⚠\u{FE0F}".as_bytes());
+    assert_snapshot!(t.state.dump(), @r"
+    ⚠c|
+    cursor=(0,2) alt=false offset=0
+    ");
 }

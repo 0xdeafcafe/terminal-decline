@@ -5,6 +5,9 @@ struct Uniforms {
     float2 viewport; // drawable size in pixels
 };
 
+// The instance structs below must match `RectInstance` and `GlyphInstance`
+// in frame.rs; const asserts there check their sizes and field offsets.
+
 // Solid rectangles: cell backgrounds (merged into runs), underlines,
 // strikethrough, cursor.
 struct Rect {

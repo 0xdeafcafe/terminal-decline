@@ -14,9 +14,11 @@ objc2-metal.workspace = true
 objc2-quartz-core.workspace = true
 objc2-core-foundation.workspace = true
 dispatch2 = "0.3"
+unicode-width.workspace = true
 
 [dev-dependencies]
 criterion = { version = "0.7", default-features = false }
+proptest = "1"
 
 [[bench]]
 name = "frame"

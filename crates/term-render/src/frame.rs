@@ -3,6 +3,7 @@
 
 use term_core::{Cell, ColorKind, CursorShape, Terminal, flags};
 use term_font::{Metrics, Style};
+use unicode_width::UnicodeWidthChar;
 
 /// RGBA8 with red in the low byte (matches `unpack_unorm4x8_to_float`).
 pub type Rgba = u32;
@@ -19,6 +20,13 @@ pub const fn rgb(hex: u32) -> Rgba {
 #[inline]
 fn s16(v: i32) -> i16 {
     v.clamp(i16::MIN as i32, i16::MAX as i32) as i16
+}
+
+/// Cells a character takes, by the same rule term-core uses when it prints:
+/// 0 for characters it drops (controls, combining marks).
+#[inline]
+fn char_cells(c: char) -> usize {
+    c.width().unwrap_or(0)
 }
 
 fn with_alpha(c: Rgba, a: u8) -> Rgba {
@@ -47,6 +55,22 @@ pub struct GlyphInstance {
     pub color: Rgba,
     pub is_color: u32,
 }
+
+// These layouts must match `struct Rect` and `struct Glyph` in shaders.metal,
+// which read the instance buffers directly.
+const _: () = {
+    use std::mem::{offset_of, size_of};
+    assert!(size_of::<RectInstance>() == 12);
+    assert!(offset_of!(RectInstance, x) == 0);
+    assert!(offset_of!(RectInstance, w) == 4);
+    assert!(offset_of!(RectInstance, color) == 8);
+    assert!(size_of::<GlyphInstance>() == 20);
+    assert!(offset_of!(GlyphInstance, x) == 0);
+    assert!(offset_of!(GlyphInstance, w) == 4);
+    assert!(offset_of!(GlyphInstance, u) == 8);
+    assert!(offset_of!(GlyphInstance, color) == 12);
+    assert!(offset_of!(GlyphInstance, is_color) == 16);
+};
 
 /// Where a rasterised glyph sits in the glyph texture.
 #[derive(Clone, Copy, Debug)]
@@ -176,7 +200,7 @@ impl Frame {
         // Cells covered by input-method text don't draw their own glyphs.
         let preedit_cells = preedit.filter(|t| !t.is_empty()).map(|t| {
             let line = term.cursor.row + term.display_offset();
-            let width: usize = t.chars().map(|c| if (c as u32) < 0x1100 { 1 } else { 2 }).sum();
+            let width: usize = t.chars().map(char_cells).sum();
             (line, term.cursor.col..term.cursor.col + width)
         });
 
@@ -312,7 +336,10 @@ impl Frame {
         let y = input.padding.1 as i32 + line as i32 * ch;
         let mut col = input.term.cursor.col;
         for c in text.chars() {
-            let width = if (c as u32) < 0x1100 { 1 } else { 2 };
+            let width = char_cells(c);
+            if width == 0 {
+                continue;
+            }
             if col + width > input.term.cols() {
                 break;
             }

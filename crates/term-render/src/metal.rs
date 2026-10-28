@@ -20,63 +20,58 @@ use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
 use term_font::{Fonts, Style};
 
 use crate::frame::{Frame, FrameInput, GlyphSlot, GlyphSource};
+use crate::packer::{NoRoom, ShelfPacker};
 
 type Device = ProtocolObject<dyn MTLDevice>;
-type Texture = ProtocolObject<dyn MTLTexture>;
 type Buffer = ProtocolObject<dyn MTLBuffer>;
+pub type CommandBuffer = ProtocolObject<dyn MTLCommandBuffer>;
+/// A Metal texture, as taken by [`Renderer::encode`].
+pub type Texture = ProtocolObject<dyn MTLTexture>;
 
 const FRAMES_IN_FLIGHT: usize = 2;
 /// Caps keep the glyph textures within 16 MB each (R8 at 4096², BGRA at 2048²).
 const MAX_MASK_ATLAS: u32 = 4096;
 const MAX_COLOR_ATLAS: u32 = 2048;
 
-/// One glyph texture, filled shelf by shelf.
+/// One glyph texture; [`ShelfPacker`] decides where glyphs go.
 struct Atlas {
     texture: Retained<Texture>,
-    max: u32,
-    full: bool,
+    packer: ShelfPacker,
     format: MTLPixelFormat,
     bpp: usize,
-    size: u32,
-    x: u32,
-    y: u32,
-    shelf_h: u32,
+}
+
+fn new_texture(device: &Device, format: MTLPixelFormat, size: u32) -> Retained<Texture> {
+    let desc = unsafe {
+        MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(format, size as usize, size as usize, false)
+    };
+    desc.setUsage(MTLTextureUsage::ShaderRead);
+    device.newTextureWithDescriptor(&desc).expect("glyph texture")
 }
 
 impl Atlas {
     fn new(device: &Device, format: MTLPixelFormat, bpp: usize, size: u32, max: u32) -> Atlas {
-        let desc = unsafe {
-            MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(format, size as usize, size as usize, false)
-        };
-        desc.setUsage(MTLTextureUsage::ShaderRead);
-        let texture = device.newTextureWithDescriptor(&desc).expect("glyph texture");
+        let packer = ShelfPacker::new(size, max);
         Atlas {
-            texture,
-            max,
-            full: false,
+            texture: new_texture(device, format, packer.size()),
+            packer,
             format,
             bpp,
-            size,
-            x: 0,
-            y: 0,
-            shelf_h: 0,
         }
     }
 
-    fn insert(&mut self, w: u32, h: u32, data: &[u8], in_flight: &(Mutex<usize>, Condvar)) -> Option<(u16, u16)> {
-        if w > self.size || h > self.size {
-            return None;
+    /// Empty the texture, growing it first if it ran out of room. Returns
+    /// whether it grew.
+    fn reset(&mut self, device: &Device) -> bool {
+        let grew = self.packer.reset();
+        if grew {
+            self.texture = new_texture(device, self.format, self.packer.size());
         }
-        if self.x + w > self.size {
-            self.y += self.shelf_h + 1;
-            self.x = 0;
-            self.shelf_h = 0;
-        }
-        if self.y + h > self.size {
-            self.full = true;
-            return None;
-        }
-        let (x, y) = (self.x, self.y);
+        grew
+    }
+
+    fn insert(&mut self, w: u32, h: u32, data: &[u8], in_flight: &(Mutex<usize>, Condvar)) -> Result<(u16, u16), NoRoom> {
+        let (x, y) = self.packer.insert(w, h)?;
         // replaceRegion doesn't synchronise with the GPU: wait until no frame
         // that samples this texture is in flight. New glyphs are rare.
         let (lock, cvar) = in_flight;
@@ -105,9 +100,7 @@ impl Atlas {
                 w as usize * self.bpp,
             );
         }
-        self.x += w + 1;
-        self.shelf_h = self.shelf_h.max(h);
-        Some((x as u16, y as u16))
+        Ok((x as u16, y as u16))
     }
 }
 
@@ -119,7 +112,6 @@ pub struct GlyphCache {
     /// ASCII lookups skip the hash map.
     ascii: Box<[Option<Option<GlyphSlot>>; 128 * 4]>,
     other: HashMap<(u32, Style), Option<GlyphSlot>>,
-    full: bool,
     in_flight: Arc<(Mutex<usize>, Condvar)>,
 }
 
@@ -131,7 +123,6 @@ impl GlyphCache {
             color: Atlas::new(device, MTLPixelFormat::BGRA8Unorm, 4, 256, MAX_COLOR_ATLAS),
             ascii: Box::new([None; 512]),
             other: HashMap::new(),
-            full: false,
             in_flight,
         };
         for c in 0x21..0x7F {
@@ -140,29 +131,58 @@ impl GlyphCache {
         cache
     }
 
-    /// Forget every glyph. Atlases that ran out of room grow (up to their cap;
-    /// at the cap they are simply emptied and refilled with what's on screen).
-    fn clear(&mut self, device: &Device) {
-        let renew = |a: &Atlas| {
-            let size = if a.full { (a.size * 2).min(a.max) } else { a.size };
-            Atlas::new(device, a.format, a.bpp, size, a.max)
-        };
-        self.mask = renew(&self.mask);
-        self.color = renew(&self.color);
-        self.ascii.fill(None);
-        self.other.clear();
-        self.full = false;
+    /// A glyph texture ran out of room since the last [`make_room`](Self::make_room).
+    fn needs_room(&self) -> bool {
+        self.mask.packer.is_full() || self.color.packer.is_full()
     }
 
-    fn rasterize(&mut self, cp: u32, style: Style) -> Option<GlyphSlot> {
-        let ch = char::from_u32(cp)?;
-        let g = self.fonts.rasterize(ch, style)?;
-        let atlas = if g.color { &mut self.color } else { &mut self.mask };
-        let Some((u, v)) = atlas.insert(g.width, g.height, &g.data, &self.in_flight) else {
-            self.full = true;
-            return None;
+    /// Empty each texture that ran out of room, growing it up to its cap (at
+    /// the cap it is simply emptied and refilled with what's on screen), and
+    /// forget the glyphs that were in it. The other texture keeps its glyphs.
+    /// Returns whether any texture grew.
+    fn make_room(&mut self, device: &Device) -> bool {
+        let mut grew = false;
+        for color in [false, true] {
+            let atlas = if color { &mut self.color } else { &mut self.mask };
+            if !atlas.packer.is_full() {
+                continue;
+            }
+            grew |= atlas.reset(device);
+            self.forget(|slot| slot.is_some_and(|s| s.color == color));
+        }
+        grew
+    }
+
+    /// Forget every glyph and empty both textures (keeping their sizes).
+    fn clear(&mut self) {
+        self.mask.packer = ShelfPacker::new(self.mask.packer.size(), self.mask.packer.max());
+        self.color.packer = ShelfPacker::new(self.color.packer.size(), self.color.packer.max());
+        self.forget(|_| true);
+    }
+
+    fn forget(&mut self, drop: impl Fn(Option<GlyphSlot>) -> bool) {
+        for entry in self.ascii.iter_mut() {
+            if entry.is_some_and(&drop) {
+                *entry = None;
+            }
+        }
+        self.other.retain(|_, slot| !drop(*slot));
+    }
+
+    /// `None` when there was no room in the texture right now (so the result
+    /// must not be cached); `Some(None)` for glyphs that draw nothing or can
+    /// never fit.
+    fn rasterize(&mut self, cp: u32, style: Style) -> Option<Option<GlyphSlot>> {
+        let Some(g) = char::from_u32(cp).and_then(|ch| self.fonts.rasterize(ch, style)) else {
+            return Some(None);
         };
-        Some(GlyphSlot {
+        let atlas = if g.color { &mut self.color } else { &mut self.mask };
+        let (u, v) = match atlas.insert(g.width, g.height, &g.data, &self.in_flight) {
+            Ok(at) => at,
+            Err(NoRoom::Full) => return None,
+            Err(NoRoom::TooBig) => return Some(None),
+        };
+        Some(Some(GlyphSlot {
             u,
             v,
             w: g.width as u16,
@@ -170,7 +190,7 @@ impl GlyphCache {
             left: g.left as i16,
             top: g.top as i16,
             color: g.color,
-        })
+        }))
     }
 }
 
@@ -182,19 +202,15 @@ impl GlyphSource for GlyphCache {
             if let Some(slot) = self.ascii[i] {
                 return slot;
             }
-            let slot = self.rasterize(cp, style);
-            if !self.full {
-                self.ascii[i] = Some(slot);
-            }
+            let slot = self.rasterize(cp, style)?;
+            self.ascii[i] = Some(slot);
             return slot;
         }
         if let Some(slot) = self.other.get(&(cp, style)) {
             return *slot;
         }
-        let slot = self.rasterize(cp, style);
-        if !self.full {
-            self.other.insert((cp, style), slot);
-        }
+        let slot = self.rasterize(cp, style)?;
+        self.other.insert((cp, style), slot);
         slot
     }
 }
@@ -283,28 +299,41 @@ impl Renderer {
 
     pub fn set_fonts(&mut self, fonts: Fonts) {
         self.glyphs.fonts = fonts;
-        self.glyphs.mask.full = false;
-        self.glyphs.color.full = false;
-        self.glyphs.clear(&self.device);
+        self.glyphs.clear();
     }
 
     /// Build this frame's instances. Call with the terminal locked; it only
     /// reads the terminal and touches no GPU state except new glyphs.
     pub fn prepare(&mut self, input: &FrameInput) {
         self.frame.build(input, &mut self.glyphs);
-        // Out of glyph texture space: start over with bigger textures. At the
-        // size caps a screen that still doesn't fit draws what fits.
-        for _ in 0..3 {
-            if !self.glyphs.full {
+        // Out of glyph texture space: empty the texture that filled up,
+        // growing it, and build again. This ends: each pass either grows a
+        // texture (a few doublings to the cap) or, at the cap, empties it once
+        // and draws what fits.
+        while self.glyphs.needs_room() {
+            let grew = self.glyphs.make_room(&self.device);
+            self.frame.build(input, &mut self.glyphs);
+            if !grew {
                 break;
             }
-            self.glyphs.clear(&self.device);
-            self.frame.build(input, &mut self.glyphs);
         }
     }
 
     /// Encode and present the prepared frame.
     pub fn present(&mut self, layer: &CAMetalLayer) {
+        let Some(drawable) = layer.nextDrawable() else {
+            return;
+        };
+        let cmd = self.encode(&drawable.texture());
+        cmd.presentDrawable(ProtocolObject::from_ref(&*drawable));
+        cmd.commit();
+    }
+
+    /// Encode the prepared frame into `target` (a `BGRA8Unorm` render
+    /// target), waiting first while two frames are already on
+    /// the GPU. The returned command buffer is not committed yet: the caller
+    /// must commit it (it counts as in flight until it completes).
+    pub fn encode(&mut self, target: &Texture) -> Retained<CommandBuffer> {
         {
             let (lock, cvar) = &*self.in_flight;
             let mut n = lock.lock().unwrap();
@@ -313,11 +342,6 @@ impl Renderer {
             }
             *n += 1;
         }
-        let Some(drawable) = layer.nextDrawable() else {
-            self.frame_done();
-            return;
-        };
-        let target = drawable.texture();
         let viewport = [target.width() as f32, target.height() as f32];
 
         let i = self.frame_index;
@@ -327,7 +351,7 @@ impl Renderer {
 
         let pass = MTLRenderPassDescriptor::renderPassDescriptor();
         let att = unsafe { pass.colorAttachments().objectAtIndexedSubscript(0) };
-        att.setTexture(Some(&target));
+        att.setTexture(Some(target));
         att.setLoadAction(MTLLoadAction::Clear);
         att.setStoreAction(MTLStoreAction::Store);
         let c = self.frame.clear;
@@ -362,23 +386,15 @@ impl Renderer {
         enc.endEncoding();
 
         let in_flight = self.in_flight.clone();
-        let done = RcBlock::new(move |_: NonNull<ProtocolObject<dyn MTLCommandBuffer>>| {
+        let done = RcBlock::new(move |_: NonNull<CommandBuffer>| {
             let (lock, cvar) = &*in_flight;
             *lock.lock().unwrap() -= 1;
             cvar.notify_one();
         });
         unsafe { cmd.addCompletedHandler(RcBlock::as_ptr(&done)) };
-        cmd.presentDrawable(ProtocolObject::from_ref(&*drawable));
-        cmd.commit();
-    }
-
-    fn frame_done(&self) {
-        let (lock, cvar) = &*self.in_flight;
-        *lock.lock().unwrap() -= 1;
-        cvar.notify_one();
+        cmd
     }
 }
-
 #[cfg(precompiled_shaders)]
 fn load_shaders(device: &Device) -> Retained<ProtocolObject<dyn MTLLibrary>> {
     static METALLIB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/shaders.metallib"));

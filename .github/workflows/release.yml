@@ -71,21 +71,14 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
+          targets: aarch64-apple-darwin
       - uses: Swatinem/rust-cache@v2
 
-      - name: Build both architectures
+      - name: Build (Apple Silicon)
         run: |
           cargo build --release --locked -p decline --target aarch64-apple-darwin
-          cargo build --release --locked -p decline --target x86_64-apple-darwin
-
-      - name: Make universal binary
-        run: |
           mkdir -p dist
-          lipo -create -output dist/decline \
-            target/aarch64-apple-darwin/release/decline \
-            target/x86_64-apple-darwin/release/decline
-          lipo -info dist/decline
+          cp target/aarch64-apple-darwin/release/decline dist/decline
 
       - name: Import signing certificate
         id: cert
@@ -123,7 +116,7 @@ jobs:
       - name: Zip and checksum
         id: package
         run: |
-          zip_name="Decline-${{ steps.meta.outputs.version }}-macos-universal.zip"
+          zip_name="Decline-${{ steps.meta.outputs.version }}-macos-arm64.zip"
           ditto -c -k --keepParent dist/Decline.app "dist/$zip_name"
           (cd dist && shasum -a 256 "$zip_name" > "$zip_name.sha256")
           echo "zip=$zip_name" >> "$GITHUB_OUTPUT"
@@ -131,7 +124,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: decline-macos-universal
+          name: decline-macos-arm64
           path: |
             dist/*.zip
             dist/*.sha256
@@ -149,7 +142,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: decline-macos-universal
+          name: decline-macos-arm64
           path: dist
       - name: Publish rolling nightly prerelease
         run: |
@@ -175,7 +168,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: decline-macos-universal
+          name: decline-macos-arm64
           path: dist
       - name: Create GitHub release
         run: |

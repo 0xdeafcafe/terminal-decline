@@ -23,10 +23,9 @@ fzf; lazygit; btop; less/man; delta; yazi with image previews.
 
 **Thresholds** (fixed Mac, same window pixels/font/scrollback bytes as
 Ghostty, footprint not RSS, WindowServer CPU included, interleaved runs):
-idle CPU 0% and 0 wakeups/s; idle footprint ≤ 50% of Ghostty's; after 10k
-lines ≤ 50%; `cat` 100 MB CPU (decline + WindowServer) ≤ 60%; 4 tabs and 4
-splits footprint ≤ 50%; input latency p99 ≤ Ghostty's. *(Proposed — see
-decisions.)*
+idle CPU 0% and 0 wakeups/s; idle footprint ≤ 35% of Ghostty's; after 10k
+lines ≤ 35%; `cat` 100 MB CPU (decline + WindowServer) ≤ 45%; 4 tabs and 4
+splits footprint ≤ 35%; input latency p99 ≤ Ghostty's.
 
 **Every change** in M2/M2b carries before/after numbers on this standard
 set, not only perf work: shaping, images and the updater each cost something.
@@ -41,7 +40,7 @@ set, not only perf work: shaping, images and the updater each cost something.
 | N.4 | Signing secrets (Developer ID, notarization, Sparkle key) — needed early to spike pins | **you** | — |
 | N.5 | Latency harness on a fixed Mac (keypress → present p50/p95/p99, idle and under flood); CI tracks event-to-encode time only | agent | M |
 | N.6 | Failures you can see: config errors and "could not start program" printed into the window, which stays open (a broken pin no longer vanishes) | me | S |
-| N.7 | Crash handling: panic hook → `~/Library/Logs/decline/` + os_log; dSYMs kept per release | me | S |
+| N.7 | Crash handling: panic hook → `~/Library/Logs/decline/` + os_log; dSYMs kept per release; release builds unwind (not abort) so a crash in one pane's parser shows an error in that pane and other windows keep running | me | M |
 | N.8 | CI cost while private: macOS nightlies only when `main` changed since last run | me | S |
 | N.9 | Pre-beta tags as `0.0.x`; `CFBundleVersion` an integer build number (nightlies too) | me | S |
 
@@ -75,11 +74,11 @@ set, not only perf work: shaping, images and the updater each cost something.
 | E.2 | OSC 8 links + Cmd-click; plain URLs | M |
 | E.3 | Keyboard: non-Latin layouts for Ctrl/Meta; kitty protocol levels Neovim/Helix use (table tests from the spec + real-app checks); `keybind` config (remap/unbind/send text; per pin) | M |
 | E.4 | Fonts: fallback list, bold/italic overrides, Nerd Font icon fitting, line height / cell width adjust | M |
-| E.5 | Shell integration (OSC 133): jump between prompts, select output, Option-click to move the cursor | M |
+| E.5 | Shell integration (OSC 133) via documented snippets for zsh/bash/fish (not injected): jump between prompts, select output, Option-click to move the cursor | M |
 | E.6 | Notifications: OSC 9/777 and bell when unfocused (named: what Claude Code sends); guarded for the bare binary; Dock progress (OSC 9;4) | S |
 | E.7 | Search: Cmd+F with AppKit's find bar over scrollback | M |
 | E.8 | Selection: auto-scroll past the edge, rectangular (Option-drag), copy-on-select option | S |
-| E.9 | Config: reload on change (FSEvents), list of live settings, `theme =` + themes dir, `decline import ghostty` / `import iterm`, deprecation policy for renamed keys | M |
+| E.9 | Config: reload on change (FSEvents), list of live settings, `theme =` + a small built-in theme set + themes dir, `decline import ghostty` / `import iterm`, deprecation policy for renamed keys | M |
 | E.10 | macOS: drag files in → escaped paths; folder on Dock icon / `open -a` → window there; Services "New decline Window/Tab at Folder"; right-click menu when mouse reporting is off; confirm before closing a running program (config off) | M |
 | E.11 | Secure Keyboard Entry (menu) | S |
 | E.12 | Accessibility: one element per pane, VoiceOver line/word navigation, Zoom follows cursor | L |
@@ -95,8 +94,8 @@ set, not only perf work: shaping, images and the updater each cost something.
 | B.1 | Ligatures: shape at draw time per style run with Core Text, cache per row counter, skip for fonts without ligatures, `font_features` | L | Fira/JetBrains Mono ligatures; frame build and `cat` measured Menlo vs JetBrains Mono |
 | B.2 | Splits: one CAMetalLayer per window, plain NSViews per pane for input/IME/a11y, cached instances per pane, panes in sync-update reuse last frame, one display link per window, one glyph atlas per process | L | 4 panes all flooding: frame p99 and WindowServer+decline CPU vs one pane; footprint per extra pane recorded |
 | B.3 | Inline images: kitty graphics (APC; transmit/place/delete; virtual placements), iTerm2 OSC 1337; per-process memory budget (default 64 MB), volatile while hidden; pixel caps, file/temp-file transmission limits; fuzz targets for graphics commands | L | `kitty +kitten icat`, `imgcat`, yazi previews |
-| B.4 | Updater: Sparkle 2 in Decline.app's main process only (never pins), silent driver, no system profiling, daily check (DESIGN's "no timers" updated), EdDSA key backed up; Homebrew interplay per decision | M | update applied without prompts; signature checked |
-| B.5 | Sixel (per decision) | M | `chafa --format sixel` |
+| B.4 | Updater: Sparkle 2 for everyone (the cask declares `auto_updates true`), in Decline.app's main process only (never pins), silent driver, no system profiling, daily check (DESIGN's "no timers" updated), EdDSA key backed up | M | update applied without prompts; signature checked |
+| B.5 | Sixel (in 1.0), fuzzed decoder, same image budget | M | `chafa --format sixel` |
 
 ## R — Performance round 2 (on the final formats)
 

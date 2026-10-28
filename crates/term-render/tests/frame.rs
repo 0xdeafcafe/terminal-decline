@@ -574,6 +574,27 @@ fn preedit_clipped_at_right_edge() {
     assert_eq!(decoded(&f, 5, 1, (0, 0)), ["abcd "]);
 }
 
+/// Regression: preedit used "below U+1100 is 1 cell, else 2", so '→'
+/// (U+2192) took two cells while term-core prints it in one.
+#[test]
+fn preedit_width_matches_term_core() {
+    let theme = Theme::default();
+    let t = term(8, 1, "abcdefg\x1b[1G");
+    let f = build_with(
+        &t.state,
+        &theme,
+        Opts {
+            preedit: Some("→漢x"),
+            ..Opts::default()
+        },
+    );
+    assert_eq!(decoded(&f, 8, 1, (0, 0)), ["→漢 xefg "]);
+
+    // And the same text printed by term-core lands in the same cells.
+    let printed = term(8, 1, "→漢xefg");
+    assert_eq!(grid_text(&printed.state), ["→漢 xefg "]);
+}
+
 // ---- layout --------------------------------------------------------------
 
 #[test]

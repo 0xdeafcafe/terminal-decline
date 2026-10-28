@@ -845,6 +845,7 @@ dependencies = [
  "proptest",
  "term-core",
  "term-font",
+ "unicode-width",
 ]
 
 [[package]]

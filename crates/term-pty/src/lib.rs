@@ -91,7 +91,7 @@ impl Pty {
 
         let mut ws = size.winsize();
         let mut master: libc::c_int = -1;
-        let pid = unsafe { libc::forkpty(&mut master, std::ptr::null_mut(), std::ptr::null_mut(), &mut ws) };
+        let pid = unsafe { libc::forkpty(&mut master, std::ptr::null_mut(), std::ptr::null_mut(), &raw mut ws) };
         if pid < 0 {
             return Err(io::Error::last_os_error());
         }
@@ -159,7 +159,15 @@ impl Pty {
     }
 
     /// The working directory of the program in the foreground, for opening a
-    /// new window in the same place.
+    /// new window in the same place. macOS only; `None` elsewhere.
+    #[cfg(not(target_vendor = "apple"))]
+    pub fn foreground_cwd(&self) -> Option<String> {
+        None
+    }
+
+    /// The working directory of the program in the foreground, for opening a
+    /// new window in the same place. macOS only; `None` elsewhere.
+    #[cfg(target_vendor = "apple")]
     pub fn foreground_cwd(&self) -> Option<String> {
         let pgid = unsafe { libc::tcgetpgrp(self.master.as_raw_fd()) };
         let pid = if pgid > 0 { pgid } else { self.pid };

@@ -119,6 +119,19 @@ jobs:
           zip_name="Decline-${{ steps.meta.outputs.version }}-macos-arm64.zip"
           ditto -c -k --keepParent dist/Decline.app "dist/$zip_name"
           (cd dist && shasum -a 256 "$zip_name" > "$zip_name.sha256")
+          # Debug symbols for symbolicating crash logs from this build
+          # (split-debuginfo = "packed" makes cargo run dsymutil). Their
+          # UUID must match the shipped binary's. Cargo's decline.dSYM is a
+          # symlink into deps/, so copy what it points to.
+          dsym=dist/decline.dSYM
+          cp -RL target/aarch64-apple-darwin/release/decline.dSYM "$dsym"
+          bin_uuid=$(dwarfdump --uuid dist/Decline.app/Contents/MacOS/decline | awk '{print $2}')
+          dsym_uuid=$(dwarfdump --uuid "$dsym" | awk '{print $2}')
+          if [[ -z "$bin_uuid" || "$bin_uuid" != "$dsym_uuid" ]]; then
+            echo "dSYM UUID $dsym_uuid doesn't match the binary's $bin_uuid" >&2
+            exit 1
+          fi
+          ditto -c -k --keepParent "$dsym" "dist/Decline-${{ steps.meta.outputs.version }}-macos-arm64.dSYM.zip"
           echo "zip=$zip_name" >> "$GITHUB_OUTPUT"
           echo "sha256=$(cut -d' ' -f1 "dist/$zip_name.sha256")" >> "$GITHUB_OUTPUT"
 

@@ -4,14 +4,10 @@ use std::ffi::CString;
 use std::fs::File;
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-use std::path::Path;
 
-pub struct Command {
-    /// Program and arguments. Empty = the user's login shell.
-    pub argv: Vec<String>,
-    pub cwd: Option<String>,
-    pub env: Vec<(String, String)>,
-}
+mod command;
+
+pub use command::{Command, build_argv, build_env, resolve_cwd};
 
 #[derive(Clone, Copy, Debug)]
 pub struct Size {
@@ -52,6 +48,19 @@ pub fn login_shell() -> String {
     "/bin/zsh".into()
 }
 
+/// The user's home directory from the password database, for when HOME is
+/// unset.
+fn passwd_home() -> Option<String> {
+    unsafe {
+        let pw = libc::getpwuid(libc::getuid());
+        if pw.is_null() || (*pw).pw_dir.is_null() {
+            return None;
+        }
+        let dir = std::ffi::CStr::from_ptr((*pw).pw_dir).to_string_lossy().into_owned();
+        (!dir.is_empty()).then_some(dir)
+    }
+}
+
 fn cstr(s: &str) -> io::Result<CString> {
     CString::new(s).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "nul byte in argument"))
 }
@@ -60,53 +69,55 @@ impl Pty {
     pub fn spawn(cmd: &Command, size: Size) -> io::Result<Pty> {
         // Build everything the child needs before forking: after fork only
         // async-signal-safe calls are allowed.
-        let shell = login_shell();
-        let shell_name = Path::new(&shell)
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or("sh".into());
-        let (program, argv): (CString, Vec<CString>) = if cmd.argv.is_empty() {
-            // A leading '-' in argv[0] makes the shell a login shell.
-            (cstr(&shell)?, vec![cstr(&format!("-{shell_name}"))?])
-        } else {
-            // Run the program through a login shell so it gets the user's
-            // PATH and environment, even when started from the Dock (where
-            // PATH is only /usr/bin:/bin:/usr/sbin:/sbin).
-            let mut argv = vec![cstr(&format!("-{shell_name}"))?, cstr("-c")?, cstr("exec \"$0\" \"$@\"")?];
-            for a in &cmd.argv {
-                argv.push(cstr(a)?);
-            }
-            (cstr(&shell)?, argv)
-        };
+        let shell = cmd.shell.clone().filter(|s| !s.is_empty()).unwrap_or_else(login_shell);
+        let program = cstr(&shell)?;
+        let argv: Vec<CString> = build_argv(&shell, &cmd.argv).iter().map(|a| cstr(a)).collect::<io::Result<_>>()?;
         let mut argv_ptrs: Vec<*const libc::c_char> = argv.iter().map(|a| a.as_ptr()).collect();
         argv_ptrs.push(std::ptr::null());
 
-        // Environment merged by key: inherited, then ours, then the caller's.
-        let mut env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
-        env.insert("TERM".into(), "xterm-256color".into());
-        env.insert("COLORTERM".into(), "truecolor".into());
-        env.insert("TERM_PROGRAM".into(), "decline".into());
-        env.insert("TERM_PROGRAM_VERSION".into(), env!("CARGO_PKG_VERSION").into());
-        // Apps started from the Dock get no locale; without one, shells and
-        // programs fall back to ASCII.
-        env.entry("LANG".into()).or_insert_with(|| "en_US.UTF-8".into());
-        env.extend(cmd.env.iter().cloned());
+        let env = build_env(std::env::vars(), &cmd.env);
+        // HOME as the child will see it, so a caller's HOME is honoured.
+        let home = env
+            .iter()
+            .find(|(k, _)| k == "HOME")
+            .map(|(_, v)| v.clone())
+            .filter(|h| !h.is_empty())
+            .or_else(passwd_home);
+        let cwd = resolve_cwd(cmd.cwd.as_deref(), home.as_deref()).map(|d| cstr(&d)).transpose()?;
+        let home = home.map(|h| cstr(&h)).transpose()?;
         let env: Vec<CString> = env.iter().map(|(k, v)| cstr(&format!("{k}={v}"))).collect::<io::Result<_>>()?;
         let mut env_ptrs: Vec<*const libc::c_char> = env.iter().map(|e| e.as_ptr()).collect();
         env_ptrs.push(std::ptr::null());
-        let cwd = cmd.cwd.as_deref().map(cstr).transpose()?;
-        let home = std::env::var("HOME").ok().map(|h| cstr(&h)).transpose()?;
 
         let mut ws = size.winsize();
         let mut master: libc::c_int = -1;
-        let pid = unsafe { libc::forkpty(&mut master, std::ptr::null_mut(), std::ptr::null_mut(), &mut ws) };
+        // Opening a PTY fails now and then when several processes open PTYs
+        // at once (seen on macOS 27: posix_openpt fails with errno -6, a
+        // negated ENXIO, about once in 400 under load), so retry a few times.
+        let mut tries = 0;
+        let pid = loop {
+            let pid = unsafe { libc::forkpty(&mut master, std::ptr::null_mut(), std::ptr::null_mut(), &raw mut ws) };
+            tries += 1;
+            if pid >= 0 || tries == 5 {
+                break pid;
+            }
+        };
         if pid < 0 {
-            return Err(io::Error::last_os_error());
+            let e = io::Error::last_os_error();
+            return Err(match e.raw_os_error() {
+                Some(code) if code < 0 => io::Error::from_raw_os_error(-code),
+                _ => e,
+            });
         }
         if pid == 0 {
             unsafe {
-                if let Some(dir) = cwd.as_ref().or(home.as_ref()) {
-                    libc::chdir(dir.as_ptr());
+                // The directory was checked before forking; if it vanished
+                // since, still start in HOME rather than the app's own cwd.
+                if let Some(dir) = &cwd
+                    && libc::chdir(dir.as_ptr()) != 0
+                    && let Some(home) = &home
+                {
+                    libc::chdir(home.as_ptr());
                 }
                 // Undo signal state inherited from the app.
                 let mut set: libc::sigset_t = std::mem::zeroed();
@@ -162,7 +173,15 @@ impl Pty {
     }
 
     /// The working directory of the program in the foreground, for opening a
-    /// new window in the same place.
+    /// new window in the same place. macOS only; `None` elsewhere.
+    #[cfg(not(target_vendor = "apple"))]
+    pub fn foreground_cwd(&self) -> Option<String> {
+        None
+    }
+
+    /// The working directory of the program in the foreground, for opening a
+    /// new window in the same place. macOS only; `None` elsewhere.
+    #[cfg(target_vendor = "apple")]
     pub fn foreground_cwd(&self) -> Option<String> {
         let pgid = unsafe { libc::tcgetpgrp(self.master.as_raw_fd()) };
         let pid = if pgid > 0 { pgid } else { self.pid };
@@ -199,6 +218,11 @@ impl Drop for Pty {
                 }
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
+            // The child leads its own session and process group (forkpty
+            // calls setsid). Kill the group too, so programs it started that
+            // also ignore SIGHUP don't keep the PTY open, which would leave
+            // the reader thread waiting forever.
+            libc::kill(-pid, libc::SIGKILL);
             libc::kill(pid, libc::SIGKILL);
             libc::waitpid(pid, std::ptr::null_mut(), 0);
         });

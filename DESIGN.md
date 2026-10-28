@@ -142,6 +142,8 @@ Settings live outside the bundle so editing them doesn't break the signature.
 The bundle is ad-hoc signed with its own identifier, the quarantine flag is
 removed, and it is registered with LaunchServices. The program runs through a
 login shell, so it gets the user's `PATH` even when started from the Dock.
+A missing or nonexistent `cwd` starts in `HOME` (the app's own working
+directory is `/` when started from the Dock).
 `decline pin --update` re-clones the binary after upgrades.
 
 Known limit: an ad-hoc signature is tied to the binary's hash, so after

@@ -19,6 +19,8 @@ use std::thread::JoinHandle;
 use term_core::Term;
 use term_pty::{Command, Pty, Size};
 
+use crate::control::ControlScanner;
+
 /// A macOS PTY hands out ~1 KB per read, so 64 KB is plenty.
 const READ_BUF: usize = 64 * 1024;
 
@@ -28,11 +30,19 @@ pub struct Hooks {
     pub wake: Arc<dyn Fn() + Send + Sync>,
     /// Called once, when the program and everything it started have exited.
     pub on_exit: Box<dyn FnOnce() + Send>,
+    /// Test-only: called with each private control command found in the
+    /// output (see [`crate::control`]), after the output before it has been
+    /// parsed. `None`, the normal case, doesn't look for them.
+    pub on_control: Option<Box<dyn FnMut(String) + Send>>,
 }
 
 impl Hooks {
     pub fn new(wake: Arc<dyn Fn() + Send + Sync>, on_exit: Box<dyn FnOnce() + Send>) -> Hooks {
-        Hooks { wake, on_exit }
+        Hooks {
+            wake,
+            on_exit,
+            on_control: None,
+        }
     }
 }
 
@@ -64,9 +74,15 @@ impl Session {
 
         let mut reader = pty.reader()?;
         let (term2, dirty2, tx2) = (term.clone(), dirty.clone(), tx.clone());
-        let Hooks { wake, on_exit } = hooks;
+        let Hooks {
+            wake,
+            on_exit,
+            mut on_control,
+        } = hooks;
         let reader = std::thread::Builder::new().name("pty-reader".into()).spawn(move || {
             let mut buf = vec![0u8; READ_BUF];
+            let mut scanner = on_control.as_ref().map(|_| ControlScanner::default());
+            let mut found = Vec::new();
             let parse = |bytes: &[u8]| {
                 if bytes.is_empty() {
                     return;
@@ -85,7 +101,16 @@ impl Session {
                 if n == 0 {
                     break;
                 }
-                parse(&buf[..n]);
+                let mut start = 0;
+                if let (Some(scanner), Some(control)) = (&mut scanner, &mut on_control) {
+                    scanner.feed(&buf[..n], &mut found);
+                    for (end, cmd) in found.drain(..) {
+                        parse(&buf[start..end]);
+                        start = end;
+                        control(cmd);
+                    }
+                }
+                parse(&buf[start..n]);
                 if !dirty2.swap(true, Ordering::AcqRel) {
                     wake();
                 }

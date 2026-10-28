@@ -833,3 +833,43 @@ fn resize_under_flood() {
     session.shut_down();
     term.lock().unwrap().state.check_invariants().unwrap();
 }
+
+/// The test-only control OSC: each command reaches the hook after the
+/// output before it has been parsed, and the terminal itself ignores it.
+#[test]
+fn control_commands_follow_the_output_before_them() {
+    let home = TempDir::new("control");
+    let script = r#"printf 'one\n\033]7770;dump\007two\n\033]7770;resize 3 4\033\\three\n'"#;
+    let cmd = command(&["/bin/sh", "-c", script], home.path());
+    let signal = Arc::new(Signal::default());
+    let seen: Arc<Mutex<Vec<(String, String)>>> = Arc::default();
+    let term: Arc<Mutex<Option<Arc<Mutex<Term>>>>> = Arc::default();
+    let mut hooks = signal.hooks();
+    let (seen2, term2) = (seen.clone(), term.clone());
+    hooks.on_control = Some(Box::new(move |c| {
+        // The session's terminal, once spawn has returned it.
+        let t = loop {
+            if let Some(t) = term2.lock().unwrap().clone() {
+                break t;
+            }
+            std::thread::yield_now();
+        };
+        let screen = t.lock().unwrap().state.dump();
+        seen2.lock().unwrap().push((c, screen));
+    }));
+    let session = Session::spawn(&cmd, size(20, 5), Term::new(20, 5, 100), hooks).unwrap();
+    *term.lock().unwrap() = Some(session.term().clone());
+    let mut h = Harness {
+        session: Some(session),
+        signal,
+        _home: home,
+    };
+    h.wait_exit();
+    let seen = seen.lock().unwrap();
+    let cmds: Vec<&str> = seen.iter().map(|(c, _)| c.as_str()).collect();
+    assert_eq!(cmds, ["dump", "resize 3 4"]);
+    assert!(seen[0].1.starts_with("one|\n|"), "{}", seen[0].1);
+    assert!(seen[1].1.starts_with("one|\ntwo|\n|"), "{}", seen[1].1);
+    let d = h.dump();
+    assert!(d.starts_with("one|\ntwo|\nthree|\n|"), "the OSC must not show: {d}");
+}

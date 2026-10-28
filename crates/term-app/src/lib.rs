@@ -7,6 +7,7 @@
 
 pub mod app;
 pub mod config;
+pub mod control;
 pub mod frame_policy;
 pub mod keys;
 pub mod layout;

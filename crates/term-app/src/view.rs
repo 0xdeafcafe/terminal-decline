@@ -3,7 +3,8 @@
 //! of the pure modules (`keys`, `mouse`, `layout`, `frame_policy`).
 
 use std::cell::{Cell as StdCell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::path::PathBuf;
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -27,6 +28,7 @@ use term_pty::{Command, Size};
 use term_render::{FrameInput, Renderer, Theme};
 
 use crate::config::Config;
+use crate::control::{self, Control, Dump};
 use crate::frame_policy::{self, Decision};
 use crate::keys::{KeyAction, KeyInput, KeyModes, Mods, encode_key, paste_bytes};
 use crate::layout::{self, CellSize, Padding};
@@ -59,6 +61,25 @@ struct State {
     /// Mouse button held while reporting to the program.
     mouse_button: Option<u8>,
     selecting: bool,
+    /// Only with `DECLINE_TEST_DUMP` set: see [`crate::control`].
+    test: Option<TestControl>,
+}
+
+/// Test-only control commands waiting to run, and the dump in progress.
+struct TestControl {
+    path: PathBuf,
+    queue: VecDeque<Control>,
+    dump: DumpState,
+    seq: u64,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DumpState {
+    Idle,
+    /// Waiting for the next frame to be drawn.
+    Requested,
+    /// Waiting for the GPU to finish this frame.
+    Drawn(u64),
 }
 
 pub struct Ivars {
@@ -397,10 +418,21 @@ impl TerminalView {
 
         let mut t = Term::new(cols, lines, config.scrollback);
         t.state.default_colors = crate::config::query_colors(&theme);
-        let hooks = Hooks::new(
+        let mut hooks = Hooks::new(
             Arc::new(move || wake(id)),
             Box::new(move || DispatchQueue::main().exec_async(move || with_view(id, |v| v.program_exited()))),
         );
+        let test = std::env::var_os(control::ENV).filter(|p| !p.is_empty()).map(|p| TestControl {
+            path: PathBuf::from(p),
+            queue: VecDeque::new(),
+            dump: DumpState::Idle,
+            seq: 0,
+        });
+        if test.is_some() {
+            hooks.on_control = Some(Box::new(move |cmd| {
+                DispatchQueue::main().exec_async(move || with_view(id, |v| v.control(&cmd)));
+            }));
+        }
         let session = Session::spawn(&launch.command, pty_size(cols, lines, m), t, hooks)?;
 
         let link = unsafe { self.displayLinkWithTarget_selector(self, sel!(tick:)) };
@@ -427,6 +459,7 @@ impl TerminalView {
             scroll_accum: 0.0,
             mouse_button: None,
             selecting: false,
+            test,
         });
         self.resize();
         Ok(())
@@ -491,6 +524,9 @@ impl TerminalView {
         let minimised = self.window().is_some_and(|w| w.isMiniaturized());
         let mut guard = self.ivars().state.borrow_mut();
         let Some(st) = guard.as_mut() else { return };
+        // Under test control, draw even when covered by other windows, so a
+        // dump never waits forever for a frame.
+        let visible = visible || st.test.is_some();
         let term = st.session.term().clone();
         let dirty = st.session.take_dirty();
         // Only a frame that may be drawn needs the terminal's lock.
@@ -584,6 +620,13 @@ impl TerminalView {
         drop(t);
         st.renderer.present(&self.ivars().layer);
         st.frames += 1;
+        let mut poll_dump = false;
+        if let Some(test) = &mut st.test
+            && test.dump == DumpState::Requested
+        {
+            test.dump = DumpState::Drawn(st.renderer.frames_submitted());
+            poll_dump = true;
+        }
 
         let need_blink = blink && st.focused && !st.blink_scheduled;
         if need_blink {
@@ -611,6 +654,9 @@ impl TerminalView {
             if !app.isActive() {
                 app.requestUserAttention(objc2_app_kit::NSRequestUserAttentionType::InformationalRequest);
             }
+        }
+        if poll_dump {
+            self.poll_dump();
         }
     }
 
@@ -988,4 +1034,124 @@ fn key_input(event: &NSEvent) -> KeyInput {
 
 pub fn delegate_of(view: &TerminalView) -> &ProtocolObject<dyn NSWindowDelegate> {
     ProtocolObject::from_ref(view)
+}
+
+/// Test-only control (`DECLINE_TEST_DUMP`); see [`crate::control`].
+impl TerminalView {
+    fn control(&self, cmd: &str) {
+        let Some(c) = Control::parse(cmd) else {
+            eprintln!("decline: unknown test control command {cmd:?}");
+            return;
+        };
+        self.with_state(|st| {
+            if let Some(test) = &mut st.test {
+                test.queue.push_back(c);
+            }
+        });
+        self.run_controls();
+    }
+
+    /// Run queued commands until one has to wait (a dump in progress).
+    fn run_controls(&self) {
+        loop {
+            let next = self.with_state(|st| {
+                let test = st.test.as_mut()?;
+                if test.dump != DumpState::Idle {
+                    return None;
+                }
+                test.queue.pop_front()
+            });
+            match next.flatten() {
+                None => return,
+                Some(Control::Dump) => {
+                    self.with_state(|st| {
+                        if let Some(test) = &mut st.test {
+                            test.dump = DumpState::Requested;
+                        }
+                    });
+                    self.request_redraw();
+                }
+                Some(Control::Resize { cols, lines }) => self.set_grid(cols as usize, lines as usize),
+                Some(Control::Font(delta)) => {
+                    let size = self.with_state(|st| (st.font_size + delta as f64).max(6.0));
+                    self.reload_fonts(size);
+                }
+                Some(Control::Quit) => {
+                    objc2_app_kit::NSApplication::sharedApplication(MainThreadMarker::from(self)).terminate(None);
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Resize the window to show `cols` × `lines`.
+    fn set_grid(&self, cols: usize, lines: usize) {
+        let Some(window) = self.window() else { return };
+        let titlebar = self.titlebar_height();
+        let size = self.with_state(|st| {
+            let pad = padding_for(&st.config, titlebar, st.scale);
+            layout::content_size(cols, lines, st.scale, st.renderer.metrics().into(), pad)
+        });
+        if let Some((w, h)) = size {
+            window.setContentSize(NSSize::new(w, h));
+        }
+    }
+
+    /// Write the dump once the GPU has finished the frame drawn for it.
+    fn poll_dump(&self) {
+        let ready = self.with_state(|st| {
+            let test = st.test.as_ref()?;
+            let DumpState::Drawn(frame) = test.dump else { return None };
+            Some(st.renderer.frames_completed() >= frame)
+        });
+        match ready.flatten() {
+            None => {}
+            Some(false) => {
+                let id = self.ivars().id;
+                let _ = DispatchQueue::main().after(DispatchTime::NOW.time(2_000_000), move || with_view(id, |v| v.poll_dump()));
+            }
+            Some(true) => {
+                self.with_state(write_dump);
+                self.run_controls();
+            }
+        }
+    }
+}
+
+fn write_dump(st: &mut State) {
+    use std::io::Write;
+    let Some(test) = &mut st.test else { return };
+    test.seq += 1;
+    test.dump = DumpState::Idle;
+    let (screen, cols, lines) = {
+        let t = st.session.term().lock().unwrap();
+        (t.state.dump(), t.state.cols(), t.state.lines())
+    };
+    let m = st.renderer.metrics();
+    let (mask_texture, color_texture) = st.renderer.glyphs.texture_sizes();
+    let dump = Dump {
+        seq: test.seq,
+        screen,
+        cols,
+        lines,
+        frames: st.renderer.frames_completed(),
+        glyphs: st.renderer.frame.glyphs.len(),
+        rects: st.renderer.frame.rects.len(),
+        mask_texture,
+        color_texture,
+        cell_width: m.cell_width,
+        cell_height: m.cell_height,
+        font_size: st.font_size,
+        scale: st.scale,
+        phys_footprint: control::phys_footprint(),
+    };
+    let line = serde_json::to_string(&dump).expect("dump serialises");
+    let written = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&test.path)
+        .and_then(|mut f| writeln!(f, "{line}"));
+    if let Err(e) = written {
+        eprintln!("decline: writing {}: {e}", test.path.display());
+    }
 }

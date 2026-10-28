@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
+<title id="title">decline — Slope / dark</title><desc id="desc">Slope drops, then rests on a terminal baseline. Layered app icon artwork.</desc>
+<defs><linearGradient id="body" x1="0" y1="0" x2=".7" y2="1"><stop stop-color="#143B34"/><stop offset="1" stop-color="#051A17"/></linearGradient><linearGradient id="ink" x1="0" y1="0" x2=".3" y2="1"><stop stop-color="#FFFFFF"/><stop offset="1" stop-color="#CEF4DF"/></linearGradient><radialGradient id="light" cx=".25" cy="0" r="1"><stop stop-color="#FFFFFF" stop-opacity=".16"/><stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/></radialGradient><linearGradient id="rim" x2=".3" y2="1"><stop stop-color="#FFFFFF" stop-opacity=".55"/><stop offset=".5" stop-color="#FFFFFF" stop-opacity=".06"/><stop offset="1" stop-color="#FFFFFF" stop-opacity=".22"/></linearGradient></defs>
+<g id="01-body"><rect x="100" y="100" width="824" height="824" rx="185" fill="url(#body)"/></g>
+<g id="02-preview-depth" transform="translate(0 14)" opacity=".22"><path d="M294 400 L484 610 Q497 624 516 624 H738" fill="none" stroke="#000000" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></g>
+<g id="03-mark"><path d="M294 400 L484 610 Q497 624 516 624 H738" fill="none" stroke="url(#ink)" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></g>
+<g id="04-preview-light"><rect x="103" y="103" width="818" height="818" rx="182" fill="url(#light)" stroke="url(#rim)" stroke-width="6"/></g>
+</svg>

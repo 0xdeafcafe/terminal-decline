@@ -1,5 +1,7 @@
 # decline
 
+![decline — less overhead, more terminal](docs/brand/readme-header.png)
+
 A GPU-accelerated terminal for macOS, written in Rust. It aims to use less
 memory and CPU than Ghostty and Warp, has no UI of its own, and can turn any
 program into its own Dock app.

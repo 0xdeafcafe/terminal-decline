@@ -1,0 +1,33 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+license = "MIT"
+repository = "https://github.com/0xdeafcafe/terminal-decline"
+
+[workspace.dependencies]
+term-core = { path = "crates/term-core" }
+term-pty = { path = "crates/term-pty" }
+term-font = { path = "crates/term-font" }
+term-render = { path = "crates/term-render" }
+vte = "0.15"
+libc = "0.2"
+unicode-width = "0.2"
+objc2 = "0.6"
+block2 = "0.6"
+objc2-foundation = "0.3"
+objc2-app-kit = "0.3"
+objc2-metal = "0.3"
+objc2-quartz-core = "0.3"
+objc2-core-text = "0.3"
+objc2-core-graphics = "0.3"
+objc2-core-foundation = "0.3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+debug = "line-tables-only"

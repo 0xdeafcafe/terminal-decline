@@ -1,0 +1,217 @@
+use term_core::{Color, Term, flags};
+
+fn text(t: &Term, line: usize) -> String {
+    let row = t.state.visible_row(line);
+    let s: String = row.cells.iter().filter(|c| !c.has(flags::WIDE_SPACER)).map(|c| c.ch()).collect();
+    s.trim_end().to_string()
+}
+
+#[test]
+fn prints_and_wraps() {
+    let mut t = Term::new(5, 3, 100);
+    t.advance(b"abcdefg");
+    assert_eq!(text(&t, 0), "abcde");
+    assert_eq!(text(&t, 1), "fg");
+    assert!(t.state.visible_row(0).wrapped);
+    assert_eq!((t.state.cursor.row, t.state.cursor.col), (1, 2));
+}
+
+#[test]
+fn last_column_defers_wrap() {
+    let mut t = Term::new(5, 3, 100);
+    t.advance(b"abcde\r\n");
+    assert_eq!(text(&t, 0), "abcde");
+    assert_eq!((t.state.cursor.row, t.state.cursor.col), (1, 0));
+    assert!(!t.state.visible_row(0).wrapped);
+}
+
+#[test]
+fn scrolls_into_history_compactly() {
+    let mut t = Term::new(80, 2, 100);
+    t.advance(b"one\r\ntwo\r\nthree");
+    assert_eq!(t.state.scrollback_len(), 1);
+    assert_eq!(text(&t, 0), "two");
+    assert_eq!(text(&t, 1), "three");
+    t.state.scroll_view(1);
+    assert_eq!(text(&t, 0), "one");
+    // Trailing blanks dropped on the way into scrollback.
+    assert_eq!(t.state.visible_row(0).cells.len(), 3);
+}
+
+#[test]
+fn scrollback_limit() {
+    let mut t = Term::new(10, 1, 3);
+    for i in 0..10 {
+        t.advance(format!("{i}\r\n").as_bytes());
+    }
+    assert_eq!(t.state.scrollback_len(), 3);
+}
+
+#[test]
+fn sgr_colours() {
+    let mut t = Term::new(10, 1, 0);
+    t.advance(b"\x1b[1;31mA\x1b[38;5;200mB\x1b[38;2;1;2;3mC\x1b[38:2::4:5:6mD\x1b[0mE");
+    let r = t.state.visible_row(0);
+    assert!(r.cells[0].has(flags::BOLD));
+    assert_eq!(r.cells[0].fg, Color::indexed(1));
+    assert_eq!(r.cells[1].fg, Color::indexed(200));
+    assert_eq!(r.cells[2].fg, Color::rgb(1, 2, 3));
+    assert_eq!(r.cells[3].fg, Color::rgb(4, 5, 6));
+    assert_eq!(r.cells[4].fg, Color::DEFAULT);
+    assert!(!r.cells[4].has(flags::BOLD));
+}
+
+#[test]
+fn alt_screen_restores_primary() {
+    let mut t = Term::new(10, 2, 10);
+    t.advance(b"hello\x1b[?1049h\x1b[Hvim");
+    assert_eq!(text(&t, 0), "vim");
+    t.advance(b"\x1b[?1049l");
+    assert_eq!(text(&t, 0), "hello");
+    assert_eq!(t.state.cursor.col, 5);
+}
+
+#[test]
+fn erase_and_cursor_report() {
+    let mut t = Term::new(10, 3, 0);
+    t.advance(b"abcdef\x1b[3D\x1b[K\x1b[6n");
+    assert_eq!(text(&t, 0), "abc");
+    assert_eq!(t.state.replies, b"\x1b[1;4R");
+}
+
+#[test]
+fn wide_chars() {
+    let mut t = Term::new(5, 2, 0);
+    t.advance("ab漢字".as_bytes());
+    assert_eq!(text(&t, 0), "ab漢");
+    assert_eq!(text(&t, 1), "字");
+    let r = t.state.visible_row(0);
+    assert!(r.cells[2].has(flags::WIDE));
+    assert!(r.cells[3].has(flags::WIDE_SPACER));
+}
+
+#[test]
+fn scroll_region_insert_delete_lines() {
+    let mut t = Term::new(5, 4, 10);
+    t.advance(b"1\r\n2\r\n3\r\n4\x1b[2;3r\x1b[2H\x1b[M");
+    assert_eq!((0..4).map(|l| text(&t, l)).collect::<Vec<_>>(), ["1", "3", "", "4"]);
+    assert_eq!(t.state.scrollback_len(), 0);
+}
+
+#[test]
+fn line_drawing_charset() {
+    let mut t = Term::new(5, 1, 0);
+    t.advance(b"\x1b(0lqk\x1b(Bq");
+    assert_eq!(text(&t, 0), "┌─┐q");
+}
+
+#[test]
+fn selection_text_joins_wrapped_lines() {
+    let mut t = Term::new(4, 3, 10);
+    t.advance(b"abcdef\r\nxy");
+    let a = t.state.visible_point(0, 0);
+    let b = t.state.visible_point(2, 3);
+    t.state.selection = Some(term_core::Selection { anchor: a, head: b });
+    assert_eq!(t.state.selection_text().unwrap(), "abcdef\nxy");
+}
+
+#[test]
+fn origin_mode_restore_and_report() {
+    let mut t = Term::new(80, 24, 0);
+    t.advance(b"\x1b[?6h\x1b7\x1b[5;20r\x1b8\x1b[6n");
+    assert_eq!(t.state.replies, b"\x1b[1;1R");
+}
+
+#[test]
+fn resize_in_alt_screen_keeps_shell_lines() {
+    let mut t = Term::new(10, 6, 100);
+    t.advance(b"a\r\nb\r\nc\r\nd\r\ne\r\n$ ");
+    t.advance(b"\x1b[?1049h");
+    t.state.resize(10, 3);
+    t.advance(b"\x1b[?1049l");
+    assert_eq!(text(&t, 2), "$");
+    assert_eq!(text(&t, 1), "e");
+    assert_eq!(t.state.scrollback_len(), 3);
+}
+
+#[test]
+fn scrolled_view_stays_put_with_full_history() {
+    let mut t = Term::new(10, 3, 5);
+    for i in 0..20 {
+        t.advance(format!("L{i}\r\n").as_bytes());
+    }
+    t.state.scroll_view(2);
+    let before = text(&t, 0);
+    t.advance(b"more\r\n");
+    assert_eq!(text(&t, 0), before);
+}
+
+#[test]
+fn insert_char_does_not_split_wide() {
+    let mut t = Term::new(6, 1, 0);
+    t.advance("界".as_bytes());
+    t.advance(b"\x1b[2G\x1b[@");
+    let r = t.state.visible_row(0);
+    for (i, c) in r.cells.iter().enumerate() {
+        if c.has(flags::WIDE_SPACER) {
+            assert!(i > 0 && r.cells[i - 1].has(flags::WIDE));
+        }
+    }
+}
+
+#[test]
+fn g1_line_drawing() {
+    let mut t = Term::new(5, 1, 0);
+    t.advance(b"\x1b)0\x0eq\x0fq");
+    assert_eq!(text(&t, 0), "─q");
+}
+
+#[test]
+fn soft_reset_keeps_screen() {
+    let mut t = Term::new(5, 2, 10);
+    t.advance(b"hi\x1b[1m\x1b[!p");
+    assert_eq!(text(&t, 0), "hi");
+    assert!(!t.state.cursor.pen.has(flags::BOLD));
+}
+
+#[test]
+fn erase_clears_pending_wrap() {
+    let mut t = Term::new(10, 2, 0);
+    t.advance(b"0123456789\x1b[KX");
+    assert_eq!(text(&t, 0), "012345678X");
+}
+
+#[test]
+fn queries() {
+    let mut t = Term::new(10, 2, 0);
+    t.advance(b"\x1b[?2026$p\x1b]11;?\x1b\\\x1b[?u");
+    let r = String::from_utf8(t.state.replies.clone()).unwrap();
+    assert!(r.contains("\x1b[?2026;2$y"), "{r:?}");
+    assert!(r.contains("\x1b]11;rgb:1616/1818/1c1c\x1b\\"), "{r:?}");
+    assert!(r.contains("\x1b[?0u"), "{r:?}");
+}
+
+#[test]
+fn kitty_keyboard_stack() {
+    let mut t = Term::new(10, 2, 0);
+    t.advance(b"\x1b[>1u");
+    assert_eq!(t.state.kitty_keyboard_flags(), 1);
+    t.advance(b"\x1b[<u");
+    assert_eq!(t.state.kitty_keyboard_flags(), 0);
+}
+
+#[test]
+fn vs16_widens_emoji() {
+    let mut t = Term::new(10, 1, 0);
+    t.advance("⚠\u{FE0F}x".as_bytes());
+    assert!(t.state.visible_row(0).cells[0].has(flags::WIDE));
+    assert_eq!(t.state.visible_row(0).cells[2].ch(), 'x');
+}
+
+#[test]
+fn osc_clipboard_and_cwd() {
+    let mut t = Term::new(10, 1, 0);
+    t.advance(b"\x1b]52;c;aGVsbG8=\x07\x1b]7;file://host/Users/a%20b\x07");
+    assert_eq!(t.state.clipboard.as_deref(), Some("hello"));
+    assert_eq!(t.state.cwd.as_deref(), Some("/Users/a b"));
+}

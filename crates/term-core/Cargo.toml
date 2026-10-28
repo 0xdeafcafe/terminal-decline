@@ -1,0 +1,16 @@
+[package]
+name = "term-core"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+vte.workspace = true
+unicode-width.workspace = true
+
+[dev-dependencies]
+criterion = { version = "0.7", default-features = false }
+
+[[bench]]
+name = "parse"
+harness = false

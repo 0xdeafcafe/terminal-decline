@@ -1,0 +1,28 @@
+[package]
+name = "decline"
+edition.workspace = true
+version.workspace = true
+description = "A fast, GPU-accelerated terminal for macOS"
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "decline"
+path = "src/main.rs"
+
+[dependencies]
+term-core.workspace = true
+term-pty.workspace = true
+term-font.workspace = true
+term-render.workspace = true
+objc2.workspace = true
+block2.workspace = true
+objc2-foundation.workspace = true
+objc2-app-kit.workspace = true
+objc2-metal.workspace = true
+objc2-quartz-core.workspace = true
+objc2-core-foundation.workspace = true
+dispatch2 = "0.3"
+libc.workspace = true
+serde = { version = "1", features = ["derive"] }
+toml = "1.1"

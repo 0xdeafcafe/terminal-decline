@@ -2,6 +2,7 @@
 //! escape codes from the `vte` parser.
 
 use std::borrow::Cow;
+use std::collections::VecDeque;
 
 use unicode_width::UnicodeWidthChar;
 use vte::{Params, Perform};
@@ -117,9 +118,11 @@ impl Selection {
 pub struct Terminal {
     cols: usize,
     lines: usize,
-    screen: Vec<Row>,
+    /// A ring of rows, so scrolling the whole screen moves the top row to the
+    /// bottom without shifting the others.
+    screen: VecDeque<Row>,
     /// The other screen: the alternate one while on the primary, and vice versa.
-    other_screen: Vec<Row>,
+    other_screen: VecDeque<Row>,
     alt_active: bool,
     /// Lines that scrolled off the top (primary screen only). Its total
     /// count of lines ever pushed is the base for [`Point`] line numbers.
@@ -167,6 +170,9 @@ pub struct Terminal {
     pub replies: Vec<u8>,
     /// Bumped on any change that needs a redraw.
     pub generation: u64,
+    /// Write printable ASCII runs in bulk ([`Terminal::write_ascii`]); off
+    /// only in tests, as the reference the bulk path is compared against.
+    bulk_ascii: bool,
 }
 
 impl Terminal {
@@ -207,6 +213,7 @@ impl Terminal {
             cell_pixels: (8, 16),
             replies: Vec::new(),
             generation: 1,
+            bulk_ascii: true,
         }
     }
 
@@ -401,6 +408,19 @@ impl Terminal {
         if top == 0 {
             self.top_line += n as u64;
         }
+        if top == 0 && bottom == self.lines - 1 {
+            // Common case, the whole screen: each top row goes round the ring
+            // to the bottom, and the others stay where they are.
+            for _ in 0..n {
+                let mut row = self.screen.pop_front().expect("screen has rows");
+                if to_history {
+                    self.push_scrollback(&row);
+                }
+                row.reset(self.cols, blank);
+                self.screen.push_back(row);
+            }
+            return;
+        }
         for i in 0..n {
             if to_history {
                 let row = std::mem::take(&mut self.screen[top + i]);
@@ -409,20 +429,15 @@ impl Terminal {
             }
             self.screen[top + i].reset(self.cols, blank);
         }
-        if n == 1 && top == 0 && bottom == self.lines - 1 {
-            // Common case: whole screen up by one.
-            self.screen.rotate_left(1);
-        } else {
-            self.screen[top..=bottom].rotate_left(n);
-        }
+        self.screen.make_contiguous()[top..=bottom].rotate_left(n);
     }
 
     fn scroll_down(&mut self, n: usize) {
         let (top, bottom) = (self.scroll_top, self.scroll_bottom);
         let n = n.min(bottom - top + 1);
-        self.screen[top..=bottom].rotate_right(n);
+        self.screen.make_contiguous()[top..=bottom].rotate_right(n);
         let blank = self.blank();
-        for row in &mut self.screen[top..top + n] {
+        for row in self.screen.range_mut(top..top + n) {
             row.reset(self.cols, blank);
         }
     }
@@ -565,6 +580,7 @@ impl Terminal {
         fresh.replies = std::mem::take(&mut self.replies);
         fresh.default_colors = self.default_colors;
         fresh.cell_pixels = self.cell_pixels;
+        fresh.bulk_ascii = self.bulk_ascii;
         // Like xterm, a full reset clears scrollback too.
         fresh.scrollback = std::mem::replace(&mut self.scrollback, Scrollback::new(0));
         fresh.scrollback.clear();
@@ -643,6 +659,59 @@ impl Terminal {
             self.cursor.col = col + width;
         }
         self.last_char = Some(c);
+    }
+
+    /// Write a run of printable ASCII (0x20..=0x7E): the same result as
+    /// [`Terminal::write_char`] for each byte, but one row segment at a time:
+    /// the pen is read once, wrapping is handled only at segment ends, and
+    /// the cells are written in one pass. Segments that overwrite part of a
+    /// wide character, and the modes that change what a character does
+    /// (insert, DEC line drawing, autowrap off), go one character at a time.
+    fn write_ascii(&mut self, bytes: &[u8]) {
+        let Some(&last) = bytes.last() else { return };
+        if self.modes.insert || self.line_drawing || !self.modes.autowrap {
+            for &b in bytes {
+                self.write_char(b as char);
+            }
+            return;
+        }
+        let pen = self.cursor.pen;
+        let style = pen.flags() & flags::STYLE_MASK;
+        let cols = self.cols;
+        let mut rest = bytes;
+        while !rest.is_empty() {
+            if self.cursor.pending_wrap {
+                self.screen[self.cursor.row].wrapped = true;
+                self.cursor.col = 0;
+                self.linefeed();
+            }
+            let (row, col) = (self.cursor.row, self.cursor.col);
+            let n = rest.len().min(cols - col);
+            let (segment, tail) = rest.split_at(n);
+            rest = tail;
+            let cells = &mut self.screen[row].cells[col..col + n];
+            if cells.iter().fold(0, |a, c| a | c.packed) & (flags::WIDE | flags::WIDE_SPACER) != 0 {
+                // Overwriting part of a wide character: write_char cleans up.
+                for &b in segment {
+                    self.write_char(b as char);
+                }
+                continue;
+            }
+            for (cell, &b) in cells.iter_mut().zip(segment) {
+                *cell = Cell {
+                    packed: b as u32 | style,
+                    fg: pen.fg,
+                    bg: pen.bg,
+                };
+            }
+            if col + n == cols {
+                self.cursor.col = cols - 1;
+                self.cursor.pending_wrap = true;
+            } else {
+                self.cursor.col = col + n;
+            }
+        }
+        self.last_char = Some(last as char);
     }
 
     /// U+FE0F after a narrow symbol asks for emoji presentation, which is two
@@ -871,7 +940,7 @@ fn extended_color(first: &[u16], rest: &mut vte::ParamsIter<'_>) -> Option<Color
     }
 }
 
-fn blank_screen(cols: usize, lines: usize) -> Vec<Row> {
+fn blank_screen(cols: usize, lines: usize) -> VecDeque<Row> {
     (0..lines).map(|_| Row::new(cols, Cell::BLANK)).collect()
 }
 
@@ -880,7 +949,7 @@ fn default_tabs(cols: usize) -> Vec<bool> {
 }
 
 /// Returns the rows removed from the top.
-fn resize_screen(screen: &mut Vec<Row>, cursor: &mut Cursor, cols: usize, lines: usize) -> Vec<Row> {
+fn resize_screen(screen: &mut VecDeque<Row>, cursor: &mut Cursor, cols: usize, lines: usize) -> Vec<Row> {
     let mut removed = Vec::new();
     for row in screen.iter_mut() {
         row.cells.resize(cols, Cell::BLANK);
@@ -892,15 +961,15 @@ fn resize_screen(screen: &mut Vec<Row>, cursor: &mut Cursor, cols: usize, lines:
     }
     while screen.len() > lines {
         // Remove blank rows below the cursor first, then rows from the top.
-        if screen.len() - 1 > cursor.row && screen.last().is_some_and(|r| r.cells.iter().all(|c| c.is_blank())) {
-            screen.pop();
+        if screen.len() - 1 > cursor.row && screen.back().is_some_and(|r| r.cells.iter().all(|c| c.is_blank())) {
+            screen.pop_back();
         } else {
-            removed.push(screen.remove(0));
+            removed.extend(screen.pop_front());
             cursor.row = cursor.row.saturating_sub(1);
         }
     }
     while screen.len() < lines {
-        screen.push(Row::new(cols, Cell::BLANK));
+        screen.push_back(Row::new(cols, Cell::BLANK));
     }
     removed
 }
@@ -982,6 +1051,17 @@ impl Perform for Terminal {
     fn print(&mut self, c: char) {
         self.write_char(c);
         self.touch();
+    }
+
+    fn print_ascii(&mut self, bytes: &[u8]) {
+        if self.bulk_ascii {
+            self.write_ascii(bytes);
+            self.touch();
+        } else {
+            for &b in bytes {
+                self.print(b as char);
+            }
+        }
     }
 
     fn execute(&mut self, byte: u8) {
@@ -1343,6 +1423,13 @@ impl Terminal {
     /// WIDE cell is followed by a WIDE_SPACER and every spacer follows a WIDE
     /// cell; the view is not scrolled back further than the scrollback; the
     /// scroll region is inside the screen. Costs one pass over the screens.
+    /// Turn the bulk ASCII path off (or back on), for tests that compare it
+    /// with writing one character at a time.
+    #[doc(hidden)]
+    pub fn set_bulk_ascii(&mut self, on: bool) {
+        self.bulk_ascii = on;
+    }
+
     #[doc(hidden)]
     pub fn check_invariants(&self) -> Result<(), String> {
         let (cols, lines) = (self.cols, self.lines);
@@ -1441,9 +1528,9 @@ impl Terminal {
     fn scroll_up_no_history(&mut self, n: usize) {
         let (top, bottom) = (self.scroll_top, self.scroll_bottom);
         let n = n.min(bottom - top + 1);
-        self.screen[top..=bottom].rotate_left(n);
+        self.screen.make_contiguous()[top..=bottom].rotate_left(n);
         let blank = self.blank();
-        for row in &mut self.screen[bottom + 1 - n..=bottom] {
+        for row in self.screen.range_mut(bottom + 1 - n..=bottom) {
             row.reset(self.cols, blank);
         }
     }
@@ -1453,9 +1540,6 @@ impl Terminal {
 pub struct Term {
     parser: vte::Parser,
     pub state: Terminal,
-    /// The start of a UTF-8 character that the last chunk ended in the
-    /// middle of, held back until the rest arrives (see [`Term::advance`]).
-    held: Vec<u8>,
 }
 
 impl Term {
@@ -1463,53 +1547,17 @@ impl Term {
         Term {
             parser: vte::Parser::new(),
             state: Terminal::new(cols, lines, scrollback_limit),
-            held: Vec::new(),
         }
     }
 
-    /// Parse a chunk of program output.
-    ///
-    /// A UTF-8 character split across two chunks is held back and parsed
-    /// with the next chunk, so the parser never sees a chunk that ends in
-    /// the middle of one. vte 0.15 mishandles that case: if an invalid byte
-    /// follows within three bytes of the split, it drops the valid text
-    /// between (`"é"` sent as `[0xC3]`, `[0xA9, b'a', 0xFF]` loses the `a`).
+    /// Parse a chunk of program output. Escape sequences and UTF-8
+    /// characters may be split across chunks anywhere: the parser carries
+    /// its state from one call to the next.
     pub fn advance(&mut self, bytes: &[u8]) {
-        if self.held.is_empty() {
-            let n = bytes.len() - incomplete_utf8_tail(bytes);
-            self.parser.advance(&mut self.state, &bytes[..n]);
-            self.held.extend_from_slice(&bytes[n..]);
-        } else {
-            // Rare (the last chunk ended mid-character): join the two.
-            let mut joined = std::mem::take(&mut self.held);
-            joined.extend_from_slice(bytes);
-            let n = joined.len() - incomplete_utf8_tail(&joined);
-            self.parser.advance(&mut self.state, &joined[..n]);
-            joined.drain(..n);
-            self.held = joined;
-        }
+        self.parser.advance(&mut self.state, bytes);
         #[cfg(debug_assertions)]
         if let Err(e) = self.state.check_invariants() {
             panic!("terminal invariant broken: {e}");
         }
     }
-}
-
-/// How many bytes at the end of `bytes` are the start of a UTF-8 character
-/// whose remaining bytes haven't arrived yet (0 if none).
-fn incomplete_utf8_tail(bytes: &[u8]) -> usize {
-    for back in 1..=bytes.len().min(3) {
-        let b = bytes[bytes.len() - back];
-        if b & 0xC0 == 0x80 {
-            continue; // continuation byte: keep looking for the lead byte
-        }
-        let len = match b {
-            0xC2..=0xDF => 2,
-            0xE0..=0xEF => 3,
-            0xF0..=0xF4 => 4,
-            _ => return 0,
-        };
-        return if back < len { back } else { 0 };
-    }
-    0
 }

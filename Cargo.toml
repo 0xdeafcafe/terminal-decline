@@ -1,6 +1,9 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+# Vendored dependencies, used through [patch.crates-io] below and kept out
+# of the workspace's fmt and clippy runs.
+exclude = ["vendor"]
 
 [workspace.package]
 edition = "2024"
@@ -26,6 +29,10 @@ objc2-quartz-core = "0.3"
 objc2-core-text = "0.3"
 objc2-core-graphics = "0.3"
 objc2-core-foundation = "0.3"
+
+# vte, vendored with local changes listed in vendor/vte/README.md.
+[patch.crates-io]
+vte = { path = "vendor/vte" }
 
 [profile.release]
 lto = "thin"

@@ -127,8 +127,13 @@ impl Row {
     }
 
     pub fn reset(&mut self, cols: usize, fill: Cell) {
-        self.cells.clear();
-        self.cells.resize(cols, fill);
+        if self.cells.len() == cols && fill == Cell::BLANK {
+            // The usual case: the all-zero blank, which fills as a memset.
+            self.cells.fill(Cell::BLANK);
+        } else {
+            self.cells.clear();
+            self.cells.resize(cols, fill);
+        }
         self.wrapped = false;
     }
 
@@ -273,5 +278,19 @@ mod tests {
         row.reset(5, Cell::BLANK);
         assert_eq!(row.cells, vec![Cell::BLANK; 5]);
         assert!(!row.wrapped);
+        // Same length: the blank fill (a memset) and any other fill.
+        row.cells[1] = Cell {
+            packed: 'x' as u32 | flags::BOLD,
+            fg: Color::indexed(1),
+            bg: Color::rgb(1, 2, 3),
+        };
+        row.wrapped = true;
+        row.reset(5, Cell::BLANK);
+        assert_eq!(row.cells, vec![Cell::BLANK; 5]);
+        assert!(!row.wrapped);
+        row.reset(5, fill);
+        assert_eq!(row.cells, vec![fill; 5]);
+        row.reset(2, Cell::BLANK);
+        assert_eq!(row.cells, vec![Cell::BLANK; 2]);
     }
 }

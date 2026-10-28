@@ -27,7 +27,7 @@ any command as its own Dock app.
 
 | crate         | does                                                                  |
 |---------------|-----------------------------------------------------------------------|
-| `term-core`   | escape-code handling (via `vte`), screen grid, scrollback, selection  |
+| `term-core`   | escape-code handling (via vendored `vte`), screen grid, scrollback, selection |
 | `term-pty`    | spawns the shell on a pseudo-terminal, reader thread, resize          |
 | `term-font`   | Core Text: font loading, cell metrics, glyph rasterising              |
 | `term-render` | Metal: glyph texture, per-cell instance buffer, one instanced draw    |
@@ -54,17 +54,28 @@ only with `DECLINE_TEST_DUMP=<file>` set) that writes JSON dumps.
 - A cell is 12 bytes: `u32` with the 21-bit Unicode scalar plus 11 style flag
   bits (bold, italic, underline, wide, …), and one `u32` each for foreground
   and background (default / palette index / 24-bit RGB, tagged in the top byte).
-- The visible screen is `Vec<Row>`, a row is `Vec<Cell>` plus a soft-wrap flag.
+- The visible screen is a ring of rows (`VecDeque<Row>`), so scrolling the
+  whole screen moves the top row to the bottom without shifting the others;
+  scroll regions rotate just their rows. A row is `Vec<Cell>` plus a
+  soft-wrap flag, and is cleared with a memset when the fill is the default
+  blank (all zero).
 - Scrollback (`term-core/src/scrollback.rs`) stores each line as UTF-8 text
   plus style runs (only non-default colours/styles are written), packed into
   ~64 KB blocks that are freed whole from the oldest end. Lines are expanded
   back into cells only when shown or copied. Measured per line: plain 52 B,
   `ls` colours 93 B, compiler errors 81 B, full-width background 183 B, CJK
   90 B (was 518 / 674 / – / ~1500 / – with full cell rows): 10k lines take
-  0.5–1.8 MB. Encoding costs ~10% parse throughput; end-to-end `cat` speed is
-  unchanged (the limit is elsewhere).
+  0.5–1.8 MB. Encoding finds a line's end by skipping all-zero cells 8 at a
+  time, and lines of plain default-style ASCII are a byte copy.
 - Points in the buffer use an ever-increasing line number so a selection stays
   attached to its text while output scrolls.
+- Parsing: `vte` is vendored (`vendor/vte`, through `[patch.crates-io]`)
+  with `Perform::print_ascii`, which hands over each run of printable ASCII
+  whole; the end of a run is found 8 bytes at a time. `Terminal::write_ascii`
+  writes a run one row segment at a time (pen read once, wrap handled only at
+  segment ends). Segments over part of a wide character, insert mode, DEC line
+  drawing and autowrap off go one character at a time. A property test checks
+  the bulk path against one character at a time, fed one byte per call.
 - Known gap for the first milestone: combining marks / grapheme clusters are
   dropped (needs a side table for multi-codepoint cells). Resize does not
   re-wrap lines yet.
@@ -178,8 +189,9 @@ Read once at start; later: reload on file change (FSEvents, no polling).
 ## Performance testing
 
 - `term-core` benchmarks (criterion): plain ASCII, coloured output (SGR-heavy),
-  cursor-movement-heavy (vim/htop style), Unicode/wide text, scrolling with a
-  full scrollback.
+  cursor-movement-heavy (vim/htop style), `seq`-style short lines, Unicode/wide
+  text, all with a full scrollback; each fed in 64 KB pieces (`parse`) and in
+  1 KB pieces (`parse_1k`, what a macOS PTY returns per read).
 - Render benchmark: frame build time for 300×100 grid (CPU side) and GPU time
   via Metal counters.
 - End-to-end: wall time of `cat` 100 MB file; idle CPU over 60 s
@@ -199,9 +211,26 @@ Read once at start; later: reload on file change (FSEvents, no polling).
 | CPU time during that `cat` | 1.6 s | 4.4 s |
 | Footprint after it (10k lines scrollback) | 59 MB | 145–177 MB |
 | Binary size | 1.1 MB | — |
+| Parse, plain text (1 KB pieces) | 423 MB/s | — |
+| Parse, coloured / TUI / `seq` / Unicode | 172 / 289 / 110 / 131 MB/s | — |
 
-`term-core` parse throughput (criterion, `cargo bench -p term-core`): plain
-122 MB/s, coloured 147 MB/s, TUI redraws 188 MB/s, Unicode 172 MB/s.
+`term-core` parse throughput (criterion, `cargo bench -p term-core --bench
+parse`, M1 Max, MB/s; 64 KB pieces, then 1 KB pieces). Before the bulk ASCII
+work, then after it:
+
+| input | before | after |
+|---|---|---|
+| plain text | 113 / 110 | 431 / 423 (3.8×) |
+| coloured (`ls`, compiler errors) | 128 / 125 | 172 / 172 (1.4×) |
+| TUI redraws | 180 / 175 | 290 / 289 (1.6×) |
+| `seq` | 39 / 39 | 111 / 110 (2.8×) |
+| Unicode / wide | 121 / 124 | 132 / 131 |
+
+By step (1 KB pieces, plain / coloured / TUI / `seq`): bulk ASCII runs
+201 / 164 / 290 / 43; faster scrollback encoding 328 / 167 / 280 / 74; 8-byte
+run scan 355 / 164 / 286 / 73; screen as a ring 419 / 171 / 285 / 102;
+memset row reset 423 / 172 / 289 / 110. Plain text is now above the PTY's
+~240 MB/s but short of the 2× goal.
 Caveats: window sizes, fonts and scrollback limits were not matched exactly
 yet; decline does less work (no text shaping, no grapheme clusters, no
 reflow). See the performance-testing section for the fair-comparison plan.
@@ -225,7 +254,7 @@ pin identity collisions, pin signing and quarantine.
 1. ~~Scrollback as text + style runs~~ (done). Next: compress sealed blocks.
 2. **Wider live cells** (16 bytes or a style table) for underline styles and
    colours, hyperlinks (OSC 8) and grapheme clusters.
-3. **Parse plain-text runs in bulk** instead of one character at a time.
+3. ~~Parse plain-text runs in bulk~~ (done). Next: a CSI/SGR fast path.
 4. **Copy cells under the lock, build GPU instances outside it**, with
    per-row dirty flags so a spinner doesn't rebuild the whole screen.
 5. **Box-drawing and Powerline glyphs drawn in code** (seamless borders).

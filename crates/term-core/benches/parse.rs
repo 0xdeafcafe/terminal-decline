@@ -63,6 +63,17 @@ fn tui(size: usize) -> Vec<u8> {
     out
 }
 
+/// Short numbered lines, like `seq 1 1000000`: mostly line feeds and scrolling.
+fn seq(size: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(size);
+    let mut i = 1u64;
+    while out.len() < size {
+        out.extend_from_slice(format!("{i}\r\n").as_bytes());
+        i += 1;
+    }
+    out
+}
+
 /// Wide characters and emoji.
 fn unicode(size: usize) -> Vec<u8> {
     let s = "漢字かなカナ한글 😀 Привет мир ┌─┐│└┘ ";
@@ -80,23 +91,29 @@ fn bench(c: &mut Criterion) {
         ("plain", plain(SIZE)),
         ("coloured", coloured(SIZE)),
         ("tui", tui(SIZE)),
+        ("seq", seq(SIZE)),
         ("unicode", unicode(SIZE)),
     ];
-    let mut g = c.benchmark_group("parse");
-    g.sample_size(20);
-    for (name, data) in &inputs {
-        g.throughput(Throughput::Bytes(data.len() as u64));
-        g.bench_with_input(BenchmarkId::from_parameter(name), data, |b, data| {
-            // A full scrollback, so trimming cost is included.
-            let mut t = Term::new(160, 50, 10_000);
-            b.iter(|| {
-                for chunk in data.chunks(64 * 1024) {
-                    t.advance(black_box(chunk));
-                }
+    // `parse`: 64 KB per `advance` (the reader's slice size). `parse_1k`:
+    // 1 KB per call, what a macOS PTY returns per read, so per-call costs
+    // and runs cut at chunk ends count.
+    for (group, chunk) in [("parse", 64 * 1024), ("parse_1k", 1024)] {
+        let mut g = c.benchmark_group(group);
+        g.sample_size(20);
+        for (name, data) in &inputs {
+            g.throughput(Throughput::Bytes(data.len() as u64));
+            g.bench_with_input(BenchmarkId::from_parameter(name), data, |b, data| {
+                // A full scrollback, so trimming cost is included.
+                let mut t = Term::new(160, 50, 10_000);
+                b.iter(|| {
+                    for piece in data.chunks(chunk) {
+                        t.advance(black_box(piece));
+                    }
+                });
             });
-        });
+        }
+        g.finish();
     }
-    g.finish();
 }
 
 criterion_group!(benches, bench);

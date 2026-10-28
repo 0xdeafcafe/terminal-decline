@@ -266,8 +266,8 @@ fn vs16_does_not_break_the_next_wide_char() {
 
 #[test]
 fn utf8_split_across_chunks_keeps_the_text_after_it() {
-    // Regression (vte 0.15): completing a split character next to an
-    // invalid byte dropped the valid text in between.
+    // Regression (vte 0.15, fixed in vendor/vte): completing a split
+    // character next to an invalid byte dropped the valid text in between.
     let cases: &[&[&[u8]]] = &[
         &[&[0xC3], &[0xA9, b'a', 0xFF]],
         &[&[0xCC], &[0x81, b'0', 0xA9]],
@@ -339,6 +339,36 @@ fn selection_after_reset_and_alt_screen_round_trip() {
     t.state.scroll_view(1);
     select(&mut t, (0, 0), (1, 3));
     assert_eq!(t.state.selection_text().unwrap(), "new\nmore");
+}
+
+#[test]
+fn region_scrolls_after_the_screen_ring_has_turned() {
+    // The screen is a ring of rows that turns as output scrolls. Scrolling a
+    // region, inserting and deleting lines and reverse index must work the
+    // same whether or not it has turned: build the same screen by scrolling
+    // (turned) and by cursor moves (not turned), then edit both alike.
+    let edits: &[&[u8]] = &[
+        b"\x1b[2;4r\x1b[2HM\x1b[2;1H\x1bM\x1bMRI",
+        b"\x1b[2;4r\x1b[3H\x1b[L\x1b[2L+",
+        b"\x1b[2;4r\x1b[2H\x1b[M\x1b[4H\x1b[3M-",
+        b"\x1b[2;5r\x1b[5H\n\n\x1b[S\x1b[T\x1b[2T",
+        b"\x1b[r\x1b[5H\n\n\x1bM\x1b[L\x1b[M",
+    ];
+    for (i, edit) in edits.iter().enumerate() {
+        let mut turned = Term::new(8, 5, 0);
+        turned.advance(b"line0");
+        for n in 1..17 {
+            turned.advance(format!("\r\nline{n}").as_bytes());
+        }
+        let mut fresh = Term::new(8, 5, 0);
+        for (row, n) in (12..17).enumerate() {
+            fresh.advance(format!("\x1b[{};1Hline{n}", row + 1).as_bytes());
+        }
+        assert_eq!(turned.state.dump(), fresh.state.dump(), "same start");
+        turned.advance(edit);
+        fresh.advance(edit);
+        assert_eq!(turned.state.dump(), fresh.state.dump(), "edit {i}");
+    }
 }
 
 #[test]

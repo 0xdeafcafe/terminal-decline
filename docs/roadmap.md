@@ -1,123 +1,141 @@
 # Roadmap to 1.0
 
-"Done" means **decline 1.0**: a signed, notarized app on Homebrew that you can
-use all day instead of Ghostty, with measured lower memory and CPU, no UI of
-its own, and Dock pins that survive upgrades. Each milestone ends with tests
-green, numbers recorded in DESIGN.md, and a tagged release from 0.2 on.
+**decline 1.0** is a signed, notarized app on Homebrew that passes the
+daily-driver checklist below, beats Ghostty on the thresholds below, has no UI
+of its own beyond what macOS provides (native tabs, a split divider, standard
+menus/find bar/alerts), and has Dock pins that survive upgrades.
 
-Owner key: **me** = the main session; **agent** = a background agent in its
-own worktree, merged by me after fmt/clippy/tests pass; **you** = needs
-Alex.
+Revised after an Opus (xhigh) review: the cell/storage redesign comes first
+because ligatures, images, graphemes, reflow and most perf work sit on it;
+pins and packaging come before the public beta; perf round 2 runs on the
+final formats.
 
-## M0 — Finish what's running (in progress)
+Owner key: **me** = main session; **agent** = background agent in its own
+worktree, merged by me after fmt/clippy/tests; **you** = needs Alex.
+Sizes: S < 1 day, M 1–3 days, L > 3 days (agent time).
 
-| # | Work | Owner | Done when |
+## Definition of done
+
+**Daily-driver checklist** (each verified in an integration or smoke test, or
+a recorded manual check): zsh, bash, fish; Neovim (undercurl, true colour,
+kitty keys); tmux; ssh; Claude Code (Shift+Enter, spinner, notifications);
+fzf; lazygit; btop; less/man; delta; yazi with image previews.
+
+**Thresholds** (fixed Mac, same window pixels/font/scrollback bytes as
+Ghostty, footprint not RSS, WindowServer CPU included, interleaved runs):
+idle CPU 0% and 0 wakeups/s; idle footprint ≤ 50% of Ghostty's; after 10k
+lines ≤ 50%; `cat` 100 MB CPU (decline + WindowServer) ≤ 60%; 4 tabs and 4
+splits footprint ≤ 50%; input latency p99 ≤ Ghostty's. *(Proposed — see
+decisions.)*
+
+**Every change** in M2/M2b carries before/after numbers on this standard
+set, not only perf work: shaping, images and the updater each cost something.
+
+## Now — in parallel
+
+| # | Work | Owner | Size |
 |---|---|---|---|
-| 0.1 | App split into library + `session` module; key/mouse/layout/frame-policy modules; hermetic pins/config | agent | view.rs is AppKit glue only |
-| 0.2 | Headless integration tests (shells, vim, less, curses, queries, paste, resize, reader/main-thread races) | agent | pass 5× in a row |
-| 0.3 | Real-app smoke tests via `DECLINE_TEST_DUMP` + private OSC | agent | run in CI, required |
-| 0.4 | Parser speed-ups: bulk ASCII runs (vendored vte), SWAR scan, faster scrollback encoding, ring screen | agent | ≥ 2× plain, no conformance/property/fuzz regressions |
-| 0.5 | First green run of every new workflow (CI, fuzz, bench, nightly props, weekly pressure, coverage); fix runner issues (Metal device, window server) | me | all green on GitHub |
-| 0.6 | Merge or close open Dependabot PRs | me | none open |
+| N.1 | Finish M0: app library split + session module, integration and smoke tests; parser speed-ups (vendored vte) | agent | running |
+| N.2 | All workflows green on GitHub; Dependabot PRs merged or closed | me | S |
+| N.3 | Brand: Slope iteration (icons, dark/tinted, pin rule, wordmark) | Astra | running |
+| N.4 | Signing secrets (Developer ID, notarization, Sparkle key) — needed early to spike pins | **you** | — |
+| N.5 | Latency harness on a fixed Mac (keypress → present p50/p95/p99, idle and under flood); CI tracks event-to-encode time only | agent | M |
+| N.6 | Failures you can see: config errors and "could not start program" printed into the window, which stays open (a broken pin no longer vanishes) | me | S |
+| N.7 | Crash handling: panic hook → `~/Library/Logs/decline/` + os_log; dSYMs kept per release | me | S |
+| N.8 | CI cost while private: macOS nightlies only when `main` changed since last run | me | S |
+| N.9 | Pre-beta tags as `0.0.x`; `CFBundleVersion` an integer build number (nightlies too) | me | S |
 
-## M1 — Performance, round 2
+## F — Formats (the foundation)
 
-Ordered by the reviews' win-per-risk.
-
-| # | Work | Done when |
-|---|---|---|
-| 1.1 | Stop each row after its last non-blank cell when building frames (B3) | sparse frame ≤ 15 µs at 203×50 |
-| 1.2 | Build GPU instances outside the terminal lock; rasterise new glyphs outside it | lock held only for a cell copy; typing never waits on a glyph |
-| 1.3 | Cache decoded scrollback rows while scrolled back | no decode per frame when the view hasn't moved |
-| 1.4 | Memory-pressure dispatch source: on warning free spare drawables, purge textures, compress scrollback | handler tested by calling it directly |
-| 1.5 | Fast path for CSI/SGR parsing | coloured output ≥ 1.5× |
-| 1.6 | `CAMetalDisplayLink` instead of display link + blocking `nextDrawable` | main thread never blocks on a drawable; latency measured before/after |
-| 1.7 | Small items: 16-byte glyph instances, colour texture created on first emoji, mask texture starts 512², alt screen allocated on first use, reuse freed scrollback blocks, skip presenting identical frames | each measured, kept only if it wins |
-| 1.8 | Compress sealed scrollback blocks when idle/hidden (LZ4), two-block decode cache | 100k-line scrollback ≤ 3 MB |
-| 1.9 | Fair comparison report vs Ghostty (same window pixels, font, scrollback bytes; interleaved runs; footprint not RSS; WindowServer CPU included; energy via powermetrics) | table in DESIGN.md + reproducible script |
-| 1.10 | Input latency measurement (keypress → present, idle and under load, p50/p95/p99) | numbers in DESIGN.md, no regressions in CI trend |
-
-## M2 — Everyday correctness and features
-
-| # | Work | Done when |
-|---|---|---|
-| 2.1 | Wider cells or a style table: grapheme clusters (combining marks, ZWJ emoji), underline styles (curly/dotted/dashed, SGR 4:x) and underline colour (SGR 58), overline | Neovim undercurl, flags/family emoji render correctly; scrollback format carries them |
-| 2.2 | Box-drawing, block and Powerline glyphs drawn in code | no seams in tmux/htop/fzf/Claude Code borders at any size |
-| 2.3 | OSC 8 hyperlinks + Cmd-click to open; Cmd-click plain URLs | links open in the browser; hover shows underline |
-| 2.4 | Reflow on resize; pull lines back from scrollback when growing | Kimi's ignored grow test passes; selection survives reflow |
-| 2.5 | Keyboard: Ctrl/Meta on non-Latin layouts (ASCII-capable layout lookup), kitty protocol beyond flag 1 (report events/alternates as far as Neovim/Helix use) | Ctrl+C works on Russian layout; kitty's own test program passes the levels we claim |
-| 2.6 | Shell integration: OSC 133 prompt marks → jump between prompts (Cmd+↑/↓), select command output | works with zsh/bash/fish snippets in docs |
-| 2.7 | Notifications: OSC 9 / 777 and bell → macOS notification when the window isn't focused | Claude Code's "done" bell shows a notification |
-| 2.8 | Remaining replies/modes: title push/pop (CSI 22/23 t), DECRQSS, XTGETTCAP, mode 2031 colour-scheme updates + light/dark theme pair in config, mode 1016 pixel mouse | Neovim/`delta`/`bat` detect correctly |
-| 2.9 | Selection polish: auto-scroll while dragging past the edge, rectangular selection (Option-drag), copy on select (config) | — |
-| 2.10 | Config reload on file change (FSEvents, no polling); config reference doc generated from the struct | edit → applied within a second, zero idle wakeups |
-| 2.11 | Secure Keyboard Entry (menu item + automatic for password prompts? menu only) and basic VoiceOver text | VoiceOver reads the screen |
-| 2.12 | Known small bugs: VS16 with autowrap off widens the wrong cell; CSI M on the top row and line numbers | regression tests |
-| 2.13 | vttest and esctest2 runs; fix what matters | results recorded; no crashes |
-
-## M2b — Tabs, splits, ligatures, images, updates (in 1.0 by decision)
-
-Zero UI still holds: tabs are macOS's own window tabs, splits are just a
-divider line, and the updater shows nothing unless an update is applied.
-
-| # | Work | Done when |
-|---|---|---|
-| 2b.1 | **Tabs** via native macOS window tabbing (Cmd+T, Cmd+Shift+[ ], Cmd+1…9, drag tabs out to windows); titles from OSC 0/2; no custom tab bar | behaves like Terminal.app tabs; each tab its own session |
-| 2b.2 | **Splits**: Cmd+D / Cmd+Shift+D, 1 px divider only, drag to resize, Cmd+Option+arrows to move focus, zoom a pane (Cmd+Shift+Enter); layout tree per window; each pane its own session and renderer target in one Metal layer | 4-pane layout at 120 Hz with no extra idle cost; closing a pane reflows the rest |
-| 2b.3 | **Ligatures / text shaping**: shape runs of same-style text with Core Text (`CTLine`/`CTRun`), cache shaped runs per row; glyph cache keyed by font + glyph id; `font_features` config (e.g. `-calt`); cursor and selection still per cell | Fira Code / JetBrains Mono ligatures render; shaping cost cached so plain-text throughput drops < 10% |
-| 2b.4 | **Inline images**: kitty graphics protocol (transmit, place, delete; virtual placements), iTerm2 OSC 1337 inline images, Sixel; images as GPU textures with a memory budget and eviction; placements move with scrollback | `kitty +kitten icat`, `imgcat`, `chafa --format sixel` work; image memory capped (default 64 MB) |
-| 2b.5 | **In-app updater**: Sparkle 2 with an EdDSA-signed appcast on GitHub releases; checks daily in the background, downloads silently, installs on quit; turned off automatically for Homebrew installs (cask declares `auto_updates true`) and by config | update applied without any window or prompt; signature verified |
-
-These depend on M2's cell redesign (2.1): images and shaped runs both need
-the new cell/run model, so 2.1 is designed once with all three in mind.
-
-## M3 — Dock pins that survive upgrades
-
-| # | Work | Done when |
-|---|---|---|
-| 3.1 | Pin launcher: small stub executable + `libdecline.dylib` inside `Decline.app`; pin bundles hold only the stub, Info.plist, icon; stub finds Decline.app by bundle id and loads it | upgrading decline needs no `pin --update`; macOS permissions granted to a pin persist |
-| 3.2 | Generated pin icons from the brand template (initial + hue from name), used when `--icon` isn't given; icons follow macOS 26/27 shape | pins tell apart in the Dock at 16 px |
-| 3.3 | `decline pin` polish: `--list` shows status, `--edit` opens the pin's config, repair command if Decline.app moved | — |
-| 3.4 | Pins opened from Finder/Spotlight/Login Items behave like the Dock | smoke-tested |
-
-## M4 — Brand, packaging, public beta
-
-| # | Work | Owner | Done when |
+| # | Work | Size | Done when |
 |---|---|---|---|
-| 4.1 | Brand round 2 with Astra, then pick a direction | agent / **you** | decided |
-| 4.2 | App icon (.icns, all sizes, macOS 26/27 layered style) in `Decline.app`; README header, wordmark | agent | icon in the bundle |
-| 4.3 | Make the repo and tap public at the 0.1.0 beta | me (at 4.8) | public |
-| 4.4 | Apple Developer ID secrets in GitHub: `APPLE_CERT_P12`, `APPLE_CERT_PASSWORD`, `APPLE_TEAM_ID`, `APPLE_ID`, `APPLE_APP_PASSWORD`; plus Sparkle `SPARKLE_ED_PRIVATE_KEY` | **you** | release workflow signs and notarizes |
-| 4.5 | Homebrew tap: repo created (private until the beta); add `HOMEBREW_TAP_TOKEN` (fine-grained PAT, contents write on the tap) | **you** (token) | `brew install --cask 0xdeafcafe/tap/decline` works |
-| 4.6 | Changelog from conventional commits (git-cliff) and release notes in the release workflow | me | tag → release with notes |
-| 4.7 | `cargo install --git` path verified on a clean machine (bare binary without bundle) | me | documented and tested in CI |
-| 4.8 | Tag **0.1.0** (public beta) | me, after 4.3–4.5 | release + cask published |
+| F.0 | **Design + Opus review** of the cell/style/run/scrollback model: 8-byte cell + per-screen style table (fg, bg, underline colour/style, overline, link id); grapheme store per row (+ mode 2027); kitty virtual-placement placeholders (U+10EEEE, ids in colours) stored losslessly; per-row change counters; shaping runs break only on font face, code-drawn glyphs, placeholders; ligature drawn as one glyph clipped per cell; glyph key (font id, glyph id) with a font registry; image placement table keyed by line number, freed with scrollback blocks; scrollback v2 (clusters, style fields, per-block link table, prompt marks, logical vs physical lines); APC support in vendored vte | M | reviewed and accepted |
+| F.1 | Core: new cells, style table, graphemes, scrollback v2 | L | all conformance/property/fuzz tests green; bytes/line within 10% of today for plain text |
+| F.2 | Font: cluster rasterising via CTLine, font registry, glyph-id keys | M | flags / family emoji / combining marks render |
+| F.3 | Render: style table resolve, underline styles + colour, overline, new glyph key | M | Neovim undercurl visible once it knows we support it (after F.5) |
+| F.4 | Reflow on resize + pull lines back from scrollback when growing (`resize_grow_height_pulls_from_scrollback` passes) | L | 120 Hz divider/window drag with 100k lines of scrollback, frame ≤ 8 ms (reflow lazy/debounced) |
+| F.5 | Replies Neovim etc. use to detect features: XTGETTCAP (Smulx, Setulc, Tc, RGB), DECRQSS, OSC 4/104 palette, OSC 10–12 set + 110–112 reset, title push/pop | M | Neovim enables undercurl and true colour with `TERM=xterm-256color` |
+| F.6 | Box-drawing, block and Powerline glyphs drawn in code | M | no seams at any size in tmux/htop/fzf/Claude Code |
 
-## M5 — 1.0 hardening
+## P — Pins and packaging (before the beta)
+
+| # | Work | Size | Done when |
+|---|---|---|---|
+| P.1 | Bundle layout: `Decline.app` = launcher + `libdecline.dylib`; inside-out signing (no `--deep`); hardened runtime; usage-description strings + entitlements (camera, microphone, Apple Events, location…) so programs in the terminal can ask | M | notarized build runs; a program asking for the mic gets a prompt |
+| P.2 | Pin launcher: stub never changes after creation; versioned ABI (frozen at 1.0); verifies the library's signature (Apple anchor + team ID) before loading; finds Decline.app (prefers /Applications, config override for dev); clear message if missing; one-time migration for cloned pins; bare `cargo install` pins keep the clone method | L | upgrade needs no pin changes; pin permissions persist across upgrades (spiked early with real signing) |
+| P.3 | Generated pin icons from the Slope rule (stable across upgrades; check how macOS 26/27 shows flat runtime `.icns`) | M | 8 sample names give distinct (initial, hue); brand doc's check value holds |
+| P.4 | `pin --list` status, `--edit` (external config only), repair if Decline.app moved; pins from Finder/Spotlight/Login Items | S | smoke-tested |
+| P.5 | Check App Management prompts when writing pins into `~/Applications` | S | documented behaviour |
+
+## E — Everyday (then the public beta)
+
+| # | Work | Size |
+|---|---|---|
+| E.1 | Native tabs: enable window tabbing, menu items, Cmd+T / Cmd+1…9; grid shrinks when the tab bar appears; background tabs give back memory | S |
+| E.2 | OSC 8 links + Cmd-click; plain URLs | M |
+| E.3 | Keyboard: non-Latin layouts for Ctrl/Meta; kitty protocol levels Neovim/Helix use (table tests from the spec + real-app checks); `keybind` config (remap/unbind/send text; per pin) | M |
+| E.4 | Fonts: fallback list, bold/italic overrides, Nerd Font icon fitting, line height / cell width adjust | M |
+| E.5 | Shell integration (OSC 133): jump between prompts, select output, Option-click to move the cursor | M |
+| E.6 | Notifications: OSC 9/777 and bell when unfocused (named: what Claude Code sends); guarded for the bare binary; Dock progress (OSC 9;4) | S |
+| E.7 | Search: Cmd+F with AppKit's find bar over scrollback | M |
+| E.8 | Selection: auto-scroll past the edge, rectangular (Option-drag), copy-on-select option | S |
+| E.9 | Config: reload on change (FSEvents), list of live settings, `theme =` + themes dir, `decline import ghostty` / `import iterm`, deprecation policy for renamed keys | M |
+| E.10 | macOS: drag files in → escaped paths; folder on Dock icon / `open -a` → window there; Services "New decline Window/Tab at Folder"; right-click menu when mouse reporting is off; confirm before closing a running program (config off) | M |
+| E.11 | Secure Keyboard Entry (menu) | S |
+| E.12 | Accessibility: one element per pane, VoiceOver line/word navigation, Zoom follows cursor | L |
+| E.13 | vttest (named menus) and esctest2 (checked-in list of accepted failures) | M |
+| E.14 | Small bugs: VS16 with autowrap off; CSI M on the top row | S |
+| E.15 | Privacy statement: no telemetry; only network call is the update check; crash reports local; "Report a problem" opens a pre-filled issue | S |
+| E.16 | Release: make repo + tap public, **then** tag `0.1.0`; changelog (git-cliff); cask caveats + `zap`; smoke on macOS 14 | S |
+
+## B — Betas to 1.0 (0.x releases)
+
+| # | Work | Size | Done when |
+|---|---|---|---|
+| B.1 | Ligatures: shape at draw time per style run with Core Text, cache per row counter, skip for fonts without ligatures, `font_features` | L | Fira/JetBrains Mono ligatures; frame build and `cat` measured Menlo vs JetBrains Mono |
+| B.2 | Splits: one CAMetalLayer per window, plain NSViews per pane for input/IME/a11y, cached instances per pane, panes in sync-update reuse last frame, one display link per window, one glyph atlas per process | L | 4 panes all flooding: frame p99 and WindowServer+decline CPU vs one pane; footprint per extra pane recorded |
+| B.3 | Inline images: kitty graphics (APC; transmit/place/delete; virtual placements), iTerm2 OSC 1337; per-process memory budget (default 64 MB), volatile while hidden; pixel caps, file/temp-file transmission limits; fuzz targets for graphics commands | L | `kitty +kitten icat`, `imgcat`, yazi previews |
+| B.4 | Updater: Sparkle 2 in Decline.app's main process only (never pins), silent driver, no system profiling, daily check (DESIGN's "no timers" updated), EdDSA key backed up; Homebrew interplay per decision | M | update applied without prompts; signature checked |
+| B.5 | Sixel (per decision) | M | `chafa --format sixel` |
+
+## R — Performance round 2 (on the final formats)
 
 | # | Work | Done when |
 |---|---|---|
-| 5.1 | Daily-driver period: use it for a week; triage issues | no open crash/data-loss bugs |
-| 5.2 | Fuzzing clean for 14 nightly runs; property tests clean at 50k cases | — |
-| 5.3 | Docs: README, config reference, keyboard reference, pins guide, `decline --help`/man page, CONTRIBUTING, AGENTS.md current | — |
-| 5.4 | Final fair benchmark report vs Ghostty and Warp published in README | numbers reproducible from the repo |
-| 5.5 | Tag **1.0.0** | — |
+| R.1 | Frame build outside the lock (snapshot: cells, styles in use, grapheme strings, image placements, row counters); glyph rasterising outside the lock | p99 key latency under a 30k-glyph flood ≤ idle p99 + 2 ms |
+| R.2 | Per-row instance caching (uses row counters) + row-end blank skip | sparse frame ≤ 15 µs at 203×50 |
+| R.3 | Scrollback row cache while scrolled back | no decode per frame when the view doesn't move |
+| R.4 | CSI/SGR parse fast path | coloured ≥ 1.5× vs the commit before R.4 |
+| R.5 | Memory-pressure handler (spare drawables, purge textures, compress scrollback) | simulated warning: footprint drop then correct redraw |
+| R.6 | `CAMetalDisplayLink` | kept only if N.5 numbers improve |
+| R.7 | Idle scrollback compression (LZ4, two-block cache) | 100k lines of `ls`/log output ≤ 3 MB; decode ≤ 100 µs per block |
+| R.8 | Small items (lazy colour texture, smaller first mask texture, lazy alt screen, block reuse, skip identical frames) | each kept only if footprint or CPU improves by ≥ 2% on the standard set |
+
+## Z — 1.0
+
+| # | Work | Done when |
+|---|---|---|
+| Z.1 | 2–4 weeks across beta users against the checklist | no open crash or data-loss bugs |
+| Z.2 | Fuzz clean 14 nights; property tests clean at 50k cases | — |
+| Z.3 | Docs: README, config/keyboard references, pins guide, man page, CONTRIBUTING | every config key documented (generated) |
+| Z.4 | Fair comparison report vs Ghostty published (script in repo) | thresholds met |
+| Z.5 | Tag `1.0.0`; consider submitting to homebrew/cask | — |
 
 ## Decisions (28 Oct 2026)
 
-1. Brand: another round with Astra before choosing.
+1. Brand: Slope, iterating (round with Astra).
 2. Repo and tap go public at the 0.1.0 beta.
 3. Signing: Alex adds the Apple signing secrets.
-4. Homebrew: `0xdeafcafe/homebrew-tap` (created, private for now).
-5. 1.0 includes tabs, splits, ligatures, inline images and an in-app
-   updater (M2b).
+4. Homebrew: `0xdeafcafe/homebrew-tap` (created, private for now); cask only,
+   no formula (a formula builds the bare binary: no pin launcher,
+   notifications or updater).
+5. 1.0 includes tabs, splits, ligatures, inline images and an in-app updater.
 
 ## How the work runs
 
-- Milestones run in order, but independent items inside a milestone run as
-  parallel agents in worktrees (never two agents on the same crate).
-- Every design or plan goes through an Opus (xhigh) review before it's built;
-  code reviews by Astra/Kimi at the end of each milestone.
-- Every change: conventional commit, fmt, clippy `-D warnings`, tests; perf
-  changes carry before/after numbers.
-- After each milestone: pressure run, DESIGN.md numbers updated, tag.
+- Phases run in order (Now → F → P → E → B → R → Z); items inside a phase
+  run as parallel agents in worktrees, never two on the same crate.
+- Every design goes through an Opus (xhigh) review before it's built; code
+  reviews by Astra/Kimi at the end of each phase.
+- Every change: conventional commit, fmt, clippy `-D warnings`, tests;
+  numbers on the standard set where relevant; DESIGN.md kept current.

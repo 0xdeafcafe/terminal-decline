@@ -176,10 +176,36 @@ const DEFAULT_LOOK: Look = Look {
     style: 0,
 };
 
+/// How many cells of `cells` to store: up to and including the last one
+/// that isn't blank ([`Cell::is_blank`]).
+fn stored_len(cells: &[Cell]) -> usize {
+    // Most trailing cells are all zero (never written, or erased with the
+    // default background): skip those with a cheap check first, 8 cells at
+    // a time (an OR over 96 bytes, which vectorises), then one at a time.
+    let zero = |c: &[Cell]| c.iter().fold(0, |a, c| a | c.packed | c.fg.0 | c.bg.0) == 0;
+    let mut len = cells.len();
+    while len >= 8 && zero(&cells[len - 8..len]) {
+        len -= 8;
+    }
+    while len > 0 && zero(&cells[len - 1..len]) {
+        len -= 1;
+    }
+    cells[..len].iter().rposition(|c| !c.is_blank()).map_or(0, |i| i + 1)
+}
+
 fn encode(row: &Row, out: &mut Vec<u8>, body: &mut Vec<u8>, runs: &mut Vec<(Look, u32)>) {
-    let len = row.cells.iter().rposition(|c| !c.is_blank()).map_or(0, |i| i + 1);
-    let cells = &row.cells[..len];
+    let cells = &row.cells[..stored_len(&row.cells)];
     out.push(if row.wrapped { WRAPPED } else { 0 });
+
+    // Common case: every cell is ASCII in the default style (no flags, no
+    // colours), so the text is a byte copy and there are no runs.
+    if cells.iter().fold(0, |a, c| a | (c.packed & !0x7F) | c.fg.0 | c.bg.0) == 0 {
+        put_varint(out, cells.len() as u32);
+        out.reserve(cells.len() + 1);
+        out.extend(cells.iter().map(|c| if c.packed == 0 { b' ' } else { c.packed as u8 }));
+        put_varint(out, 0);
+        return;
+    }
 
     body.clear();
     runs.clear();
@@ -285,6 +311,176 @@ fn decode(data: &[u8], row: &mut Row) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The encoder as it was before its fast paths, kept to check that they
+    /// write exactly the same bytes.
+    fn encode_reference(row: &Row, out: &mut Vec<u8>) {
+        let len = row.cells.iter().rposition(|c| !c.is_blank()).map_or(0, |i| i + 1);
+        let cells = &row.cells[..len];
+        out.push(if row.wrapped { WRAPPED } else { 0 });
+
+        let mut body = Vec::new();
+        let mut runs: Vec<(Look, u32)> = Vec::new();
+        let mut utf8 = [0u8; 4];
+        for c in cells {
+            if c.has(flags::WIDE_SPACER) {
+                continue;
+            }
+            let cp = c.codepoint();
+            if cp < 0x80 {
+                body.push(if cp == 0 { b' ' } else { cp as u8 });
+            } else {
+                body.extend_from_slice(c.ch().encode_utf8(&mut utf8).as_bytes());
+            }
+            let look = Look {
+                fg: c.fg,
+                bg: c.bg,
+                style: c.flags() >> 21,
+            };
+            match runs.last_mut() {
+                Some((l, n)) if *l == look => *n += 1,
+                _ => runs.push((look, 1)),
+            }
+        }
+        put_varint(out, body.len() as u32);
+        out.extend_from_slice(&body);
+
+        if runs.iter().all(|(l, _)| *l == DEFAULT_LOOK) {
+            put_varint(out, 0);
+            return;
+        }
+        put_varint(out, runs.len() as u32);
+        for &(look, n) in runs.iter() {
+            let tag = ((look.fg != Color::DEFAULT) as u8 * HAS_FG)
+                | ((look.bg != Color::DEFAULT) as u8 * HAS_BG)
+                | ((look.style != 0) as u8 * HAS_STYLE);
+            out.push(tag);
+            put_varint(out, n);
+            if tag & HAS_FG != 0 {
+                out.extend_from_slice(&look.fg.0.to_le_bytes());
+            }
+            if tag & HAS_BG != 0 {
+                out.extend_from_slice(&look.bg.0.to_le_bytes());
+            }
+            if tag & HAS_STYLE != 0 {
+                put_varint(out, look.style);
+            }
+        }
+    }
+
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+        fn below(&mut self, n: u64) -> u64 {
+            self.next() % n
+        }
+    }
+
+    /// A random row, mostly the kinds of cells the encoder treats specially:
+    /// empty, default-style ASCII, typed spaces, styled or coloured cells,
+    /// blanks that still show (background, inverse, underline), non-ASCII
+    /// and wide characters.
+    fn random_row(r: &mut Rng) -> Row {
+        let len = r.below(90) as usize;
+        let ascii_only = r.below(3) == 0;
+        let mut cells = Vec::with_capacity(len + 1);
+        while cells.len() < len {
+            let ch = 0x20 + r.below(95) as u32;
+            let colour = |r: &mut Rng| match r.below(3) {
+                0 => Color::DEFAULT,
+                1 => Color::indexed(r.below(256) as u8),
+                _ => Color::rgb(r.below(256) as u8, 0, r.below(256) as u8),
+            };
+            let kind = if ascii_only { r.below(3) } else { r.below(12) };
+            let cell = match kind {
+                0 => Cell::BLANK,
+                1 => Cell { packed: ch, ..Cell::BLANK },
+                2 => Cell {
+                    packed: ' ' as u32,
+                    ..Cell::BLANK
+                },
+                3 => Cell {
+                    packed: ch | flags::BOLD,
+                    ..Cell::BLANK
+                },
+                4 => Cell {
+                    packed: ch,
+                    fg: colour(r),
+                    bg: Color::DEFAULT,
+                },
+                5 => Cell::erased(colour(r)),
+                6 => Cell {
+                    packed: [flags::INVERSE, flags::UNDERLINE, flags::STRIKE, flags::ITALIC][r.below(4) as usize],
+                    ..Cell::BLANK
+                },
+                7 => Cell {
+                    packed: 0,
+                    fg: colour(r),
+                    bg: Color::DEFAULT,
+                },
+                8 => Cell {
+                    packed: ['é', 'Ω', '─', '\u{10FFFD}'][r.below(4) as usize] as u32,
+                    ..Cell::BLANK
+                },
+                9 => Cell {
+                    packed: 0x7F,
+                    ..Cell::BLANK
+                },
+                _ => {
+                    let (fg, bg) = (colour(r), colour(r));
+                    let style = if r.below(2) == 0 { 0 } else { flags::UNDERLINE };
+                    cells.push(Cell {
+                        packed: '漢' as u32 | style | flags::WIDE,
+                        fg,
+                        bg,
+                    });
+                    Cell {
+                        packed: style | flags::WIDE_SPACER,
+                        fg,
+                        bg,
+                    }
+                }
+            };
+            cells.push(cell);
+        }
+        // Trailing blanks of every kind.
+        for _ in 0..r.below(40) {
+            cells.push(match r.below(4) {
+                0 | 1 => Cell::BLANK,
+                2 => Cell {
+                    packed: flags::BOLD,
+                    ..Cell::BLANK
+                },
+                _ => Cell {
+                    packed: 0,
+                    fg: Color::indexed(3),
+                    bg: Color::DEFAULT,
+                },
+            });
+        }
+        Row {
+            cells,
+            wrapped: r.below(2) == 0,
+        }
+    }
+
+    #[test]
+    fn encoder_writes_the_same_bytes_as_the_reference() {
+        let mut r = Rng(0x5EED_1234_ABCD_0001);
+        let (mut body, mut runs) = (Vec::new(), Vec::new());
+        for i in 0..200_000 {
+            let row = random_row(&mut r);
+            let (mut fast, mut slow) = (vec![0xEE], vec![0xEE]);
+            encode(&row, &mut fast, &mut body, &mut runs);
+            encode_reference(&row, &mut slow);
+            assert_eq!(fast, slow, "row {i}: {row:?}");
+        }
+    }
 
     fn row_of(cells: Vec<Cell>, wrapped: bool) -> Row {
         Row { cells, wrapped }

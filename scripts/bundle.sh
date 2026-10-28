@@ -1,16 +1,23 @@
 #!/usr/bin/env bash
 # Build Decline.app from a compiled binary and ad-hoc codesign it.
-# Usage: scripts/bundle.sh <binary> <output-dir> [version]
+# Usage: scripts/bundle.sh <binary> <output-dir> [version] [build-number]
+# The build number must be an integer that only goes up (Sparkle and
+# LaunchServices compare it); it defaults to the commit count.
 set -euo pipefail
 
 if [[ $# -lt 2 ]]; then
-  echo "usage: $0 <binary> <output-dir> [version]" >&2
+  echo "usage: $0 <binary> <output-dir> [version] [build-number]" >&2
   exit 64
 fi
 
 binary=$1
 out_dir=$2
 version=${3:-0.0.0}
+build=${4:-$(git -C "$(dirname "$0")" rev-list --count HEAD 2>/dev/null || echo 1)}
+if ! [[ "$build" =~ ^[0-9]+$ ]]; then
+  echo "build number must be an integer: $build" >&2
+  exit 64
+fi
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 repo_root=$(dirname "$script_dir")
@@ -52,7 +59,7 @@ cat > "$app/Contents/Info.plist" <<EOF
   <key>CFBundleShortVersionString</key>
   <string>${version}</string>
   <key>CFBundleVersion</key>
-  <string>${version}</string>
+  <string>${build}</string>
   <key>LSMinimumSystemVersion</key>
   <string>14.0</string>
   <key>NSHighResolutionCapable</key>

@@ -4,14 +4,10 @@ use std::ffi::CString;
 use std::fs::File;
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-use std::path::Path;
 
-pub struct Command {
-    /// Program and arguments. Empty = the user's login shell.
-    pub argv: Vec<String>,
-    pub cwd: Option<String>,
-    pub env: Vec<(String, String)>,
-}
+mod command;
+
+pub use command::{Command, build_argv, build_env};
 
 #[derive(Clone, Copy, Debug)]
 pub struct Size {
@@ -60,38 +56,16 @@ impl Pty {
     pub fn spawn(cmd: &Command, size: Size) -> io::Result<Pty> {
         // Build everything the child needs before forking: after fork only
         // async-signal-safe calls are allowed.
-        let shell = login_shell();
-        let shell_name = Path::new(&shell)
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or("sh".into());
-        let (program, argv): (CString, Vec<CString>) = if cmd.argv.is_empty() {
-            // A leading '-' in argv[0] makes the shell a login shell.
-            (cstr(&shell)?, vec![cstr(&format!("-{shell_name}"))?])
-        } else {
-            // Run the program through a login shell so it gets the user's
-            // PATH and environment, even when started from the Dock (where
-            // PATH is only /usr/bin:/bin:/usr/sbin:/sbin).
-            let mut argv = vec![cstr(&format!("-{shell_name}"))?, cstr("-c")?, cstr("exec \"$0\" \"$@\"")?];
-            for a in &cmd.argv {
-                argv.push(cstr(a)?);
-            }
-            (cstr(&shell)?, argv)
-        };
+        let shell = cmd.shell.clone().filter(|s| !s.is_empty()).unwrap_or_else(login_shell);
+        let program = cstr(&shell)?;
+        let argv: Vec<CString> = build_argv(&shell, &cmd.argv).iter().map(|a| cstr(a)).collect::<io::Result<_>>()?;
         let mut argv_ptrs: Vec<*const libc::c_char> = argv.iter().map(|a| a.as_ptr()).collect();
         argv_ptrs.push(std::ptr::null());
 
-        // Environment merged by key: inherited, then ours, then the caller's.
-        let mut env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
-        env.insert("TERM".into(), "xterm-256color".into());
-        env.insert("COLORTERM".into(), "truecolor".into());
-        env.insert("TERM_PROGRAM".into(), "decline".into());
-        env.insert("TERM_PROGRAM_VERSION".into(), env!("CARGO_PKG_VERSION").into());
-        // Apps started from the Dock get no locale; without one, shells and
-        // programs fall back to ASCII.
-        env.entry("LANG".into()).or_insert_with(|| "en_US.UTF-8".into());
-        env.extend(cmd.env.iter().cloned());
-        let env: Vec<CString> = env.iter().map(|(k, v)| cstr(&format!("{k}={v}"))).collect::<io::Result<_>>()?;
+        let env: Vec<CString> = build_env(std::env::vars(), &cmd.env)
+            .iter()
+            .map(|(k, v)| cstr(&format!("{k}={v}")))
+            .collect::<io::Result<_>>()?;
         let mut env_ptrs: Vec<*const libc::c_char> = env.iter().map(|e| e.as_ptr()).collect();
         env_ptrs.push(std::ptr::null());
         let cwd = cmd.cwd.as_deref().map(cstr).transpose()?;

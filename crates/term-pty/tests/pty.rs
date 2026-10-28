@@ -6,6 +6,7 @@ fn runs_command_and_reads_output() {
         argv: vec!["sh".into(), "-c".into(), "printf hi; stty size; printf \"$FOO\"".into()],
         cwd: None,
         env: vec![("FOO".into(), "bar".into())],
+        shell: None,
     };
     let pty = Pty::spawn(
         &cmd,

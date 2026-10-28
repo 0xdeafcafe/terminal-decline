@@ -9,7 +9,8 @@ vte
 >   printable ASCII (0x20..=0x7E) over whole; C0 controls and DEL are
 >   handled inline, and only non-ASCII bytes go through UTF-8 decoding. The
 >   default implementation calls `print` once per byte, so other `Perform`
->   implementations behave as before.
+>   implementations behave as before. The end of a run is found 8 bytes at
+>   a time (`printable_ascii_len`).
 > - Fix: completing a UTF-8 character split across `advance` calls consumed
 >   up to three bytes after it when an invalid byte followed (`"é"` sent as
 >   `[0xC3]`, `[0xA9, b'a', 0xFF]` lost the `a`). A C1 control completed

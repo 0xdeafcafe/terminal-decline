@@ -759,9 +759,39 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
 }
 
 /// Length of the run of printable ASCII (0x20..=0x7E) at the start of `bytes`.
+///
+/// Looks at 8 bytes at a time. In a little-endian `u64` `x`:
+/// - `(x - 0x2020…) & !x & 0x8080…` marks bytes below 0x20. A borrow can mark
+///   a byte above a marked one by mistake, but never below, so the lowest mark
+///   is exact.
+/// - `(((x & !0x8080…) + 0x0101…) | x) & 0x8080…` marks exactly the bytes at or
+///   above 0x7F (the addition can't carry into the next byte).
+///
+/// The lowest mark of the two together is the first byte that ends the run.
 #[inline(always)]
 fn printable_ascii_len(bytes: &[u8]) -> usize {
-    bytes.iter().position(|&b| !(0x20..0x7F).contains(&b)).unwrap_or(bytes.len())
+    const LOW: u64 = 0x2020_2020_2020_2020;
+    const ONES: u64 = 0x0101_0101_0101_0101;
+    const HIGH: u64 = 0x8080_8080_8080_8080;
+
+    let mut i = 0;
+    while let Some(word) = bytes.get(i..i + 8) {
+        let x = u64::from_le_bytes([
+            word[0], word[1], word[2], word[3], word[4], word[5], word[6], word[7],
+        ]);
+        let below = x.wrapping_sub(LOW) & !x & HIGH;
+        let above = (((x & !HIGH) + ONES) | x) & HIGH;
+        let stop = below | above;
+        if stop != 0 {
+            return i + (stop.trailing_zeros() / 8) as usize;
+        }
+        i += 8;
+    }
+    // The last few bytes, one at a time (never reading past the end).
+    while i < bytes.len() && (0x20..0x7F).contains(&bytes[i]) {
+        i += 1;
+    }
+    i
 }
 
 #[derive(PartialEq, Eq, Debug, Default, Copy, Clone)]
@@ -1686,6 +1716,38 @@ mod tests {
                 parser.advance(&mut split, &[*b]);
             }
             assert_eq!(whole.dispatched, split.dispatched, "{input:?}");
+        }
+    }
+
+    #[test]
+    fn printable_ascii_len_matches_a_byte_loop() {
+        let naive =
+            |b: &[u8]| b.iter().position(|&c| !(0x20..0x7F).contains(&c)).unwrap_or(b.len());
+        // Every byte value at every position, in buffers of every length up
+        // to 17, with printable filler around it.
+        for len in 0..=17 {
+            for pos in 0..len {
+                for byte in 0..=255u8 {
+                    let mut buf = [b'x'; 17];
+                    buf[pos] = byte;
+                    let got = printable_ascii_len(&buf[..len]);
+                    assert_eq!(got, naive(&buf[..len]), "{byte} at {pos}");
+                }
+            }
+        }
+        // Two stop bytes in one word, where borrows could mislead.
+        let stops = [0x00u8, 0x1F, 0x1B, 0x0A, 0x7F, 0x80, 0xC3, 0xFF, 0x20, 0x7E];
+        for a in 0..8 {
+            for b in 0..8 {
+                for &x in &stops {
+                    for &y in &stops {
+                        let mut buf = [b'q'; 8];
+                        buf[a] = x;
+                        buf[b] = y;
+                        assert_eq!(printable_ascii_len(&buf), naive(&buf), "{buf:?}");
+                    }
+                }
+            }
         }
     }
 }

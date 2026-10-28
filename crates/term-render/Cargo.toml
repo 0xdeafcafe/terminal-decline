@@ -1,0 +1,23 @@
+[package]
+name = "term-render"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+term-core.workspace = true
+term-font.workspace = true
+objc2.workspace = true
+block2.workspace = true
+objc2-foundation.workspace = true
+objc2-metal.workspace = true
+objc2-quartz-core.workspace = true
+objc2-core-foundation.workspace = true
+dispatch2 = "0.3"
+
+[dev-dependencies]
+criterion = { version = "0.7", default-features = false }
+
+[[bench]]
+name = "frame"
+harness = false

@@ -1,0 +1,173 @@
+name: Release
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: macos-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      zip: ${{ steps.package.outputs.zip }}
+      sha256: ${{ steps.package.outputs.sha256 }}
+    env:
+      APPLE_CERT_P12: ${{ secrets.APPLE_CERT_P12 }}
+      APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Work out version
+        id: meta
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            base=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name=="decline") | .version')
+            version="${base}-nightly.$(date -u +%Y%m%d)"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build both architectures
+        run: |
+          cargo build --release --locked -p decline --target aarch64-apple-darwin
+          cargo build --release --locked -p decline --target x86_64-apple-darwin
+
+      - name: Make universal binary
+        run: |
+          mkdir -p dist
+          lipo -create -output dist/decline \
+            target/aarch64-apple-darwin/release/decline \
+            target/x86_64-apple-darwin/release/decline
+          lipo -info dist/decline
+
+      - name: Import signing certificate
+        id: cert
+        if: env.APPLE_CERT_P12 != '' && env.APPLE_CERT_PASSWORD != '' && env.APPLE_TEAM_ID != ''
+        run: |
+          keychain="$RUNNER_TEMP/build.keychain-db"
+          keychain_pw=$(uuidgen)
+          echo "$APPLE_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$keychain_pw" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_pw" "$keychain"
+          security import "$RUNNER_TEMP/cert.p12" -P "$APPLE_CERT_PASSWORD" -A -t cert -f pkcs12 -k "$keychain"
+          security set-key-partition-list -S apple-tool:,apple: -k "$keychain_pw" "$keychain"
+          security list-keychains -d user -s "$keychain" login.keychain-db
+          identity=$(security find-identity -v -p codesigning "$keychain" | grep "Developer ID Application" | head -1 | sed -E 's/.*"(.*)".*/\1/')
+          echo "identity=$identity" >> "$GITHUB_OUTPUT"
+          rm -f "$RUNNER_TEMP/cert.p12"
+
+      - name: Bundle and sign Decline.app
+        env:
+          SIGN_IDENTITY: ${{ steps.cert.outputs.identity }}
+        run: |
+          # Falls back to ad-hoc signing when no certificate was imported.
+          CODESIGN_IDENTITY="${SIGN_IDENTITY:--}" scripts/bundle.sh dist/decline dist "${{ steps.meta.outputs.version }}"
+
+      - name: Notarize and staple
+        if: steps.cert.outputs.identity != '' && env.APPLE_ID != '' && env.APPLE_APP_PASSWORD != ''
+        run: |
+          ditto -c -k --keepParent dist/Decline.app dist/notarize.zip
+          xcrun notarytool submit dist/notarize.zip \
+            --apple-id "$APPLE_ID" --password "$APPLE_APP_PASSWORD" --team-id "$APPLE_TEAM_ID" --wait
+          xcrun stapler staple dist/Decline.app
+          rm dist/notarize.zip
+
+      - name: Zip and checksum
+        id: package
+        run: |
+          zip_name="Decline-${{ steps.meta.outputs.version }}-macos-universal.zip"
+          ditto -c -k --keepParent dist/Decline.app "dist/$zip_name"
+          (cd dist && shasum -a 256 "$zip_name" > "$zip_name.sha256")
+          echo "zip=$zip_name" >> "$GITHUB_OUTPUT"
+          echo "sha256=$(cut -d' ' -f1 "dist/$zip_name.sha256")" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: decline-macos-universal
+          path: |
+            dist/*.zip
+            dist/*.sha256
+          if-no-files-found: error
+
+  nightly:
+    needs: build
+    if: github.ref_type != 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: decline-macos-universal
+          path: dist
+      - name: Publish rolling nightly prerelease
+        run: |
+          gh release delete nightly --cleanup-tag --yes || true
+          gh release create nightly dist/* \
+            --prerelease \
+            --target "$GITHUB_SHA" \
+            --title "Nightly (${{ needs.build.outputs.version }})" \
+            --notes "Automated nightly build of ${GITHUB_SHA}. Ad-hoc or Developer ID signed depending on repository secrets. Not for production use."
+
+  release:
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      VERSION: ${{ needs.build.outputs.version }}
+      SHA256: ${{ needs.build.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: decline-macos-universal
+          path: dist
+      - name: Create GitHub release
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "Decline $VERSION" \
+            --generate-notes \
+            --notes "SHA-256 of the zip: \`$SHA256\`"
+
+      - name: Update Homebrew cask
+        if: env.HOMEBREW_TAP_TOKEN != ''
+        run: |
+          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/0xdeafcafe/homebrew-tap.git" tap
+          mkdir -p tap/Casks
+          sed -e "s/@VERSION@/$VERSION/" -e "s/@SHA256@/$SHA256/" packaging/homebrew/decline.rb > tap/Casks/decline.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Casks/decline.rb
+          if git diff --cached --quiet; then
+            echo "cask already up to date"
+          else
+            git commit -m "decline $VERSION"
+            git push
+          fi

@@ -159,24 +159,35 @@ impl Session {
 
     /// Hang up on the program and wait for both threads to finish,
     /// re-raising a panic from either.
-    pub fn shut_down(mut self) {
-        self.pty = None;
-        self.wait();
-        self.input = None;
-        if let Some(h) = self.writer.take()
-            && let Err(e) = h.join()
-        {
-            std::panic::resume_unwind(e);
+    pub fn shut_down(self) {
+        for h in self.hang_up() {
+            if let Err(e) = h.join() {
+                std::panic::resume_unwind(e);
+            }
         }
+    }
+
+    /// What dropping the session does, handing back the reader and writer
+    /// threads (in that order, those still running) so a caller can check
+    /// they finish.
+    pub fn hang_up(mut self) -> Vec<JoinHandle<()>> {
+        self.release();
+        [self.reader.take(), self.writer.take()].into_iter().flatten().collect()
+    }
+
+    /// Hangs up on the program (SIGHUP; term-pty kills its process group if
+    /// it is still there after a grace period). The reader then sees the end
+    /// of output and exits, and the writer once both senders are gone.
+    fn release(&mut self) {
+        self.pty = None;
+        self.input = None;
     }
 }
 
 impl Drop for Session {
     fn drop(&mut self) {
-        // Hangs up on the program; the reader sees the end of output and
-        // exits, then the writer once both senders are gone. Not joined: that
-        // could keep the main thread waiting for a program ignoring SIGHUP.
-        self.pty = None;
-        self.input = None;
+        // Not joined: that could keep the main thread waiting for a program
+        // that ignores SIGHUP.
+        self.release();
     }
 }

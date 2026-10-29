@@ -76,6 +76,9 @@ pub struct Config {
     pub opacity: f64,
     /// Blur what shows through when `opacity` is below 1.
     pub blur: bool,
+    /// Copy a selection to the clipboard as soon as it is made with the
+    /// mouse, without Cmd+C.
+    pub copy_on_select: bool,
     pub columns: u16,
     pub lines: u16,
     /// Program and arguments to run instead of the login shell.
@@ -106,6 +109,7 @@ impl Default for Config {
             option_as_meta: OptionAsMeta::None,
             opacity: 1.0,
             blur: false,
+            copy_on_select: false,
             columns: 100,
             lines: 30,
             command: Vec::new(),
@@ -542,6 +546,17 @@ mod tests {
             ]
         );
         assert!(c.missing_font_notices(&[]).is_empty());
+    }
+
+    #[test]
+    fn copy_on_select_is_off_unless_set() {
+        assert!(!Config::default().copy_on_select);
+        assert!(parse("copy_on_select = true").0.copy_on_select);
+        assert!(!parse("copy_on_select = false").0.copy_on_select);
+        let (c, errors) = parse("copy_on_select = 'yes'");
+        assert!(!c.copy_on_select);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].starts_with("config: copy_on_select: "), "{errors:?}");
     }
 
     #[test]

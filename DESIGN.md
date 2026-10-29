@@ -214,6 +214,17 @@ tables and landing pads: 1.34 → 1.50 MB) and no measurable parse speed.
   and dragging after a double- or triple-click grows by words or lines), wheel
   scrolls scrollback, or when the program asks for mouse reporting (1000/1002/
   1003 + SGR 1006) events go to the program; Shift overrides to select.
+  Which click does what is `select::gesture`: Shift-click extends the
+  selection (by words or lines if it was made that way), Option-drag makes
+  a rectangle. Dragging past the top or bottom edge scrolls, faster the
+  further past (10 lines a second per cell height, 3 to 150), driven by a
+  16 ms dispatch timer that runs only while the mouse is held past an edge.
+  `copy_on_select = true` copies a selection when the button is let go
+  (a plain click without a drag copies nothing). term-core's selection has
+  no rectangular mode, so a rectangle is kept in the app: its text is read
+  a line at a time, and while it is shown term-core holds, and the
+  renderer draws, the run of text between its corners rather than the
+  rectangle itself.
 
 ## Windows and tabs
 

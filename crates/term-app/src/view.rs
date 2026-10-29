@@ -37,6 +37,7 @@ use crate::keys::{KeyAction, KeyInput, KeyModes, Mods, encode_key, paste_bytes};
 use crate::latency::{self, FrameKeys, Latency};
 use crate::layout::{self, CellSize, Padding};
 use crate::mouse;
+use crate::select::{self, Block, Gesture};
 use crate::session::{Events, Hooks, Outcome, Session};
 
 const BLINK_INTERVAL: Duration = Duration::from_millis(530);
@@ -66,7 +67,17 @@ struct State {
     scroll_accum: f64,
     /// Mouse button held while reporting to the program.
     mouse_button: Option<u8>,
-    selecting: bool,
+    /// The gesture that started the selection while the left button is
+    /// held for it.
+    selecting: Option<Gesture>,
+    /// Whether the selection being made changed since the button went down.
+    dragged: bool,
+    /// A rectangular selection (Option-drag); see [`crate::select`].
+    block: Option<Block>,
+    /// Scrolling while a selection is dragged past the top or bottom edge.
+    autoscroll: Option<AutoScroll>,
+    /// An auto-scroll step is waiting to run.
+    autoscroll_scheduled: bool,
     /// The session has ended, but the window stays open to show why; a key
     /// closes it.
     held: bool,
@@ -83,6 +94,16 @@ struct State {
     top_inset: f64,
     /// Times the window was hidden or covered and gave back its drawables.
     hidden: u64,
+}
+
+struct AutoScroll {
+    /// Lines a second; positive scrolls back into history.
+    speed: f64,
+    /// The column under the mouse, for extending the selection.
+    col: usize,
+    last: Instant,
+    /// Part of a line not yet scrolled.
+    carry: f64,
 }
 
 /// Test-only control commands waiting to run, and the dump in progress.
@@ -260,12 +281,7 @@ define_class!(
 
         #[unsafe(method(copy:))]
         fn copy(&self, _sender: Option<&AnyObject>) {
-            let text = self.with_state(|st| st.session.lock_term().state.selection_text()).flatten();
-            if let Some(text) = text.filter(|t| !t.is_empty()) {
-                let pb = NSPasteboard::generalPasteboard();
-                pb.clearContents();
-                pb.setString_forType(&NSString::from_str(&text), unsafe { NSPasteboardTypeString });
-            }
+            self.copy_selection();
         }
 
         #[unsafe(method(paste:))]
@@ -524,7 +540,11 @@ impl TerminalView {
             marked: String::new(),
             scroll_accum: 0.0,
             mouse_button: None,
-            selecting: false,
+            selecting: None,
+            dragged: false,
+            block: None,
+            autoscroll: None,
+            autoscroll_scheduled: false,
             held: false,
             test,
             key_t0: None,
@@ -1045,64 +1065,202 @@ impl TerminalView {
     fn mouse_button_event(&self, event: &NSEvent, button: u8, press: bool) {
         self.with_state(|st| st.last_input = Instant::now());
         let Some((line, col)) = self.cell_at(event) else { return };
+        // A selection being made ends on its own button's release, even
+        // if Shift (which kept the program from the mouse) is let go first.
+        if button == mouse::LEFT && !press && self.with_state(|st| st.selecting.is_some()) == Some(true) {
+            self.end_selection();
+            return;
+        }
         if let Some((_, sgr)) = self.reporting(event) {
             self.with_state(|st| st.mouse_button = press.then_some(button));
             self.send_mouse(button + Self::mods_of(event), line, col, press, sgr);
             return;
         }
-        if button != mouse::LEFT {
+        if button != mouse::LEFT || !press {
             return;
         }
-        if !press {
-            self.with_state(|st| st.selecting = false);
-            return;
-        }
-        let clicks = event.clickCount();
+        let flags = event.modifierFlags();
+        let gesture = select::gesture(
+            event.clickCount(),
+            flags.contains(NSEventModifierFlags::Shift),
+            flags.contains(NSEventModifierFlags::Option),
+        );
         self.with_state(|st| {
-            st.selecting = true;
+            st.selecting = Some(gesture);
+            st.dragged = false;
+            st.autoscroll = None;
+            let block = st.block.take();
             let mut t = st.session.lock_term();
             let s = &mut t.state;
             let point = s.point_at(line, col);
-            match clicks {
-                1 => {
+            match gesture {
+                Gesture::Start => {
                     // Remember the anchor in an empty selection; dragging extends it.
                     s.set_selection(Some(Selection::new(point, point)));
                     st.scroll_accum = 0.0;
                 }
-                2 => s.select_word(point),
-                _ => s.select_line(point),
+                Gesture::Block => {
+                    let b = Block::at(point);
+                    s.set_selection(Some(b.stream()));
+                    st.block = Some(b);
+                }
+                Gesture::Word => s.select_word(point),
+                Gesture::Line => s.select_line(point),
+                Gesture::Extend => {
+                    // A rectangle still shown grows as a rectangle.
+                    match block.filter(|b| s.selection() == Some(b.stream())) {
+                        Some(mut b) => {
+                            b.head = point;
+                            s.set_selection(Some(b.stream()));
+                            st.block = Some(b);
+                        }
+                        None => s.extend_selection(point),
+                    }
+                }
             }
         });
         self.request_redraw();
     }
 
+    /// The left button was let go after making a selection: stop
+    /// auto-scrolling, and copy it if `copy_on_select` is on.
+    fn end_selection(&self) {
+        let copy = self.with_state(|st| {
+            let gesture = st.selecting.take();
+            st.autoscroll = None;
+            st.config.copy_on_select && gesture.is_some_and(|g| select::copies_on_release(g, st.dragged))
+        });
+        if copy == Some(true) {
+            self.copy_selection();
+        }
+    }
+
+    /// Put the selection (or the rectangle being shown) on the clipboard.
+    fn copy_selection(&self) {
+        let text = self
+            .with_state(|st| {
+                let mut t = st.session.lock_term();
+                match st.block.filter(|b| t.state.selection() == Some(b.stream())) {
+                    Some(b) => Some(b.text(&mut t.state)),
+                    None => t.state.selection_text(),
+                }
+            })
+            .flatten();
+        if let Some(text) = text.filter(|t| !t.is_empty()) {
+            let pb = NSPasteboard::generalPasteboard();
+            pb.clearContents();
+            pb.setString_forType(&NSString::from_str(&text), unsafe { NSPasteboardTypeString });
+        }
+    }
+
+    /// Move the selection being made to the cell at view `line`, `col`.
+    /// Whether it changed.
+    fn extend_selection_to(st: &mut State, line: usize, col: usize) -> bool {
+        let mut t = st.session.lock_term();
+        let before = t.state.selection();
+        let Some(sel) = before else { return false };
+        let to = t.state.point_at(line, col);
+        match st.block.as_mut().filter(|b| sel == b.stream()) {
+            Some(b) => {
+                b.head = to;
+                t.state.set_selection(Some(b.stream()));
+            }
+            None => t.state.extend_selection(to),
+        }
+        let changed = t.state.selection() != before;
+        st.dragged |= changed;
+        changed
+    }
+
+    /// Auto-scroll speed for a drag at `event`'s height (lines a second;
+    /// positive scrolls back), 0 while it is over the rows.
+    fn autoscroll_speed(&self, event: &NSEvent) -> f64 {
+        let p = self.convertPoint_fromView(event.locationInWindow(), None);
+        let titlebar = self.titlebar_height();
+        self.with_state(|st| {
+            let m = st.renderer.metrics();
+            let pad = padding_for(&st.config, titlebar, st.scale);
+            let lines = st.session.lock_term().state.lines();
+            let top = pad.top as f64;
+            let bottom = top + (lines as u32 * m.cell_height) as f64;
+            select::autoscroll_speed(p.y * st.scale, top, bottom, m.cell_height as f64)
+        })
+        .unwrap_or(0.0)
+    }
+
+    /// One auto-scroll step, then the next one while the mouse is still
+    /// held past the edge. Nothing is scheduled once it is back over the
+    /// rows or the button is let go.
+    fn autoscroll_tick(&self) {
+        let step = self.with_state(|st| {
+            st.autoscroll_scheduled = false;
+            if st.selecting.is_none() {
+                st.autoscroll = None;
+            }
+            let a = st.autoscroll.as_mut()?;
+            let now = Instant::now();
+            let lines = select::autoscroll_step(a.speed, (now - a.last).as_secs_f64(), &mut a.carry);
+            a.last = now;
+            let (up, col) = (a.speed > 0.0, a.col);
+            let mut changed = false;
+            if lines != 0 {
+                let mut t = st.session.lock_term();
+                let before = t.state.view_top();
+                t.state.scroll_view(lines);
+                changed = t.state.view_top() != before;
+                let row = if up { 0 } else { t.state.lines() - 1 };
+                drop(t);
+                changed |= Self::extend_selection_to(st, row, col);
+            }
+            st.autoscroll_scheduled = true;
+            Some(changed)
+        });
+        let Some(Some(changed)) = step else { return };
+        if changed {
+            self.request_redraw();
+        }
+        self.schedule_autoscroll();
+    }
+
+    fn schedule_autoscroll(&self) {
+        let id = self.ivars().id;
+        let at = DispatchTime::NOW.time(select::INTERVAL.as_nanos() as i64);
+        let _ = DispatchQueue::main().after(at, move || with_view(id, |v| v.autoscroll_tick()));
+    }
+
     fn mouse_motion(&self, event: &NSEvent, button: Option<u8>) {
         let Some((line, col)) = self.cell_at(event) else { return };
-        if let Some((mode, sgr)) = self.reporting(event) {
+        let selecting = self.with_state(|st| st.selecting.is_some()) == Some(true);
+        if !selecting && let Some((mode, sgr)) = self.reporting(event) {
             let held = self.with_state(|st| st.mouse_button).flatten();
             if mouse::reports_motion(mode, held) {
                 self.send_mouse(mouse::motion_code(held, button, Self::mods_of(event)), line, col, true, sgr);
             }
             return;
         }
-        if button != Some(mouse::LEFT) {
+        if button != Some(mouse::LEFT) || !selecting {
             return;
         }
-        let changed = self.with_state(|st| {
-            if !st.selecting {
-                return false;
-            }
-            let mut t = st.session.lock_term();
-            let before = t.state.selection();
-            if before.is_none() {
-                return false;
-            }
-            let to = t.state.point_at(line, col);
-            t.state.extend_selection(to);
-            t.state.selection() != before
-        });
-        if changed == Some(true) {
+        let speed = self.autoscroll_speed(event);
+        let (changed, start_timer) = self
+            .with_state(|st| {
+                // Past the top or bottom edge, a timer keeps scrolling
+                // while the mouse is held still; it stops once back over
+                // the rows or the button is let go.
+                st.autoscroll = (speed != 0.0).then(|| {
+                    let (last, carry) = st.autoscroll.as_ref().map_or((Instant::now(), 0.0), |a| (a.last, a.carry));
+                    AutoScroll { speed, col, last, carry }
+                });
+                let start = st.autoscroll.is_some() && !st.autoscroll_scheduled;
+                st.autoscroll_scheduled |= start;
+                (Self::extend_selection_to(st, line, col), start)
+            })
+            .unwrap_or((false, false));
+        if changed {
             self.request_redraw();
+        }
+        if start_timer {
+            self.schedule_autoscroll();
         }
     }
 

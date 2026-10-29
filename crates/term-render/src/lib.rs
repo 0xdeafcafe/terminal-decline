@@ -6,5 +6,5 @@ pub mod packer;
 mod row_cache;
 
 pub use frame::{Frame, FrameInput, GlyphInstance, GlyphSlot, GlyphSource, RectInstance, Rgba, Theme, rgb};
-pub use metal::{CommandBuffer, GlyphCache, Renderer, Texture, configure_layer};
+pub use metal::{CommandBuffer, FontsId, PaneDraw, PaneRender, PxRect, Renderer, Texture, configure_layer, set_glyph_texture_sizes};
 pub use packer::ShelfPacker;

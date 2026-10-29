@@ -3,6 +3,7 @@ using namespace metal;
 
 struct Uniforms {
     float2 viewport; // drawable size in pixels
+    float2 origin;   // the pane's top-left corner in the drawable, pixels
 };
 
 // The instance structs below must match `RectInstance` and `GlyphInstance`
@@ -31,7 +32,7 @@ vertex RectOut rect_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     Rect r = rects[iid];
     float2 corner = float2(vid & 1, vid >> 1);
     RectOut o;
-    o.pos = to_clip(float2(r.pos) + corner * float2(r.size), u.viewport);
+    o.pos = to_clip(u.origin + float2(r.pos) + corner * float2(r.size), u.viewport);
     float4 c = unpack_unorm4x8_to_float(r.color);
     o.color = float4(c.rgb * c.a, c.a);
     return o;
@@ -62,7 +63,7 @@ vertex GlyphOut glyph_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     Glyph g = glyphs[iid];
     float2 corner = float2(vid & 1, vid >> 1);
     GlyphOut o;
-    o.pos = to_clip(float2(g.pos) + corner * float2(g.size), u.viewport);
+    o.pos = to_clip(u.origin + float2(g.pos) + corner * float2(g.size), u.viewport);
     o.uv = float2(g.uv) + corner * float2(g.size);
     o.color = unpack_unorm4x8_to_float(g.color);
     o.is_color = g.is_color & 1u;

@@ -1,6 +1,7 @@
 //! Glyph-texture packing (`ShelfPacker`): placed glyphs never overlap and
-//! stay inside the texture; a full texture grows by doubling up to its cap;
-//! glyphs bigger than the cap are skipped without marking the texture full.
+//! stay inside the texture, also across growing; a full texture grows by
+//! doubling up to its cap, keeping what it holds; glyphs bigger than the
+//! cap are skipped without marking the texture full.
 
 use proptest::prelude::*;
 use term_render::ShelfPacker;
@@ -31,7 +32,17 @@ proptest! {
                     }
                     placed.push(r);
                 }
-                Err(NoRoom::Full) => prop_assert!(p.is_full()),
+                Err(NoRoom::Full) => {
+                    prop_assert!(p.is_full());
+                    // Grow as the renderer does; earlier placements stay.
+                    let old = p.size();
+                    if p.grow() {
+                        prop_assert_eq!(p.size(), (old * 2).min(p.max()));
+                        prop_assert!(!p.is_full());
+                    } else {
+                        prop_assert_eq!(p.size(), p.max());
+                    }
+                }
                 Err(NoRoom::TooBig) => prop_assert!(w > p.max() || h > p.max()),
             }
         }
@@ -47,10 +58,10 @@ proptest! {
             // Fill it.
             while p.insert(size, size).is_ok() {}
             prop_assert!(p.is_full());
-            p.reset();
+            let grew = p.grow();
+            prop_assert_eq!(grew, expected < max);
             expected = (expected * 2).min(max);
             prop_assert_eq!(p.size(), expected);
-            prop_assert!(!p.is_full());
         }
     }
 }
@@ -65,26 +76,42 @@ fn full_then_grow_then_cap() {
     assert_eq!(p.insert(30, 30), Err(NoRoom::Full));
     assert!(p.is_full());
 
-    assert!(p.reset(), "a full texture grows");
+    assert!(p.grow(), "a full texture grows");
     assert_eq!(p.size(), 128);
     assert!(!p.is_full());
-    assert_eq!(p.insert(30, 30), Ok((0, 0)), "growing empties it");
+    assert_eq!(p.insert(30, 30), Ok((65, 0)), "growing keeps the old square and fills beside it");
 
     while p.insert(30, 30).is_ok() {}
-    assert!(p.reset());
+    assert!(p.grow());
     assert_eq!(p.size(), 256);
 
     while p.insert(30, 30).is_ok() {}
-    assert!(!p.reset(), "at the cap it is emptied, not grown");
+    assert!(!p.grow(), "at the cap it doesn't grow");
     assert_eq!(p.size(), 256);
-    assert_eq!(p.insert(30, 30), Ok((0, 0)));
+    assert!(p.is_full());
+    p.clear();
+    assert!(!p.is_full());
+    assert_eq!(p.size(), 256);
+    assert_eq!(p.insert(30, 30), Ok((0, 0)), "clearing empties it");
 }
 
 #[test]
-fn reset_without_filling_keeps_the_size() {
+fn growing_fills_the_right_strip_then_the_bottom() {
+    let mut p = ShelfPacker::new(64, 128);
+    p.insert(64, 64).unwrap();
+    assert!(p.grow());
+    // Beside the old square, then below it across the full width.
+    assert_eq!(p.insert(63, 64), Ok((65, 0)));
+    assert_eq!(p.insert(100, 10), Ok((0, 65)));
+    // The old square and the right strip are full: the bottom shelf.
+    assert_eq!(p.insert(10, 10), Ok((101, 65)));
+}
+
+#[test]
+fn clear_keeps_the_size() {
     let mut p = ShelfPacker::new(64, 256);
     p.insert(10, 10).unwrap();
-    assert!(!p.reset());
+    p.clear();
     assert_eq!(p.size(), 64);
     assert_eq!(p.insert(10, 10), Ok((0, 0)));
 }
@@ -99,9 +126,9 @@ fn glyph_bigger_than_texture_asks_it_to_grow() {
     let mut p = ShelfPacker::new(256, 2048);
     assert_eq!(p.insert(300, 150), Err(NoRoom::Full));
     assert!(p.is_full());
-    assert!(p.reset());
+    assert!(p.grow());
     assert_eq!(p.size(), 512);
-    assert_eq!(p.insert(300, 150), Ok((0, 0)));
+    assert_eq!(p.insert(300, 150), Ok((0, 257)), "below the old square, the only place that fits");
 }
 
 #[test]

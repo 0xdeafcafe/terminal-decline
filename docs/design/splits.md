@@ -275,6 +275,70 @@ RSS, WindowServer included):
 | idle with 4 panes (`top -stats cpu,idlew`) | 0%, 0 wake-ups |
 | full screen, 1 pane, before and after B2.3a (WindowServer CPU; Metal HUD `MTL_HUD_ENABLED=1` says direct or composited) | no change; if direct, check tearing |
 
+### 3.5 Landed (B2.1)
+
+term-render draws panes into one layer and shares the GPU and glyph
+textures (`term-render/src/metal.rs`). What changed from §3.2–3.3, and
+what B2.3 needs to know:
+
+- **API:** `Renderer::build_pane(&mut PaneRender, &mut Terminal,
+  &FrameInput)` (the terminal is passed, as since F3.3);
+  `encode_panes(target, clear, &[PaneDraw], dividers)` and
+  `present_panes(layer, clear, …)` take the pass's clear colour: a pane
+  whose background isn't it fills its scissor first, so with opacity < 1
+  pass 0. `Renderer::is_current(&PaneRender)` says whether a pane must be
+  built again before it is drawn (the textures were emptied at the cap,
+  or the window's fonts changed); a pane that isn't draws its backgrounds
+  only until it is. `PxRect` (with `clamped`) lives in term-render, for
+  `panes` to use. `prepare`, `present` and `encode` stay, drawing the
+  full-window pane `Renderer::pane`; term-app changed only where its test
+  dump read the glyph texture sizes and instance counts.
+- **`PaneRender`** holds the `Frame` (instances, pane-relative, and the
+  row cache) and what it was built against: the textures' generation and
+  the `FontsId`. B.1's shaping cache goes in it.
+- **Per process** means per thread in a thread-local, kept while any
+  renderer is alive: the last window closing frees the device and
+  textures, as before. `FontsId`s are never reused.
+- **Fonts no window uses** are dropped, and then (not at the next
+  emptying, as §3.3 had it) both textures are emptied and go back to
+  their starting sizes, and every pane is built again. Their glyphs can't
+  be taken out one by one, and the app gives each window fonts of its own
+  until B2.3: leaving them would let closing windows or changing the font
+  size grow the textures towards 16 MB, where before a closed window's
+  textures were freed and a font change emptied them.
+- **`FontSet`:** `Renderer::with_font_config` / `set_font_config` share one
+  `Fonts` per (`FontConfig`, scale); `Renderer::new(Fonts)` / `set_fonts`,
+  which the app calls today, add fonts no other window shares. B2.3
+  should move to the config calls. Shared `Fonts` sit behind an `Rc`, so
+  `Fonts::allow_runs` must be set before they are handed over (B1.2).
+- **Lookups:** each `FontsId` keeps the old by-character lookup (an array
+  for ASCII, a hash map for the rest) in front of the map by
+  (`FontsId`, `GlyphKey`); B1.2's shaped glyphs can look up by key
+  directly (`PaneGlyphs::by_key`, crate-private for now).
+- **Growing:** the packer keeps what it placed and packs the new space
+  right of and below the old square (1 px apart); the old texture is
+  copied in with a blit, waited for (a few times in a process's life).
+  The pane whose build ran out drops its row cache, since its rows were
+  built without the glyphs that didn't fit, and is built again.
+- **Hiding:** the textures go purgeable when every window is hidden, and
+  come back when one is shown or a new window opens.
+- **Tests** (`tests/panes.rs`, offscreen): two panes and a divider land
+  in their rectangles, pixel for pixel what each draws alone; a pane drawn
+  again unbuilt is identical; nothing of a pane (an italic `f` leaning
+  out, a pane cut to half) draws outside its scissor; scissors past the
+  target are clamped and a pane wholly outside is skipped; a texture that
+  grows keeps a built pane's pixels with no rebuild; one emptied at its cap
+  makes it stale (backgrounds only) until rebuilt, then identical; two
+  windows with different fonts draw correctly while the other uploads
+  glyphs between their frames; closing a window empties the textures back
+  to their starting sizes and the other rebuilds identically. The
+  packer's property test grows as it fills and checks nothing overlaps
+  across growth.
+- **Measured** (DESIGN.md "Panes in one layer"): one pane is unchanged
+  within noise (160×48 build 55.8 → 55.9 µs, unchanged 4.4 → 4.2 µs,
+  encode 15.0 → 14.7 µs); the same cells as four 80×24 panes cost 57.6 µs
+  to build, 5.8 µs unchanged and 16.8 µs to encode with two dividers.
+
 ## 4. Input and focus
 
 - The focused pane's PaneView is the window's first responder. Focus

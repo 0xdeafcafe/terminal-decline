@@ -1080,12 +1080,16 @@ fn resize_shrink_width_keeps_content() {
 }
 
 #[test]
-fn resize_shrink_width_blanks_wide_at_edge() {
+fn resize_shrink_width_moves_wide_at_edge_to_the_next_row() {
     let mut t = new(5, 1);
     t.advance("ab漢".as_bytes());
     t.state.resize(3, 1);
-    assert_eq!(text(&t, 0), "ab");
-    assert!(t.state.visible_row(0).cell(2).width() != Width::Wide);
+    // The line wraps: "ab" and an edge spacer, then the wide character
+    // whole on the next row.
+    assert_eq!(text(&t, 0), "漢");
+    assert_eq!(t.state.visible_row(0).cell(0).width(), Width::Wide);
+    assert_eq!(history(&mut t, 0), "ab");
+    assert_eq!(pos(&t), (0, 2));
 }
 
 #[test]
@@ -1100,19 +1104,27 @@ fn resize_shrink_height_sends_top_rows_to_scrollback() {
 }
 
 #[test]
-#[ignore = "BUG: shrink with cursor mid-screen: xterm drops below-cursor rows, impl pushes top rows to scrollback"]
-fn resize_shrink_height_below_cursor_is_dropped() {
+fn resize_shrink_height_below_cursor_is_kept() {
+    // xterm drops the rows below the cursor; we lose nothing (§12.2 of
+    // the cells design): blank rows below the cursor go first, then rows
+    // from the top go into history, the cursor's own row too.
     let mut t = new(5, 5);
     t.advance(b"a\r\nb\r\nc\r\nd\r\ne");
     t.advance(b"\x1b[2;1H"); // cursor on b
     t.state.resize(5, 3);
+    assert_eq!(screen(&t), ["c", "d", "e"]);
+    assert_eq!(pos(&t), (0, 0));
+    assert_eq!(t.state.scrollback_len(), 2);
+    // Blank rows below the cursor are dropped first.
+    let mut t = new(5, 5);
+    t.advance(b"a\r\nb\r\nc");
+    t.state.resize(5, 3);
     assert_eq!(screen(&t), ["a", "b", "c"]);
-    assert_eq!(pos(&t), (1, 0));
-    assert_eq!(t.state.scrollback_len(), 0, "xterm drops below-cursor rows");
+    assert_eq!(pos(&t), (2, 1));
+    assert_eq!(t.state.scrollback_len(), 0);
 }
 
 #[test]
-#[ignore = "BUG: growing taller adds blanks; xterm pulls lines back from scrollback"]
 fn resize_grow_height_pulls_from_scrollback() {
     let mut t = new(5, 5);
     t.advance(b"a\r\nb\r\nc\r\nd\r\ne");
@@ -1125,13 +1137,105 @@ fn resize_grow_height_pulls_from_scrollback() {
 }
 
 #[test]
+fn resize_rewraps_lines_at_the_new_width() {
+    let mut t = new(10, 3);
+    t.advance(b"abcdefghijklmno");
+    t.state.resize(5, 4);
+    assert_eq!(screen(&t), ["abcde", "fghij", "klmno", ""]);
+    // Just past the end of a full row: waiting to wrap.
+    assert_eq!(pos(&t), (2, 4));
+    assert!(t.state.cursor().pending_wrap());
+    t.state.resize(20, 3);
+    assert_eq!(screen(&t), ["abcdefghijklmno", "", ""]);
+    assert_eq!(pos(&t), (0, 15));
+    assert_eq!(t.state.scrollback_len(), 0);
+    // Writing goes on where the line ends.
+    t.advance(b"p");
+    assert_eq!(text(&t, 0), "abcdefghijklmnop");
+}
+
+#[test]
+fn resize_keeps_wide_characters_and_clusters_whole() {
+    let mut t = new(10, 3);
+    t.advance("ab👍\u{1F3FD}c漢".as_bytes());
+    t.state.resize(3, 3);
+    assert_eq!(screen(&t), ["ab", "👍c", "漢"]);
+    let row = t.state.visible_row(0);
+    assert_eq!(row.cell(2).width(), Width::EdgeSpacer);
+    assert!(row.wrapped());
+    let row = t.state.visible_row(1);
+    let mut s = String::new();
+    row.cell(0).push_text(&mut s);
+    assert_eq!(s, "👍\u{1F3FD}");
+    assert_eq!(row.cell(0).width(), Width::Wide);
+    t.state.resize(10, 3);
+    assert_eq!(screen(&t), ["ab👍c漢", "", ""]);
+    t.state.check_invariants().unwrap();
+}
+
+#[test]
+fn resize_keeps_cells_up_to_the_cursor() {
+    let mut t = new(10, 3);
+    t.advance(b"abc\x1b[1;9H");
+    t.state.resize(4, 3);
+    assert_eq!(screen(&t), ["abc", "", ""]);
+    assert_eq!(pos(&t), (1, 3));
+    assert!(t.state.cursor().pending_wrap());
+    t.advance(b"x");
+    assert_eq!(screen(&t), ["abc", "", "x"]);
+}
+
+#[test]
+fn resize_carries_an_erased_tails_colour_to_the_new_row_end() {
+    let mut t = new(10, 2);
+    t.advance(b"\x1b[41m\x1b[K\x1b[0mab\r\n");
+    t.state.resize(4, 2);
+    assert_eq!(screen(&t), ["ab", ""]);
+    let row = t.state.visible_row(0);
+    assert!(!row.wrapped(), "the coloured tail isn't wrapped onto more rows");
+    assert_eq!(row.cell(3).style().bg, Color::indexed(1));
+    t.state.resize(8, 2);
+    assert_eq!(t.state.visible_row(0).cell(7).style().bg, Color::indexed(1));
+}
+
+#[test]
+fn resize_moves_the_view_with_its_text() {
+    let mut t = new(10, 2);
+    for i in 0..20 {
+        t.advance(format!("\r\nL{i}").as_bytes());
+    }
+    t.state.scroll_view(5);
+    let top = text(&t, 0);
+    t.state.resize(4, 3);
+    assert_eq!(text(&t, 0), top, "history isn't rewritten: the view stays on its line");
+    t.state.resize(12, 2);
+    assert_eq!(text(&t, 0), top);
+}
+
+#[test]
+fn resize_on_alt_reflows_the_primary_once_on_leaving() {
+    let mut t = new(10, 3);
+    t.advance(b"hello world!");
+    t.advance(b"\x1b[?1049h");
+    t.state.resize(6, 3);
+    t.advance(b"vim");
+    t.state.resize(4, 3);
+    t.state.check_invariants().unwrap();
+    t.advance(b"\x1b[?1049l");
+    assert_eq!(screen(&t), ["hell", "o wo", "rld!"]);
+    assert_eq!(pos(&t), (2, 3), "the saved cursor follows its text");
+    assert_eq!(t.state.scrollback_len(), 0);
+    t.state.check_invariants().unwrap();
+}
+
+#[test]
 fn resize_grow_width_pads_blanks() {
     let mut t = new(5, 2);
     t.advance(b"abcde");
     t.state.resize(10, 2);
     assert_eq!(text(&t, 0), "abcde");
     assert_eq!(t.state.visible_row(0).len(), 10);
-    assert_eq!(pos(&t), (0, 4), "cursor stays on the last written column");
+    assert_eq!(pos(&t), (0, 5), "the cursor waiting to wrap goes on along its line");
 }
 
 #[test]
@@ -1143,8 +1247,10 @@ fn resize_on_alt_preserves_primary_and_scrollback() {
     t.advance(b"alt");
     t.state.resize(10, 4);
     t.advance(b"\x1b[?1049l");
-    assert_eq!(text(&t, 0), "keep t", "shrinking width truncates the primary too");
-    assert_eq!(text(&t, 1), "line t");
+    // The primary screen waited for the program to leave, and is back at
+    // its own size: nothing changed.
+    assert_eq!(text(&t, 0), "keep this");
+    assert_eq!(text(&t, 1), "line two");
     assert_eq!(t.state.scrollback_len(), 0);
 }
 
@@ -1154,7 +1260,9 @@ fn resize_clamps_cursor_and_clears_pending_wrap() {
     t.advance(b"\x1b[4;10H");
     t.advance(b"abcde"); // ends at last column: pending wrap... not quite
     t.state.resize(4, 2);
-    assert_eq!(pos(&t), (1, 3));
+    // 9 blanks, "a", then "bcde": 14 cells, the cursor after them, at
+    // column 2 of the line's fourth row.
+    assert_eq!(pos(&t), (1, 2));
     assert!(!t.state.cursor().pending_wrap());
     // pending wrap on a shrink:
     let mut t = new(5, 2);
@@ -1165,14 +1273,16 @@ fn resize_clamps_cursor_and_clears_pending_wrap() {
 }
 
 #[test]
-fn resize_clears_selection() {
+fn resize_keeps_the_selection_on_its_text() {
     let mut t = new(10, 2);
-    t.advance(b"hello");
+    t.advance(b"hello world");
     let a = t.state.point_at(0, 0);
-    let b = t.state.point_at(0, 3);
+    let b = t.state.point_at(0, 7);
     t.state.set_selection(Some(Selection::new(a, b)));
-    t.state.resize(5, 2);
-    assert!(t.state.selection().is_none());
+    t.state.resize(5, 3);
+    assert_eq!(t.state.selection_text().unwrap(), "hello wo");
+    t.state.resize(20, 3);
+    assert_eq!(t.state.selection_text().unwrap(), "hello wo");
 }
 
 // ---------------------------------------------------------------- rep/charset/reset

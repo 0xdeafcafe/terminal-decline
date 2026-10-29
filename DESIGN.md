@@ -98,7 +98,9 @@ only with `DECLINE_TEST_DUMP=<file>` set) that writes JSON dumps.
    then encodes the draw. While the program has synchronized-update mode
    (2026) on, drawing is held (150 ms timeout). Nothing is drawn while the
    window is hidden or covered. When the display link was paused, a wake-up
-   draws immediately rather than waiting a refresh.
+   draws immediately rather than waiting a refresh. Input doesn't draw by
+   itself: the first output after it (the echo) is drawn as soon as it is
+   parsed, and without one a tick draws after 8 ms (see "Input latency").
 
 ## Failures and crashes
 
@@ -131,7 +133,9 @@ tables and landing pads: 1.34 → 1.50 MB) and no measurable parse speed.
 
 ## Rendering (Metal)
 
-- One `CAMetalLayer`, `presentsWithTransaction = false`, triple-buffered
+- One `CAMetalLayer`, `presentsWithTransaction = false`,
+  `displaySyncEnabled = false` (frames go to the window server as soon as
+  the GPU is done; see "Input latency"), two drawables, triple-buffered
   instance buffers in shared memory (Apple Silicon has unified memory, so no
   copies to the GPU).
 - Per cell the GPU gets one instance: glyph rectangle in the texture (u16×4),
@@ -344,20 +348,88 @@ Screen Recording and Accessibility were granted only briefly, so the full
 outside comparison (200 keys, htop) is still to run:
 `scripts/latency/run.py --rates "" --external decline,ghostty`.
 
-What this shows: decline is 6–10 ms slower than Ghostty at the median, so
-the "p99 no worse than Ghostty" threshold is not met yet. Where decline's
-time goes:
+What this showed: decline was 6–10 ms slower than Ghostty at the median.
+Where its time went:
 - About 23 ms from commit to `presentedTime`, nearly constant at either
-  display link rate: a frame drawn on a display link tick reaches the
-  glass about three 120 Hz refreshes later. The largest share, and the
-  first thing to try to shorten (R.6 `CAMetalDisplayLink`, presenting with
-  the Core Animation transaction, or setting the layer's contents directly).
-- The key's own redraw: typing marks the screen dirty and, with the display
-  link paused, draws at once, before the echo has arrived; the echo then
-  waits for the next tick (4–5 ms p50, up to a full tick at 60 Hz).
+  display link rate: a frame reached the glass about three 120 Hz
+  refreshes after it was sent to the GPU.
+- The key's own redraw: typing marked the screen dirty and, with the
+  display link paused, drew at once, before the echo had arrived; the echo
+  then waited for the next tick (4–5 ms p50, up to a full tick at 60 Hz).
 - 2–8 ms (p50) from the event's timestamp to the bytes reaching the writer:
   window-server delivery plus the text input system (`interpretKeyEvents`).
-Each change should be kept only if this harness shows lower numbers.
+
+#### The fix (October 2026)
+
+Cause: the layer had `displaySyncEnabled` on (the default), so each
+drawable was held for the display's next refresh before the window server
+even saw it, and the window server then composited it on the refresh after
+that. With only two drawables, a second frame inside that window (the
+key's own redraw, then its echo; or the flood window's frames)
+also blocked in `nextDrawable`, on the main thread, until one came back:
+that is the 5–10 ms p95 of "frame build + encode" above, and it held up
+every other window's drawing too.
+
+Two changes:
+1. `displaySyncEnabled = false` (term-render `configure_layer`): the
+   drawable goes to the window server as soon as the GPU is done. A window
+   doesn't tear, since the window server composites at the refresh anyway.
+   Commit → on glass drops from 23–31 ms to 4–9 ms at the median. Not
+   checked: a full-screen window, where macOS may show an opaque layer
+   directly without compositing it, and frames could then tear.
+2. Input no longer draws at once (view `send_input`): it starts the display
+   link and waits for the echo, and the first output after it is drawn as
+   soon as the reader has parsed it (`output_arrived`) instead of on the
+   next tick. With no output within `ECHO_WAIT` (8 ms) a tick draws the
+   input's own changes (cursor, scroll to the bottom). Parsed → frame
+   starts drops from 4–9 ms to 0.1 ms, and the wasted frame before the echo
+   is gone, so the echo's frame never waits for a drawable.
+
+Tried and dropped: three drawables (the harness hung after a few keys, and
+a third drawable only queues more), `presentsWithTransaction` with
+`waitUntilScheduled` and `present` (frames took 400 ms to build, as the
+main thread waited on the transaction). `CAMetalDisplayLink` and
+`presentDrawable:atTime:` were not needed once the two changes above
+closed the gap.
+
+Before and after, in decline with `--type` (t0 = `keyDown`), ms, p50 / p95
+/ p99, 200 keys per run, the same M1 Max with other agents' builds and
+benchmarks running (load average 5–24). The window was never the key
+window (Alex was typing elsewhere), which is why the old build's commit →
+on glass reads 24–31 ms rather than the 23 ms above:
+
+| scenario | before: keyDown → on glass | after | before: commit → on glass | after |
+|---|---|---|---|---|
+| idle, 120 Hz | 39.2 / 54.3 / 80.7 | 8.6 / 13.9 / 20.4 | 31.6 / 39.0 / 57.0 | 8.0 / 12.2 / 19.8 |
+| idle, 60 Hz | 39.2 / 43.3 / 43.8 | 9.3 / 26.9 / 31.2 | 30.9 / 32.3 / 35.4 | 8.8 / 26.5 / 30.7 |
+| flood, 120 Hz | 30.4 / 32.3 / 32.9 | 9.5 / 13.4 / 22.1 | 23.9 / 24.0 / 24.1 | 8.8 / 12.9 / 14.5 |
+| flood, 60 Hz | 34.8 / 41.9 / 46.3 | 4.1 / 9.6 / 17.8 | 24.4 / 31.7 / 32.1 | 3.9 / 9.5 / 17.7 |
+| htop, 120 Hz | 36.3 / 43.8 / 48.0 | 5.8 / 22.1 / 27.5 | 25.7 / 32.4 / 36.6 | 5.2 / 17.8 / 24.4 |
+| htop, 60 Hz | 36.5 / 43.7 / 48.8 | 5.4 / 21.5 / 28.7 | 24.2 / 32.4 / 36.5 | 4.2 / 19.0 / 24.1 |
+
+Every p50 and p99 is lower. The new tail is no longer steady: commit → on
+glass is mostly 3–10 ms with some keys at 17–31 ms, in stretches of
+seconds. One flood 120 Hz run of the new build had such a stretch through
+a third of its keys (7.5 / 32.9 / 41.3 key → glass, the old build's p99
+then being 32.9); the run in the table, minutes later, had none. Likely
+causes, not yet confirmed: the window server busy with other apps' frames,
+and the panel slowing its refresh while the screen is still (ProMotion),
+so the first frame after a pause waits for a slow refresh. Before, every
+frame waited a fixed two to three refreshes, which hid both. The idle
+60 Hz run lost its window to other apps after 146 keys (the 54 left had no
+frame, as for the old build in runs that were stopped).
+
+Idle: 0.0% CPU and 0 idle wakeups (`top -stats cpu,idlew`), as before:
+the display link still pauses after two ticks with nothing new, and an
+input with no echo keeps it running for at most `ECHO_WAIT`.
+
+The outside comparison with Ghostty could not be run again: Screen
+Recording and Accessibility are off for the terminal running the harness
+(`probe check`: `screen_recording=false post_events=false`). Against the
+outside numbers above (Ghostty idle 23.4 ms p50, flood 9.8 ms), decline's
+in-app key → glass gained 25–30 ms at the median, so it should now be well
+ahead; to confirm, with the permissions on:
+`scripts/latency/run.py --rates "" --external decline,ghostty`.
 
 CI: hosted macOS runners have no real display, so presented times mean
 nothing there. CI can track the part that is decline's own work, from the

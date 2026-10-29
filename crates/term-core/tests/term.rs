@@ -222,6 +222,51 @@ fn osc_clipboard_and_cwd() {
 }
 
 #[test]
+fn osc_notifications_and_progress() {
+    use term_core::{Notification, Progress};
+    let note = |title: Option<&str>, body: &str| {
+        Some(Notification {
+            title: title.map(str::to_owned),
+            body: body.to_owned(),
+        })
+    };
+    let mut t = Term::new(10, 1, 0);
+    for (bytes, want) in [
+        (
+            &b"\x1b]9;Claude Code: done; all tests pass\x07"[..],
+            note(None, "Claude Code: done; all tests pass"),
+        ),
+        (
+            b"\x1b]777;notify;Claude Code;Task finished\x1b\\",
+            note(Some("Claude Code"), "Task finished"),
+        ),
+        (b"\x1b]777;notify;Title only\x07", note(Some("Title only"), "")),
+        (b"\x1b]777;notify;;\x07", None),
+        (b"\x1b]9;\x07", None),
+        (b"\x1b]777;other;x;y\x07", None),
+        // Progress isn't a notification.
+        (b"\x1b]9;4;1;50\x07", None),
+    ] {
+        t.advance(bytes);
+        assert_eq!(t.state.take_notification(), want, "{bytes:?}");
+        assert_eq!(t.state.take_notification(), None, "taken");
+    }
+    for (bytes, want) in [
+        (&b"\x1b]9;4;1;42\x07"[..], Some(Progress::Normal(42))),
+        (b"\x1b]9;4;1;250\x07", Some(Progress::Normal(100))),
+        (b"\x1b]9;4;1\x07", Some(Progress::Normal(0))),
+        (b"\x1b]9;4;2;7\x07", Some(Progress::Error(7))),
+        (b"\x1b]9;4;3;\x07", Some(Progress::Indeterminate)),
+        (b"\x1b]9;4;4;90\x07", Some(Progress::Paused(90))),
+        (b"\x1b]9;4;0;\x07", Some(Progress::Clear)),
+        (b"\x1b]9;4;9;1\x07", None),
+    ] {
+        t.advance(bytes);
+        assert_eq!(t.state.take_progress(), want, "{bytes:?}");
+    }
+}
+
+#[test]
 fn dump_shows_wraps_trailing_spaces_and_cursor() {
     let mut t = Term::new(6, 4, 10);
     t.advance("ab  \r\n漢x wrapped\r\n\x1b[41m \x1b[0m".as_bytes());

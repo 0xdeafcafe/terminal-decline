@@ -126,6 +126,17 @@ fn with_view(id: usize, f: impl FnOnce(&TerminalView)) {
     }
 }
 
+/// Bring view `id`'s window or tab to the front (a click on its
+/// notification).
+pub(crate) fn bring_to_front(id: usize) {
+    with_view(id, |v| {
+        if let Some(window) = v.window() {
+            window.makeKeyAndOrderFront(None);
+            objc2_app_kit::NSApplication::sharedApplication(MainThreadMarker::from(v)).activate();
+        }
+    });
+}
+
 /// Wake the main thread to draw (called from any thread).
 fn wake(id: usize) {
     DispatchQueue::main().exec_async(move || with_view(id, |v| v.output_arrived()));
@@ -538,11 +549,15 @@ impl TerminalView {
 
     /// What the program asked for, taken as it was parsed (see
     /// [`crate::session::Events`]): drawn or not, a tab's title is shown
-    /// in the tab bar and a bell bounces the Dock icon.
+    /// in the tab bar, a bell bounces the Dock icon, a notification is
+    /// shown if this window or tab isn't the one in front, and progress
+    /// goes on the Dock icon.
     fn events(&self, events: Events) {
         let mtm = MainThreadMarker::from(self);
+        let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
         let fixed_title = self.with_state(|st| st.config.title.is_some()).unwrap_or(true);
-        if let Some(window) = self.window()
+        let window = self.window();
+        if let Some(window) = &window
             && !fixed_title
             && let Some(title) = &events.title
         {
@@ -550,10 +565,24 @@ impl TerminalView {
         }
         if events.bell {
             // Bounce the Dock icon if the app isn't in front.
-            let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
             if !app.isActive() {
                 app.requestUserAttention(objc2_app_kit::NSRequestUserAttentionType::InformationalRequest);
             }
+        }
+        if let Some(n) = events.notification {
+            let in_front = app.isActive() && window.as_ref().is_some_and(|w| w.isKeyWindow());
+            if !in_front {
+                // OSC 9 has no title: use the window's (programs set it).
+                let title = n
+                    .title
+                    .filter(|t| !t.is_empty())
+                    .or_else(|| window.as_ref().map(|w| w.title().to_string()))
+                    .unwrap_or_else(|| "decline".into());
+                crate::notify::post(mtm, self.ivars().id, &title, &n.body);
+            }
+        }
+        if let Some(p) = events.progress {
+            crate::notify::set_progress(mtm, self.ivars().id, p);
         }
     }
 
@@ -858,6 +887,7 @@ impl TerminalView {
         if let Some(st) = st {
             st.link.invalidate();
             drop(st); // hangs up on the program
+            crate::notify::set_progress(MainThreadMarker::from(self), self.ivars().id, term_core::Progress::Clear);
         }
         VIEWS.with(|v| v.borrow_mut().remove(&self.ivars().id));
     }
@@ -1286,6 +1316,10 @@ impl TerminalView {
                         .unwrap_or(0),
                     visible: self.visible(),
                     top_inset: self.titlebar_height(),
+                    badge: objc2_app_kit::NSApplication::sharedApplication(MainThreadMarker::from(self))
+                        .dockTile()
+                        .badgeLabel()
+                        .map(|b| b.to_string()),
                 };
                 self.with_state(|st| write_dump(st, window));
                 self.run_controls();
@@ -1301,6 +1335,7 @@ struct Window {
     tab: usize,
     visible: bool,
     top_inset: f64,
+    badge: Option<String>,
 }
 
 fn write_dump(st: &mut State, window: Window) {
@@ -1323,6 +1358,8 @@ fn write_dump(st: &mut State, window: Window) {
         visible: window.visible,
         hidden: st.hidden,
         pad_top,
+        notifications: crate::notify::stats(),
+        badge: window.badge,
         screen,
         cols,
         lines,

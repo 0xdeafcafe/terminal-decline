@@ -321,6 +321,128 @@ fn smoke_restore_reopens_tabs_as_tabs() {
     assert!(id("tab-a") < id("tab-b") && id("tab-b") < id("solo"), "{all:?}");
 }
 
+/// The bare binary (no app bundle) can't use the notification center,
+/// which would throw: OSC 9 and 777 fall back to the bell's Dock bounce,
+/// and OSC 9;4 progress still shows on the Dock icon.
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_notifications_without_a_bundle() {
+    if !have_metal() {
+        return;
+    }
+    let dir = TempDir::new("notify");
+    let script = notify_from_a_background_tab(&dir);
+    let (status, _) = decline(&dir, &script, true);
+    assert!(status.success(), "the app survived: {status}");
+    let d = dumps(&dir);
+    assert_eq!(d.len(), 2, "{d:?}");
+    assert_eq!(d[0]["tabs"], 2, "{}", d[0]);
+    let n = &d[0]["notifications"];
+    assert_eq!(n["permission"], "unbundled", "{n}");
+    assert_eq!(n["posted"], 0, "{n}");
+    assert_eq!(n["bounced"], 2, "{n}");
+    assert_eq!(d[0]["badge"], "42%", "{}", d[0]);
+    assert_eq!(d[1]["badge"], Value::Null, "cleared: {}", d[1]);
+}
+
+/// The bundled app asks for permission on the first notification and
+/// posts through the notification center. Opt in with
+/// `DECLINE_SMOKE_NOTIFY=1`: each run's temp bundle leaves an entry in
+/// System Settings > Notifications and may show a permission prompt.
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_notifications_from_a_bundle() {
+    if std::env::var_os("DECLINE_SMOKE_NOTIFY").is_none() {
+        eprintln!("skipped: set DECLINE_SMOKE_NOTIFY=1 to run");
+        return;
+    }
+    if !have_metal() {
+        return;
+    }
+    let dir = TempDir::new("notify-bundle");
+    let unique = format!("{}", std::process::id());
+    let app = temp_bundle(&dir, &format!("Decline Notify {unique}"), &notify_from_a_background_tab(&dir));
+    let d = launch_bundle(&dir, &app);
+    assert_eq!(d.len(), 2, "{d:?}");
+    let n = &d[0]["notifications"];
+    eprintln!("notifications: {n}");
+    // Asked once; the two wait for the answer, or were posted, or (turned
+    // off) bounced the Dock icon.
+    assert!(["asking", "granted", "denied"].contains(&n["permission"].as_str().unwrap()), "{n}");
+    assert_eq!(num(n, "posted") + num(n, "bounced"), 2.0, "{n}");
+    assert_eq!(d[0]["badge"], "42%", "{}", d[0]);
+}
+
+/// A program for two tabs: the first opens the second and, from behind it
+/// (where a notification is always wanted), asks for two notifications and
+/// reports progress, dumps, clears the progress, dumps and quits. Output
+/// after a dump is parsed while the dump waits for its frame, so the
+/// progress is cleared only once the first dump is written.
+fn notify_from_a_background_tab(dir: &TempDir) -> String {
+    let d = dir.path().display();
+    let wait = |cond: String| format!("i=0; while ! {{ {cond}; }} && [ $i -lt 200 ]; do sleep 0.05; i=$((i+1)); done; ");
+    format!(
+        "if mkdir '{d}/first' 2>/dev/null; then \
+           {tab}{wait_two}\
+           printf '\\033]9;Claude Code: done\\007'; sleep 0.2; \
+           printf '\\033]777;notify;Build;finished\\007\\033]9;4;1;42\\007'; echo sent; {dump}\
+           {wait_dump}printf '\\033]9;4;0;\\007'; {dump}{quit}\
+         else touch '{d}/two'; fi; sleep 20",
+        tab = osc("tab"),
+        wait_two = wait(format!("[ -e '{d}/two' ]")),
+        dump = osc("dump"),
+        wait_dump = wait(format!("[ -s '{}' ]", dir.dump_file().display())),
+        quit = osc("quit"),
+    )
+}
+
+/// A pin bundle for `script` in `dir`'s Applications, made by the pin
+/// module the way `decline pin` does (the Dock is never touched).
+fn temp_bundle(dir: &TempDir, name: &str, script: &str) -> PathBuf {
+    use decline::pin::{self, Options};
+    let paths = decline::Paths {
+        config_dir: dir.config_home().join("decline"),
+        apps_dir: dir.path().join("Applications"),
+        exe: PathBuf::from(APP),
+    };
+    std::fs::create_dir_all(&paths.apps_dir).unwrap();
+    let options = Options {
+        name: name.into(),
+        icon: None,
+        config: None,
+        cwd: None,
+        dir: paths.apps_dir.clone(),
+        dock: false,
+        command: vec!["/bin/sh".into(), "-c".into(), script.into()],
+    };
+    let mut runner = |cmd: &mut Command| {
+        let program = cmd.get_program().to_string_lossy().into_owned();
+        assert!(!program.ends_with("defaults") && !program.ends_with("killall"), "{program}");
+        cmd.status()
+    };
+    pin::create(options, &paths, &mut runner).expect("creating the pin").app
+}
+
+/// Launch `app` as the Dock does and wait for it to quit; its dumps.
+fn launch_bundle(dir: &TempDir, app: &Path) -> Vec<Value> {
+    let mut open = Command::new("/usr/bin/open");
+    open.arg("-n")
+        .arg("-W")
+        .arg("--env")
+        .arg(format!("DECLINE_TEST_DUMP={}", dir.dump_file().display()))
+        .arg("--env")
+        .arg(format!("XDG_CONFIG_HOME={}", dir.config_home().display()))
+        .arg("--stderr")
+        .arg(dir.path().join("stderr.txt"))
+        .arg(app);
+    let (status, _) = run(&mut open);
+    let lsregister = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister";
+    let _ = Command::new(lsregister).arg("-u").arg(app).status();
+    let stderr = std::fs::read_to_string(dir.path().join("stderr.txt")).unwrap_or_default();
+    assert!(status.success(), "open: {status}; the app's stderr:\n{stderr}");
+    dumps(dir)
+}
+
 /// Without `DECLINE_TEST_DUMP` the control OSC is ignored: `quit` doesn't
 /// quit, the app ends when the program does.
 #[test]

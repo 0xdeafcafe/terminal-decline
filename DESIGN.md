@@ -239,6 +239,43 @@ the index of their tab group and which tab was in front
 (`reload::SavedWindow`); they reopen as tabs of one window, in order. Files
 from builds before tabs restore as plain windows.
 
+## Notifications and progress
+
+- `ESC ] 9 ; body BEL` (iTerm2's form; the title is the window's) and
+  `ESC ] 777 ; notify ; title ; body BEL` (rxvt's) post a macOS
+  notification through `UNUserNotificationCenter` when their window or tab
+  isn't the one in front (app inactive, or another window or tab key). In
+  front, nothing is shown. term-core keeps the latest one not yet taken, so
+  several in one parse slice give one notification (a flood can't bury the
+  screen in banners). Permission is asked once, on the first notification;
+  notifications wait for the answer. A click brings that window or tab to
+  the front (the request's identifier names the view).
+- `UNUserNotificationCenter` throws outside an app bundle, so a bare
+  `cargo install` binary checks for a bundle (`NSBundle.mainBundle` with
+  an identifier, at a `.app` path) and, without one or without
+  permission, does what the bell does: bounces the Dock icon while the
+  app isn't active. The bell itself is unchanged.
+- `ESC ] 9 ; 4 ; state ; percent BEL` (ConEmu's progress) shows on the
+  Dock icon's badge: the lowest percentage of the windows reporting one,
+  "!" while one reports an error, "…" while they are only busy; state 0
+  or closing the window clears it. Pins have their own Dock icon, so their
+  own badge.
+- Like the title, these are taken by the reader thread as they are parsed,
+  so a background tab (never drawn) still notifies.
+
+What Claude Code sends (checked in its 2.1.306 binary): with
+`preferredNotifChannel` at its default `auto`, it picks a channel only
+for `TERM_PROGRAM` iTerm.app (OSC 9, `Claude Code: <message>`), kitty (OSC
+99), ghostty (OSC 777 `notify;<title>;<message>`) and Apple_Terminal (a
+bell, if the profile's bell is on); anything else, `decline` included,
+gets nothing, not even a bell. So in decline set it once:
+`claude config set --global preferredNotifChannel iterm2` (or `ghostty`;
+`iterm2_with_bell` adds a bell). Its OSC 9;4 progress
+(`terminalProgressBarEnabled`) is sent only to ghostty ≥ 1.2.0, iTerm.app
+≥ 3.6.6 and ConEmu, so decline doesn't get it from Claude Code today. A
+Notification or Stop hook can also return `terminalSequence` (OSC 9 / 777
+/ 9;4) for Claude Code to print. OSC 99 (kitty) isn't handled.
+
 ## Dock pins ("make ./rush its own app")
 
 `decline pin Rush [--icon rush.png] [--config rush.toml] [--dock] -- ./rush`

@@ -552,6 +552,7 @@ pub fn run(config: Config, notices: Vec<String>, app_name: &str, restore: Vec<cr
     let mtm = MainThreadMarker::new().expect("must run on the main thread");
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+    crate::notify::on_click(crate::view::bring_to_front);
     let delegate = AppDelegate::new(mtm, config, notices, restore);
     app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
     app.setMainMenu(Some(&build_menus(mtm, app_name)));

@@ -27,6 +27,7 @@ objc2-metal.workspace = true
 objc2-quartz-core.workspace = true
 objc2-core-foundation.workspace = true
 dispatch2 = "0.3"
+objc2-user-notifications = "0.3"
 libc.workspace = true
 serde = { version = "1", features = ["derive"] }
 toml = "1.1"

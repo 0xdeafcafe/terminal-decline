@@ -14,6 +14,7 @@ pub mod keys;
 pub mod latency;
 pub mod layout;
 pub mod mouse;
+pub mod notify;
 pub mod paths;
 pub mod pin;
 pub mod reload;

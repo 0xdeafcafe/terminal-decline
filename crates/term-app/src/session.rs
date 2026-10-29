@@ -100,6 +100,10 @@ pub struct Events {
     /// A new title (OSC 0/2).
     pub title: Option<String>,
     pub bell: bool,
+    /// OSC 9 / OSC 777.
+    pub notification: Option<term_core::Notification>,
+    /// OSC 9;4.
+    pub progress: Option<term_core::Progress>,
 }
 
 impl Events {
@@ -107,6 +111,8 @@ impl Events {
         Events {
             title: t.state.take_title(),
             bell: t.state.take_bell(),
+            notification: t.state.take_notification(),
+            progress: t.state.take_progress(),
         }
     }
 

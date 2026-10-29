@@ -146,6 +146,10 @@ pub struct Dump {
     /// Top padding in pixels: the title bar, the tab bar while one shows,
     /// and the configured padding.
     pub pad_top: u32,
+    /// Notifications so far, for the whole app (see [`crate::notify`]).
+    pub notifications: crate::notify::Stats,
+    /// The Dock icon's badge (progress).
+    pub badge: Option<String>,
     /// `Terminal::dump()`: the visible rows and a status line.
     pub screen: String,
     pub cols: usize,

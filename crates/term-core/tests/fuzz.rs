@@ -113,6 +113,10 @@ fn run_stream(seed: u64, sizes: &[(usize, usize, usize)], bytes_per_size: usize)
     for &(cols, lines, limit) in sizes {
         let mut rng = Rng(seed ^ (cols as u64) << 32 ^ lines as u64);
         let mut t = Term::new(cols, lines, limit);
+        // Half the sizes sweep their style tables constantly (§5.2).
+        if cols % 2 == 0 {
+            t.state.set_sweep_at(Some(8));
+        }
         let mut fed = 0;
         while fed < bytes_per_size {
             let mut chunk = Vec::new();

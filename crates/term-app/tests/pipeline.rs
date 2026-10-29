@@ -21,7 +21,7 @@ use terminal_decline::keys::{self, KeyAction, KeyInput, KeyModes, flags};
 use terminal_decline::session::{Hooks, Outcome, Session};
 
 /// Upper bound for any single wait.
-const DEADLINE: Duration = Duration::from_secs(15);
+const DEADLINE: Duration = Duration::from_secs(60);
 const PROMPT: &str = "READY>";
 
 fn size(cols: u16, lines: u16) -> Size {

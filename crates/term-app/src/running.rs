@@ -84,9 +84,13 @@ mod tests {
     use super::*;
     use std::process::{Command, Stdio};
 
-    /// A shell on a PTY, as a window runs one: `None` until it starts a
-    /// job of its own in the foreground.
-    fn shell_running(script: &str) -> (term_pty::Pty, Option<String>) {
+    /// A shell on a PTY, as a window runs one, and the foreground program
+    /// once it is `want`. With `want` as `None` the shell is only looked at
+    /// once, for a script that never starts a job. A job's process group
+    /// is in the foreground from the fork, before it execs the program, so
+    /// waiting for any program would see the shell's own name; wait for
+    /// the one expected, up to a generous deadline for a busy machine.
+    fn shell_running(script: &str, want: Option<&str>) -> (term_pty::Pty, Option<String>) {
         let cmd = term_pty::Command {
             argv: vec!["/bin/sh".into(), "-c".into(), script.into()],
             cwd: None,
@@ -101,28 +105,27 @@ mod tests {
             cell_height: 16,
         };
         let pty = term_pty::Pty::spawn(&cmd, size).unwrap();
-        let mut seen = None;
-        for _ in 0..100 {
-            seen = foreground_program(pty.pid());
-            if seen.is_some() {
-                break;
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        loop {
+            let seen = foreground_program(pty.pid());
+            if want.is_none() || seen.as_deref() == want || std::time::Instant::now() >= until {
+                return (pty, seen);
             }
-            std::thread::sleep(std::time::Duration::from_millis(20));
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        (pty, seen)
     }
 
     #[test]
     fn sees_the_job_in_the_foreground() {
         // With job control on, the shell gives `sleep` its own process
         // group and the terminal to it, as an interactive shell does.
-        let (_pty, fg) = shell_running("set -m; /bin/sleep 5; :");
+        let (_pty, fg) = shell_running("set -m; /bin/sleep 120; :", Some("sleep"));
         assert_eq!(fg.as_deref(), Some("sleep"));
     }
 
     #[test]
     fn a_shell_at_its_prompt_runs_nothing() {
-        let (_pty, fg) = shell_running("read x");
+        let (_pty, fg) = shell_running("read x", None);
         assert_eq!(fg, None);
         assert_eq!(foreground_program(-1), None);
     }

@@ -703,7 +703,7 @@ impl TerminalView {
                     .title
                     .filter(|t| !t.is_empty())
                     .or_else(|| window.as_ref().map(|w| w.title().to_string()))
-                    .unwrap_or_else(|| "decline".into());
+                    .unwrap_or_else(|| "Terminal Decline".into());
                 crate::notify::post(mtm, self.ivars().id, &title, &n.body);
             }
         }
@@ -1777,7 +1777,7 @@ pub fn delegate_of(view: &TerminalView) -> &ProtocolObject<dyn NSWindowDelegate>
 impl TerminalView {
     fn control(&self, cmd: &str) {
         let Some(c) = Control::parse(cmd) else {
-            eprintln!("decline: unknown test control command {cmd:?}");
+            eprintln!("terminal-decline: unknown test control command {cmd:?}");
             return;
         };
         self.with_state(|st| {
@@ -1947,6 +1947,6 @@ fn write_dump(st: &mut State, window: Window) {
         .open(&test.path)
         .and_then(|mut f| writeln!(f, "{line}"));
     if let Err(e) = written {
-        eprintln!("decline: writing {}: {e}", test.path.display());
+        eprintln!("terminal-decline: writing {}: {e}", test.path.display());
     }
 }

@@ -207,7 +207,7 @@ mod tests {
 
     #[test]
     fn files_open_in_their_folder() {
-        let dir = std::env::temp_dir().join(format!("decline-desktop-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("terminal-decline-desktop-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("sub")).unwrap();
         std::fs::write(dir.join("file.txt"), "x").unwrap();
         assert_eq!(folder_for(&dir.join("sub")), Some(dir.join("sub")));

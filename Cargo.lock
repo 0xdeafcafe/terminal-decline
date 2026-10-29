@@ -233,30 +233,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 
 [[package]]
-name = "decline"
-version = "0.0.1"
-dependencies = [
- "block2",
- "decline",
- "dispatch2",
- "libc",
- "objc2",
- "objc2-app-kit",
- "objc2-core-foundation",
- "objc2-foundation",
- "objc2-metal",
- "objc2-quartz-core",
- "objc2-user-notifications",
- "serde",
- "serde_json",
- "term-core",
- "term-font",
- "term-pty",
- "term-render",
- "toml",
-]
-
-[[package]]
 name = "dispatch2"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -897,6 +873,30 @@ dependencies = [
  "term-core",
  "term-font",
  "unicode-width",
+]
+
+[[package]]
+name = "terminal-decline"
+version = "0.0.1"
+dependencies = [
+ "block2",
+ "dispatch2",
+ "libc",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-core-foundation",
+ "objc2-foundation",
+ "objc2-metal",
+ "objc2-quartz-core",
+ "objc2-user-notifications",
+ "serde",
+ "serde_json",
+ "term-core",
+ "term-font",
+ "term-pty",
+ "term-render",
+ "terminal-decline",
+ "toml",
 ]
 
 [[package]]

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Keypress-to-present latency of decline, idle and under load, and the
-same keypress-to-pixels measurement for decline and Ghostty from outside.
+"""Keypress-to-present latency of Terminal Decline, idle and under load, and the
+same keypress-to-pixels measurement for Terminal Decline and Ghostty from outside.
 
-    scripts/latency/run.py [--app target/release/decline] [--keys 200]
+    scripts/latency/run.py [--app target/release/terminal-decline] [--keys 200]
                            [--scenarios idle,flood,htop] [--rates 120,60]
                            [--external decline,ghostty] [--out target/latency]
 
@@ -84,7 +84,7 @@ GHOSTTY_ARGS = [
     "--quit-after-last-window-closed=true",
 ]
 
-BUNDLE_ID = "red.forbes.decline.latency"
+BUNDLE_ID = "red.forbes.terminal-decline.latency"
 LSREGISTER = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
 
 
@@ -128,17 +128,17 @@ def make_bundle(binary, out_dir):
     """Wrap the binary in an app of its own bundle id, so `open` can start
     it: macOS lets an app started by LaunchServices take the focus, while
     one started from a script may be refused. Its own id keeps it apart
-    from an installed Decline.app."""
-    app = out_dir / "DeclineLatency.app"
+    from an installed Terminal Decline.app."""
+    app = out_dir / "TerminalDeclineLatency.app"
     shutil.rmtree(app, ignore_errors=True)
     (app / "Contents/MacOS").mkdir(parents=True)
-    shutil.copy2(binary, app / "Contents/MacOS/decline")
+    shutil.copy2(binary, app / "Contents/MacOS/terminal-decline")
     with open(app / "Contents/Info.plist", "wb") as f:
         plistlib.dump(
             {
                 "CFBundleIdentifier": BUNDLE_ID,
-                "CFBundleName": "DeclineLatency",
-                "CFBundleExecutable": "decline",
+                "CFBundleName": "TerminalDeclineLatency",
+                "CFBundleExecutable": "terminal-decline",
                 "CFBundlePackageType": "APPL",
                 "NSHighResolutionCapable": True,
             },
@@ -181,7 +181,7 @@ class App:
         open_args = ["--stderr", str(stderr)]
         for k, v in env.items():
             open_args += ["--env", f"{k}={v}"]
-        return App(bundle, str(bundle / "Contents/MacOS/decline"), open_args, ["-e", *program])
+        return App(bundle, str(bundle / "Contents/MacOS/terminal-decline"), open_args, ["-e", *program])
 
     @staticmethod
     def ghostty(program):
@@ -361,7 +361,7 @@ def show(title, rows):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--app", default=str(ROOT / "target/release/decline"))
+    ap.add_argument("--app", default=str(ROOT / "target/release/terminal-decline"))
     ap.add_argument("--keys", type=int, default=200)
     ap.add_argument("--scenarios", default="idle,flood,htop")
     ap.add_argument("--rates", default="120,60", help="in-app display link rates; empty to skip in-app runs")

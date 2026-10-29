@@ -1,4 +1,4 @@
-# decline — design
+# Terminal Decline — design
 
 A GPU-accelerated terminal for macOS, written in Rust. Goal: lower memory and
 CPU use than Ghostty and Warp, with zero UI of its own, and the ability to pin
@@ -24,7 +24,7 @@ any command as its own Dock app.
   terminal tab, editing that file (`docs/design/preferences.md`). Menus
   exist only because macOS requires a menu bar (Quit, Copy, Paste, New
   Window, New Tab); they are standard AppKit menus.
-- **Dock pins.** `decline pin` turns any command into its own macOS app.
+- **Dock pins.** `terminal-decline pin` turns any command into its own macOS app.
 
 ## Modules (Cargo workspace)
 
@@ -38,7 +38,7 @@ any command as its own Dock app.
 
 `term-core` has no platform code and is tested and benchmarked on its own.
 
-`term-app` (the `decline` package) is a library plus a thin `main.rs`. The
+`term-app` (the `terminal-decline` package) is a library plus a thin `main.rs`. The
 AppKit code (`app`, `view`) only turns events into the inputs of plain
 modules, each tested on its own: `session` (the program, its PTY, the
 reader and writer threads, the shared terminal and the dirty flag),
@@ -126,10 +126,10 @@ An app started from the Dock or as a pin has no stderr, so failures are
 written into the window as dim red text (and to stderr):
 
 - Config errors appear at the top of each window, before the program's
-  output: `decline: config: font_sise: unknown field …; ignored`.
+  output: `terminal-decline: config: font_sise: unknown field …; ignored`.
 - A program that can't be started leaves its error and "press any key to
   close". One that exits within 1 s with a non-zero status (a broken pin,
-  `decline -e /nonexistent`) leaves `[process exited with status N]`. In
+  `terminal-decline -e /nonexistent`) leaves `[process exited with status N]`. In
   both cases the window stays open until a key is pressed (Cmd shortcuts
   still work, so the message can be copied). A program that exits with
   status 0, or after the first second, closes its window as before. The
@@ -138,14 +138,14 @@ written into the window as dim red text (and to stderr):
 
 Release builds unwind (`panic = "unwind"`). A panic hook writes the
 message, a backtrace and the version to
-`~/Library/Logs/decline/crash-<time>.log` and logs a fault to os_log
-(subsystem `red.forbes.decline`, a few lines of FFI to `_os_log_impl`). A
+`~/Library/Logs/terminal-decline/crash-<time>.log` and logs a fault to os_log
+(subsystem `red.forbes.terminal-decline`, a few lines of FFI to `_os_log_impl`). A
 panic while a reader thread parses output is caught inside the terminal's
 lock, so the lock is never poisoned: that session's terminal is replaced by
-a fresh one saying "decline hit a bug and stopped this session; details in
+a fresh one saying "Terminal Decline hit a bug and stopped this session; details in
 …", its program is killed, and other windows keep running. A panic on the
 main thread (AppKit) aborts once it has been logged. Each release keeps
-its `decline.dSYM` (`split-debuginfo = "packed"`) as a release download,
+its `terminal-decline.dSYM` (`split-debuginfo = "packed"`) as a release download,
 for symbolicating crash logs. Unwinding costs binary size (unwind tables
 and landing pads: 157 KB when it was added, 1.34 → 1.50 MB; 261 KB on 29
 Oct 2026, 1.90 → 2.16 MB) and no measurable parse speed.
@@ -230,10 +230,10 @@ Oct 2026, 1.90 → 2.16 MB) and no measurable parse speed.
   Cmd+= / Cmd+- font size, Ctrl+Cmd+F full screen. These are the
   defaults of the `[keybind]` config (below), which remaps or unbinds them
   and makes keys send text; pins may override it in their own config.
-- Secure Keyboard Entry (decline menu, with a checkmark; kept in user
+- Secure Keyboard Entry (Terminal Decline menu, with a checkmark; kept in user
   defaults as `SecureKeyboardEntry`): `EnableSecureEventInput` so no other
   process sees the keys typed, as in Terminal.app. macOS has one switch
-  for the whole session, so decline holds it only while it is the active
+  for the whole session, so Terminal Decline holds it only while it is the active
   app (other apps' hot keys and input tools keep working while it is in
   the background) and gives it back when it quits (`secure_input`). Pins
   have their own bundle id, so their own setting.
@@ -370,26 +370,26 @@ What Claude Code sends (checked in its 2.1.306 binary): with
 `preferredNotifChannel` at its default `auto`, it picks a channel only
 for `TERM_PROGRAM` iTerm.app (OSC 9, `Claude Code: <message>`), kitty (OSC
 99), ghostty (OSC 777 `notify;<title>;<message>`) and Apple_Terminal (a
-bell, if the profile's bell is on); anything else, `decline` included,
-gets nothing, not even a bell. So in decline set it once:
+bell, if the profile's bell is on); anything else, `terminal-decline` included,
+gets nothing, not even a bell. So in Terminal Decline set it once:
 `claude config set --global preferredNotifChannel iterm2` (or `ghostty`;
 `iterm2_with_bell` adds a bell). Its OSC 9;4 progress
 (`terminalProgressBarEnabled`) is sent only to ghostty ≥ 1.2.0, iTerm.app
-≥ 3.6.6 and ConEmu, so decline doesn't get it from Claude Code today. A
+≥ 3.6.6 and ConEmu, so Terminal Decline doesn't get it from Claude Code today. A
 Notification or Stop hook can also return `terminalSequence` (OSC 9 / 777
 / 9;4) for Claude Code to print. OSC 99 (kitty) isn't handled.
 
 ## Dock pins ("make ./rush its own app")
 
-`decline pin Rush [--icon rush.png] [--config rush.toml] [--dock] -- ./rush`
+`terminal-decline pin Rush [--icon rush.png] [--config rush.toml] [--dock] -- ./rush`
 creates `~/Applications/Rush.app`:
 
 ```
 Rush.app/Contents/
-  Info.plist           CFBundleIdentifier = red.forbes.decline.pin.rush
-  MacOS/rush           APFS clone of the decline binary (no extra disk)
+  Info.plist           CFBundleIdentifier = red.forbes.terminal-decline.pin.rush
+  MacOS/rush           APFS clone of the Terminal Decline binary (no extra disk)
   Resources/icon.icns  generated from --icon (via `sips` + `iconutil`)
-~/.config/decline/pins/rush.toml   command, cwd, env, any config setting
+~/.config/terminal-decline/pins/rush.toml   command, cwd, env, any config setting
 ```
 
 Each pin has its own bundle id, so macOS gives it its own Dock icon, Cmd+Tab
@@ -400,23 +400,57 @@ removed, and it is registered with LaunchServices. The program runs through a
 login shell, so it gets the user's `PATH` even when started from the Dock.
 A missing or nonexistent `cwd` starts in `HOME` (the app's own working
 directory is `/` when started from the Dock).
-`decline pin --update` re-clones the binary after upgrades.
-`decline pin --remove` deletes a bundle only if it is a `.app` inside the
+`terminal-decline pin --update` re-clones the binary after upgrades, and
+rewrites each pin's Info.plist (name from the bundle's file name, its icon
+if it has one), so pins made before the rename (ids
+`red.forbes.decline.pin.*`) get the new id prefix and their Secure Keyboard
+Entry choice.
+`terminal-decline pin --remove` deletes a bundle only if it is a `.app` inside the
 apps dir containing `Contents/MacOS/<id>`, since the settings file naming it
-can be edited. Pin names can't contain `/` or `..`.
+can be edited. Pin names can't contain `/` or `..`, and can't take the app's
+own names (`terminal-decline`, `decline`): the binary under those names is
+never a pin, also when started through the cask's `decline` link.
 
 Known limit: an ad-hoc signature is tied to the binary's hash, so after
 `--update` macOS asks again for permissions the pin was granted (Documents,
 Full Disk Access, …). The fix (next milestone) is Chrome's web-app approach:
-a small launcher executable that never changes, loading decline's code from
-the installed `Decline.app`.
+a small launcher executable that never changes, loading Terminal Decline's code from
+the installed `Terminal Decline.app`, found by its bundle id.
+
+## The name
+
+The app was called Decline until E.17; it is Terminal Decline now:
+
+| | now | before |
+|---|---|---|
+| app | `Terminal Decline.app`, `red.forbes.terminal-decline` | `Decline.app`, `red.forbes.decline` |
+| command | `terminal-decline` (the cask also links `decline`) | `decline` |
+| pins | `red.forbes.terminal-decline.pin.<id>` | `red.forbes.decline.pin.<id>` |
+| config | `~/.config/terminal-decline` | `~/.config/decline` |
+| logs, caches | `~/Library/{Logs,Caches}/terminal-decline` | `…/decline` |
+| `TERM_PROGRAM`, XTVERSION | `terminal-decline` | `decline` |
+
+The defaults domain, os_log subsystem and tab group follow the bundle id.
+The `DECLINE_*` variables for tests and measurements keep their names.
+
+Moving over (`Paths::move_old_config`, before anything else runs, even
+`pin`): if only `~/.config/decline` exists it is renamed to the new name
+and the old name becomes a link to it, so pins made before the rename
+still find their settings. If the old one is itself a link (dotfiles), the
+new one links to the same place. If both exist the new one is used, nothing
+is merged, and the window says so once. Another process doing the same at
+once (the app and a pin starting together) is fine: the move is one
+`rename`, and whoever loses looks again. The app copies its Secure Keyboard
+Entry choice from the old defaults domain when the new one has none; old
+crash logs stay where they are. macOS treats the renamed app and pins as new
+apps, so permissions they were granted are asked for again.
 
 ## Config
 
-`~/.config/decline/config.toml`: font family/size, colours (16 + fg/bg/cursor/
+`~/.config/terminal-decline/config.toml`: font family/size, colours (16 + fg/bg/cursor/
 selection), padding, opacity/blur, option-as-meta, scrollback lines, shell.
 
-Themes (`theme`): `theme = "name"` loads `~/.config/decline/themes/<name>.toml`,
+Themes (`theme`): `theme = "name"` loads `~/.config/terminal-decline/themes/<name>.toml`,
 else the built-in theme of that name; `theme = { light = "x", dark = "y" }`
 picks by each window's macOS appearance and switches when it changes
 (`viewDidChangeEffectiveAppearance`, a notification, no polling). A theme
@@ -426,24 +460,24 @@ the config override the theme's, one by one (`""` in `palette` keeps the
 theme's entry). Colours must be `#rrggbb`; a bad one, a bad theme file or a
 missing theme is a notice. The built-in set is embedded TOML
 (`crates/term-app/themes/`, each file naming its source and licence):
-slope-dark and slope-light (decline's own, from the Slope brand palette),
+slope-dark and slope-light (Terminal Decline's own, from the Slope brand palette),
 solarized-dark/-light (MIT), gruvbox-dark (MIT), catppuccin-mocha/-latte
 (MIT), tokyo-night (MIT; colours from tokyonight.nvim, Apache-2.0). With
-no theme the colours are decline's defaults, as before. Programs aren't
+no theme the colours are Terminal Decline's defaults, as before. Programs aren't
 told about appearance changes yet: colour-scheme reports (mode 2031,
 `CSI ? 997 ; 1|2 n`) need term-core support first.
 
-Importers (`import`): `decline import ghostty [PATH]` reads Ghostty's config
+Importers (`import`): `terminal-decline import ghostty [PATH]` reads Ghostty's config
 (default: the first of `~/.config/ghostty/config.ghostty`, `…/config` and
 the same in `~/Library/Application Support/com.mitchellh.ghostty`) and maps
-theme (a built-in decline theme by loose name, else the Ghostty theme file
+theme (a built-in Terminal Decline theme by loose name, else the Ghostty theme file
 becomes `themes/<name>.toml`; `light:x,dark:y` becomes a pair), palette,
 foreground/background/cursor/selection colours, font-family (the first is
 `font_family`, the rest `font_fallback`), the bold/italic faces,
 font-size, adjust-cell-height/width percentages, background-opacity,
 background-blur, macos-option-as-alt, copy-on-select, window-padding-x,
-window-width/height and keybinds (actions with a decline equivalent,
-text:/csi:/esc:, unbind; not sequences or global ones). `decline import
+window-width/height and keybinds (actions with a Terminal Decline equivalent,
+text:/csi:/esc:, unbind; not sequences or global ones). `terminal-decline import
 iterm FILE.itermcolors [--name NAME]` turns an iTerm2 preset (XML, or
 binary through `plutil`) into `themes/<name>.toml`, converting calibrated
 and P3 colours to sRGB with AppKit. Both print the TOML; `--write` writes
@@ -467,7 +501,7 @@ contents, so only a real change reloads. A reload reads every layer again
   `font_size` replaces a size set with Cmd+= / Cmd+-), `padding`,
   `opacity`, `option_as_meta`, `copy_on_select` and `[keybind]` (the menus
   are rebuilt);
-- to new windows only, with a notice naming them (`decline: config:
+- to new windows only, with a notice naming them (`terminal-decline: config:
   columns changed: it applies to new windows`): `command`, `cwd`, `env`,
   `columns`, `lines`, `blur` (a view set up with the window), `title`, and
   `scrollback` (term-core has no way to change a running terminal's
@@ -509,7 +543,7 @@ the cell height; must be above 0) and `cell_width = "0"` (points, e.g.
 `line_height` or `cell_width` is reported like any other bad setting. The
 first window checks the named fonts are installed (`Fonts::missing`); any
 that aren't become config notices in that window and later ones
-(`decline: config: font_fallback: no font named "X" is installed;
+(`terminal-decline: config: font_fallback: no font named "X" is installed;
 ignored`). Cmd+= / Cmd+- change only the size; the other font settings
 stay.
 
@@ -529,7 +563,7 @@ stay.
 
 ## Measured (M-series Mac, macOS 27, release build)
 
-| | decline | Ghostty 1.x |
+| | Terminal Decline | Ghostty 1.x |
 |---|---|---|
 | Idle CPU | 0.0% | 0.9–2.7% |
 | Idle wakeups/s | 0 | 1–2 |
@@ -559,7 +593,7 @@ run scan 355 / 164 / 286 / 73; screen as a ring 419 / 171 / 285 / 102;
 memset row reset 423 / 172 / 289 / 110. Plain text is now above the PTY's
 ~240 MB/s but short of the 2× goal.
 Caveats: window sizes, fonts and scrollback limits were not matched exactly
-yet; decline does less work (no text shaping, no grapheme clusters, no
+yet; Terminal Decline does less work (no text shaping, no grapheme clusters, no
 reflow). See the performance-testing section for the fair-comparison plan.
 
 ### Input latency (keypress → on screen)
@@ -567,16 +601,16 @@ reflow). See the performance-testing section for the fair-comparison plan.
 `scripts/latency/run.py` (roadmap N.5). Two methods:
 
 - **In decline.** With `DECLINE_LATENCY_LOG=<file>` (test and bench runs
-  only; unset, it costs one check per key, parse and frame) decline writes
+  only; unset, it costs one check per key, parse and frame) Terminal Decline writes
   a JSON line per key: the event's timestamp (t0), `keyDown`, the bytes
   handed to the writer thread (t1), the next parse in that window, taken
   with the terminal locked (t2), the frame that shows it (start, commit,
   GPU done) and the drawable's `presentedTime` (t3), all on one clock
   (`CLOCK_UPTIME_RAW`, which `NSEvent`, `CACurrentMediaTime` and Metal use).
-  The driver starts decline as a throwaway app bundle through `open` (an
+  The driver starts Terminal Decline as a throwaway app bundle through `open` (an
   app started from a script may not be given the focus), running
   `scripts/latency/echo.py` (raw mode, echoes each key at once) or
-  `htop -d 1` (typing into its search bar). Keys: decline posts key events
+  `htop -d 1` (typing into its search bar). Keys: Terminal Decline posts key events
   to its own process with `CGEventPostToPid` when asked through
   `DECLINE_LATENCY_INPUT` (a FIFO). That needs no permission (posting to
   another process needs Accessibility) and still goes through the window
@@ -588,20 +622,20 @@ reflow). See the performance-testing section for the fair-comparison plan.
   `keyDown` would, without the window server: it works without the focus
   (macOS refuses to activate an app while someone types in another), and
   t0 is then `keyDown`.
-- **From outside, for Ghostty and decline alike.** `scripts/latency/probe.swift`
+- **From outside, for Ghostty and Terminal Decline alike.** `scripts/latency/probe.swift`
   posts the key to the app with `CGEventPostToPid` and watches its window
   with ScreenCaptureKit at every refresh; the latency is the display time
   of the first frame whose pixels changed minus the time just before
   posting. Needs Accessibility and Screen Recording for the terminal
   running it. Error bars: one refresh (8.3 ms at 120 Hz) per sample. On the
-  same decline frames, ScreenCaptureKit's display time is 5–13 ms (median
+  same Terminal Decline frames, ScreenCaptureKit's display time is 5–13 ms (median
   11 ms) earlier than Metal's `presentedTime`, so add about 11 ms for the
   time to the glass; the comparison between terminals is like for like.
-  Ghostty is started with decline's defaults (Menlo 13, 100×30, padding 6,
+  Ghostty is started with Terminal Decline's defaults (Menlo 13, 100×30, padding 6,
   no cursor blink, no config file).
 
 M1 Max, built-in ProMotion display, macOS 27, release build; the Mac was
-in use (other apps and agents running) during the runs. In decline, ms,
+in use (other apps and agents running) during the runs. In Terminal Decline, ms,
 p50 / p95 / p99, 200 keys per run:
 
 | scenario | key event → on glass | event → bytes to writer | writer → echo parsed | parsed → frame starts | frame build + encode | commit → on glass |
@@ -622,7 +656,7 @@ key, which can be htop's own refresh rather than its answer.
 From outside (key posted → pixels changed, ms; 29 and 20 keys, too few for
 a p99):
 
-| scenario | decline p50 / p95 / max | Ghostty 1.4.0 p50 / p95 / max |
+| scenario | Terminal Decline p50 / p95 / max | Ghostty 1.4.0 p50 / p95 / max |
 |---|---|---|
 | idle | 29.7 / 43.1 / 45.4 | 23.4 / 37.0 / 40.5 |
 | flood (second window running `yes`) | 19.5 / 28.5 / 28.5 | 9.8 / 48.3 / 48.3 |
@@ -631,7 +665,7 @@ Screen Recording and Accessibility were granted only briefly, so the full
 outside comparison (200 keys, htop) is still to run:
 `scripts/latency/run.py --rates "" --external decline,ghostty`.
 
-What this showed: decline was 6–10 ms slower than Ghostty at the median.
+What this showed: Terminal Decline was 6–10 ms slower than Ghostty at the median.
 Where its time went:
 - About 23 ms from commit to `presentedTime`, nearly constant at either
   display link rate: a frame reached the glass about three 120 Hz
@@ -675,7 +709,7 @@ main thread waited on the transaction). `CAMetalDisplayLink` and
 `presentDrawable:atTime:` were not needed once the two changes above
 closed the gap.
 
-Before and after, in decline with `--type` (t0 = `keyDown`), ms, p50 / p95
+Before and after, in Terminal Decline with `--type` (t0 = `keyDown`), ms, p50 / p95
 / p99, 200 keys per run, the same M1 Max with other agents' builds and
 benchmarks running (load average 5–24). The window was never the key
 window (Alex was typing elsewhere), which is why the old build's commit →
@@ -709,13 +743,13 @@ input with no echo keeps it running for at most `ECHO_WAIT`.
 The outside comparison with Ghostty could not be run again: Screen
 Recording and Accessibility are off for the terminal running the harness
 (`probe check`: `screen_recording=false post_events=false`). Against the
-outside numbers above (Ghostty idle 23.4 ms p50, flood 9.8 ms), decline's
+outside numbers above (Ghostty idle 23.4 ms p50, flood 9.8 ms), Terminal Decline's
 in-app key → glass gained 25–30 ms at the median, so it should now be well
 ahead; to confirm, with the permissions on:
 `scripts/latency/run.py --rates "" --external decline,ghostty`.
 
 CI: hosted macOS runners have no real display, so presented times mean
-nothing there. CI can track the part that is decline's own work, from the
+nothing there. CI can track the part that is Terminal Decline's own work, from the
 key's bytes to the encoded frame (t1 → commit): a headless test sending a
 key through `session` to `echo.py` and timing until the reader has parsed
 the echo, then `Renderer::prepare` and `encode` into an offscreen texture
@@ -750,7 +784,7 @@ pin identity collisions, pin signing and quarantine.
 
 ## Pressure tests
 
-`scripts/pressure/run.py target/release/decline <workdir>` (inputs from
+`scripts/pressure/run.py target/release/terminal-decline <workdir>` (inputs from
 `scripts/pressure/gen.py`). All survived, release and debug (overflow-checked)
 builds:
 

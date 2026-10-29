@@ -1,13 +1,13 @@
 //! Smoke tests of the real app: they open windows, so they are `#[ignore]`d
 //! and run one at a time (nextest group `gui`). Run them with
-//! `cargo nextest run -p decline --run-ignored only -E 'binary(smoke)'`.
+//! `cargo nextest run -p terminal-decline --run-ignored only -E 'binary(smoke)'`.
 //!
-//! Each launches the built `decline` with `DECLINE_TEST_DUMP=<file>`, so a
-//! program in the window can drive it with the private control OSC (see
-//! `decline::control`): `dump` writes a line of JSON after the next frame
-//! the GPU has finished, then `resize`, `font` and `quit`. The tests assert
-//! on the dumps, not on pixels. Config comes from an empty temp dir
-//! (`XDG_CONFIG_HOME`), never the user's.
+//! Each launches the built `terminal-decline` with
+//! `DECLINE_TEST_DUMP=<file>`, so a program in the window can drive it with
+//! the private control OSC (see `terminal_decline::control`): `dump` writes a
+//! line of JSON after the next frame the GPU has finished, then `resize`,
+//! `font` and `quit`. The tests assert on the dumps, not on pixels. Config
+//! comes from an empty temp dir (`XDG_CONFIG_HOME`), never the user's.
 //!
 //! On CI (`CI` set) a missing Metal device fails the test; locally it is
 //! skipped. A launch failure always fails.
@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-const APP: &str = env!("CARGO_BIN_EXE_decline");
+const APP: &str = env!("CARGO_BIN_EXE_terminal-decline");
 /// Longest a scenario may take before the app is killed.
 const TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -32,7 +32,7 @@ struct TempDir(PathBuf);
 
 impl TempDir {
     fn new(name: &str) -> TempDir {
-        let dir = std::env::temp_dir().join(format!("decline-smoke-{}-{name}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("terminal-decline-smoke-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("config")).unwrap();
         TempDir(dir.canonicalize().unwrap())
@@ -88,8 +88,8 @@ fn run(cmd: &mut Command) -> (ExitStatus, Duration) {
     }
 }
 
-/// `decline -e sh -c <script>` with the dump file, a temp config home and
-/// any `env`.
+/// `terminal-decline -e sh -c <script>` with the dump file, a temp config
+/// home and any `env`.
 fn decline(dir: &TempDir, script: &str, dump: bool) -> (ExitStatus, Duration) {
     let mut cmd = Command::new(APP);
     cmd.args(["-e", "/bin/sh", "-c", script])
@@ -371,7 +371,11 @@ fn smoke_notifications_from_a_bundle() {
     }
     let dir = TempDir::new("notify-bundle");
     let unique = format!("{}", std::process::id());
-    let app = temp_bundle(&dir, &format!("Decline Notify {unique}"), &notify_from_a_background_tab(&dir));
+    let app = temp_bundle(
+        &dir,
+        &format!("Terminal Decline Notify {unique}"),
+        &notify_from_a_background_tab(&dir),
+    );
     let d = launch_bundle(&dir, &app);
     assert_eq!(d.len(), 2, "{d:?}");
     let n = &d[0]["notifications"];
@@ -416,7 +420,7 @@ fn smoke_secure_keyboard_entry_from_user_defaults() {
     }
     let dir = TempDir::new("secure");
     let unique = format!("{}", std::process::id());
-    let id = format!("{}decline-secure-{unique}", decline::pin::ID_PREFIX);
+    let id = format!("{}terminal-decline-secure-{unique}", terminal_decline::pin::ID_PREFIX);
     /// Removes the temp bundle's defaults domain, even if the test fails.
     struct Domain(String);
     impl Drop for Domain {
@@ -431,7 +435,7 @@ fn smoke_secure_keyboard_entry_from_user_defaults() {
     let _domain = Domain(id.clone());
     assert!(status.success());
     let script = format!("echo secure; sleep 0.3; {}{}sleep 20", osc("dump"), osc("quit"));
-    let app = temp_bundle(&dir, &format!("Decline Secure {unique}"), &script);
+    let app = temp_bundle(&dir, &format!("Terminal Decline Secure {unique}"), &script);
     let d = launch_bundle(&dir, &app);
     assert_eq!(d.len(), 1, "{d:?}");
     // macOS may refuse to activate an app started while someone types in
@@ -443,11 +447,11 @@ fn smoke_secure_keyboard_entry_from_user_defaults() {
 }
 
 /// A pin bundle for `script` in `dir`'s Applications, made by the pin
-/// module the way `decline pin` does (the Dock is never touched).
+/// module the way `terminal-decline pin` does (the Dock is never touched).
 fn temp_bundle(dir: &TempDir, name: &str, script: &str) -> PathBuf {
-    use decline::pin::{self, Options};
-    let paths = decline::Paths {
-        config_dir: dir.config_home().join("decline"),
+    use terminal_decline::pin::{self, Options};
+    let paths = terminal_decline::Paths {
+        config_dir: dir.config_home().join("terminal-decline"),
         apps_dir: dir.path().join("Applications"),
         exe: PathBuf::from(APP),
     };
@@ -505,10 +509,10 @@ fn smoke_control_osc_ignored_without_the_env_var() {
     assert!(!dir.dump_file().exists());
 }
 
-/// Launch `decline <args>` with the dump file, for a program that fails at
-/// once. The window then stays open and (under test control) dumps what it
-/// shows: return that dump once the app has stayed running past it, then
-/// kill the app.
+/// Launch `terminal-decline <args>` with the dump file, for a program that
+/// fails at once. The window then stays open and (under test control) dumps
+/// what it shows: return that dump once the app has stayed running past it,
+/// then kill the app.
 fn held_window(dir: &TempDir, args: &[&str]) -> Value {
     let mut cmd = Command::new(APP);
     cmd.args(args)
@@ -588,16 +592,42 @@ fn smoke_config_errors_show_in_the_window() {
         return;
     }
     let dir = TempDir::new("badconfig");
-    std::fs::create_dir_all(dir.config_home().join("decline")).unwrap();
-    std::fs::write(dir.config_home().join("decline/config.toml"), "font_sise = 3\n").unwrap();
+    std::fs::create_dir_all(dir.config_home().join("terminal-decline")).unwrap();
+    std::fs::write(dir.config_home().join("terminal-decline/config.toml"), "font_sise = 3\n").unwrap();
     let script = format!("echo program output; {}{}sleep 20", osc("dump"), osc("quit"));
     let (status, _) = decline(&dir, &script, true);
     assert!(status.success(), "{status}");
     let d = dumps(&dir);
     assert_eq!(d.len(), 1, "{d:?}");
     let s = screen(&d[0]);
-    assert!(s.starts_with("decline: config: font_sise: unknown field"), "{s}");
-    assert!(s.contains("ignored|\nprogram output|"), "{s}");
+    assert!(s.starts_with("terminal-decline: config: font_sise: unknown field"), "{s}");
+    // Joined where the long notice wrapped (⏎).
+    assert!(s.replace("⏎\n", "").contains("; ignored|\nprogram output|"), "{s}");
+}
+
+/// The first run after the rename moves `~/.config/decline` to
+/// `~/.config/terminal-decline` and reads the config from there.
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_old_config_dir_is_moved_and_read() {
+    if !have_metal() {
+        return;
+    }
+    let dir = TempDir::new("oldconfig");
+    let old = dir.config_home().join("decline");
+    std::fs::create_dir_all(&old).unwrap();
+    std::fs::write(old.join("config.toml"), "font_sise = 3\n").unwrap();
+    let script = format!("{}{}sleep 20", osc("dump"), osc("quit"));
+    let (status, _) = decline(&dir, &script, true);
+    assert!(status.success(), "{status}");
+    let d = dumps(&dir);
+    assert_eq!(d.len(), 1, "{d:?}");
+    let s = screen(&d[0]);
+    assert!(s.starts_with("terminal-decline: config: moved "), "{s}");
+    assert!(s.contains("terminal-decline: config: font_sise: unknown field"), "{s}");
+    let new = dir.config_home().join("terminal-decline");
+    assert_eq!(std::fs::read_to_string(new.join("config.toml")).unwrap(), "font_sise = 3\n");
+    assert_eq!(std::fs::read_link(&old).unwrap(), Path::new("terminal-decline"));
 }
 
 /// Font settings reach the window: `line_height = 1.5` makes cells half
@@ -613,8 +643,8 @@ fn smoke_font_settings_from_the_config() {
     let script = format!("echo text; {}{}{}{}sleep 20", osc("dump"), osc("font +1"), osc("dump"), osc("quit"));
     let run_with = |name: &str, config: &str| {
         let dir = TempDir::new(name);
-        std::fs::create_dir_all(dir.config_home().join("decline")).unwrap();
-        std::fs::write(dir.config_home().join("decline/config.toml"), config).unwrap();
+        std::fs::create_dir_all(dir.config_home().join("terminal-decline")).unwrap();
+        std::fs::write(dir.config_home().join("terminal-decline/config.toml"), config).unwrap();
         let (status, _) = decline(&dir, &script, true);
         assert!(status.success(), "{status}");
         let d = dumps(&dir);
@@ -623,7 +653,7 @@ fn smoke_font_settings_from_the_config() {
         d
     };
     let plain = run_with("font-default", "");
-    let tall = run_with("font-tall", "line_height = 1.5\nfont_fallback = ['No Such Font For Decline']\n");
+    let tall = run_with("font-tall", "line_height = 1.5\nfont_fallback = ['No Such Font Here']\n");
     assert_eq!(num(&plain[0], "scale"), num(&tall[0], "scale"));
     for (p, t) in plain.iter().zip(&tall) {
         let (hp, ht) = (num(p, "cell_height"), num(t, "cell_height"));
@@ -632,7 +662,7 @@ fn smoke_font_settings_from_the_config() {
     }
     let s = screen(&tall[0]);
     assert!(
-        s.starts_with("decline: config: font_fallback: no font named \"No Such Font For Decline\" is installed; ignored|"),
+        s.starts_with("terminal-decline: config: font_fallback: no font named \"No Such Font Here\" is installed; ignored|"),
         "{s}"
     );
     assert!(screen(&plain[0]).starts_with("text|"), "{}", screen(&plain[0]));
@@ -643,7 +673,7 @@ fn smoke_font_settings_from_the_config() {
 #[test]
 #[ignore = "opens a window; run with --run-ignored"]
 fn smoke_pin_bundle_launches() {
-    use decline::pin::{self, Options};
+    use terminal_decline::pin::{self, Options};
     if !have_metal() {
         return;
     }
@@ -656,8 +686,8 @@ fn smoke_pin_bundle_launches() {
             .unwrap()
             .as_millis()
     );
-    let paths = decline::Paths {
-        config_dir: dir.config_home().join("decline"),
+    let paths = terminal_decline::Paths {
+        config_dir: dir.config_home().join("terminal-decline"),
         apps_dir: dir.path().join("Applications"),
         exe: PathBuf::from(APP),
     };
@@ -666,7 +696,7 @@ fn smoke_pin_bundle_launches() {
     std::fs::write(&extra, "font_size = 17\n").unwrap();
     let script = format!("echo pinned {unique}; {}{}sleep 20", osc("dump"), osc("quit"));
     let options = Options {
-        name: format!("Decline Smoke {unique}"),
+        name: format!("Terminal Decline Smoke {unique}"),
         icon: None,
         config: Some(extra),
         cwd: None,
@@ -681,7 +711,7 @@ fn smoke_pin_bundle_launches() {
         cmd.status()
     };
     let made = pin::create(options, &paths, &mut runner).expect("creating the pin");
-    let id = format!("{}decline-smoke-{unique}", pin::ID_PREFIX);
+    let id = format!("{}terminal-decline-smoke-{unique}", pin::ID_PREFIX);
     assert!(std::fs::read_to_string(made.app.join("Contents/Info.plist")).unwrap().contains(&id));
 
     let mut open = Command::new("/usr/bin/open");
@@ -717,7 +747,7 @@ fn smoke_themes_load_and_follow_the_appearance() {
         return;
     }
     let dir = TempDir::new("theme");
-    let conf_dir = dir.config_home().join("decline");
+    let conf_dir = dir.config_home().join("terminal-decline");
     std::fs::create_dir_all(&conf_dir).unwrap();
     let file = conf_dir.join("config.toml");
     std::fs::write(&file, "theme = 'mine'\n").unwrap();
@@ -741,7 +771,7 @@ fn smoke_themes_load_and_follow_the_appearance() {
     assert!(d.len() >= 3, "{d:?}");
     assert_eq!(d[0]["background"], "#16181c", "the defaults until the theme exists");
     assert!(
-        screen(&d[0]).starts_with("decline: config: theme: no theme named \"mine\""),
+        screen(&d[0]).starts_with("terminal-decline: config: theme: no theme named \"mine\""),
         "{}",
         screen(&d[0])
     );
@@ -783,7 +813,7 @@ fn smoke_config_reloads_when_edited() {
         return;
     }
     let dir = TempDir::new("reload");
-    let conf_dir = dir.config_home().join("decline");
+    let conf_dir = dir.config_home().join("terminal-decline");
     std::fs::create_dir_all(&conf_dir).unwrap();
     let file = conf_dir.join("config.toml");
     std::fs::write(&file, "[colors]\nbackground = '#000000'\n").unwrap();
@@ -816,10 +846,13 @@ fn smoke_config_reloads_when_edited() {
     assert_eq!(last["background"], "#102030", "{last}");
     let s = screen(last);
     assert!(s.starts_with("before|"), "{s}");
-    assert!(s.contains("decline: config: font_sise: unknown field"), "{s}");
-    assert!(s.contains("decline: config: columns changed: it applies to new windows|"), "{s}");
+    assert!(s.contains("terminal-decline: config: font_sise: unknown field"), "{s}");
     assert!(
-        !screen(&d[recoloured]).contains("decline:"),
+        s.contains("terminal-decline: config: columns changed: it applies to new windows|"),
+        "{s}"
+    );
+    assert!(
+        !screen(&d[recoloured]).contains("terminal-decline:"),
         "a good edit shows nothing: {}",
         screen(&d[recoloured])
     );
@@ -839,8 +872,8 @@ fn smoke_dropped_files_are_typed_as_a_paste() {
     let d = dir.path().display();
     let first = ["/tmp/My Files/a (1).txt", "/tmp/$HOME & co"];
     let second = ["/Users/me/it is ~here"];
-    let bracketed = format!("\x1b[200~{}\x1b[201~", decline::desktop::dropped_text(&first));
-    let plain = decline::desktop::dropped_text(&second);
+    let bracketed = format!("\x1b[200~{}\x1b[201~", terminal_decline::desktop::dropped_text(&first));
+    let plain = terminal_decline::desktop::dropped_text(&second);
     let script = format!(
         "printf '\\033[?2004h'; stty -icanon -echo min 1 time 0; {drop1}\
          dd bs=1 count={n1} of='{d}/got1' 2>/dev/null; \
@@ -881,7 +914,7 @@ fn smoke_folders_opened_with_the_app() {
         p.display().to_string()
     };
     let (a, b) = (sub("dir-a"), sub("dir b"));
-    let name = format!("Decline Open {}", std::process::id());
+    let name = format!("Terminal Decline Open {}", std::process::id());
     let app_path = dir.path().join("Applications").join(format!("{name}.app"));
     let d = dir.path().display();
     let two_dumped = format!("[ \"$(wc -l < '{}')\" -ge 2 ]", dir.dump_file().display());
@@ -929,8 +962,8 @@ fn smoke_confirm_close_asks_while_a_program_runs() {
         return;
     }
     let dir = TempDir::new("confirm");
-    std::fs::create_dir_all(dir.config_home().join("decline")).unwrap();
-    std::fs::write(dir.config_home().join("decline/config.toml"), "confirm_close = true\n").unwrap();
+    std::fs::create_dir_all(dir.config_home().join("terminal-decline")).unwrap();
+    std::fs::write(dir.config_home().join("terminal-decline/config.toml"), "confirm_close = true\n").unwrap();
     // A job in the foreground, as an interactive shell runs one.
     let job = dir.path().join("job.sh");
     std::fs::write(&job, format!("{}sleep 1; {}{}sleep 20\n", osc("close"), osc("dump"), osc("quit"))).unwrap();
@@ -942,8 +975,8 @@ fn smoke_confirm_close_asks_while_a_program_runs() {
 
     // Nothing running: the window closes, and with it the app.
     let dir = TempDir::new("confirm-idle");
-    std::fs::create_dir_all(dir.config_home().join("decline")).unwrap();
-    std::fs::write(dir.config_home().join("decline/config.toml"), "confirm_close = true\n").unwrap();
+    std::fs::create_dir_all(dir.config_home().join("terminal-decline")).unwrap();
+    std::fs::write(dir.config_home().join("terminal-decline/config.toml"), "confirm_close = true\n").unwrap();
     let (status, elapsed) = decline(&dir, &format!("{}sleep 20", osc("close")), true);
     assert!(status.success(), "{status}");
     assert!(elapsed < Duration::from_secs(15), "closed after {elapsed:?}");

@@ -98,7 +98,7 @@ fn from_env() -> Option<Latency> {
     let file = match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
         Ok(f) => f,
         Err(e) => {
-            eprintln!("decline: {ENV}: {}: {e}", PathBuf::from(&path).display());
+            eprintln!("terminal-decline: {ENV}: {}: {e}", PathBuf::from(&path).display());
             return None;
         }
     };
@@ -187,7 +187,7 @@ impl Latency {
         for k in keys {
             let line = serde_json::to_string(k).expect("key serialises");
             if let Err(e) = writeln!(inner.out, "{line}") {
-                eprintln!("decline: {ENV}: {e}");
+                eprintln!("terminal-decline: {ENV}: {e}");
             }
         }
         let _ = inner.out.flush();
@@ -307,13 +307,13 @@ pub fn listen(run: impl Fn(Command) + Send + Sync + 'static) {
                         let run = run.clone();
                         dispatch2::DispatchQueue::main().exec_async(move || run(c));
                     }
-                    None => eprintln!("decline: {ENV_INPUT}: unknown command {line:?}"),
+                    None => eprintln!("terminal-decline: {ENV_INPUT}: unknown command {line:?}"),
                 }
             }
         }
     });
     if let Err(e) = spawned {
-        eprintln!("decline: {ENV_INPUT}: {e}");
+        eprintln!("terminal-decline: {ENV_INPUT}: {e}");
     }
 }
 

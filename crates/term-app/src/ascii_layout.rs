@@ -95,7 +95,7 @@ const SHIFT: u32 = 0x02;
 /// `CFNotificationSuspensionBehaviorDeliverImmediately`.
 const DELIVER_IMMEDIATELY: isize = 4;
 
-/// Delivered even while decline is in the background, so the table is
+/// Delivered even while Terminal Decline is in the background, so the table is
 /// never read for a layout that is no longer selected.
 extern "C" fn layout_changed(_: *mut c_void, _: *mut c_void, _: *const c_void, _: *const c_void, _: *const c_void) {
     STALE.store(true, Ordering::Release);

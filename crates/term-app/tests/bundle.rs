@@ -1,12 +1,12 @@
 //! The app bundle `scripts/bundle.sh` makes: its Info.plist is valid and
 //! declares what the app answers (folders opened with it, the Services
-//! menu items, named with [`decline::PRODUCT_NAME`]).
+//! menu items, named with [`terminal_decline::PRODUCT_NAME`]).
 #![cfg(target_os = "macos")]
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const APP: &str = env!("CARGO_BIN_EXE_decline");
+const APP: &str = env!("CARGO_BIN_EXE_terminal-decline");
 
 fn repo() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap()
@@ -25,7 +25,7 @@ fn extract(plist: &Path, key: &str) -> String {
 
 #[test]
 fn info_plist_declares_folders_and_services() {
-    let out_dir = std::env::temp_dir().join(format!("decline-bundle-{}", std::process::id()));
+    let out_dir = std::env::temp_dir().join(format!("terminal-decline-bundle-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&out_dir);
     std::fs::create_dir_all(&out_dir).unwrap();
     let made = Command::new("/bin/bash")
@@ -51,7 +51,7 @@ fn info_plist_declares_folders_and_services() {
         assert_eq!(service("NSMessage"), message);
         assert_eq!(
             service("NSMenuItem.default"),
-            format!("New {} {title} at Folder", decline::PRODUCT_NAME)
+            format!("New {} {title} at Folder", terminal_decline::PRODUCT_NAME)
         );
         assert_eq!(service("NSPortName"), bundle_name);
         assert_eq!(service("NSSendFileTypes.0"), "public.folder");

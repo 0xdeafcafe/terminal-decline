@@ -128,7 +128,7 @@ impl Pty {
         let program = cstr(&shell)?;
         // Written to the terminal by the child if exec fails (it can't
         // format anything after forking).
-        let exec_failed = format!("decline: could not start {shell}\r\n");
+        let exec_failed = format!("terminal-decline: could not start {shell}\r\n");
         let argv: Vec<CString> = build_argv(&shell, &cmd.argv).iter().map(|a| cstr(a)).collect::<io::Result<_>>()?;
         let mut argv_ptrs: Vec<*const libc::c_char> = argv.iter().map(|a| a.as_ptr()).collect();
         argv_ptrs.push(std::ptr::null());

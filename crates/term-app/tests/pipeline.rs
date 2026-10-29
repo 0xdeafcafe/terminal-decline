@@ -14,11 +14,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use decline::frame_policy::{self, Decision};
-use decline::keys::{self, KeyAction, KeyInput, KeyModes, flags};
-use decline::session::{Hooks, Outcome, Session};
 use term_core::{Attrs, ColorKind, Term, Terminal};
 use term_pty::{Command, Size};
+use terminal_decline::frame_policy::{self, Decision};
+use terminal_decline::keys::{self, KeyAction, KeyInput, KeyModes, flags};
+use terminal_decline::session::{Hooks, Outcome, Session};
 
 /// Upper bound for any single wait.
 const DEADLINE: Duration = Duration::from_secs(15);
@@ -38,7 +38,7 @@ struct TempDir(PathBuf);
 
 impl TempDir {
     fn new(name: &str) -> TempDir {
-        let dir = std::env::temp_dir().join(format!("decline-pipeline-{}-{name}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("terminal-decline-pipeline-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         TempDir(dir.canonicalize().unwrap())
@@ -394,7 +394,7 @@ fn events_arrive_without_drawing() {
     hooks.on_events = Some(Box::new(move |e| tx.send(e).unwrap()));
     let session = Session::spawn(&cmd, size(80, 24), Term::new(80, 24, 100), hooks).expect("spawn");
     let mut got = Vec::new();
-    while !got.iter().any(|e: &decline::session::Events| e.bell) {
+    while !got.iter().any(|e: &terminal_decline::session::Events| e.bell) {
         got.push(rx.recv_timeout(DEADLINE).expect("no events"));
     }
     let titles: Vec<_> = got.iter().filter_map(|e| e.title.as_deref()).collect();
@@ -438,7 +438,7 @@ fn failure_after_a_second_closes() {
     assert!(!screen.contains("[process exited"), "{screen}");
 }
 
-/// `decline -e /nonexistent`: the shell says why and exits with 127.
+/// `terminal-decline -e /nonexistent`: the shell says why and exits with 127.
 #[test]
 fn missing_program_keeps_the_window() {
     let (outcome, screen) = run_to_end("missing", &["/nonexistent"], 80);
@@ -464,7 +464,7 @@ fn program_that_cannot_start_says_why() {
     assert_eq!(session.pid(), None);
     let screen = session.lock_term().state.dump();
     assert!(
-        screen.starts_with("decline: could not start \"bad\\0name\": nul byte in argument|"),
+        screen.starts_with("terminal-decline: could not start \"bad\\0name\": nul byte in argument|"),
         "{screen}"
     );
     assert!(has_line(&screen, "press any key to close"), "{screen}");
@@ -480,14 +480,14 @@ fn config_errors_show_before_the_output() {
     let home = TempDir::new("badconfig");
     let file = home.path().join("config.toml");
     std::fs::write(&file, "font_sise = 3\nfont_size = 15\n").unwrap();
-    let (config, errors) = decline::config::load(&[file.as_path()], std::path::Path::new("/nonexistent"));
+    let (config, errors) = terminal_decline::config::load(&[file.as_path()], std::path::Path::new("/nonexistent"));
     assert_eq!(config.font_size, 15.0);
     assert_eq!(errors.len(), 1, "{errors:?}");
     let cmd = command(&["/bin/sh", "-c", "echo program output; sleep 0.3"], home.path());
     let signal = Arc::new(Signal::default());
     let mut term = Term::new(300, 24, 100);
     for e in &errors {
-        decline::session::write_notice(&mut term, e);
+        terminal_decline::session::write_notice(&mut term, e);
     }
     let mut h = Harness {
         session: Some(Session::spawn(&cmd, size(300, 24), term, signal.clone().hooks()).unwrap()),
@@ -499,7 +499,10 @@ fn config_errors_show_before_the_output() {
     // The notice lists every setting, so it may wrap onto more rows
     // (marked ⏎ at the end of each but its last).
     let rows = lines.iter().position(|l| !l.ends_with('⏎')).unwrap() + 1;
-    assert!(lines[0].starts_with("decline: config: font_sise: unknown field"), "{lines:?}");
+    assert!(
+        lines[0].starts_with("terminal-decline: config: font_sise: unknown field"),
+        "{lines:?}"
+    );
     assert!(
         lines[rows - 1].trim_end_matches(['|', '⏎', '·']).ends_with("; ignored"),
         "{lines:?}"
@@ -525,7 +528,7 @@ fn config_errors_show_before_the_output() {
 #[test]
 fn parser_panic_stops_only_that_session() {
     let logs = TempDir::new("crash-logs");
-    decline::crash::install(logs.path().to_path_buf(), false);
+    terminal_decline::crash::install(logs.path().to_path_buf(), false);
 
     let other = Harness::shell("survivor");
     let script = "printf 'before the bug\\n'; printf '\\033]7770;test-panic\\007'; echo after; sleep 30";
@@ -542,13 +545,13 @@ fn parser_panic_stops_only_that_session() {
         .map(|p| (p.clone(), std::fs::read_to_string(p).unwrap()))
         .find(|(_, text)| text.contains("test-hooks: the parse step was asked to panic"))
         .expect("a crash log");
-    assert!(text.contains(concat!("decline ", env!("CARGO_PKG_VERSION"))), "{text}");
+    assert!(text.contains(concat!("Terminal Decline ", env!("CARGO_PKG_VERSION"))), "{text}");
     assert!(text.contains("thread 'pty-reader'") && text.contains("backtrace:"), "{text}");
 
     let screen = broken.dump();
     let expected = format!(
-        "decline hit a bug and stopped this session; details in {}",
-        decline::crash::tilde(&log)
+        "Terminal Decline hit a bug and stopped this session; details in {}",
+        terminal_decline::crash::tilde(&log)
     );
     assert!(has_line(&screen, &expected), "{screen}");
     assert!(has_line(&screen, "press any key to close"), "{screen}");

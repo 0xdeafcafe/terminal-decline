@@ -1,6 +1,6 @@
-# Slope Dark: decline's own theme, from the Slope brand palette
+# Slope Dark: Terminal Decline's own theme, from the Slope brand palette
 # (docs/brand/README.md): paper text on spruce, a mint cursor.
-# Part of decline, MIT licence.
+# Part of Terminal Decline, MIT licence.
 foreground = "#f3f3eb"
 background = "#092d2b"
 cursor = "#b9e5cc"

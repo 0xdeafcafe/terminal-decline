@@ -1939,7 +1939,7 @@ impl Perform for Terminal {
                 }
             }
             ('q', [b'>']) => {
-                let reply = format!("\x1bP>|decline {}\x1b\\", env!("CARGO_PKG_VERSION"));
+                let reply = format!("\x1bP>|terminal-decline {}\x1b\\", env!("CARGO_PKG_VERSION"));
                 self.replies.extend_from_slice(reply.as_bytes());
             }
             ('t', []) => {

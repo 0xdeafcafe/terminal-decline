@@ -1,6 +1,6 @@
 # Roadmap to 1.0
 
-**decline 1.0** is a signed, notarized app on Homebrew that passes the
+**Terminal Decline 1.0** is a signed, notarized app on Homebrew that passes the
 daily-driver checklist below, beats Ghostty on the thresholds below, has no UI
 of its own beyond what macOS provides (native tabs, a split divider, standard
 menus/find bar/alerts), and has Dock pins that survive upgrades.
@@ -24,7 +24,7 @@ fzf; lazygit; btop; less/man; delta; yazi with image previews.
 **Thresholds** (fixed Mac, same window pixels/font/scrollback bytes as
 Ghostty, footprint not RSS, WindowServer CPU included, interleaved runs):
 idle CPU 0% and 0 wakeups/s; idle footprint ≤ 35% of Ghostty's; after 10k
-lines ≤ 35%; `cat` 100 MB CPU (decline + WindowServer) ≤ 45%; 4 tabs and 4
+lines ≤ 35%; `cat` 100 MB CPU (Terminal Decline + WindowServer) ≤ 45%; 4 tabs and 4
 splits footprint ≤ 35%; input latency p99 ≤ Ghostty's.
 
 **Every change** in M2/M2b carries before/after numbers on this standard
@@ -40,7 +40,7 @@ set, not only perf work: shaping, images and the updater each cost something.
 | N.4 | Signing secrets (Developer ID, notarization, Sparkle key) — needed early to spike pins | **you** | — |
 | N.5 | Latency harness on a fixed Mac (keypress → present p50/p95/p99, idle and under flood); CI tracks event-to-encode time only | agent | M |
 | N.6 | Failures you can see: config errors and "could not start program" printed into the window, which stays open (a broken pin no longer vanishes) | me | S |
-| N.7 | Crash handling: panic hook → `~/Library/Logs/decline/` + os_log; dSYMs kept per release; release builds unwind (not abort) so a crash in one pane's parser shows an error in that pane and other windows keep running | me | M |
+| N.7 | Crash handling: panic hook → `~/Library/Logs/terminal-decline/` + os_log; dSYMs kept per release; release builds unwind (not abort) so a crash in one pane's parser shows an error in that pane and other windows keep running | me | M |
 | N.8 | CI cost while private: macOS nightlies only when `main` changed since last run | me | S |
 | N.9 | Pre-beta tags as `0.0.x`; `CFBundleVersion` an integer build number (nightlies too) | me | S |
 | N.10 | Rename to Terminal Decline everywhere (app, bundle id, command with `decline` alias, config dir with migration, pins, cask; was E.17), before signed builds go out, P.1/P.2 and Sparkle; steps in order in docs/design/preferences.md | agent | S |
@@ -61,10 +61,10 @@ set, not only perf work: shaping, images and the updater each cost something.
 
 | # | Work | Size | Done when |
 |---|---|---|---|
-| P.1 | Bundle layout: `Decline.app` = launcher + `libdecline.dylib`; inside-out signing (no `--deep`); hardened runtime; usage-description strings + entitlements (camera, microphone, Apple Events, location…) so programs in the terminal can ask | M | notarized build runs; a program asking for the mic gets a prompt |
-| P.2 | Pin launcher: stub never changes after creation; versioned ABI (frozen at 1.0); verifies the library's signature (Apple anchor + team ID) before loading; finds Decline.app (prefers /Applications, config override for dev); clear message if missing; one-time migration for cloned pins; bare `cargo install` pins keep the clone method | L | upgrade needs no pin changes; pin permissions persist across upgrades (spiked early with real signing) |
+| P.1 | Bundle layout: `Terminal Decline.app` = launcher + `libterminal_decline.dylib`; inside-out signing (no `--deep`); hardened runtime; usage-description strings + entitlements (camera, microphone, Apple Events, location…) so programs in the terminal can ask | M | notarized build runs; a program asking for the mic gets a prompt |
+| P.2 | Pin launcher: stub never changes after creation; versioned ABI (frozen at 1.0); verifies the library's signature (Apple anchor + team ID) before loading; finds Terminal Decline.app by its bundle id, `red.forbes.terminal-decline` (LaunchServices; config override for dev); clear message if missing; one-time migration for cloned pins; bare `cargo install` pins keep the clone method | L | upgrade needs no pin changes; pin permissions persist across upgrades (spiked early with real signing) |
 | P.3 | Generated pin icons from the Slope rule (stable across upgrades; check how macOS 26/27 shows flat runtime `.icns`) | M | 8 sample names give distinct (initial, hue); brand doc's check value holds |
-| P.4 | `pin --list` status, `--edit` (external config only), repair if Decline.app moved; pins from Finder/Spotlight/Login Items | S | smoke-tested |
+| P.4 | `pin --list` status, `--edit` (external config only), repair if Terminal Decline.app moved; pins from Finder/Spotlight/Login Items | S | smoke-tested |
 | P.5 | Check App Management prompts when writing pins into `~/Applications` | S | documented behaviour |
 
 ## E — Everyday (then the public beta)
@@ -79,8 +79,8 @@ set, not only perf work: shaping, images and the updater each cost something.
 | E.6 | Notifications: OSC 9/777 and bell when unfocused (named: what Claude Code sends); guarded for the bare binary; Dock progress (OSC 9;4) | S |
 | E.7 | Search: Cmd+F with our own native-style find bar (standard search field, previous/next, count, options; Edit > Find, Cmd+G/Cmd+E and the shared find text work as usual) over all of history; in-view hits first, then history outwards, using fast block search (SIMD substring search plus a per-block filter so most blocks are skipped) | M |
 | E.8 | Selection: auto-scroll past the edge, rectangular (Option-drag), copy-on-select option | S |
-| E.9 | Config: reload on change (FSEvents), list of live settings, `theme =` + a small built-in theme set + themes dir, `decline import ghostty` / `import iterm`, deprecation policy for renamed keys | M |
-| E.10 | macOS: drag files in → escaped paths; folder on Dock icon / `open -a` → window there; Services "New decline Window/Tab at Folder"; right-click menu when mouse reporting is off; confirm before closing a running program (config off) | M |
+| E.9 | Config: reload on change (FSEvents), list of live settings, `theme =` + a small built-in theme set + themes dir, `terminal-decline import ghostty` / `import iterm`, deprecation policy for renamed keys | M |
+| E.10 | macOS: drag files in → escaped paths; folder on Dock icon / `open -a` → window there; Services "New Terminal Decline Window/Tab at Folder"; right-click menu when mouse reporting is off; confirm before closing a running program (config off) | M |
 | E.11 | Secure Keyboard Entry (menu) | S |
 | E.13 | vttest (named menus) and esctest2 (checked-in list of accepted failures) | M |
 | E.14 | Small bugs: VS16 with autowrap off; CSI M on the top row | S |
@@ -92,9 +92,9 @@ set, not only perf work: shaping, images and the updater each cost something.
 | # | Work | Size | Done when |
 |---|---|---|---|
 | B.1 | Ligatures: shape at draw time per style run with Core Text, cache per row counter, skip for fonts without ligatures, `font_features` | L | Fira/JetBrains Mono ligatures; frame build and `cat` measured Menlo vs JetBrains Mono |
-| B.2 | Splits: one CAMetalLayer per window, plain NSViews per pane for input/IME/a11y, cached instances per pane, panes in sync-update reuse last frame, one display link per window, one glyph atlas per process | L | 4 panes all flooding: frame p99 and WindowServer+decline CPU vs one pane; footprint per extra pane recorded |
+| B.2 | Splits: one CAMetalLayer per window, plain NSViews per pane for input/IME/a11y, cached instances per pane, panes in sync-update reuse last frame, one display link per window, one glyph atlas per process | L | 4 panes all flooding: frame p99 and WindowServer+Terminal Decline CPU vs one pane; footprint per extra pane recorded |
 | B.3 | Inline images: kitty graphics (APC; transmit/place/delete; virtual placements), iTerm2 OSC 1337; per-process memory budget (default 64 MB), volatile while hidden; pixel caps, file/temp-file transmission limits; fuzz targets for graphics commands | L | `kitty +kitten icat`, `imgcat`, yazi previews |
-| B.4 | Updater: Sparkle 2 for everyone (the cask declares `auto_updates true`), in Decline.app's main process only (never pins), silent driver, no system profiling, daily check (DESIGN's "no timers" updated), EdDSA key backed up | M | update applied without prompts; signature checked |
+| B.4 | Updater: Sparkle 2 for everyone (the cask declares `auto_updates true`), in Terminal Decline.app's main process only (never pins), silent driver, no system profiling, daily check (DESIGN's "no timers" updated), EdDSA key backed up | M | update applied without prompts; signature checked |
 | B.5 | Sixel (in 1.0), fuzzed decoder, same image budget | M | `chafa --format sixel` |
 
 ## R — Performance round 2 (on the final formats)

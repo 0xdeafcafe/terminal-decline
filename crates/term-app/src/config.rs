@@ -1,5 +1,5 @@
-//! Config file: `~/.config/decline/config.toml`, with a pin's own config
-//! (inside its app bundle) layered on top.
+//! Config file: `~/.config/terminal-decline/config.toml`, with a pin's own
+//! config (inside its app bundle) layered on top.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -75,7 +75,7 @@ pub struct Palette {
 }
 
 impl Palette {
-    /// decline's colours with no theme and no `[colors]`.
+    /// Terminal Decline's colours with no theme and no `[colors]`.
     pub const DEFAULT: Palette = Palette {
         foreground: 0xd8dee9,
         background: 0x16181c,
@@ -323,7 +323,7 @@ fn resolve(theme: Option<&ThemeChoice>, colors: &Colors, themes_dir: &Path, erro
 pub struct Source {
     /// The user's config.toml, then a pin's settings, then `--config`.
     pub layers: Vec<PathBuf>,
-    /// The user's own themes: `~/.config/decline/themes`.
+    /// The user's own themes: `~/.config/terminal-decline/themes`.
     pub themes_dir: PathBuf,
     /// `-e PROGRAM ARGS...`, which replaces `command` whatever the files say.
     pub command: Option<Vec<String>>,

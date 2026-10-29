@@ -398,7 +398,8 @@ file:
 Names: bundle `Terminal Decline.app`, id `red.forbes.terminal-decline`;
 pin ids `red.forbes.terminal-decline.pin.<id>`; command `terminal-decline`
 with a `decline` alias (the cask installs both; `cargo install` installs
-`terminal-decline`); config `~/.config/terminal-decline`; logs
+`terminal-decline`); config `~/.config/terminal-decline` (moved from `~/.config/decline` on
+first run, which then links to it); logs
 `~/Library/Logs/terminal-decline`; `TERM_PROGRAM=terminal-decline`; the
 defaults domain follows the bundle id.
 

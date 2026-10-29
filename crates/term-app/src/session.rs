@@ -13,11 +13,11 @@
 //! Failures are shown in the terminal, since an app started from the Dock
 //! has no stderr. A program that can't start, or that fails within
 //! [`QUICK_EXIT`], leaves a message, and [`Outcome::Hold`] keeps the window
-//! open. A panic while parsing (a bug in decline) is caught: the session
-//! stops reading, kills the program and says where the crash log is, while
-//! other windows keep running. The panic is caught while the terminal's
-//! lock is still held, so the lock is never poisoned: the broken terminal
-//! is replaced by a fresh one before anyone else can see it.
+//! open. A panic while parsing (a bug in Terminal Decline) is caught: the
+//! session stops reading, kills the program and says where the crash log is,
+//! while other windows keep running. The panic is caught while the terminal's
+//! lock is still held, so the lock is never poisoned: the broken terminal is
+//! replaced by a fresh one before anyone else can see it.
 
 use std::io;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -54,9 +54,9 @@ pub const TEST_PANIC: &[u8] = b"\x1b]7770;test-panic\x07";
 pub enum Outcome {
     /// The program exited normally: the window can close.
     Closed,
-    /// The program couldn't start, failed straight away, or decline hit a
-    /// bug. A message saying which is in the terminal, and the window stays
-    /// open until a key is pressed.
+    /// The program couldn't start, failed straight away, or Terminal Decline
+    /// hit a bug. A message saying which is in the terminal, and the window
+    /// stays open until a key is pressed.
     Hold,
 }
 
@@ -121,9 +121,9 @@ impl Events {
     }
 }
 
-/// Write `text` into `term` as a dim red line from decline itself.
+/// Write `text` into `term` as a dim red line from Terminal Decline itself.
 pub fn write_notice(term: &mut Term, text: &str) {
-    write_red(term, &format!("decline: {text}"));
+    write_red(term, &format!("terminal-decline: {text}"));
 }
 
 /// A notice written while a program runs (after a config reload): on a line
@@ -152,7 +152,7 @@ pub fn lock(term: &Mutex<Term>) -> MutexGuard<'_, Term> {
     term.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Decline hit a bug while parsing.
+/// Terminal Decline hit a bug while parsing.
 struct Bug;
 
 /// Parse `bytes` into the terminal, returning replies for the program and,
@@ -221,7 +221,7 @@ impl Session {
             Ok(pty) => pty,
             Err(e) => {
                 let what = command.argv.first().map(|p| format!("{p:?}")).unwrap_or_else(|| "the shell".into());
-                eprintln!("decline: could not start {what}: {e}");
+                eprintln!("terminal-decline: could not start {what}: {e}");
                 {
                     let mut t = lock(&term);
                     write_notice(&mut t, &format!("could not start {what}: {e}"));
@@ -443,7 +443,8 @@ fn finished(term: &Mutex<Term>, child: &Child, started: Instant) -> Outcome {
     Outcome::Hold
 }
 
-/// Decline hit a bug in this session: say so, and where the details are.
+/// Terminal Decline hit a bug in this session: say so, and where the details
+/// are.
 fn show_bug(term: &Mutex<Term>) {
     let log = crate::crash::take_last_log();
     let mut t = lock(term);
@@ -451,8 +452,11 @@ fn show_bug(term: &Mutex<Term>) {
     // after one inside, this is already a fresh one.
     replace_term(&mut t);
     let msg = match log {
-        Some(p) => format!("decline hit a bug and stopped this session; details in {}", crate::crash::tilde(&p)),
-        None => "decline hit a bug and stopped this session; details on stderr".into(),
+        Some(p) => format!(
+            "Terminal Decline hit a bug and stopped this session; details in {}",
+            crate::crash::tilde(&p)
+        ),
+        None => "Terminal Decline hit a bug and stopped this session; details on stderr".into(),
     };
     write_red(&mut t, &msg);
     write_dim(&mut t, PRESS_ANY_KEY);

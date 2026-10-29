@@ -102,7 +102,7 @@ E2. Multiple windows of the main app share one process (Cmd+N) — already.
 
 Measured facts that changed the plan: a macOS PTY returns ≤ 1 KB per read and
 buffers ~2 KB, so batches are 1–3 KB (the "drain 1 MB" design never happens);
-decline's own heap at idle is < 0.5 MB (the rest is AppKit/CoreSVG/CF);
+Terminal Decline's own heap at idle is < 0.5 MB (the rest is AppKit/CoreSVG/CF);
 `malloc_zone_pressure_relief` returns 0 bytes on this macOS (xzone
 allocator); the window server spends 1.7–2.7 s CPU per 500 MB flood while
 the window is visible.

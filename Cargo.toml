@@ -41,5 +41,5 @@ codegen-units = 1
 # crates/term-app/src/crash.rs). A panic on the main thread still aborts.
 panic = "unwind"
 debug = "line-tables-only"
-# A decline.dSYM next to the binary, kept per release to symbolicate crashes.
+# A terminal-decline.dSYM next to the binary, kept per release to symbolicate crashes.
 split-debuginfo = "packed"

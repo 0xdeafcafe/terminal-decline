@@ -26,7 +26,7 @@ pub fn build_env(inherited: impl Iterator<Item = (String, String)>, extra: &[(St
     let mut env: BTreeMap<String, String> = inherited.collect();
     env.insert("TERM".into(), "xterm-256color".into());
     env.insert("COLORTERM".into(), "truecolor".into());
-    env.insert("TERM_PROGRAM".into(), "decline".into());
+    env.insert("TERM_PROGRAM".into(), "terminal-decline".into());
     env.insert("TERM_PROGRAM_VERSION".into(), env!("CARGO_PKG_VERSION").into());
     env.entry("LANG".into()).or_insert_with(|| "en_US.UTF-8".into());
     env.extend(extra.iter().cloned());
@@ -83,7 +83,7 @@ mod tests {
         let env = build_env(std::iter::empty(), &[]);
         assert_eq!(get(&env, "TERM"), Some("xterm-256color"));
         assert_eq!(get(&env, "COLORTERM"), Some("truecolor"));
-        assert_eq!(get(&env, "TERM_PROGRAM"), Some("decline"));
+        assert_eq!(get(&env, "TERM_PROGRAM"), Some("terminal-decline"));
         assert_eq!(get(&env, "TERM_PROGRAM_VERSION"), Some(env!("CARGO_PKG_VERSION")));
         assert_eq!(get(&env, "LANG"), Some("en_US.UTF-8"));
         assert_eq!(env.len(), 5, "{env:?}");
@@ -101,7 +101,7 @@ mod tests {
         let env = build_env(inherited.into_iter(), &[]);
         assert_eq!(get(&env, "TERM"), Some("xterm-256color"));
         assert_eq!(get(&env, "COLORTERM"), Some("truecolor"));
-        assert_eq!(get(&env, "TERM_PROGRAM"), Some("decline"));
+        assert_eq!(get(&env, "TERM_PROGRAM"), Some("terminal-decline"));
         assert_eq!(get(&env, "TERM_PROGRAM_VERSION"), Some(env!("CARGO_PKG_VERSION")));
         assert_eq!(get(&env, "PATH"), Some("/bin"));
     }

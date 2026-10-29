@@ -230,7 +230,7 @@ mod tests {
     #[test]
     fn sees_a_file_created_in_a_new_directory() {
         let dir = TempDir::new("watch-create");
-        let file = dir.join("decline/themes/x.toml");
+        let file = dir.join("terminal-decline/themes/x.toml");
         let (w, rx) = watcher(vec![file.clone()]);
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         assert!(quiet(&rx), "directories alone change nothing");
@@ -251,14 +251,14 @@ mod tests {
     fn follows_a_symlink_to_its_target() {
         let dir = TempDir::new("watch-link");
         std::fs::create_dir_all(dir.join("dotfiles")).unwrap();
-        std::fs::create_dir_all(dir.join("decline")).unwrap();
+        std::fs::create_dir_all(dir.join("terminal-decline")).unwrap();
         let real = dir.join("dotfiles/config.toml");
         std::fs::write(&real, "a = 1\n").unwrap();
-        let link = dir.join("decline/config.toml");
+        let link = dir.join("terminal-decline/config.toml");
         std::os::unix::fs::symlink(&real, &link).unwrap();
         let list = watch_list(std::slice::from_ref(&link));
         assert!(list.contains(&dir.join("dotfiles")), "{list:?}");
-        assert!(list.contains(&dir.join("decline")), "{list:?}");
+        assert!(list.contains(&dir.join("terminal-decline")), "{list:?}");
         let (_w, rx) = watcher(vec![link]);
         let tmp = dir.join("dotfiles/tmp");
         std::fs::write(&tmp, "a = 2\n").unwrap();

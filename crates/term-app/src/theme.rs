@@ -3,8 +3,8 @@
 //!
 //! A theme is a TOML file of the same keys as `[colors]` (foreground,
 //! background, cursor, selection and the 16-colour palette), read from
-//! `~/.config/decline/themes/<name>.toml`, else one of the built-in set
-//! embedded here ([`BUILT_IN`]; each file names its authors and licence).
+//! `~/.config/terminal-decline/themes/<name>.toml`, else one of the built-in
+//! set embedded here ([`BUILT_IN`]; each file names its authors and licence).
 //! Explicit `[colors]` in the config override the theme's.
 
 use std::path::{Path, PathBuf};

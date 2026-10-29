@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build Decline.app from a compiled binary and ad-hoc codesign it.
+# Build Terminal Decline.app from a compiled binary and ad-hoc codesign it.
 # Usage: scripts/bundle.sh <binary> <output-dir> [version] [build-number]
 # The build number must be an integer that only goes up (Sparkle and
 # LaunchServices compare it); it defaults to the commit count.
@@ -30,14 +30,14 @@ fi
 
 # The bundle's name (the .app and CFBundleName) and the name people see
 # in menus. Set here only.
-bundle_name="Decline"
+bundle_name="Terminal Decline"
 product_name="Terminal Decline"
 
 app="$out_dir/$bundle_name.app"
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-cp "$binary" "$app/Contents/MacOS/decline"
-chmod 755 "$app/Contents/MacOS/decline"
+cp "$binary" "$app/Contents/MacOS/terminal-decline"
+chmod 755 "$app/Contents/MacOS/terminal-decline"
 
 icon_entry=""
 if [[ -f "$icon" ]]; then
@@ -52,13 +52,13 @@ cat > "$app/Contents/Info.plist" <<EOF
 <plist version="1.0">
 <dict>
   <key>CFBundleIdentifier</key>
-  <string>red.forbes.decline</string>
+  <string>red.forbes.terminal-decline</string>
   <key>CFBundleName</key>
   <string>${bundle_name}</string>
   <key>CFBundleDisplayName</key>
   <string>${bundle_name}</string>
   <key>CFBundleExecutable</key>
-  <string>decline</string>
+  <string>terminal-decline</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>

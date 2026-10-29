@@ -321,3 +321,39 @@ fn cluster_width_with_ambiguous_wide() {
     assert_eq!(cluster_width("↔\u{FE0F}", 1), 2);
     assert_eq!(cluster_width("👨\u{200D}👩", 2), 2);
 }
+
+/// The ambiguous-width setting applies to output from then on: cells
+/// already written keep their width, the cursor moves by the new one (what
+/// Vim's `t_u7` check measures), letters stay narrow, and a reset keeps it.
+#[test]
+fn ambiguous_width_applies_to_new_output_only() {
+    use term_core::Width::*;
+    let mut t = Term::new(10, 1, 0);
+    t.advance("§".as_bytes());
+    assert_eq!(t.state.cursor().col(), 1);
+    t.state.set_ambiguous_width(2);
+    assert_eq!(t.state.ambiguous_width(), 2);
+    t.advance("§─α\x1b[6n".as_bytes());
+    let row = t.state.visible_row(0);
+    let cells: Vec<_> = row.cells().take(7).map(|c| (c.ch(), c.width())).collect();
+    assert_eq!(
+        cells,
+        [
+            ('§', Narrow),
+            ('§', Wide),
+            (' ', Spacer),
+            ('─', Wide),
+            (' ', Spacer),
+            ('α', Narrow),
+            (' ', Narrow),
+        ]
+    );
+    assert_eq!(t.state.take_replies(), b"\x1b[1;7R");
+    // A reset keeps the setting, which is 1 or 2.
+    t.advance(b"\x1bc");
+    assert_eq!(t.state.ambiguous_width(), 2);
+    t.state.set_ambiguous_width(7);
+    assert_eq!(t.state.ambiguous_width(), 2);
+    t.state.set_ambiguous_width(0);
+    assert_eq!(t.state.ambiguous_width(), 1);
+}

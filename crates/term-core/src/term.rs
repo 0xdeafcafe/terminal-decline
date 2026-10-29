@@ -286,6 +286,9 @@ pub struct Terminal {
     active_charset: usize,
     line_drawing: bool,
     last_char: Option<char>,
+    /// East Asian Ambiguous characters are this many cells wide (1 or 2),
+    /// a setting (§6.3).
+    ambiguous: u8,
     /// Grapheme segmentation of what is being printed (§6.2 of the cells
     /// design).
     grapheme: GraphemeState,
@@ -373,6 +376,7 @@ impl Terminal {
             active_charset: 0,
             line_drawing: false,
             last_char: None,
+            ambiguous: 1,
             grapheme: GraphemeState::default(),
             grapheme_plain: None,
             grapheme_log: None,
@@ -547,6 +551,22 @@ impl Terminal {
 
     pub fn set_default_colors(&mut self, colors: [u32; 3]) {
         self.default_colors = colors;
+    }
+
+    /// How many cells (1 or 2) East Asian Ambiguous characters take.
+    pub fn ambiguous_width(&self) -> u8 {
+        self.ambiguous
+    }
+
+    /// Set the East Asian Ambiguous width (the `ambiguous_width` setting,
+    /// §6.3 of the cells design): 1 or 2 cells, for output from now on.
+    /// Cells already written keep their width, so nothing moves; programs
+    /// already running keep the width they worked out themselves. The
+    /// grapheme state is cleared. (When history records the setting per
+    /// block, this also seals the open block.)
+    pub fn set_ambiguous_width(&mut self, width: u8) {
+        self.ambiguous = width.clamp(1, 2);
+        self.clear_grapheme();
     }
 
     /// Cell size in pixels, for answering size queries.
@@ -1237,6 +1257,7 @@ impl Terminal {
         fresh.default_colors = self.default_colors;
         fresh.cell_pixels = self.cell_pixels;
         fresh.bulk_ascii = self.bulk_ascii;
+        fresh.ambiguous = self.ambiguous;
         fresh.grapheme_log = self.grapheme_log.take();
         // Like xterm, a full reset clears scrollback too.
         fresh.scrollback = std::mem::replace(&mut self.scrollback, Scrollback::new(0));
@@ -1261,13 +1282,14 @@ impl Terminal {
         let p = unicode::props(c);
         // Most text: a plain character with a width starts a cluster
         // unless a Prepend one came before it.
+        let width = p.width_with(self.ambiguous);
         if p.is_plain()
-            && p.width() != 0
+            && width != 0
             && self.modes.autowrap
             && self.grapheme_log.is_none()
             && (self.grapheme_plain.is_some() || !self.grapheme.seg.after_prepend())
         {
-            let at = self.put_char(c, p.width() as usize);
+            let at = self.put_char(c, width as usize);
             self.grapheme_plain = at.map(|_| c);
             if at.is_none() {
                 self.grapheme = GraphemeState {
@@ -1293,7 +1315,7 @@ impl Terminal {
         if let Some(log) = &mut self.grapheme_log {
             log_scalar(log, c, joins);
         }
-        let width = p.width() as usize;
+        let width = p.width_with(self.ambiguous) as usize;
         if width == 0 {
             if c == '\u{FE0F}' {
                 self.widen_previous();
@@ -1474,7 +1496,7 @@ impl Terminal {
         let Some(c) = self.grapheme_plain else { return self.grapheme };
         let p = unicode::props(c);
         GraphemeState {
-            at: self.cell_before_cursor(p.width() as usize),
+            at: self.cell_before_cursor(p.width_with(self.ambiguous) as usize),
             seg: Segmenter::start_plain(c, p),
         }
     }

@@ -206,6 +206,13 @@ fn cluster() -> impl Strategy<Value = Vec<u8>> {
         "\x1b[?2027l",
         "\x1b[?2027h",
         "\x1b[?2027$p",
+        // kitty placeholders (images are on in
+        // `invariants_hold_under_random_input`).
+        "\u{10EEEE}\u{305}\u{30D}",
+        "\u{10EEEE}\u{10EEEE}",
+        "\u{10EEEE}\u{30E}\u{301}\u{305}\u{1D244}\u{310}",
+        "\x1b[38;2;0;0;7m\u{10EEEE}\u{30E}\u{305}\u{310}\u{10EEEE}",
+        "\x1b[38;5;9;58;5;3m\u{10EEEE}\u{1D244}\u{10EEEE}",
     ])
     .prop_map(|s| s.as_bytes().to_vec())
 }
@@ -343,7 +350,8 @@ proptest! {
         limit in select(vec![0usize, 1, 2, 10, 1000]),
         steps in prop::collection::vec(step(), 1..40),
     ) {
-        let mut t = Term::new(cols, lines, limit);
+        // Images on, so placeholders are cells.
+        let mut t = Term::new(cols, lines, limit, term_core::ImagePool::new(32 << 20));
         for step in &steps {
             apply(&mut t, step);
             check(&t)?;
@@ -357,9 +365,9 @@ proptest! {
         input in prop::collection::vec(chunk(), 1..8).prop_map(|c| c.concat()),
         cuts in prop::collection::vec(any::<prop::sample::Index>(), 0..6),
     ) {
-        let mut whole = Term::new(20, 6, 50);
+        let mut whole = Term::new(20, 6, 50, term_core::ImagePool::process());
         whole.advance(&input);
-        let mut parts = Term::new(20, 6, 50);
+        let mut parts = Term::new(20, 6, 50, term_core::ImagePool::process());
         let mut at: Vec<usize> = cuts.iter().map(|i| i.index(input.len() + 1)).collect();
         at.sort();
         let mut from = 0;
@@ -579,8 +587,8 @@ proptest! {
         limit in select(vec![0usize, 3, 100]),
         steps in prop::collection::vec(bulk_step(), 1..16),
     ) {
-        let mut fast = Term::new(cols, lines, limit);
-        let mut slow = Term::new(cols, lines, limit);
+        let mut fast = Term::new(cols, lines, limit, term_core::ImagePool::process());
+        let mut slow = Term::new(cols, lines, limit, term_core::ImagePool::process());
         slow.state.set_bulk_ascii(false);
         // Recording clusters makes the reference keep its grapheme state
         // up to date after every character, where the fast one leaves the
@@ -1010,9 +1018,9 @@ proptest! {
         limit in select(vec![0usize, 5, 100]),
         steps in prop::collection::vec(style_step(), 1..30),
     ) {
-        let mut swept = Term::new(cols, lines, limit);
+        let mut swept = Term::new(cols, lines, limit, term_core::ImagePool::process());
         swept.state.set_sweep_at(Some(8));
-        let mut plain = Term::new(cols, lines, limit);
+        let mut plain = Term::new(cols, lines, limit, term_core::ImagePool::process());
         let mut mirrors = Mirrors::default();
         let mut most_cells = swept.state.cols() * swept.state.lines();
         for step in &steps {
@@ -1068,7 +1076,7 @@ fn truecolour_gradient_keeps_the_table_bounded() {
     for (cols, lines) in [(80usize, 24usize), (300, 100)] {
         let cells = cols * lines;
         let sweep_at = (cells * 3 / 2).max(1024);
-        let mut t = Term::new(cols, lines, 1000);
+        let mut t = Term::new(cols, lines, 1000, term_core::ImagePool::process());
         let mut out = Vec::new();
         let mut n = 0u32;
         let (mut peak, mut peak_bytes) = (0, 0);
@@ -1195,7 +1203,7 @@ proptest! {
         steps in prop::collection::vec(reflow_step(), 1..30),
         sizes in prop::collection::vec((2usize..=24, 1usize..=8), 1..6),
     ) {
-        let mut t = Term::new(start.0, start.1, 100_000);
+        let mut t = Term::new(start.0, start.1, 100_000, term_core::ImagePool::process());
         for step in &steps {
             match step {
                 ReflowStep::Output(b) => t.advance(b),

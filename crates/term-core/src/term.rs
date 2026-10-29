@@ -8,6 +8,8 @@ use std::sync::Arc;
 use vte::{OscLarge, Params, Perform};
 
 use crate::cell::{Cell, Color, Mark, MarkKind, Row, Width};
+use crate::image::placeholder::{self, PLACEHOLDER, Piece};
+use crate::image::{Graphics, ImageJob, ImagePool, ImageState, JobDone};
 pub use crate::links::LinkValue;
 use crate::rows::{Content, RowRef};
 use crate::scrollback::{HistoryStats, Scrollback};
@@ -410,12 +412,41 @@ pub struct Terminal {
     bulk_ascii: bool,
     /// The search, while the find bar is open (§13.4).
     search: Option<Box<search::SearchState>>,
+    /// The images of the screen shown and of the other one (images.md
+    /// §4.1), each with the process-wide pool.
+    graphics: Box<Graphics>,
+    other_graphics: Box<Graphics>,
+    /// Work to run off the lock, taken by the session (§4.2).
+    image_jobs: Vec<ImageJob>,
+    /// The kitty placeholder cell just written, while its diacritics may
+    /// still come (cells §7).
+    placeholder: Option<PlaceholderAt>,
+    /// A placeholder was written on a screen since the last reset: only
+    /// then does the snapshot look for them to flag rows.
+    placeholders_written: bool,
+}
+
+/// The placeholder cell diacritics go to, and what was inferred so far.
+#[derive(Clone, Copy, Debug)]
+struct PlaceholderAt {
+    row: usize,
+    col: usize,
+    piece: Piece,
+    /// The cell to the left, if it was a placeholder of the same image and
+    /// placement, as it was when the base character came.
+    left: Option<Piece>,
+    /// Diacritics so far.
+    step: u8,
 }
 
 impl Terminal {
-    pub fn new(cols: usize, lines: usize, scrollback_limit: usize) -> Terminal {
+    /// A terminal of `cols` × `lines` keeping `scrollback_limit` lines of
+    /// history, whose images count against `pool` (every terminal of a
+    /// process shares [`ImagePool::process`]).
+    pub fn new(cols: usize, lines: usize, scrollback_limit: usize, pool: Arc<ImagePool>) -> Terminal {
         let cols = cols.max(2);
         let lines = lines.max(1);
+        let terminal_id = snapshot::next_terminal_id();
         Terminal {
             cols,
             lines,
@@ -476,10 +507,15 @@ impl Terminal {
             generation: 1,
             counter: 0,
             batch_start: 1,
-            terminal_id: snapshot::next_terminal_id(),
+            terminal_id,
             history_epoch: 0,
             bulk_ascii: true,
             search: None,
+            graphics: Box::new(Graphics::new(terminal_id, pool.clone())),
+            other_graphics: Box::new(Graphics::new(terminal_id, pool)),
+            image_jobs: Vec::new(),
+            placeholder: None,
+            placeholders_written: false,
         }
         .with_rows_touched()
     }
@@ -1616,6 +1652,7 @@ impl Terminal {
         }
         std::mem::swap(&mut self.screen, &mut self.other_screen);
         std::mem::swap(&mut self.styles, &mut self.other_styles);
+        std::mem::swap(&mut self.graphics, &mut self.other_graphics);
         // The templates and the pen's link id name ids in the other
         // screen's tables.
         self.drop_pen_link_id();
@@ -1676,8 +1713,62 @@ impl Terminal {
         self.touch_screen_rows();
     }
 
+    /// The pool this terminal's images count against.
+    pub fn image_pool(&self) -> &Arc<ImagePool> {
+        self.graphics.pool()
+    }
+
+    /// Whether this terminal handles images (the hidden switch, §11).
+    pub fn images_enabled(&self) -> bool {
+        self.graphics.pool().enabled()
+    }
+
+    /// The shown screen's images.
+    pub fn graphics(&self) -> &Graphics {
+        &self.graphics
+    }
+
+    /// Test aid until kitty graphics lands (I.2): the shown screen's images,
+    /// to add placements to.
+    #[doc(hidden)]
+    pub fn graphics_mut_for_test(&mut self) -> &mut Graphics {
+        &mut self.graphics
+    }
+
+    /// Move the image jobs queued since the last call to `out`, to run with
+    /// the lock released (after each parse slice and each snapshot).
+    pub fn take_image_jobs(&mut self, out: &mut Vec<ImageJob>) {
+        out.append(&mut self.image_jobs);
+    }
+
+    /// A job taken with [`Terminal::take_image_jobs`] finished. One for
+    /// another terminal, or for an image since replaced or deleted (its
+    /// generation differs), is dropped. Returns whether to redraw.
+    pub fn image_job_done(&mut self, done: JobDone) -> bool {
+        if done.terminal_id != self.terminal_id {
+            return false;
+        }
+        for g in [&mut self.graphics, &mut self.other_graphics] {
+            if let Some(image) = g.image_mut(done.image)
+                && image.generation == done.generation
+            {
+                image.state = match done.result {
+                    Ok(()) => ImageState::Ready,
+                    Err(_) => ImageState::Failed,
+                };
+                if let Some(id) = image.pool {
+                    g.pool().set_busy(id, false);
+                }
+                self.generation = self.generation.wrapping_add(1);
+                return true;
+            }
+        }
+        false
+    }
+
     fn reset(&mut self) {
-        let mut fresh = Terminal::new(self.cols, self.lines, self.scrollback.limit());
+        // The same pool: RIS frees this terminal's images, not the budget.
+        let mut fresh = Terminal::new(self.cols, self.lines, self.scrollback.limit(), self.graphics.pool().clone());
         // New tables, with epochs that carry on from these.
         let cells = self.cols * self.lines;
         fresh.styles = StyleTable::new(self.epochs + 1, cells, self.sweep_at_test);
@@ -1708,6 +1799,8 @@ impl Terminal {
         // The same terminal to the renderer: counters carry on, and the
         // cleared history gets a new epoch (§9.1).
         fresh.terminal_id = self.terminal_id;
+        fresh.graphics = Box::new(Graphics::new(self.terminal_id, self.graphics.pool().clone()));
+        fresh.other_graphics = Box::new(Graphics::new(self.terminal_id, self.graphics.pool().clone()));
         fresh.counter = self.counter;
         fresh.batch_start = self.batch_start;
         fresh.history_epoch = self.history_epoch + 1;
@@ -1717,6 +1810,9 @@ impl Terminal {
 
     fn write_char(&mut self, c: char) {
         let c = if self.charset != Charset::Ascii { self.charset.map(c) } else { c };
+        if c == PLACEHOLDER && self.images_enabled() {
+            return self.write_placeholder();
+        }
         let p = unicode::props(c);
         // Most text: a plain character with a width starts a cluster
         // unless a Prepend one came before it.
@@ -1777,11 +1873,95 @@ impl Terminal {
         self.grapheme.at = self.put_char(c, width);
     }
 
+    /// A kitty placeholder (U+10EEEE) at the cursor: a placeholder cell in
+    /// the pen's style, its piece inferred from the cell to the left
+    /// (cells §7). Its diacritics join it as they come.
+    #[cold]
+    #[inline(never)]
+    fn write_placeholder(&mut self) {
+        self.clear_grapheme();
+        let Some((row, col)) = self.put_char(PLACEHOLDER, 1) else { return };
+        // REP repeats characters, not pieces of images.
+        self.forget_last_char();
+        let cells = &self.screen[row].cells;
+        let pen = *self.styles.get(cells[col].style_id());
+        let left = col.checked_sub(1).and_then(|l| {
+            let cell = cells[l];
+            let (r, c) = cell.placeholder()?;
+            let s = self.styles.get(cell.style_id());
+            (s.fg == pen.fg && s.underline_color == pen.underline_color).then_some(Piece {
+                row: r,
+                col: c,
+                high: s.image_id_high,
+            })
+        });
+        let piece = placeholder::on_base(left);
+        self.placeholders_written = true;
+        self.set_placeholder_cell(row, col, piece);
+        // Diacritics join this cell, as combining marks join a cluster.
+        self.grapheme = GraphemeState {
+            at: Some((row, col)),
+            seg: Segmenter::start(PLACEHOLDER, unicode::props(PLACEHOLDER)),
+        };
+        self.placeholder = Some(PlaceholderAt {
+            row,
+            col,
+            piece,
+            left,
+            step: 0,
+        });
+    }
+
+    /// Store `piece` in the placeholder cell at (`row`, `col`): its style's
+    /// high byte, its row and column. A column guessed past 511 stores a
+    /// blank in the same style.
+    fn set_placeholder_cell(&mut self, row: usize, col: usize, piece: Piece) {
+        let cell = self.screen[row].cells[col];
+        let mut style = *self.styles.get(cell.style_id());
+        let template = if style.image_id_high != piece.high {
+            style.image_id_high = piece.high;
+            // May sweep and renumber: the cell is written after.
+            self.intern(style)
+        } else {
+            cell.style_part()
+        };
+        self.screen[row].cells[col] = if piece.col > placeholder::MAX_COL {
+            template
+        } else {
+            template.with_placeholder(piece.row, piece.col)
+        };
+        self.touch_row(row);
+    }
+
+    /// A combining character after a placeholder: one of kitty's
+    /// diacritics sets the next of row, column and high byte; any other is
+    /// dropped. True if it went to the placeholder.
+    fn placeholder_diacritic(&mut self, row: usize, col: usize, c: char) -> bool {
+        let Some(mut p) = self.placeholder.filter(|p| (p.row, p.col) == (row, col)) else {
+            return false;
+        };
+        let cell = self.screen[row].cells[col];
+        if !cell.is_placeholder() && !(p.piece.col > placeholder::MAX_COL && cell.bits() & (Cell::CONTENT | Cell::KIND) == 0) {
+            self.placeholder = None;
+            return false;
+        }
+        if let Some(v) = placeholder::diacritic_value(c) {
+            p.piece = placeholder::on_diacritic(p.step, v, p.piece, p.left);
+            p.step = p.step.saturating_add(1);
+            self.placeholder = Some(p);
+            self.set_placeholder_cell(row, col, p.piece);
+        }
+        true
+    }
+
     /// `c` joined the cluster in the cell at (`row`, `col`), the last one
     /// printed: add it to the cell, and fix the cell's width in place when
     /// the cluster's width changed (§6.3).
     #[inline(never)]
     fn join_cell(&mut self, row: usize, col: usize, c: char) {
+        if self.placeholder.is_some() && self.placeholder_diacritic(row, col, c) {
+            return;
+        }
         if !self.screen[row].push_to_cell(col, c) {
             // Past the caps (32 scalars, 128 bytes, 8 KB a row): dropped.
             return;
@@ -2115,6 +2295,7 @@ impl Terminal {
     fn clear_grapheme(&mut self) {
         self.grapheme.clear();
         self.grapheme_plain = None;
+        self.placeholder = None;
     }
 
     /// Test aid: record every grapheme cluster as the terminal segments the
@@ -3104,6 +3285,8 @@ impl Terminal {
     pub fn check_invariants(&self) -> Result<(), String> {
         let (cols, lines) = (self.cols, self.lines);
         self.check_counters()?;
+        self.graphics.check().map_err(|e| format!("graphics: {e}"))?;
+        self.other_graphics.check().map_err(|e| format!("other graphics: {e}"))?;
         if self.cursor.row >= lines || self.cursor.col >= cols {
             return Err(format!("cursor ({}, {}) outside {cols}x{lines}", self.cursor.row, self.cursor.col));
         }
@@ -3264,23 +3447,27 @@ impl Terminal {
     }
 }
 
-/// A screen cell is a narrow, wide or spacer scalar, or a narrow or wide
-/// cluster (no placeholders yet), its spare bits are zero, and its style
-/// id is live with SE matching the style.
+/// A screen cell is a narrow, wide or spacer scalar, a narrow or wide
+/// cluster, or a narrow placeholder (row < 297, column < 512), its spare
+/// bits are zero, and its style id is live with SE matching the style.
 fn check_cell(cell: Cell, styles: &StyleTable) -> Result<(), String> {
     let bits = cell.bits();
-    if bits & (Cell::PROTECTED | 0x1F << 27) != 0 || (bits & Cell::KIND != 0 && !cell.is_cluster()) {
-        return Err(format!("cell {bits:#x} has a placeholder kind, protected or spare bits set"));
+    if bits & (Cell::PROTECTED | 0x1F << 27) != 0 || bits & Cell::KIND == Cell::KIND {
+        return Err(format!("cell {bits:#x} has kind 3, protected or spare bits set"));
     }
-    if !cell.is_cluster() && cell.codepoint() != 0 && char::from_u32(cell.codepoint()).is_none() {
+    if let Some((row, _)) = cell.placeholder() {
+        if cell.width() != Width::Narrow || row >= crate::image::placeholder::VALUES || bits & Cell::CONTENT >= 1 << 18 {
+            return Err(format!("placeholder {bits:#x} isn't narrow, or its row or column is out of range"));
+        }
+    } else if !cell.is_cluster() && cell.codepoint() != 0 && char::from_u32(cell.codepoint()).is_none() {
         return Err(format!("cell {bits:#x} holds no scalar"));
     }
     // C0 controls are executed, never printed; history's text relies on
     // it (0x0A ends a stored line).
-    if !cell.is_cluster() && (1..0x20).contains(&cell.codepoint()) {
+    if cell.bits() & Cell::KIND == 0 && (1..0x20).contains(&cell.codepoint()) {
         return Err(format!("cell {bits:#x} holds a C0 control"));
     }
-    if cell.is_spacer() && (cell.codepoint() != 0 || cell.is_cluster()) {
+    if cell.is_spacer() && cell.bits() & (Cell::CONTENT | Cell::KIND) != 0 {
         return Err(format!("spacer {bits:#x} holds a character"));
     }
     let id = cell.style_id();
@@ -3334,10 +3521,11 @@ pub struct Term {
 }
 
 impl Term {
-    pub fn new(cols: usize, lines: usize, scrollback_limit: usize) -> Term {
+    /// A parser and a [`Terminal::new`].
+    pub fn new(cols: usize, lines: usize, scrollback_limit: usize, pool: Arc<ImagePool>) -> Term {
         Term {
             parser: vte::Parser::new(),
-            state: Terminal::new(cols, lines, scrollback_limit),
+            state: Terminal::new(cols, lines, scrollback_limit, pool),
         }
     }
 

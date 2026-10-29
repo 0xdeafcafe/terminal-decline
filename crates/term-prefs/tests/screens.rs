@@ -48,7 +48,7 @@ impl Screen {
     fn new(app: &mut App, w: usize, h: usize) -> Screen {
         app.resize(w, h);
         let mut s = Screen {
-            term: Term::new(w, h, 0),
+            term: Term::new(w, h, 0, term_core::ImagePool::process()),
             renderer: Renderer::default(),
             decoder: Decoder::default(),
             now: Instant::now(),

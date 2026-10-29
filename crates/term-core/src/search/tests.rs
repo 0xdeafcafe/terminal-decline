@@ -137,7 +137,7 @@ fn matcher_paths() {
 
 #[test]
 fn hits_on_screen_and_across_a_wrap() {
-    let mut t = Term::new(10, 4, 100);
+    let mut t = Term::new(10, 4, 100, crate::ImagePool::process());
     t.advance(b"hello world, hello");
     let hits = search(&mut t, q("hello", false, WordMatch::Contains));
     assert_eq!(hits.len(), 2);
@@ -150,7 +150,7 @@ fn hits_on_screen_and_across_a_wrap() {
 
 #[test]
 fn clusters_and_wide_characters() {
-    let mut t = Term::new(20, 3, 100);
+    let mut t = Term::new(20, 3, 100, crate::ImagePool::process());
     t.advance("e\u{301}x e 中文e".as_bytes());
     let hits = search(&mut t, q("e", false, WordMatch::Contains));
     // Not the first half of e + U+0301.
@@ -162,7 +162,7 @@ fn clusters_and_wide_characters() {
 
 #[test]
 fn history_blocks_and_boundaries() {
-    let mut t = Term::new(12, 3, 1000);
+    let mut t = Term::new(12, 3, 1000, crate::ImagePool::process());
     for i in 0..60 {
         t.advance(format!("line {i} needle\r\n").as_bytes());
         if i % 7 == 0 {
@@ -181,7 +181,7 @@ fn history_blocks_and_boundaries() {
 
 #[test]
 fn live_output_is_searched_once() {
-    let mut t = Term::new(16, 3, 1000);
+    let mut t = Term::new(16, 3, 1000, crate::ImagePool::process());
     t.advance(b"one foo\r\n");
     let query = q("foo", false, WordMatch::Contains);
     assert_eq!(search(&mut t, query.clone()).len(), 1);
@@ -199,7 +199,7 @@ fn live_output_is_searched_once() {
 
 #[test]
 fn next_and_previous_wrap_and_select() {
-    let mut t = Term::new(10, 3, 100);
+    let mut t = Term::new(10, 3, 100, crate::ImagePool::process());
     t.advance(b"ab\r\nab\r\nab");
     search(&mut t, q("ab", false, WordMatch::Contains));
     assert!(t.state.search_next());
@@ -221,7 +221,7 @@ fn next_and_previous_wrap_and_select() {
 
 #[test]
 fn freed_and_cleared_history_drop_their_hits() {
-    let mut t = Term::new(10, 2, 1000);
+    let mut t = Term::new(10, 2, 1000, crate::ImagePool::process());
     for _ in 0..30 {
         t.advance(b"zz\r\n");
     }
@@ -241,7 +241,7 @@ fn freed_and_cleared_history_drop_their_hits() {
 /// so "ς" stayed a whole-word hit after "a" was printed after it.
 #[test]
 fn screen_row_written_again_before_a_snapshot() {
-    let mut t = Term::new(8, 3, 8);
+    let mut t = Term::new(8, 3, 8, crate::ImagePool::process());
     let query = q("ς", false, WordMatch::FullWord);
     t.advance("ς".as_bytes());
     assert_eq!(search(&mut t, query.clone()).len(), 1);
@@ -256,7 +256,7 @@ fn screen_row_written_again_before_a_snapshot() {
 /// so a match there starts a word (as a new search would find).
 #[test]
 fn hiding_a_wrapped_rows_start_makes_a_word_start() {
-    let mut t = Term::new(4, 2, 3);
+    let mut t = Term::new(4, 2, 3, crate::ImagePool::process());
     t.advance("aaaaéb\r\n".as_bytes());
     let query = q("é", false, WordMatch::StartsWith);
     assert!(search(&mut t, query.clone()).is_empty());
@@ -277,7 +277,7 @@ fn hiding_a_wrapped_rows_start_makes_a_word_start() {
 #[test]
 fn history_hit_at_its_end_follows_the_screen() {
     // "y" ends history; the screen's rows are empty.
-    let mut t = Term::new(8, 2, 100);
+    let mut t = Term::new(8, 2, 100, crate::ImagePool::process());
     t.advance(b"y\r\n\r\n");
     let query = q("y\n", false, WordMatch::FullWord);
     assert_eq!(search(&mut t, query.clone()).len(), 1);
@@ -294,7 +294,7 @@ fn history_hit_at_its_end_follows_the_screen() {
 #[test]
 fn match_from_historys_line_ends_onto_the_screen() {
     for (out, query) in [("x\r\nab\r\n", "\nA"), ("x\r\n\r\nab\r\n", "\n\nA")] {
-        let mut t = Term::new(8, 2, 100);
+        let mut t = Term::new(8, 2, 100, crate::ImagePool::process());
         t.advance(out.as_bytes());
         let query = q(query, true, WordMatch::Contains);
         let hits = search(&mut t, query.clone());
@@ -309,7 +309,7 @@ fn match_from_historys_line_ends_onto_the_screen() {
 #[test]
 fn resize_keeps_hits_equal_to_the_reflowed_text() {
     for query in [q("needle", false, WordMatch::Contains), q("needle", false, WordMatch::FullWord)] {
-        let mut t = Term::new(12, 3, 1000);
+        let mut t = Term::new(12, 3, 1000, crate::ImagePool::process());
         for i in 0..20 {
             t.advance(format!("{i} xx needle yy needle\r\n").as_bytes());
         }
@@ -329,7 +329,7 @@ fn resize_keeps_hits_equal_to_the_reflowed_text() {
 /// are found.
 #[test]
 fn lines_shown_again_by_a_resize_are_searched() {
-    let mut t = Term::new(6, 3, 8);
+    let mut t = Term::new(6, 3, 8, crate::ImagePool::process());
     let query = q("A", false, WordMatch::Contains);
     search(&mut t, query.clone());
     t.advance(format!("aA\r\n{}\r\nab", "a".repeat(66)).as_bytes());
@@ -389,7 +389,7 @@ proptest! {
         query in query(),
         resize in prop::option::of((4usize..16, 1usize..6)),
     ) {
-        let mut t = Term::new(cols, 3, limit);
+        let mut t = Term::new(cols, 3, limit, crate::ImagePool::process());
         feed(&mut t, &before);
         let hits = search(&mut t, query.clone());
         prop_assert_eq!(&hits, &naive(&t, &query));

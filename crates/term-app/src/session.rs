@@ -199,7 +199,8 @@ fn parse(term: &Mutex<Term>, bytes: &[u8], on_parsed: Option<&(dyn Fn() + Send)>
 /// Replace a terminal that may be half-updated by a panic with a fresh one
 /// of the same size and colours.
 pub(crate) fn replace_term(t: &mut Term) {
-    let mut fresh = Term::new(t.state.cols(), t.state.lines(), 0);
+    // The same pool: the old terminal's images are freed when it is dropped.
+    let mut fresh = Term::new(t.state.cols(), t.state.lines(), 0, t.state.image_pool().clone());
     fresh.state.set_default_colors(t.state.default_colors());
     fresh.state.set_default_palette(t.state.default_palette());
     fresh.state.set_cell_pixels(t.state.cell_pixels());

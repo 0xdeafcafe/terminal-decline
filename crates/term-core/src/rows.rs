@@ -64,6 +64,9 @@ impl<'a> CellRef<'a> {
         if self.cell.is_cluster() {
             return Content::Cluster(self.clusters.map_or("", |x| x.get(cp)));
         }
+        if let Some((row, col)) = self.cell.placeholder() {
+            return Content::Placeholder { row, col };
+        }
         if cp == 0 {
             return Content::Empty;
         }

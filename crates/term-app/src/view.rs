@@ -2408,7 +2408,7 @@ struct NewPane<'a> {
 /// Start pane `n` of window `window`: its terminal and program.
 fn spawn_pane(window: usize, config: &Config, theme: &Theme, m: term_font::Metrics, test: bool, n: NewPane) -> std::io::Result<Pane> {
     let (cols, lines) = n.grid;
-    let mut t = Term::new(cols, lines, config.scrollback);
+    let mut t = Term::new(cols, lines, config.scrollback, term_core::ImagePool::process());
     t.state.set_ambiguous_width(config.ambiguous_width);
     crate::config::set_term_colors(&mut t.state, theme);
     for notice in n.notices {

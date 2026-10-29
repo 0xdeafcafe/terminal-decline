@@ -164,7 +164,7 @@ impl Harness {
         setup(home.path());
         let cmd = command(argv, home.path());
         let signal = Arc::new(Signal::default());
-        let term = Term::new(sz.cols as usize, sz.lines as usize, 1000);
+        let term = Term::new(sz.cols as usize, sz.lines as usize, 1000, term_core::ImagePool::process());
         let session = Session::spawn(&cmd, sz, term, signal.hooks()).expect("spawn");
         Harness {
             session: Some(session),
@@ -394,7 +394,7 @@ fn events_arrive_without_drawing() {
     let (tx, rx) = std::sync::mpsc::channel();
     let mut hooks = Arc::new(Signal::default()).hooks();
     hooks.on_events = Some(Box::new(move |e| tx.send(e).unwrap()));
-    let session = Session::spawn(&cmd, size(80, 24), Term::new(80, 24, 100), hooks).expect("spawn");
+    let session = Session::spawn(&cmd, size(80, 24), Term::new(80, 24, 100, term_core::ImagePool::process()), hooks).expect("spawn");
     let mut got = Vec::new();
     while !got.iter().any(|e: &terminal_decline_app::session::Events| e.bell) {
         got.push(rx.recv_timeout(DEADLINE).expect("no events"));
@@ -454,7 +454,13 @@ fn a_restored_command_waits_at_the_prompt() {
         let home = TempDir::new(&format!("at-prompt-{}", shell.replace('/', "-")));
         let cmd = login_shell(shell, home.path());
         let signal = Arc::new(Signal::default());
-        let session = Session::spawn(&cmd, size(100, 24), Term::new(100, 24, 1000), signal.hooks()).expect("spawn");
+        let session = Session::spawn(
+            &cmd,
+            size(100, 24),
+            Term::new(100, 24, 1000, term_core::ImagePool::process()),
+            signal.hooks(),
+        )
+        .expect("spawn");
         // At once, long before the shell's line editor has started.
         let line = "touch 'ran here' \"$HOME/also\"";
         session.type_at_prompt(line.into());
@@ -508,7 +514,13 @@ fn shell_integration_snippets_mark_prompts() {
         startup.push_str(&format!("source '{}'\n", snippets.join(snippet).display()));
         std::fs::write(&rc, startup).unwrap();
         let signal = Arc::new(Signal::default());
-        let session = Session::spawn(&cmd, size(60, 6), Term::new(60, 6, 1000), signal.hooks()).expect("spawn");
+        let session = Session::spawn(
+            &cmd,
+            size(60, 6),
+            Term::new(60, 6, 1000, term_core::ImagePool::process()),
+            signal.hooks(),
+        )
+        .expect("spawn");
         let h = Harness {
             session: Some(session),
             signal,
@@ -558,7 +570,13 @@ fn typing_first_drops_the_restored_command() {
     let home = TempDir::new("at-prompt-typed");
     let cmd = login_shell("/bin/zsh", home.path());
     let signal = Arc::new(Signal::default());
-    let session = Session::spawn(&cmd, size(80, 24), Term::new(80, 24, 1000), signal.hooks()).expect("spawn");
+    let session = Session::spawn(
+        &cmd,
+        size(80, 24),
+        Term::new(80, 24, 1000, term_core::ImagePool::process()),
+        signal.hooks(),
+    )
+    .expect("spawn");
     session.type_at_prompt("echo restored".into());
     let h = Harness {
         session: Some(session),
@@ -625,7 +643,13 @@ fn program_that_cannot_start_says_why() {
     let home = TempDir::new("nostart");
     let cmd = command(&["bad\0name"], home.path());
     let signal = Arc::new(Signal::default());
-    let session = Session::spawn(&cmd, size(80, 24), Term::new(80, 24, 100), signal.hooks()).expect("spawn");
+    let session = Session::spawn(
+        &cmd,
+        size(80, 24),
+        Term::new(80, 24, 100, term_core::ImagePool::process()),
+        signal.hooks(),
+    )
+    .expect("spawn");
     assert_eq!(signal.exits(), 1);
     assert_eq!(signal.outcome(), Some(Outcome::Hold));
     assert_eq!(session.pid(), None);
@@ -652,7 +676,7 @@ fn config_errors_show_before_the_output() {
     assert_eq!(errors.len(), 1, "{errors:?}");
     let cmd = command(&["/bin/sh", "-c", "echo program output; sleep 0.3"], home.path());
     let signal = Arc::new(Signal::default());
-    let mut term = Term::new(300, 24, 100);
+    let mut term = Term::new(300, 24, 100, term_core::ImagePool::process());
     for e in &errors {
         terminal_decline_app::session::write_notice(&mut term, e);
     }
@@ -1101,7 +1125,7 @@ fn with_loop(name: &str, script: &str, sz: Size) -> (Arc<Session>, Arc<Signal>, 
     let home = TempDir::new(name);
     let cmd = command(&["/bin/sh", "-c", script], home.path());
     let signal = Arc::new(Signal::default());
-    let term = Term::new(sz.cols as usize, sz.lines as usize, 1000);
+    let term = Term::new(sz.cols as usize, sz.lines as usize, 1000, term_core::ImagePool::process());
     let session = Arc::new(Session::spawn(&cmd, sz, term, signal.hooks()).unwrap());
     let fake = FakeLoop::start(session.clone(), signal.clone());
     (session, signal, fake, home)
@@ -1159,7 +1183,13 @@ fn drop_frees_everything() {
     let script = "trap '' HUP; sleep 100 & echo started; while :; do sleep 1; done";
     let cmd = command(&["/bin/sh", "-c", script], home.path());
     let signal = Arc::new(Signal::default());
-    let session = Session::spawn(&cmd, size(80, 24), Term::new(80, 24, 100), signal.hooks()).unwrap();
+    let session = Session::spawn(
+        &cmd,
+        size(80, 24),
+        Term::new(80, 24, 100, term_core::ImagePool::process()),
+        signal.hooks(),
+    )
+    .unwrap();
     let mut h = Harness {
         session: Some(session),
         signal: signal.clone(),
@@ -1256,7 +1286,13 @@ fn resize_under_flood() {
     let home = TempDir::new("resize-flood");
     let cmd = command(&["/bin/sh", "-c", script], home.path());
     let signal = Arc::new(Signal::default());
-    let session = Session::spawn(&cmd, size(80, 24), Term::new(80, 24, 2000), signal.hooks()).unwrap();
+    let session = Session::spawn(
+        &cmd,
+        size(80, 24),
+        Term::new(80, 24, 2000, term_core::ImagePool::process()),
+        signal.hooks(),
+    )
+    .unwrap();
     session.take_dirty();
     signal.wait_past(0, Instant::now() + DEADLINE);
     assert!(signal.wakes() > 0, "no output arrived");
@@ -1310,7 +1346,7 @@ fn prefs(home: TempDir, config: &Path, recorded: Arc<AtomicU64>) -> Harness {
     hooks.on_record_chord = Some(Box::new(move || {
         recorded.fetch_add(1, Ordering::SeqCst);
     }));
-    let session = Session::spawn(&cmd, size(80, 24), Term::new(80, 24, 100), hooks).unwrap();
+    let session = Session::spawn(&cmd, size(80, 24), Term::new(80, 24, 100, term_core::ImagePool::process()), hooks).unwrap();
     Harness {
         session: Some(session),
         signal,
@@ -1404,7 +1440,7 @@ fn control_commands_follow_the_output_before_them() {
         let screen = t.lock().unwrap().state.dump();
         seen2.lock().unwrap().push((c, screen));
     }));
-    let session = Session::spawn(&cmd, size(20, 5), Term::new(20, 5, 100), hooks).unwrap();
+    let session = Session::spawn(&cmd, size(20, 5), Term::new(20, 5, 100, term_core::ImagePool::process()), hooks).unwrap();
     *term.lock().unwrap() = Some(session.term().clone());
     let mut h = Harness {
         session: Some(session),

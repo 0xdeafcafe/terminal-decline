@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 vte.workspace = true
+term-image.workspace = true
 memchr = "2.7"
 
 [dev-dependencies]

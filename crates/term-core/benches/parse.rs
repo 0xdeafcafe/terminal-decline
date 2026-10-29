@@ -117,7 +117,7 @@ fn bench(c: &mut Criterion) {
             g.throughput(Throughput::Bytes(data.len() as u64));
             g.bench_with_input(BenchmarkId::from_parameter(name), data, |b, data| {
                 // A full scrollback, so trimming cost is included.
-                let mut t = Term::new(160, 50, 10_000);
+                let mut t = Term::new(160, 50, 10_000, term_core::ImagePool::process());
                 b.iter(|| {
                     for piece in data.chunks(chunk) {
                         t.advance(black_box(piece));

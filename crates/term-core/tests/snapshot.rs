@@ -32,7 +32,7 @@ impl Cache {
 }
 
 fn filled(cols: usize, lines: usize) -> Term {
-    let mut t = Term::new(cols, lines, 100);
+    let mut t = Term::new(cols, lines, 100, term_core::ImagePool::process());
     let text: Vec<String> = (0..lines).map(|i| format!("line {i}")).collect();
     t.advance(text.join("\r\n").as_bytes());
     t
@@ -40,7 +40,7 @@ fn filled(cols: usize, lines: usize) -> Term {
 
 #[test]
 fn every_row_has_its_own_counter_from_the_start() {
-    let t = Term::new(10, 5, 0);
+    let t = Term::new(10, 5, 0, term_core::ImagePool::process());
     let seqs = t.state.row_seqs();
     assert_eq!(seqs.len(), 5);
     assert_eq!(seqs.iter().collect::<HashSet<_>>().len(), 5, "{seqs:?}");
@@ -221,8 +221,8 @@ fn reset_keeps_counting_and_clears_history_by_epoch() {
 
 #[test]
 fn a_new_terminal_has_a_new_id() {
-    let a = Term::new(10, 4, 0);
-    let b = Term::new(10, 4, 0);
+    let a = Term::new(10, 4, 0, term_core::ImagePool::process());
+    let b = Term::new(10, 4, 0, term_core::ImagePool::process());
     assert_ne!(a.state.terminal_id(), b.state.terminal_id());
 }
 
@@ -258,7 +258,7 @@ fn rows_the_renderer_must_drop_are_copied_again() {
 
 #[test]
 fn style_updates_follow_each_screens_table() {
-    let mut t = Term::new(10, 3, 0);
+    let mut t = Term::new(10, 3, 0, term_core::ImagePool::process());
     let mut snap = Snapshot::default();
     t.state.snapshot(&mut snap, |_| false);
     assert_eq!(snap.screen, ScreenId::Primary);
@@ -295,7 +295,7 @@ fn style_updates_follow_each_screens_table() {
 /// snapshots were sent.
 #[test]
 fn a_new_renderer_is_sent_each_table_whole() {
-    let mut t = Term::new(10, 3, 0);
+    let mut t = Term::new(10, 3, 0, term_core::ImagePool::process());
     t.advance(b"\x1b[31mred\x1b[0m");
     let mut old = Snapshot::default();
     t.state.snapshot(&mut old, |_| false);
@@ -322,7 +322,7 @@ fn a_new_renderer_is_sent_each_table_whole() {
 
 #[test]
 fn history_rows_bring_their_own_styles() {
-    let mut t = Term::new(10, 2, 100);
+    let mut t = Term::new(10, 2, 100, term_core::ImagePool::process());
     t.advance(b"\x1b[1;31mbold\x1b[0m plain\r\n\x1b[44mblue\x1b[0m\r\nlast\r\nend");
     t.state.scroll_view(2);
     let mut snap = Snapshot::default();
@@ -371,7 +371,7 @@ fn selection_is_a_highlight_per_row() {
 
 #[test]
 fn cursor_shape_visibility_and_width() {
-    let mut t = Term::new(10, 3, 0);
+    let mut t = Term::new(10, 3, 0, term_core::ImagePool::process());
     t.advance("\u{6f22}\x1b[1;1H\x1b[5 q".as_bytes());
     let mut snap = Snapshot::default();
     t.state.snapshot(&mut snap, |_| false);
@@ -400,7 +400,7 @@ fn snapshot_dimensions_and_counter() {
 /// are copied again, and the ones before it stay cached.
 #[test]
 fn lines_pulled_back_are_copied_again() {
-    let mut t = Term::new(10, 2, 100);
+    let mut t = Term::new(10, 2, 100, term_core::ImagePool::process());
     t.advance(b"a\r\nb\r\nc\r\nd\r\ne\r\nf");
     t.state.scroll_view(2);
     let mut cache = Cache::default();
@@ -430,7 +430,7 @@ fn lines_pulled_back_are_copied_again() {
 /// the style to the screen's width.
 #[test]
 fn full_width_backgrounds_fill_history_rows() {
-    let mut t = Term::new(10, 2, 100);
+    let mut t = Term::new(10, 2, 100, term_core::ImagePool::process());
     t.advance(b"\x1b[44m+1\x1b[K\x1b[0m\r\nplain\r\n\r\n");
     t.state.resize(14, 2);
     t.state.scroll_view(2);
@@ -445,7 +445,7 @@ fn full_width_backgrounds_fill_history_rows() {
 
 #[test]
 fn a_scalar_joining_a_cluster_changes_its_row() {
-    let mut t = Term::new(10, 2, 0);
+    let mut t = Term::new(10, 2, 0, term_core::ImagePool::process());
     t.advance(b"e");
     let mut c = Cache::default();
     c.take(&mut t);
@@ -466,7 +466,7 @@ fn a_scalar_joining_a_cluster_changes_its_row() {
 
 #[test]
 fn snapshots_carry_cluster_text() {
-    let mut t = Term::new(10, 2, 0);
+    let mut t = Term::new(10, 2, 0, term_core::ImagePool::process());
     t.advance("ae\u{301}👍\u{1F3FD}\r\nplain".as_bytes());
     let mut c = Cache::default();
     c.take(&mut t);

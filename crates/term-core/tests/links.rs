@@ -24,7 +24,7 @@ fn check(t: &Term) {
 
 #[test]
 fn osc8_links_the_cells_printed_while_it_is_set() {
-    let mut t = Term::new(30, 3, 100);
+    let mut t = Term::new(30, 3, 100, term_core::ImagePool::process());
     t.advance(b"a\x1b]8;;https://example.com\x1b\\link\x1b]8;;\x1b\\ b");
     assert_eq!(at(&t, 0, 0), None);
     for col in 1..5 {
@@ -42,7 +42,7 @@ fn osc8_links_the_cells_printed_while_it_is_set() {
 
 #[test]
 fn a_uri_may_hold_semicolons() {
-    let mut t = Term::new(30, 2, 0);
+    let mut t = Term::new(30, 2, 0, term_core::ImagePool::process());
     t.advance(b"\x1b]8;;https://x/?a=1;b=2;c\x1b\\x");
     assert_eq!(at(&t, 0, 0), link("https://x/?a=1;b=2;c", None));
     // Other parameters than `id` are skipped; an empty id is none.
@@ -53,7 +53,7 @@ fn a_uri_may_hold_semicolons() {
 
 #[test]
 fn links_over_the_limits_are_ignored() {
-    let mut t = Term::new(10, 2, 0);
+    let mut t = Term::new(10, 2, 0, term_core::ImagePool::process());
     let long = "a".repeat(4097);
     t.advance(format!("\x1b]8;;https://ok\x1b\\a\x1b]8;;{long}\x1b\\b").as_bytes());
     assert_eq!(at(&t, 0, 0), link("https://ok", None));
@@ -68,7 +68,7 @@ fn links_over_the_limits_are_ignored() {
 
 #[test]
 fn sgr_leaves_the_link_alone_and_erasing_drops_it() {
-    let mut t = Term::new(20, 2, 0);
+    let mut t = Term::new(20, 2, 0, term_core::ImagePool::process());
     t.advance(b"\x1b]8;;https://e\x1b\\\x1b[1;31ma\x1b[0mb\x1b[44mc");
     for col in 0..3 {
         assert_eq!(at(&t, 0, col), link("https://e", None), "col {col}");
@@ -87,7 +87,7 @@ fn sgr_leaves_the_link_alone_and_erasing_drops_it() {
 
 #[test]
 fn both_halves_of_a_wide_character_have_its_link() {
-    let mut t = Term::new(10, 2, 0);
+    let mut t = Term::new(10, 2, 0, term_core::ImagePool::process());
     t.advance("\x1b]8;;https://w\x1b\\漢\x1b]8;;\x1b\\".as_bytes());
     assert_eq!(at(&t, 0, 0), link("https://w", None));
     assert_eq!(at(&t, 0, 1), link("https://w", None));
@@ -96,7 +96,7 @@ fn both_halves_of_a_wide_character_have_its_link() {
 
 #[test]
 fn pieces_of_one_link_share_an_id() {
-    let mut t = Term::new(10, 3, 0);
+    let mut t = Term::new(10, 3, 0, term_core::ImagePool::process());
     // The same id and URI in two colours, across a wrap: one link.
     t.advance(b"\x1b]8;id=1;https://p\x1b\\\x1b[31mabcdefgh\x1b[32mijkl\x1b]8;;\x1b\\");
     // The same URI with another id is another link.
@@ -111,7 +111,7 @@ fn pieces_of_one_link_share_an_id() {
 
 #[test]
 fn hovered_link_is_highlighted_in_every_piece() {
-    let mut t = Term::new(10, 4, 0);
+    let mut t = Term::new(10, 4, 0, term_core::ImagePool::process());
     t.advance(b"\x1b]8;id=1;https://p\x1b\\abc\x1b]8;;\x1b\\ x \x1b]8;id=1;https://p\x1b\\de\x1b]8;;\x1b\\");
     t.advance(b"\r\n\x1b]8;id=1;https://p\x1b\\\x1b[1mfg\x1b]8;;\x1b\\");
     t.advance(b"\r\n\x1b]8;;https://p\x1b\\other\x1b]8;;\x1b\\");
@@ -155,7 +155,7 @@ fn hovered_link_is_highlighted_in_every_piece() {
 
 #[test]
 fn plain_urls_are_found_across_wraps_and_hovered_like_links() {
-    let mut t = Term::new(12, 4, 10);
+    let mut t = Term::new(12, 4, 10, term_core::ImagePool::process());
     // Soft-wrapped onto a second row, then a full stop that isn't part of it.
     t.advance(b"go https://example.com/x. ok");
     let url = |t: &Term, line, col| t.state.url_at(t.state.point_at(line, col));
@@ -178,7 +178,7 @@ fn plain_urls_are_found_across_wraps_and_hovered_like_links() {
     assert_eq!(rows, vec![vec![(3..12, HoveredLink)], vec![(0..12, HoveredLink)], vec![], vec![]]);
 
     // An OSC 8 link wins over the URL text it shows.
-    let mut t = Term::new(40, 2, 0);
+    let mut t = Term::new(40, 2, 0, term_core::ImagePool::process());
     t.advance(b"\x1b]8;;https://real\x1b\\https://shown\x1b]8;;\x1b\\");
     t.state.set_hover(Some(t.state.point_at(0, 2)));
     t.state.snapshot(&mut snap, |_| true);
@@ -186,7 +186,7 @@ fn plain_urls_are_found_across_wraps_and_hovered_like_links() {
     assert_eq!(snap.row_highlights(&snap.rows[0])[0].cols, 0..13);
 
     // History rows are text too.
-    let mut t = Term::new(20, 2, 10);
+    let mut t = Term::new(20, 2, 10, term_core::ImagePool::process());
     t.advance(b"see http://old.ex\r\n\r\nnew");
     t.state.scroll_view(1);
     assert_eq!(url(&t, 0, 6).map(|x| x.2).as_deref(), Some("http://old.ex"));
@@ -194,7 +194,7 @@ fn plain_urls_are_found_across_wraps_and_hovered_like_links() {
 
 #[test]
 fn a_saved_cursor_holds_its_link_by_value() {
-    let mut t = Term::new(20, 3, 0);
+    let mut t = Term::new(20, 3, 0, term_core::ImagePool::process());
     t.advance(b"\x1b]8;;https://saved\x1b\\\x1b7\x1b]8;;\x1b\\a\x1b8b");
     assert_eq!(at(&t, 0, 0), link("https://saved", None), "DECRC brought the link back");
     // Across the alternate screen (1049), whose table is another one: the
@@ -216,7 +216,7 @@ fn a_saved_cursor_holds_its_link_by_value() {
 
 #[test]
 fn resets_end_the_link() {
-    let mut t = Term::new(20, 2, 0);
+    let mut t = Term::new(20, 2, 0, term_core::ImagePool::process());
     t.advance(b"\x1b]8;;https://a\x1b\\\x1b[!p");
     assert_eq!(t.state.pen_link(), None, "DECSTR");
     t.advance(b"\x1b]8;;https://a\x1b\\x\x1bc");
@@ -227,7 +227,7 @@ fn resets_end_the_link() {
 
 #[test]
 fn sweeps_free_links_no_style_uses() {
-    let mut t = Term::new(10, 3, 0);
+    let mut t = Term::new(10, 3, 0, term_core::ImagePool::process());
     t.state.set_sweep_at(Some(8));
     for i in 0..200 {
         t.advance(format!("\x1b]8;;https://n/{i}\x1b\\\x1b[3{}mx\x1b]8;;\x1b\\\r", i % 8).as_bytes());
@@ -243,7 +243,7 @@ fn sweeps_free_links_no_style_uses() {
 
 #[test]
 fn the_pens_link_survives_a_sweep_before_it_is_printed() {
-    let mut t = Term::new(10, 3, 0);
+    let mut t = Term::new(10, 3, 0, term_core::ImagePool::process());
     t.state.set_sweep_at(Some(8));
     // Interned at the first print, then many new styles force sweeps
     // while the pen holds it and no cell does.
@@ -260,7 +260,7 @@ fn the_pens_link_survives_a_sweep_before_it_is_printed() {
 
 #[test]
 fn clearing_the_alternate_screen_frees_its_links() {
-    let mut t = Term::new(10, 3, 0);
+    let mut t = Term::new(10, 3, 0, term_core::ImagePool::process());
     t.advance(b"\x1b[?1049h\x1b]8;;https://alt\x1b\\abc\x1b]8;;\x1b\\");
     assert_eq!(t.state.style_stats().0.links, 1);
     t.advance(b"\x1b[?1049l\x1b[?1049h");
@@ -272,7 +272,7 @@ fn clearing_the_alternate_screen_frees_its_links() {
 fn history_keeps_links() {
     // Each history block has its own link table: links come back by value
     // and the hovered one is highlighted in history rows too.
-    let mut t = Term::new(10, 2, 100);
+    let mut t = Term::new(10, 2, 100, term_core::ImagePool::process());
     t.advance(b"\x1b]8;id=1;https://h\x1b\\old\x1b]8;;\x1b\\ \x1b]8;;https://o\x1b\\x\x1b]8;;\x1b\\\r\n\r\nnew");
     assert_eq!(t.state.scrollback_len(), 1);
     t.state.scroll_view(1);
@@ -312,7 +312,7 @@ fn session(t: &mut Term, cmd: &str, output: &str, status: u32) {
 
 #[test]
 fn marks_go_on_the_cursors_row_at_its_column() {
-    let mut t = Term::new(20, 5, 0);
+    let mut t = Term::new(20, 5, 0, term_core::ImagePool::process());
     session(&mut t, "ls", "a\r\nb\r\n", 0);
     let top = t.state.point_at(0, 0).line;
     let line = |r: usize| top + r as u64;
@@ -346,7 +346,7 @@ fn marks_go_on_the_cursors_row_at_its_column() {
 
 #[test]
 fn marks_move_with_their_rows_and_go_when_the_row_is_erased() {
-    let mut t = Term::new(20, 3, 0);
+    let mut t = Term::new(20, 3, 0, term_core::ImagePool::process());
     t.advance(b"\x1b]133;A\x07$ \r\n\r\n");
     let first = t.state.point_at(0, 0).line;
     assert_eq!(t.state.marks_at(first), vec![mark(MarkKind::Prompt, 0)]);
@@ -354,7 +354,7 @@ fn marks_move_with_their_rows_and_go_when_the_row_is_erased() {
     t.advance(b"\r\n");
     assert_eq!(t.state.point_at(0, 0).line, first + 1);
     assert_eq!(t.state.marks_at(first), vec![], "scrolled off with no history");
-    let mut t = Term::new(20, 3, 0);
+    let mut t = Term::new(20, 3, 0, term_core::ImagePool::process());
     t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07ls");
     let line = t.state.point_at(0, 0).line;
     // A partial erase (zle redrawing after the prompt) keeps them.
@@ -381,7 +381,7 @@ fn marks_move_with_their_rows_and_go_when_the_row_is_erased() {
 
 #[test]
 fn jump_between_prompts() {
-    let mut t = Term::new(20, 12, 0);
+    let mut t = Term::new(20, 12, 0, term_core::ImagePool::process());
     session(&mut t, "one", "1\r\n", 0);
     session(&mut t, "two", "2\r\n22\r\n", 1);
     t.advance(b"\x1b]133;A\x07$ ");
@@ -396,14 +396,14 @@ fn jump_between_prompts() {
     assert_eq!(t.state.next_prompt(line(2)), Some(at(5)));
     assert_eq!(t.state.next_prompt(line(5)), None);
     // With no marks there is nowhere to go.
-    let plain = Term::new(20, 4, 0);
+    let plain = Term::new(20, 4, 0, term_core::ImagePool::process());
     assert_eq!(plain.state.previous_prompt(3), None);
     assert_eq!(plain.state.next_prompt(0), None);
 }
 
 #[test]
 fn select_a_commands_output() {
-    let mut t = Term::new(20, 12, 0);
+    let mut t = Term::new(20, 12, 0, term_core::ImagePool::process());
     session(&mut t, "one", "1\r\n", 0);
     session(&mut t, "two", "2\r\n22\r\n", 1);
     session(&mut t, "quiet", "", 0);
@@ -427,7 +427,7 @@ fn select_a_commands_output() {
     assert_eq!(copy(&mut t, p(8, 2)), Some("still\ngoing".into()));
     assert_eq!(t.state.command_output(p(6, 8)), Some((p(7, 0), p(8, 4))));
     // Before any mark there is no command.
-    let mut plain = Term::new(20, 3, 0);
+    let mut plain = Term::new(20, 3, 0, term_core::ImagePool::process());
     plain.advance(b"text");
     assert_eq!(plain.state.command_output(plain.state.point_at(0, 1)), None);
 }
@@ -438,7 +438,7 @@ fn select_a_commands_output() {
 #[test]
 fn marks_in_history_work_as_on_the_screen() {
     let run = |lines: usize| {
-        let mut t = Term::new(20, lines, 100);
+        let mut t = Term::new(20, lines, 100, term_core::ImagePool::process());
         session(&mut t, "one", "1\r\n", 0);
         session(&mut t, "two", "2\r\n22\r\n", 1);
         session(&mut t, "quiet", "", 0);
@@ -465,7 +465,7 @@ fn marks_in_history_work_as_on_the_screen() {
 /// with their lines when history drops them or is cleared.
 #[test]
 fn marks_in_history() {
-    let mut t = Term::new(20, 4, 6);
+    let mut t = Term::new(20, 4, 6, term_core::ImagePool::process());
     session(&mut t, "one", "1\r\n", 0);
     session(&mut t, "two", "2\r\n22\r\n", 1);
     t.advance(b"\x1b]133;A\x07$ ");
@@ -494,7 +494,7 @@ fn marks_in_history() {
     t.advance(b"\x1b[3J");
     assert_eq!(t.state.previous_prompt(10), None);
     // The alternate screen has no history to jump into.
-    let mut t = Term::new(20, 2, 10);
+    let mut t = Term::new(20, 2, 10, term_core::ImagePool::process());
     session(&mut t, "one", "1\r\n", 0);
     t.advance(b"\x1b[?1049h");
     assert_eq!(t.state.previous_prompt(t.state.point_at(1, 0).line), None);
@@ -504,9 +504,9 @@ fn marks_in_history() {
 #[test]
 fn osc8_and_133_split_across_reads() {
     let input = b"\x1b]8;id=q;https://split/a;b\x1b\\link\x1b]8;;\x1b\\\x1b]133;A\x07$ ";
-    let mut whole = Term::new(20, 2, 0);
+    let mut whole = Term::new(20, 2, 0, term_core::ImagePool::process());
     whole.advance(input);
-    let mut bytes = Term::new(20, 2, 0);
+    let mut bytes = Term::new(20, 2, 0, term_core::ImagePool::process());
     for b in input.iter() {
         bytes.advance(std::slice::from_ref(b));
     }

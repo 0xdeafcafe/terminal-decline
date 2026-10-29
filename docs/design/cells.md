@@ -1218,6 +1218,46 @@ for (row, column), scaled to the placement's cell box, as an overlay
 (§9.3). Rows with placeholders carry `RowFlags::PLACEHOLDERS`, and
 placeholders break shaping runs (§10).
 
+**Landed (PR 10).** What was built (`image/placeholder.rs`, `cell.rs`,
+`term.rs`, `scrollback.rs`, `term/reflow.rs`, tests in
+`tests/placeholders.rs`), and where it differs from the above:
+- **Only with images on.** U+10EEEE becomes a placeholder cell only
+  while the hidden switch is on (images.md §11, `TD_IMAGES=1`); off, it
+  is printed as text as before, so daily builds don't change.
+- **The cell**: kind 2, narrow, row in bits 0–8 and column in bits 9–17
+  (`Cell::with_placeholder`, `Cell::placeholder`, `Content::Placeholder`).
+  The image id is the style's foreground (RGB as 24 bits, a palette
+  index as 8) with `image_id_high` above it
+  (`image::placeholder_image_id`); the placement id is the underline
+  colour, as sent.
+- **Inference** is §7's, as the diacritics arrive: the placeholder takes
+  the grapheme state's place, so its diacritics come to it through the
+  same join as combining marks, in legacy mode and with 2027. The cell
+  to the left is read once, when the base arrives. A fourth diacritic
+  and other combining marks are dropped. A high byte other than the left
+  cell's interns a new style for the cell. REP doesn't repeat
+  placeholders.
+- **History**: the text holds 0x00 per placeholder, the meta the
+  placeholder list of §11.3 behind the `extra` byte's bit 0, after the
+  marks. A 40-cell image row is 53 bytes sealed, as §11.4 says
+  (`scrollback_mem`: 57 bytes a line held, 53 sealed;
+  `bench-limits.json` gates it at 60). `check_all` checks the list
+  against the text's 0x00 bytes.
+- **Reflow** (PR 11): placeholder cells wrap in pieces like text, keeping
+  their row and column. kitty direct placements are now tracked
+  positions: their top-left cell moves with the text, and one whose cell
+  was in a blank row dropped below the cursor goes (its image stays).
+- **The snapshot**: `RowFlags::PLACEHOLDERS`, looked for only once the
+  terminal has written a placeholder.
+- **Not built**: the renderer still draws a placeholder cell as its
+  content bits read as a character (only with images on; drawing is
+  I.4), and the screen search reads them the same way (history's 0x00
+  never matches).
+- **Measured** (interleaved, best of three medians, loaded machine):
+  `parse_1k` plain −0.4%, coloured +2.6%, `seq` +0.9%, `tui` 0%,
+  unicode −1.5%, clusters +2.8% against the commit before I.0; the
+  snapshot within ±4% except 80×24 full copy +24 ns (5.6%).
+
 ---
 
 ## 8. Images
@@ -3410,7 +3450,7 @@ go in order, and the font and render agents run alongside.
 | 7 | core | **scrollback v2** (§11) at the written width only: `BlockData` (shared) and `BlockEntry`, meta and contiguous text, checkpoints, per-block ambiguous setting, `FILL`, `pop()` with the lowest-popped mark, the 32 MB backstop, the 64-entry slot cache; `scrollback_mem` gains emoji, placeholder, gradient and sealed figures; bench limits lowered. **Landed**, with PR 9's history half and `set_scrollback_limit`; what changed from the design is at the end of §11.8 | L | 6 |
 | 8 | core | row change counters, `terminal_id`, `history_epoch`, `popped_from`, the snapshot with highlight ranges, the screen it shows and style updates (§9). **Landed**; what changed from the design is at the end of §9.2 | S | 5 |
 | 9 | core | OSC 8 link table and OSC 133 prompt marks, on the screen and in v2. **Landed** on the screen (end of §5.5), and in history with PR 7 (end of §11.8) | S | 7 |
-| 10 | core | kitty placeholders (cell kind, diacritic table, step-by-step inference, v2 list) | S | 7 |
+| 10 | core | kitty placeholders (cell kind, diacritic table, step-by-step inference, v2 list). **Landed**, behind the image switch; what changed from the design is at the end of §7 | S | 7 |
 | 11 | core | **screen reflow, pull-back and tracked positions** (F.4, §12.2): the two ignored resize tests settled (§19). **Landed**; what changed from the design is at the end of §12.2 | L | 7, 8 |
 | 12 | core | **history at another width** (§12.3): rows-at-width counts, `ViewTop::At { point, offset }` across width changes, `FILL` at another width | M | 11 |
 | 13a | core | **UTF-16 counts and mapping** (§13.10): `utf16_len` per entry, UTF-16 checkpoints, `utf16_offset` / `point_at_utf16` / `utf16_piece` | S | 7 |

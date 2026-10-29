@@ -29,7 +29,7 @@ fn view(t: &Term) -> Vec<String> {
 /// A 20-column terminal, two rows, with "0123…j" (20 cells, a whole row)
 /// and "x" in history, then shrunk to 10 columns: history isn't touched.
 fn shrunk() -> Term {
-    let mut t = Term::new(20, 2, 100);
+    let mut t = Term::new(20, 2, 100, term_core::ImagePool::process());
     t.advance(b"0123456789abcdefghij\r\nx\r\ny\r\nz");
     assert_eq!(t.state.scrollback_len(), 2);
     t.state.resize(10, 2);
@@ -106,7 +106,7 @@ fn output_underneath_leaves_the_view_alone() {
 
 #[test]
 fn fill_lines_reach_the_new_width() {
-    let mut t = Term::new(10, 1, 100);
+    let mut t = Term::new(10, 1, 100, term_core::ImagePool::process());
     t.advance(b"\x1b[41mred\x1b[K\x1b[0m\r\nplain");
     t.state.resize(20, 1);
     t.state.scroll_view(1);
@@ -121,7 +121,7 @@ fn fill_lines_reach_the_new_width() {
 
 #[test]
 fn a_wrapped_fill_line_fills_its_last_row_at_the_new_width() {
-    let mut t = Term::new(4, 1, 100);
+    let mut t = Term::new(4, 1, 100, term_core::ImagePool::process());
     t.advance(b"\x1b[44mabcdef\x1b[K\x1b[0m\r\nz");
     // "abcd" wrapped, "ef" filled: two stored lines at 4 columns.
     assert_eq!(t.state.scrollback_len(), 2);
@@ -159,7 +159,7 @@ fn snapshot_rows_at_another_width_are_keyed_by_their_first_cell() {
 
 #[test]
 fn wide_characters_move_whole_to_the_next_row() {
-    let mut t = Term::new(6, 1, 100);
+    let mut t = Term::new(6, 1, 100, term_core::ImagePool::process());
     t.advance("ab漢字\r\nz".as_bytes());
     t.state.resize(3, 1);
     t.state.scroll_view(isize::MAX / 2);
@@ -172,7 +172,7 @@ fn wide_characters_move_whole_to_the_next_row() {
 
 #[test]
 fn links_in_history_are_found_at_the_new_columns() {
-    let mut t = Term::new(20, 1, 100);
+    let mut t = Term::new(20, 1, 100, term_core::ImagePool::process());
     t.advance(b"0123456789ab\x1b]8;;https://x.test\x1b\\link\x1b]8;;\x1b\\\r\nz");
     t.state.resize(10, 1);
     t.state.scroll_view(1);
@@ -251,7 +251,7 @@ proptest! {
         written in 2usize..=30,
         widths in prop::collection::vec(2usize..=40, 1..4),
     ) {
-        let mut t = Term::new(written, 2, 10_000);
+        let mut t = Term::new(written, 2, 10_000, term_core::ImagePool::process());
         let input = text.join("\r\n");
         t.advance(input.as_bytes());
         t.advance(b"\r\n\r\n\r\n");

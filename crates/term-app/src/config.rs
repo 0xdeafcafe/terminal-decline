@@ -1351,7 +1351,7 @@ mod tests {
     #[test]
     fn programs_colours_are_drawn_over_the_theme() {
         let theme = Config::default().theme(Appearance::Dark);
-        let mut t = term_core::Term::new(10, 2, 0);
+        let mut t = term_core::Term::new(10, 2, 0, term_core::ImagePool::process());
         set_term_colors(&mut t.state, &theme);
         assert!(t.state.take_colors_changed());
         // The theme's palette is what programs read.

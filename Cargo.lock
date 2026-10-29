@@ -958,6 +958,7 @@ dependencies = [
  "insta",
  "memchr",
  "proptest",
+ "term-image",
  "unicode-segmentation",
  "unicode-width",
  "vte",

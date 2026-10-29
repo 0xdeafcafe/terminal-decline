@@ -217,7 +217,7 @@ mod tests {
 
     #[test]
     fn block_text_takes_the_columns_on_each_line() {
-        let mut t = Term::new(20, 5, 100);
+        let mut t = Term::new(20, 5, 100, term_core::ImagePool::process());
         t.advance(b"abcdefgh\r\n0123456789\r\nxy\r\nlast line");
         let top = t.state.point_at(0, 0).line;
         let p = |view_line: u64, col| Point {

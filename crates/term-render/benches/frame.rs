@@ -93,7 +93,7 @@ fn line(l: usize, cols: usize, colours: Colours, s: &mut String) {
 }
 
 fn screen(cols: usize, lines: usize, colours: Colours) -> Term {
-    let mut t = Term::new(cols, lines, 0);
+    let mut t = Term::new(cols, lines, 0, term_core::ImagePool::process());
     let mut s = String::new();
     for l in 0..lines {
         line(l, cols, colours, &mut s);
@@ -187,7 +187,7 @@ fn code_line(l: usize, cols: usize, s: &mut String) {
 }
 
 fn code_screen(cols: usize, lines: usize) -> Term {
-    let mut t = Term::new(cols, lines, 0);
+    let mut t = Term::new(cols, lines, 0, term_core::ImagePool::process());
     let mut s = String::from("\x1b[?25l");
     for l in 0..lines {
         code_line(l, cols, &mut s);
@@ -350,7 +350,7 @@ fn bench(c: &mut Criterion) {
     // Scrolled back: every row comes from history, expanded from its
     // stored form, copied and built.
     for (name, cols, lines, colours) in [cases[1], cases[2], cases[4]] {
-        let mut t = Term::new(cols, lines, 10_000);
+        let mut t = Term::new(cols, lines, 10_000, term_core::ImagePool::process());
         let mut s = String::new();
         for l in 0..lines * 3 {
             line(l, cols, colours, &mut s);

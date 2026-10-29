@@ -121,7 +121,7 @@ pub fn decode(data: &[u8]) -> Vec<Step> {
 /// renumberings happen every few prints and every holder of a style id is
 /// exercised (§5.2 of the cells design).
 pub fn new_term() -> Term {
-    let mut t = Term::new(80, 24, SCROLLBACK);
+    let mut t = Term::new(80, 24, SCROLLBACK, term_core::ImagePool::process());
     t.state.set_sweep_at(Some(8));
     t
 }

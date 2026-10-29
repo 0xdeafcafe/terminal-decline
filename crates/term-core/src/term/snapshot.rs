@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use super::history::{Unit, ViewRow};
 use super::{CursorShape, LinkValue, Terminal};
 use crate::cell::{Cell, Row, Width};
+use crate::image::{SnapPlacement, SnapVirtual};
 use crate::scrollback::HistoryReader;
 use crate::style::Style;
 
@@ -60,6 +61,9 @@ impl RowFlags {
     /// full-width background, §11.3): its cells already carry it to the
     /// screen's width.
     pub const FILL: RowFlags = RowFlags(1 << 2);
+    /// The row has kitty placeholder cells (cells §7): the renderer draws
+    /// their pieces of images, and they break shaping runs.
+    pub const PLACEHOLDERS: RowFlags = RowFlags(1 << 3);
 
     #[inline]
     pub const fn contains(self, other: RowFlags) -> bool {
@@ -165,6 +169,11 @@ pub struct Snapshot {
     /// The styles of the history rows copied this time.
     pub history_styles: Vec<Style>,
     pub highlights: Vec<Highlight>,
+    /// kitty direct placements that reach into the view, ready images only
+    /// (images.md §4.4). Empty until kitty graphics lands (I.2).
+    pub placements: Vec<SnapPlacement>,
+    /// The virtual placements placeholder cells in view refer to.
+    pub virtual_placements: Vec<SnapVirtual>,
     pub cursor: SnapCursor,
     /// The epoch of each screen's table (primary, alternate) whose styles
     /// have all been sent through this snapshot, so a renderer that is new
@@ -262,6 +271,14 @@ impl Terminal {
         out.style_updates.clear();
         out.history_styles.clear();
         out.highlights.clear();
+        out.placements.clear();
+        out.virtual_placements.clear();
+        // Images the pool evicted since the last command or snapshot are
+        // lost (§5.2); nothing is drawn from them yet, so the pool is told
+        // of no drawn images until drawing lands (I.4).
+        if !self.graphics.is_empty() {
+            self.graphics.apply_evictions();
+        }
         out.terminal_id = self.terminal_id;
         out.history_epoch = self.history_epoch;
         out.popped_from = popped;
@@ -428,6 +445,10 @@ impl Terminal {
                         let i = (line - history_first) as usize;
                         flags.set(RowFlags::WRAPPED, self.scrollback.wrapped(i));
                         flags.set(RowFlags::FILL, self.scrollback.fill(i));
+                        flags.set(
+                            RowFlags::PLACEHOLDERS,
+                            self.placeholders_written && self.scrollback.has_placeholders(i),
+                        );
                         !kept
                             && self
                                 .scrollback
@@ -436,6 +457,10 @@ impl Terminal {
                         let (r, fill) = u.row(row, self.cols);
                         flags.set(RowFlags::WRAPPED, r.wrapped);
                         flags.set(RowFlags::FILL, fill);
+                        flags.set(
+                            RowFlags::PLACEHOLDERS,
+                            self.placeholders_written && r.cells.iter().any(|c| c.is_placeholder()),
+                        );
                         if !kept {
                             out.row = r;
                             out.row_styles.clear();
@@ -462,6 +487,10 @@ impl Terminal {
                     let row = &self.screen[r];
                     let key = RowKey::Screen(row.seq);
                     flags.set(RowFlags::WRAPPED, row.wrapped);
+                    flags.set(
+                        RowFlags::PLACEHOLDERS,
+                        self.placeholders_written && row.cells.iter().any(|c| c.is_placeholder()),
+                    );
                     let copied = !(same_terminal && have(key));
                     if copied {
                         out.cells.extend_from_slice(&row.cells);

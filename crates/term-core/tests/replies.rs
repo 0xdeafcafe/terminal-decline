@@ -6,7 +6,7 @@
 use term_core::{DynamicColor, Term};
 
 fn new(cols: usize, lines: usize) -> Term {
-    Term::new(cols, lines, 100)
+    Term::new(cols, lines, 100, term_core::ImagePool::process())
 }
 
 /// Send `input`, return the replies as a string and clear them.

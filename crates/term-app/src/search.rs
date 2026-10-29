@@ -570,7 +570,7 @@ mod tests {
     use term_core::Term;
 
     fn term(cols: usize, lines: usize, text: &str) -> Term {
-        let mut t = Term::new(cols, lines, 1000);
+        let mut t = Term::new(cols, lines, 1000, term_core::ImagePool::process());
         t.advance(text.as_bytes());
         t
     }

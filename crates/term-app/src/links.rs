@@ -119,7 +119,7 @@ mod tests {
 
     #[test]
     fn under_prefers_the_osc8_link() {
-        let mut t = term_core::Term::new(40, 2, 0);
+        let mut t = term_core::Term::new(40, 2, 0, term_core::ImagePool::process());
         t.advance(b"\x1b]8;;https://real\x1b\\https://shown\x1b]8;;\x1b\\ http://plain.example x");
         let at = |col| under(&t.state, t.state.point_at(0, col));
         assert_eq!(at(3).as_deref(), Some("https://real"));

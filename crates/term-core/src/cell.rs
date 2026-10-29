@@ -84,6 +84,9 @@ impl Cell {
     pub const KIND: u64 = 3 << 21;
     /// Kind 1: the content is a slot in the row's cluster store.
     pub const CLUSTER: u64 = 1 << 21;
+    /// Kind 2: a kitty placeholder; the content is its image row (bits
+    /// 0–8) and column (bits 9–17).
+    pub const PLACEHOLDER: u64 = 2 << 21;
     pub const WIDTH: u64 = 3 << 23;
     const WIDTH_SHIFT: u32 = 23;
     pub const PROTECTED: u64 = 1 << 25;
@@ -205,6 +208,29 @@ impl Cell {
     #[inline]
     pub const fn with_cluster(self, slot: u32) -> Cell {
         Cell(self.0 & !(Self::CONTENT | Self::KIND) | Self::CLUSTER | slot as u64)
+    }
+
+    /// A kitty placeholder cell (kind 2): a piece of an image, the image
+    /// and placement named by its style (cells §7).
+    #[inline]
+    pub const fn is_placeholder(self) -> bool {
+        self.0 & Self::KIND == Self::PLACEHOLDER
+    }
+
+    /// This cell (style kept, narrow) as the placeholder for the image
+    /// piece at `row` (< 297) and `col` (< 512).
+    #[inline]
+    pub const fn with_placeholder(self, row: u16, col: u16) -> Cell {
+        Cell(self.0 & !(Self::CONTENT | Self::KIND | Self::WIDTH) | Self::PLACEHOLDER | (row as u64 & 0x1FF) | (col as u64 & 0x1FF) << 9)
+    }
+
+    /// A placeholder cell's image row and column.
+    #[inline]
+    pub const fn placeholder(self) -> Option<(u16, u16)> {
+        if !self.is_placeholder() {
+            return None;
+        }
+        Some(((self.0 & 0x1FF) as u16, ((self.0 >> 9) & 0x1FF) as u16))
     }
 }
 

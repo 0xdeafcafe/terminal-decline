@@ -136,7 +136,7 @@ fn check_invariants(t: &Term, cols: usize, lines: usize, limit: usize) {
 fn run_stream(seed: u64, sizes: &[(usize, usize, usize)], bytes_per_size: usize) {
     for &(cols, lines, limit) in sizes {
         let mut rng = Rng(seed ^ (cols as u64) << 32 ^ lines as u64);
-        let mut t = Term::new(cols, lines, limit);
+        let mut t = Term::new(cols, lines, limit, term_core::ImagePool::process());
         // Half the sizes sweep their style tables constantly (§5.2).
         if cols % 2 == 0 {
             t.state.set_sweep_at(Some(8));
@@ -186,9 +186,9 @@ fn random_stream_chunking_is_transparent() {
     let mut stream = Vec::new();
     push_random_bytes(&mut stream, &mut rng, 32 * 1024);
 
-    let mut whole = Term::new(20, 6, 100);
+    let mut whole = Term::new(20, 6, 100, term_core::ImagePool::process());
     whole.advance(&stream);
-    let mut drip = Term::new(20, 6, 100);
+    let mut drip = Term::new(20, 6, 100, term_core::ImagePool::process());
     for b in stream.chunks(3) {
         drip.advance(b);
     }

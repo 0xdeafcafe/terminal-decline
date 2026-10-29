@@ -13,7 +13,7 @@ fn text(t: &Term, line: usize) -> String {
 
 #[test]
 fn prints_and_wraps() {
-    let mut t = Term::new(5, 3, 100);
+    let mut t = Term::new(5, 3, 100, term_core::ImagePool::process());
     t.advance(b"abcdefg");
     assert_eq!(text(&t, 0), "abcde");
     assert_eq!(text(&t, 1), "fg");
@@ -23,7 +23,7 @@ fn prints_and_wraps() {
 
 #[test]
 fn last_column_defers_wrap() {
-    let mut t = Term::new(5, 3, 100);
+    let mut t = Term::new(5, 3, 100, term_core::ImagePool::process());
     t.advance(b"abcde\r\n");
     assert_eq!(text(&t, 0), "abcde");
     assert_eq!((t.state.cursor().row(), t.state.cursor().col()), (1, 0));
@@ -32,7 +32,7 @@ fn last_column_defers_wrap() {
 
 #[test]
 fn scrolls_into_history_compactly() {
-    let mut t = Term::new(80, 2, 100);
+    let mut t = Term::new(80, 2, 100, term_core::ImagePool::process());
     t.advance(b"one\r\ntwo\r\nthree");
     assert_eq!(t.state.scrollback_len(), 1);
     assert_eq!(text(&t, 0), "two");
@@ -45,7 +45,7 @@ fn scrolls_into_history_compactly() {
 
 #[test]
 fn scrollback_limit() {
-    let mut t = Term::new(10, 1, 3);
+    let mut t = Term::new(10, 1, 3, term_core::ImagePool::process());
     for i in 0..10 {
         t.advance(format!("{i}\r\n").as_bytes());
     }
@@ -54,7 +54,7 @@ fn scrollback_limit() {
 
 #[test]
 fn sgr_colours() {
-    let mut t = Term::new(10, 1, 0);
+    let mut t = Term::new(10, 1, 0, term_core::ImagePool::process());
     t.advance(b"\x1b[1;31mA\x1b[38;5;200mB\x1b[38;2;1;2;3mC\x1b[38:2::4:5:6mD\x1b[0mE");
     let r = t.state.visible_row(0);
     assert!(r.cell(0).style().attrs.contains(Attrs::BOLD));
@@ -68,7 +68,7 @@ fn sgr_colours() {
 
 #[test]
 fn alt_screen_restores_primary() {
-    let mut t = Term::new(10, 2, 10);
+    let mut t = Term::new(10, 2, 10, term_core::ImagePool::process());
     t.advance(b"hello\x1b[?1049h\x1b[Hvim");
     assert_eq!(text(&t, 0), "vim");
     t.advance(b"\x1b[?1049l");
@@ -78,7 +78,7 @@ fn alt_screen_restores_primary() {
 
 #[test]
 fn erase_and_cursor_report() {
-    let mut t = Term::new(10, 3, 0);
+    let mut t = Term::new(10, 3, 0, term_core::ImagePool::process());
     t.advance(b"abcdef\x1b[3D\x1b[K\x1b[6n");
     assert_eq!(text(&t, 0), "abc");
     assert_eq!(t.state.replies(), b"\x1b[1;4R");
@@ -86,7 +86,7 @@ fn erase_and_cursor_report() {
 
 #[test]
 fn wide_chars() {
-    let mut t = Term::new(5, 2, 0);
+    let mut t = Term::new(5, 2, 0, term_core::ImagePool::process());
     t.advance("ab漢字".as_bytes());
     assert_eq!(text(&t, 0), "ab漢");
     assert_eq!(text(&t, 1), "字");
@@ -97,7 +97,7 @@ fn wide_chars() {
 
 #[test]
 fn scroll_region_insert_delete_lines() {
-    let mut t = Term::new(5, 4, 10);
+    let mut t = Term::new(5, 4, 10, term_core::ImagePool::process());
     t.advance(b"1\r\n2\r\n3\r\n4\x1b[2;3r\x1b[2H\x1b[M");
     assert_eq!((0..4).map(|l| text(&t, l)).collect::<Vec<_>>(), ["1", "3", "", "4"]);
     assert_eq!(t.state.scrollback_len(), 0);
@@ -105,14 +105,14 @@ fn scroll_region_insert_delete_lines() {
 
 #[test]
 fn line_drawing_charset() {
-    let mut t = Term::new(5, 1, 0);
+    let mut t = Term::new(5, 1, 0, term_core::ImagePool::process());
     t.advance(b"\x1b(0lqk\x1b(Bq");
     assert_eq!(text(&t, 0), "┌─┐q");
 }
 
 #[test]
 fn selection_text_joins_wrapped_lines() {
-    let mut t = Term::new(4, 3, 10);
+    let mut t = Term::new(4, 3, 10, term_core::ImagePool::process());
     t.advance(b"abcdef\r\nxy");
     let a = t.state.point_at(0, 0);
     let b = t.state.point_at(2, 3);
@@ -122,14 +122,14 @@ fn selection_text_joins_wrapped_lines() {
 
 #[test]
 fn origin_mode_restore_and_report() {
-    let mut t = Term::new(80, 24, 0);
+    let mut t = Term::new(80, 24, 0, term_core::ImagePool::process());
     t.advance(b"\x1b[?6h\x1b7\x1b[5;20r\x1b8\x1b[6n");
     assert_eq!(t.state.replies(), b"\x1b[1;1R");
 }
 
 #[test]
 fn resize_in_alt_screen_keeps_shell_lines() {
-    let mut t = Term::new(10, 6, 100);
+    let mut t = Term::new(10, 6, 100, term_core::ImagePool::process());
     t.advance(b"a\r\nb\r\nc\r\nd\r\ne\r\n$ ");
     t.advance(b"\x1b[?1049h");
     t.state.resize(10, 3);
@@ -141,7 +141,7 @@ fn resize_in_alt_screen_keeps_shell_lines() {
 
 #[test]
 fn scrolled_view_stays_put_with_full_history() {
-    let mut t = Term::new(10, 3, 5);
+    let mut t = Term::new(10, 3, 5, term_core::ImagePool::process());
     for i in 0..20 {
         t.advance(format!("L{i}\r\n").as_bytes());
     }
@@ -153,7 +153,7 @@ fn scrolled_view_stays_put_with_full_history() {
 
 #[test]
 fn insert_char_does_not_split_wide() {
-    let mut t = Term::new(6, 1, 0);
+    let mut t = Term::new(6, 1, 0, term_core::ImagePool::process());
     t.advance("界".as_bytes());
     t.advance(b"\x1b[2G\x1b[@");
     let r = t.state.visible_row(0);
@@ -166,14 +166,14 @@ fn insert_char_does_not_split_wide() {
 
 #[test]
 fn g1_line_drawing() {
-    let mut t = Term::new(5, 1, 0);
+    let mut t = Term::new(5, 1, 0, term_core::ImagePool::process());
     t.advance(b"\x1b)0\x0eq\x0fq");
     assert_eq!(text(&t, 0), "─q");
 }
 
 #[test]
 fn soft_reset_keeps_screen() {
-    let mut t = Term::new(5, 2, 10);
+    let mut t = Term::new(5, 2, 10, term_core::ImagePool::process());
     t.advance(b"hi\x1b[1m\x1b[!p");
     assert_eq!(text(&t, 0), "hi");
     assert!(!t.state.cursor().pen().attrs.contains(Attrs::BOLD));
@@ -181,14 +181,14 @@ fn soft_reset_keeps_screen() {
 
 #[test]
 fn erase_clears_pending_wrap() {
-    let mut t = Term::new(10, 2, 0);
+    let mut t = Term::new(10, 2, 0, term_core::ImagePool::process());
     t.advance(b"0123456789\x1b[KX");
     assert_eq!(text(&t, 0), "012345678X");
 }
 
 #[test]
 fn queries() {
-    let mut t = Term::new(10, 2, 0);
+    let mut t = Term::new(10, 2, 0, term_core::ImagePool::process());
     t.advance(b"\x1b[?2026$p\x1b]11;?\x1b\\\x1b[?u");
     let r = String::from_utf8(t.state.replies().to_vec()).unwrap();
     assert!(r.contains("\x1b[?2026;2$y"), "{r:?}");
@@ -198,7 +198,7 @@ fn queries() {
 
 #[test]
 fn kitty_keyboard_stack() {
-    let mut t = Term::new(10, 2, 0);
+    let mut t = Term::new(10, 2, 0, term_core::ImagePool::process());
     t.advance(b"\x1b[>1u");
     assert_eq!(t.state.kitty_keyboard_flags(), 1);
     t.advance(b"\x1b[<u");
@@ -207,7 +207,7 @@ fn kitty_keyboard_stack() {
 
 #[test]
 fn vs16_widens_emoji() {
-    let mut t = Term::new(10, 1, 0);
+    let mut t = Term::new(10, 1, 0, term_core::ImagePool::process());
     t.advance("⚠\u{FE0F}x".as_bytes());
     assert!(t.state.visible_row(0).cell(0).width() == Width::Wide);
     assert_eq!(t.state.visible_row(0).cell(2).ch(), 'x');
@@ -215,7 +215,7 @@ fn vs16_widens_emoji() {
 
 #[test]
 fn osc_clipboard_and_cwd() {
-    let mut t = Term::new(10, 1, 0);
+    let mut t = Term::new(10, 1, 0, term_core::ImagePool::process());
     t.advance(b"\x1b]52;c;aGVsbG8=\x07\x1b]7;file://host/Users/a%20b\x07");
     assert_eq!(t.state.clipboard(), Some("hello"));
     assert_eq!(t.state.cwd(), Some("/Users/a b"));
@@ -249,7 +249,7 @@ fn osc52(len: usize) -> (String, Vec<u8>) {
 #[test]
 fn osc_clipboard_of_one_megabyte() {
     let (text, seq) = osc52(1 << 20);
-    let mut t = Term::new(10, 1, 0);
+    let mut t = Term::new(10, 1, 0, term_core::ImagePool::process());
     t.advance(&seq);
     assert_eq!(t.state.take_clipboard().as_deref(), Some(text.as_str()));
 
@@ -266,7 +266,7 @@ fn osc_clipboard_of_one_megabyte() {
 /// handled normally.
 #[test]
 fn osc_size_caps() {
-    let mut t = Term::new(10, 1, 0);
+    let mut t = Term::new(10, 1, 0, term_core::ImagePool::process());
     // Over 4 MB of base64.
     let (_, seq) = osc52(3 << 20);
     assert!(seq.len() > 4 << 20);
@@ -294,7 +294,7 @@ fn osc_notifications_and_progress() {
             body: body.to_owned(),
         })
     };
-    let mut t = Term::new(10, 1, 0);
+    let mut t = Term::new(10, 1, 0, term_core::ImagePool::process());
     for (bytes, want) in [
         (
             &b"\x1b]9;Claude Code: done; all tests pass\x07"[..],
@@ -332,7 +332,7 @@ fn osc_notifications_and_progress() {
 
 #[test]
 fn dump_shows_wraps_trailing_spaces_and_cursor() {
-    let mut t = Term::new(6, 4, 10);
+    let mut t = Term::new(6, 4, 10, term_core::ImagePool::process());
     t.advance("ab  \r\n漢x wrapped\r\n\x1b[41m \x1b[0m".as_bytes());
     assert_snapshot!(t.state.dump(), @r"
     ab··|
@@ -345,7 +345,7 @@ fn dump_shows_wraps_trailing_spaces_and_cursor() {
 
 #[test]
 fn dump_follows_view_and_alt_screen() {
-    let mut t = Term::new(4, 2, 10);
+    let mut t = Term::new(4, 2, 10, term_core::ImagePool::process());
     t.advance(b"1\r\n2\r\n3");
     t.state.scroll_view(1);
     assert_snapshot!(t.state.dump(), @r"
@@ -365,7 +365,7 @@ fn dump_follows_view_and_alt_screen() {
 fn vs16_does_not_break_the_next_wide_char() {
     // Regression: widening ⚠ wrote its spacer over the left half of 漢,
     // leaving 漢's spacer without its wide cell.
-    let mut t = Term::new(6, 1, 0);
+    let mut t = Term::new(6, 1, 0, term_core::ImagePool::process());
     t.advance("a漢\r⚠\u{FE0F}".as_bytes());
     assert_snapshot!(t.state.dump(), @r"
     ⚠️|
@@ -385,15 +385,15 @@ fn utf8_split_across_chunks_keeps_the_text_after_it() {
         &[&[0xF0, 0x9F], &[0x98], &[], &[0x80, b'b', 0xC3]],
     ];
     for chunks in cases {
-        let mut whole = Term::new(10, 1, 0);
+        let mut whole = Term::new(10, 1, 0, term_core::ImagePool::process());
         whole.advance(&chunks.concat());
-        let mut split = Term::new(10, 1, 0);
+        let mut split = Term::new(10, 1, 0, term_core::ImagePool::process());
         for c in *chunks {
             split.advance(c);
         }
         assert_eq!(split.state.dump(), whole.state.dump(), "{chunks:?}");
     }
-    let mut t = Term::new(10, 1, 0);
+    let mut t = Term::new(10, 1, 0, term_core::ImagePool::process());
     t.advance(&[0xC3]);
     t.advance(&[0xA9, b'a', 0xFF]);
     assert_snapshot!(t.state.dump(), @r"
@@ -412,7 +412,7 @@ fn select(t: &mut Term, from: (usize, usize), to: (usize, usize)) {
 fn selection_without_scrollback_does_not_slide_to_the_next_line() {
     // Regression: with scrollback off, line numbers only counted stored
     // lines, so after a scroll the selection pointed at the next line.
-    let mut t = Term::new(10, 2, 0);
+    let mut t = Term::new(10, 2, 0, term_core::ImagePool::process());
     t.advance(b"aaa\r\nbbb");
     select(&mut t, (0, 0), (0, 2));
     assert_eq!(t.state.selection_text().unwrap(), "aaa");
@@ -426,7 +426,7 @@ fn selection_without_scrollback_does_not_slide_to_the_next_line() {
 
 #[test]
 fn selection_on_alt_screen_does_not_slide_to_the_next_line() {
-    let mut t = Term::new(10, 2, 100);
+    let mut t = Term::new(10, 2, 100, term_core::ImagePool::process());
     t.advance(b"shell\x1b[?1049h\x1b[Haaa\r\nbbb");
     select(&mut t, (0, 0), (0, 2));
     assert_eq!(t.state.selection_text().unwrap(), "aaa");
@@ -437,7 +437,7 @@ fn selection_on_alt_screen_does_not_slide_to_the_next_line() {
 
 #[test]
 fn selection_after_reset_and_alt_screen_round_trip() {
-    let mut t = Term::new(10, 2, 100);
+    let mut t = Term::new(10, 2, 100, term_core::ImagePool::process());
     t.advance(b"one\r\ntwo\r\nthree\x1bc");
     // A full reset clears scrollback, like xterm.
     assert_eq!(t.state.scrollback_len(), 0);
@@ -464,12 +464,12 @@ fn region_scrolls_after_the_screen_ring_has_turned() {
         b"\x1b[r\x1b[5H\n\n\x1bM\x1b[L\x1b[M",
     ];
     for (i, edit) in edits.iter().enumerate() {
-        let mut turned = Term::new(8, 5, 0);
+        let mut turned = Term::new(8, 5, 0, term_core::ImagePool::process());
         turned.advance(b"line0");
         for n in 1..17 {
             turned.advance(format!("\r\nline{n}").as_bytes());
         }
-        let mut fresh = Term::new(8, 5, 0);
+        let mut fresh = Term::new(8, 5, 0, term_core::ImagePool::process());
         for (row, n) in (12..17).enumerate() {
             fresh.advance(format!("\x1b[{};1Hline{n}", row + 1).as_bytes());
         }
@@ -482,7 +482,7 @@ fn region_scrolls_after_the_screen_ring_has_turned() {
 
 #[test]
 fn vs16_next_to_a_narrow_char_overwrites_it() {
-    let mut t = Term::new(6, 1, 0);
+    let mut t = Term::new(6, 1, 0, term_core::ImagePool::process());
     t.advance("abc\r⚠\u{FE0F}".as_bytes());
     assert_snapshot!(t.state.dump(), @r"
     ⚠️c|
@@ -492,7 +492,7 @@ fn vs16_next_to_a_narrow_char_overwrites_it() {
 
 #[test]
 fn the_scrollback_limit_changes_on_a_running_terminal() {
-    let mut t = Term::new(10, 2, 100);
+    let mut t = Term::new(10, 2, 100, term_core::ImagePool::process());
     for n in 0..50 {
         t.advance(format!("line{n}\r\n").as_bytes());
     }
@@ -525,4 +525,35 @@ fn the_scrollback_limit_changes_on_a_running_terminal() {
     t.advance(b"again\r\n");
     assert_eq!(t.state.scrollback_len(), 1);
     t.state.check_invariants().unwrap();
+}
+
+#[test]
+fn the_image_pool_is_kept_across_a_reset() {
+    let pool = term_core::ImagePool::new(32 << 20);
+    let mut t = Term::new(10, 3, 100, pool.clone());
+    assert!(t.state.images_enabled());
+    t.advance(b"hi\x1bc");
+    assert!(std::sync::Arc::ptr_eq(t.state.image_pool(), &pool));
+    let mut jobs = Vec::new();
+    t.state.take_image_jobs(&mut jobs);
+    assert!(jobs.is_empty());
+    // A job for another terminal, or for an image it doesn't have, is dropped.
+    let done = |terminal_id| term_core::JobDone {
+        job: term_core::image::JobId::next(),
+        terminal_id,
+        image: term_core::ImageKey::Kitty(1),
+        generation: 1,
+        result: Ok(()),
+    };
+    assert!(!t.state.image_job_done(done(u64::MAX)));
+    let id = t.state.terminal_id();
+    assert!(!t.state.image_job_done(done(id)));
+}
+
+#[test]
+fn images_are_off_without_the_hidden_switch() {
+    // The test runs don't set TD_IMAGES.
+    if std::env::var_os("TD_IMAGES").is_none() {
+        assert!(!term_core::ImagePool::process().enabled());
+    }
 }

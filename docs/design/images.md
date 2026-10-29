@@ -1140,6 +1140,46 @@ the switch.
 | I.6 | ci + fuzz | fuzz targets in the nightly rotation, the `parse` target with images on, dictionary entries, the pressure scenarios added | S | I.1, I.2 |
 | I.7 | docs | DESIGN.md (Rendering, memory, idle), the manual checklist, numbers on the standard set, roadmap B.3/B.5 marked; the hidden switch removed | S | I.3, I.5b |
 
+**Landed (I.0).** What was built (`term-core/src/image.rs`,
+`image/pool.rs` and its tests), and where it differs from §4 and §5:
+- **Graphics** is one per screen (cells §8.1), boxed in the terminal,
+  each holding the pool and the terminal's id as owner; it frees its
+  pool entries when dropped, so `replace_term` and RIS (which keep the
+  pool) give the bytes back. Placements are keyed (top line, serial);
+  `placements_in` uses `tallest` as §4.1 says; `remap_placements` is
+  what reflow uses (cells PR 10). The caps are constants, not enforced
+  yet (I.2).
+- **ImagePool**: `reserve` (the replaced entry's bytes back first),
+  `grow` for uploads, `set_pixels`/`set_encoded` (a reservation turns
+  into what it holds; encoded copies count whole 64 KB pieces),
+  `set_busy` (giving back what a finished job reserved and didn't use),
+  `set_placed`, `drawn`, `set_shown` (purgeable buffers with an encoded
+  copy while hidden; on show, buffers macOS took become lost-with-source
+  and are reported as evicted), `release`, `release_owner`,
+  `take_evicted`. The order index holds each idle entry's key in the
+  entry, so every update is O(log n). An entry is protected when busy
+  or drawn in its owner's latest frame while shown. `budget_for` gives
+  §12's budget; `ImagePool::process()` is the process pool, made with
+  32 MB and the hidden switch.
+- **The hidden switch** is `image::images_switch()` (`TD_IMAGES=1`, read
+  once) behind `ImagePool::process()`: its terminals report
+  `images_enabled() == false`. Tests make their own pools, with images
+  on.
+- **Every `Terminal::new` and `Term::new` takes the pool**: the session
+  passes the process pool, `replace_term` the old terminal's, tests and
+  benches the process pool (or their own).
+- **Jobs**: `ImageJob`, `JobDone`, `JobId::next()` (process-wide),
+  `take_image_jobs` and `image_job_done`, which drops a job for another
+  terminal or another generation; generations come from a process-wide
+  counter too.
+- **The snapshot** has `placements` and `virtual_placements` (empty
+  until I.2), and marks evicted images lost; `drawn` is not called yet
+  (nothing is drawn until I.4).
+- **History blocks** list the own images their dictionary names
+  (`BlockData::images`); `Scrollback::take_freed_images` hands the lists
+  of freed blocks back (rather than `push` returning them). The terminal
+  starts taking them with I.3, when own images exist.
+
 V.1 and I.1 can start now. After I.0: I.2 (core), I.4 (render) at once,
 then I.5a (app) once I.4's `MetalPixels` is in; I.3 follows I.2. B.3 is
 done with I.2 + I.4 + I.5 (+ the iTerm2 half of I.3); B.5 with the Sixel

@@ -147,6 +147,7 @@ fn command(argv: &[&str], home: &Path) -> Command {
             ("LESS".into(), String::new()),
         ],
         shell: Some("/bin/sh".into()),
+        direct: false,
     }
 }
 

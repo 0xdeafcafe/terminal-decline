@@ -632,6 +632,7 @@ impl AppDelegate {
             cwd: cwd.or_else(|| config.cwd.clone()),
             env: config.env.clone().into_iter().collect(),
             shell: None,
+            direct: false,
         };
         if let Some(dir) = &command.cwd {
             command.cwd = Some(expand_home(dir));

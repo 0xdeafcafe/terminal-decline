@@ -70,6 +70,7 @@ mod tests {
             cwd: None,
             env: Vec::new(),
             shell: Some("/bin/sh".into()),
+            direct: false,
         };
         let size = term_pty::Size {
             cols: 80,

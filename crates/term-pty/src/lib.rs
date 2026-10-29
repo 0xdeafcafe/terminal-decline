@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 
 mod command;
 
-pub use command::{Command, build_argv, build_env, resolve_cwd};
+pub use command::{Command, build_argv, build_env, exec_argv, resolve_cwd};
 
 #[derive(Clone, Copy, Debug)]
 pub struct Size {
@@ -125,11 +125,12 @@ impl Pty {
         // Build everything the child needs before forking: after fork only
         // async-signal-safe calls are allowed.
         let shell = cmd.shell.clone().filter(|s| !s.is_empty()).unwrap_or_else(login_shell);
-        let program = cstr(&shell)?;
+        let (program, argv) = exec_argv(cmd, &shell).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
         // Written to the terminal by the child if exec fails (it can't
         // format anything after forking).
-        let exec_failed = format!("terminal-decline: could not start {shell}\r\n");
-        let argv: Vec<CString> = build_argv(&shell, &cmd.argv).iter().map(|a| cstr(a)).collect::<io::Result<_>>()?;
+        let exec_failed = format!("terminal-decline: could not start {program}\r\n");
+        let program = cstr(&program)?;
+        let argv: Vec<CString> = argv.iter().map(|a| cstr(a)).collect::<io::Result<_>>()?;
         let mut argv_ptrs: Vec<*const libc::c_char> = argv.iter().map(|a| a.as_ptr()).collect();
         argv_ptrs.push(std::ptr::null());
 

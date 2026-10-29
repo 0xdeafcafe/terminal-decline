@@ -655,6 +655,10 @@ Every other scalar starts a cell.
 3. otherwise, **its first scalar's width** from the table (with the
    ambiguous-width setting below), at least 1.
 
+A digit, `#` or `*` followed by VS16 but not (yet) U+20E3 is **1** cell,
+as `string-width` gives; it becomes a 2-cell keycap only when U+20E3
+arrives (Alex's call, 29 Oct 2026).
+
 That is `string-width`'s rule, the one Claude Code's Ink uses, and what
 most JS TUIs compute. It differs from `unicode-width` 0.2.3's string width
 for some scripts. A test table pins these cases (values to confirm against

@@ -565,6 +565,12 @@ impl Config {
         }
     }
 
+    /// Whether the config names fonts besides the family (fallbacks or
+    /// faces), the only ones `Fonts::missing` can list.
+    pub fn names_fonts(&self) -> bool {
+        !self.font_fallback.is_empty() || self.font_bold.is_some() || self.font_italic.is_some() || self.font_bold_italic.is_some()
+    }
+
     /// A notice for each font named in the config that isn't installed
     /// (`missing`, from `Fonts::missing`), naming the setting it came from.
     pub fn missing_font_notices(&self, missing: &[String]) -> Vec<String> {

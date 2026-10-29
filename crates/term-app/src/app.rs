@@ -15,13 +15,14 @@ use objc2_app_kit::{
 use objc2_foundation::{NSArray, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSString, NSURL};
 use term_font::Fonts;
 use term_pty::Command;
+use term_render::Renderer;
 
 use crate::config::Config;
 use crate::desktop::{self, FrontWindow, Open, TabPreference};
 use crate::keybind::{Keybinds, MenuAction};
 use crate::reload::SavedWindow;
 use crate::secure_input::{self, SecureInput};
-use crate::view::{Launch, TerminalView, content_size, delegate_of};
+use crate::view::{Launch, WindowView, content_size, delegate_of};
 
 /// Every Terminal Decline window shares this, so any two can be tabs of one
 /// window.
@@ -53,7 +54,7 @@ pub struct AppIvars {
     /// Whether the first window has checked the configured fonts are
     /// installed (adding to `notices` if not).
     fonts_checked: std::cell::Cell<bool>,
-    windows: RefCell<Vec<(Retained<NSWindow>, Retained<TerminalView>)>>,
+    windows: RefCell<Vec<(Retained<NSWindow>, Retained<WindowView>)>>,
     /// Secure Keyboard Entry (Terminal Decline menu).
     secure: RefCell<SecureInput>,
     /// Whether `applicationDidFinishLaunching:` has run.
@@ -189,7 +190,7 @@ define_class!(
         /// the bundle's Info.plist).
         #[unsafe(method(newWindowAtFolder:userData:error:))]
         fn new_window_at_folder(&self, pb: &NSPasteboard, _data: Option<&NSString>, _error: *mut *mut NSString) {
-            for dir in folders_of(crate::view::file_paths(pb)) {
+            for dir in folders_of(crate::pane_view::file_paths(pb)) {
                 self.open_folder(dir, Some(Open::Window));
             }
         }
@@ -197,7 +198,7 @@ define_class!(
         /// Services > New Terminal Decline Tab at Folder.
         #[unsafe(method(newTabAtFolder:userData:error:))]
         fn new_tab_at_folder(&self, pb: &NSPasteboard, _data: Option<&NSString>, _error: *mut *mut NSString) {
-            for dir in folders_of(crate::view::file_paths(pb)) {
+            for dir in folders_of(crate::pane_view::file_paths(pb)) {
                 self.open_folder(dir, Some(Open::Tab));
             }
         }
@@ -353,7 +354,7 @@ impl AppDelegate {
         let config = Rc::new(config);
         let old = self.ivars().config.replace(config.clone());
         let mut shown = errors.clone();
-        if old.font_config(old.font_size) != config.font_config(config.font_size) {
+        if old.font_config(old.font_size) != config.font_config(config.font_size) && config.names_fonts() {
             let mtm = MainThreadMarker::from(self);
             let scale = NSScreen::mainScreen(mtm).map(|s| s.backingScaleFactor()).unwrap_or(2.0);
             let fonts = Fonts::with_config(&config.font_config(config.font_size), scale);
@@ -623,7 +624,7 @@ impl AppDelegate {
         }
     }
 
-    fn key_view(&self) -> Option<Retained<TerminalView>> {
+    fn key_view(&self) -> Option<Retained<WindowView>> {
         self.view_of(&*self.key_window()?)
     }
 
@@ -634,7 +635,7 @@ impl AppDelegate {
         self.view_of(&key).map(|_| key)
     }
 
-    fn view_of(&self, window: &NSWindow) -> Option<Retained<TerminalView>> {
+    fn view_of(&self, window: &NSWindow) -> Option<Retained<WindowView>> {
         self.ivars()
             .windows
             .borrow()
@@ -656,11 +657,13 @@ impl AppDelegate {
         let mtm = MainThreadMarker::from(self);
         let config = self.ivars().config.borrow().clone();
         let scale = NSScreen::mainScreen(mtm).map(|s| s.backingScaleFactor()).unwrap_or(2.0);
-        let fonts = Fonts::with_config(&config.font_config(config.font_size), scale);
-        let metrics = fonts.metrics;
-        if !self.ivars().fonts_checked.replace(true) {
+        // Shared with every window whose fonts are the same.
+        let renderer = Renderer::with_font_config(&config.font_config(config.font_size), scale);
+        let metrics = renderer.metrics();
+        if !self.ivars().fonts_checked.replace(true) && config.names_fonts() {
             // Fonts the config names but that aren't installed: shown with
             // the other config notices, in this window and later ones.
+            let fonts = Fonts::with_config(&config.font_config(config.font_size), scale);
             let missing = config.missing_font_notices(fonts.missing());
             for n in &missing {
                 eprintln!("terminal-decline: {n}");
@@ -699,7 +702,7 @@ impl AppDelegate {
         window.setContentSize(size);
         let bounds = NSRect::new(NSPoint::new(0.0, 0.0), size);
 
-        let view = TerminalView::new(mtm, bounds);
+        let view = WindowView::new(mtm, bounds);
         view.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable);
         if !settings {
             apply_opacity(&window, &config);
@@ -715,7 +718,9 @@ impl AppDelegate {
             window.setContentView(Some(&view));
         }
         window.setDelegate(Some(delegate_of(&view)));
-        window.makeFirstResponder(Some(&view));
+        if let Some(pane) = view.first_responder() {
+            window.makeFirstResponder(Some(&pane));
+        }
         window.setAcceptsMouseMovedEvents(true);
 
         let mut command = match settings {
@@ -768,7 +773,7 @@ impl AppDelegate {
             config,
             Launch {
                 command,
-                fonts,
+                renderer,
                 scale,
                 notices: match settings {
                     true => Rc::from([]),

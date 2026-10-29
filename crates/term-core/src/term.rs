@@ -13,12 +13,17 @@ use crate::style::{Attrs, Style, Underline};
 use crate::style_table::{StyleStats, StyleTable};
 use crate::unicode::{self, Segmenter};
 
+mod replies;
 mod snapshot;
+pub use replies::DynamicColor;
 pub use snapshot::{Highlight, HighlightKind, RowFlags, RowKey, ScreenId, SnapCursor, SnapRow, Snapshot};
 
 /// A style table holding more ids than this gives its memory back when
 /// the screen is cleared.
 const GIVE_BACK_AT: usize = 256;
+
+/// Titles `CSI 22 t` keeps, as xterm.
+const TITLE_STACK: usize = 10;
 
 /// A desktop notification a program asked for: OSC 9 (`9;body`, iTerm2's
 /// form, no title) or OSC 777 (`777;notify;title;body`, rxvt's).
@@ -355,8 +360,14 @@ pub struct Terminal {
     progress: Option<Progress>,
     /// The program's working directory, if it reports it (OSC 7).
     cwd: Option<String>,
-    /// Default colours as 0xRRGGBB, for answering colour queries.
-    default_colors: [u32; 3],
+    /// The palette and foreground, background and cursor colours: the
+    /// theme's, with what programs set (OSC 4, 10–12) on top.
+    colors: Box<replies::ColorTable>,
+    colors_changed: bool,
+    /// A DCS query being collected (DECRQSS, XTGETTCAP).
+    dcs: Option<replies::Dcs>,
+    /// Titles saved by `CSI 22 t`, for `CSI 23 t` to put back.
+    title_stack: Vec<Option<String>>,
     /// Cell size in pixels, for answering size queries.
     cell_pixels: (u16, u16),
     /// Bytes the terminal must send back to the program (replies to queries).
@@ -432,7 +443,10 @@ impl Terminal {
             notification: None,
             progress: None,
             cwd: None,
-            default_colors: [0xd8dee9, 0x16181c, 0xd8dee9],
+            colors: Box::new(replies::ColorTable::new([0xd8dee9, 0x16181c, 0xd8dee9])),
+            colors_changed: false,
+            dcs: None,
+            title_stack: Vec::new(),
             cell_pixels: (8, 16),
             replies: Vec::new(),
             generation: 1,
@@ -581,16 +595,6 @@ impl Terminal {
     /// The program's working directory, if it reports it (OSC 7).
     pub fn cwd(&self) -> Option<&str> {
         self.cwd.as_deref()
-    }
-
-    /// Foreground, background and cursor colours as 0xRRGGBB, for answering
-    /// colour queries.
-    pub fn default_colors(&self) -> [u32; 3] {
-        self.default_colors
-    }
-
-    pub fn set_default_colors(&mut self, colors: [u32; 3]) {
-        self.default_colors = colors;
     }
 
     /// How many cells (1 or 2) East Asian Ambiguous characters take.
@@ -1340,7 +1344,9 @@ impl Terminal {
         fresh.sweep_at_test = self.sweep_at_test;
         fresh.generation = self.generation.wrapping_add(1);
         fresh.replies = std::mem::take(&mut self.replies);
-        fresh.default_colors = self.default_colors;
+        // The theme's colours stay; what programs set goes.
+        fresh.colors = Box::new(self.colors.reset_all());
+        fresh.colors_changed = true;
         fresh.cell_pixels = self.cell_pixels;
         fresh.bulk_ascii = self.bulk_ascii;
         fresh.ambiguous = self.ambiguous;
@@ -1841,13 +1847,6 @@ impl Terminal {
         self.saved_alt = None;
     }
 
-    fn reply_color(&mut self, osc: &[u8], rgb: u32) {
-        let (r, g, b) = ((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF);
-        let os = String::from_utf8_lossy(osc);
-        let reply = format!("\x1b]{os};rgb:{r:02x}{r:02x}/{g:02x}{g:02x}/{b:02x}{b:02x}\x1b\\");
-        self.replies.extend_from_slice(reply.as_bytes());
-    }
-
     fn set_private_mode(&mut self, mode: u16, on: bool) {
         match mode {
             1 => self.modes.app_cursor = on,
@@ -2158,8 +2157,21 @@ impl Perform for Terminal {
         }
     }
 
-    fn hook(&mut self, _params: &Params, _intermediates: &[u8], _ignore: bool, _action: char) {
+    fn hook(&mut self, _params: &Params, intermediates: &[u8], ignore: bool, action: char) {
         self.clear_grapheme();
+        self.dcs_hook(intermediates, ignore, action);
+    }
+
+    fn put(&mut self, byte: u8) {
+        self.dcs_put(&[byte]);
+    }
+
+    fn put_slice(&mut self, data: &[u8]) {
+        self.dcs_put(data);
+    }
+
+    fn dcs_end(&mut self, complete: bool) {
+        self.dcs_finish(complete);
     }
 
     fn apc_start(&mut self) {
@@ -2327,11 +2339,6 @@ impl Perform for Terminal {
                 let n = a1.min(self.cols * self.lines);
                 if let Some(c) = self.last_char {
                     for _ in 0..n {
-                        // Each copy is its own cluster: copies that could
-                        // join (regional indicators, Hangul jamo, Prepend)
-                        // mustn't merge (§6.4). The last copy keeps its
-                        // state, so a mark printed next still joins it.
-                        self.clear_grapheme();
                         self.write_char(c);
                     }
                 } else if !self.last_cluster.is_empty() {
@@ -2465,6 +2472,22 @@ impl Perform for Terminal {
                     14 => format!("\x1b[4;{};{}t", self.lines * ch as usize, self.cols * cw as usize),
                     16 => format!("\x1b[6;{ch};{cw}t"),
                     18 => format!("\x1b[8;{};{}t", self.lines, self.cols),
+                    // Push and pop the title (0 or 2: the window title;
+                    // there is no icon label to keep).
+                    22 if arg(1) != 1 => {
+                        if self.title_stack.len() >= TITLE_STACK {
+                            self.title_stack.remove(0);
+                        }
+                        self.title_stack.push(self.title.clone());
+                        String::new()
+                    }
+                    23 if arg(1) != 1 => {
+                        if let Some(title) = self.title_stack.pop() {
+                            self.title = title;
+                            self.title_changed = true;
+                        }
+                        String::new()
+                    }
                     _ => String::new(),
                 };
                 self.replies.extend_from_slice(reply.as_bytes());
@@ -2523,12 +2546,10 @@ impl Perform for Terminal {
 
     fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
         self.clear_grapheme();
+        if self.osc_color(params) {
+            return;
+        }
         match params {
-            [code @ (b"10" | b"11" | b"12"), b"?"] => {
-                let i = (code[1] - b'0') as usize;
-                let rgb = self.default_colors[i];
-                self.reply_color(code, rgb);
-            }
             [b"52", _target, data] if *data != b"?" => {
                 if let Some(bytes) = base64_decode(data) {
                     self.clipboard = Some(String::from_utf8_lossy(&bytes).into_owned());

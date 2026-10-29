@@ -453,6 +453,12 @@ impl Session {
         lock(&self.term)
     }
 
+    /// The count of output batches read, shared: it moves when output
+    /// arrives (see [`crate::idle_filters::Quiet`]).
+    pub fn batches(&self) -> Arc<AtomicU64> {
+        self.batches.clone()
+    }
+
     /// Whether anything changed since the last call; clears the flag.
     pub fn take_dirty(&self) -> bool {
         self.dirty.swap(false, Ordering::AcqRel)

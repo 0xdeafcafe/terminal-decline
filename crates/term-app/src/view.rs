@@ -1117,6 +1117,7 @@ impl WindowView {
                 drop(ticks);
                 drop(guard);
                 self.schedule_trim(token, trim_after);
+                self.schedule_filters(token);
                 return;
             }
             Decision::Hide { keep_surface } => {
@@ -1388,6 +1389,27 @@ impl WindowView {
                 if idle == Some(true) {
                     v.trim_drawables();
                 }
+            })
+        });
+    }
+
+    /// Once the display link has stayed paused (no output, no frame) for
+    /// a while, have the filters thread build the panes' history search
+    /// filters. One timer per pause; nothing repeats.
+    fn schedule_filters(&self, token: u64) {
+        let id = self.ivars().id;
+        let after = crate::idle_filters::IDLE_BEFORE;
+        let _ = DispatchQueue::main().after(DispatchTime::NOW.time(after.as_nanos() as i64), move || {
+            with_view(id, |v| {
+                v.with_state(|st| {
+                    let idle = st.win.frames == token && st.win.link.isPaused();
+                    if !crate::idle_filters::due(after, !idle) {
+                        return;
+                    }
+                    for p in st.panes.values() {
+                        crate::idle_filters::request(p.session.term().clone(), crate::idle_filters::Quiet::new(p.session.batches()));
+                    }
+                });
             })
         });
     }

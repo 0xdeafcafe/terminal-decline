@@ -55,9 +55,15 @@ only with `DECLINE_TEST_DUMP=<file>` set: `dump`, `resize`, `font`, `tab`,
 
 ## Screen storage
 
-- A cell is 12 bytes: `u32` with the 21-bit Unicode scalar plus 11 style flag
-  bits (bold, italic, underline, wide, …), and one `u32` each for foreground
-  and background (default / palette index / 24-bit RGB, tagged in the top byte).
+- A cell is 8 bytes (`u64`): a 21-bit Unicode scalar, its width (narrow,
+  wide, spacer), a "shows when empty" bit, and a 32-bit id into its screen's
+  style table. Each screen (primary, alternate) has its own table of
+  distinct `Style`s (colours, attributes, underline style and colour,
+  overline, link), each stored once. Ids are freed by a sweep over the
+  screen when the table reaches 1.5 × the screen's cells, with no reference
+  counts; clearing the whole screen renumbers them and gives the memory
+  back. History stores styles by value. Details and measurements:
+  `docs/design/cells.md` §4–§5.
 - The visible screen is a ring of rows (`VecDeque<Row>`), so scrolling the
   whole screen moves the top row to the bottom without shifting the others;
   scroll regions rotate just their rows. A row is `Vec<Cell>` plus a
@@ -795,8 +801,8 @@ pin identity collisions, pin signing and quarantine.
 ## Next milestone
 
 1. ~~Scrollback as text + style runs~~ (done). Next: compress sealed blocks.
-2. **Wider live cells** (16 bytes or a style table) for underline styles and
-   colours, hyperlinks (OSC 8) and grapheme clusters.
+2. ~~8-byte cells with a style table per screen~~ (done, cells design
+   PR 5). Next: grapheme clusters per row (PR 6), OSC 8 links (PR 9).
 3. ~~Parse plain-text runs in bulk~~ (done). Next: a CSI/SGR fast path.
 4. **Copy cells under the lock, build GPU instances outside it**, with
    per-row dirty flags so a spinner doesn't rebuild the whole screen.
@@ -833,3 +839,16 @@ them, and runs of same-styled cells share one resolved style. Text whose
 style changes every one or two cells is still 10–25% slower than before PR 1
 (each change re-reads the style); PR 5's style ids make that a single
 compare.
+
+### 8-byte cells and style tables (cells design PR 5)
+
+Interleaved A/B against `main`, best of 5, busy machine. Parse
+(`cargo bench -p term-core --bench parse`, 64 KB / 1 KB pieces): plain
+418 → 534 / 413 → 520 MiB/s, `seq` +29% / +28%, coloured +8.5% / +7.6%,
+unicode +19% / +19%, `tui` 0.0% / −1.5% (noise). Frames
+(`cargo bench -p term-render --bench frame`): 80×24 plain 6.61 → 6.33 µs,
+300×100 plain 99.3 → 93.4 µs, coloured 112.6 → 106.8 µs, a different
+style every cell 152.8 → 140.9 µs. Memory: 8 B a cell (was 12); style
+tables 92 B for plain text, 14 KB for 256 colours, 117 KB / 1.83 MB at
+80×24 / 300×100 for a truecolour gradient, back under 4 KB once the screen
+is cleared.

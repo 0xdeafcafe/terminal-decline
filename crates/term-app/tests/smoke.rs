@@ -2296,9 +2296,10 @@ fn smoke_kitty_png_is_listed_in_the_images_dump() {
     let dir = TempDir::new("images");
     std::fs::create_dir_all(dir.config_home().join("terminal-decline")).unwrap();
     std::fs::write(dir.config_home().join("terminal-decline/config.toml"), "images = true\n").unwrap();
-    // Decoding runs on a queue: give it a moment before the dump.
+    // Some text too: every dump checks glyphs were drawn. Decoding runs on
+    // a queue: give it a moment before the dump.
     let script = format!(
-        "printf '\\033_Ga=T,f=100,i=7,q=2;{PNG}\\033\\\\\\n'; sleep 1; {}{}sleep 20",
+        "printf 'images\\033_Ga=T,f=100,i=7,q=2;{PNG}\\033\\\\\\n'; sleep 1; {}{}sleep 20",
         osc("dump"),
         osc("quit")
     );

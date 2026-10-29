@@ -977,6 +977,17 @@ fn submenu(mtm: MainThreadMarker, bar: &NSMenu, title: &str, items: &[Retained<N
     menu
 }
 
+/// An item holding a submenu of `items`, for inside another menu.
+fn nested(mtm: MainThreadMarker, title: &str, items: &[Retained<NSMenuItem>]) -> Retained<NSMenuItem> {
+    let menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str(title));
+    for i in items {
+        menu.addItem(i);
+    }
+    let holder = item(mtm, title, None, "");
+    holder.setSubmenu(Some(&menu));
+    holder
+}
+
 /// A menu item for `action`, showing the first chord bound to it, plus
 /// hidden items for any other chords (their keys still work, as Cmd+1…9
 /// do).
@@ -1073,8 +1084,17 @@ pub fn build_menus(mtm: MainThreadMarker, app_name: &str, binds: &Keybinds) -> R
         vec![NSMenuItem::separatorItem(mtm)],
         b("Clear Scrollback", MenuAction::ClearScrollback),
         vec![NSMenuItem::separatorItem(mtm)],
-        // Disabled until the find bar exists: nothing answers its action.
-        b("Find…", MenuAction::Find),
+        vec![nested(
+            mtm,
+            "Find",
+            &[
+                b("Find…", MenuAction::Find),
+                b("Find Next", MenuAction::FindNext),
+                b("Find Previous", MenuAction::FindPrevious),
+                b("Use Selection for Find", MenuAction::UseSelectionForFind),
+            ]
+            .concat(),
+        )],
     ];
     submenu(mtm, &bar, "Edit", &edit.concat());
     let view = [

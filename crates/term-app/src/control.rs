@@ -50,6 +50,9 @@
 //!   (negative: towards the bottom), as the scroll wheel does;
 //! - `menu ACTION`: send a menu item's action (a `[keybind]` action name,
 //!   as `select_output`) up the responder chain, as choosing it does;
+//! - `find TEXT`: put TEXT in the focused pane's find bar (Cmd+F opens
+//!   it, as `menu find` does) and search, as typing it does once the
+//!   field's delay runs out;
 //! - `quit`: quit the app, without asking.
 //!
 //! While this is on, the window draws even when covered by other windows,
@@ -65,6 +68,22 @@ use crate::panes::{Dir, Direction, PaneId};
 
 /// The env var that turns this on, naming the dump file.
 pub const ENV: &str = "DECLINE_TEST_DUMP";
+/// A pane's open find bar, in a [`Dump`].
+#[derive(Clone, Debug, Serialize)]
+pub struct FindDump {
+    pub query: String,
+    /// The count as the bar shows it ("3 of 120").
+    pub count: String,
+    pub hits: usize,
+    /// The current hit's index, and its view row if it is in view.
+    pub current: Option<usize>,
+    pub current_row: Option<usize>,
+    /// Highlighted ranges drawn in the last frame.
+    pub highlights: usize,
+    /// The bar's field has the keys.
+    pub focused: bool,
+}
+
 /// The OSC number.
 pub const OSC: &str = "7770";
 
@@ -224,6 +243,9 @@ pub enum Control {
     Scroll(isize),
     /// A menu item's action, as choosing the item sends it.
     Menu(crate::keybind::MenuAction),
+    /// Put this text in the focused pane's find bar and search, as typing
+    /// it does once the field's delay runs out.
+    Find(String),
     Quit,
 }
 
@@ -264,6 +286,9 @@ impl Control {
         }
         if let Some(text) = s.trim_start().strip_prefix("type-settings ") {
             return Some(Control::TypeSettings(unescape(text)));
+        }
+        if let Some(text) = s.trim_start().strip_prefix("find ") {
+            return Some(Control::Find(text.to_string()));
         }
         let mut words = s.split_whitespace();
         let c = match words.next()? {
@@ -403,6 +428,8 @@ pub struct Dump {
     pub view_offset: usize,
     /// The focused pane's selected text.
     pub selection: Option<String>,
+    /// The focused pane's find bar, while it is open.
+    pub find: Option<FindDump>,
     /// The dividers drawn between them.
     pub dividers: usize,
     /// The zoomed pane's id, while one fills the window.

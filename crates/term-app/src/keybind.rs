@@ -44,9 +44,14 @@ pub enum MenuAction {
     ToggleFullScreen,
     NextTab,
     PreviousTab,
-    /// Edit > Find…: a placeholder until the find bar exists (its menu
-    /// item stays disabled).
+    /// Edit > Find > Find…: show the focused pane's find bar.
     Find,
+    /// Edit > Find > Find Next and Find Previous: the next or previous
+    /// match becomes current and is scrolled into view.
+    FindNext,
+    FindPrevious,
+    /// Edit > Find > Use Selection for Find.
+    UseSelectionForFind,
     /// A new pane right of the focused one, or below it.
     SplitRight,
     SplitDown,
@@ -83,7 +88,7 @@ pub enum MenuAction {
 }
 
 impl MenuAction {
-    pub const ALL: [MenuAction; 34] = [
+    pub const ALL: [MenuAction; 37] = [
         MenuAction::NewWindow,
         MenuAction::NewTab,
         MenuAction::Close,
@@ -98,6 +103,9 @@ impl MenuAction {
         MenuAction::NextTab,
         MenuAction::PreviousTab,
         MenuAction::Find,
+        MenuAction::FindNext,
+        MenuAction::FindPrevious,
+        MenuAction::UseSelectionForFind,
         MenuAction::SplitRight,
         MenuAction::SplitDown,
         MenuAction::CloseTab,
@@ -137,6 +145,9 @@ impl MenuAction {
             MenuAction::NextTab => "next_tab",
             MenuAction::PreviousTab => "previous_tab",
             MenuAction::Find => "find",
+            MenuAction::FindNext => "find_next",
+            MenuAction::FindPrevious => "find_previous",
+            MenuAction::UseSelectionForFind => "use_selection_for_find",
             MenuAction::SplitRight => "split_right",
             MenuAction::SplitDown => "split_down",
             MenuAction::CloseTab => "close_tab",
@@ -177,6 +188,9 @@ impl MenuAction {
             MenuAction::NextTab => "Show Next Tab",
             MenuAction::PreviousTab => "Show Previous Tab",
             MenuAction::Find => "Find…",
+            MenuAction::FindNext => "Find Next",
+            MenuAction::FindPrevious => "Find Previous",
+            MenuAction::UseSelectionForFind => "Use Selection for Find",
             MenuAction::SplitRight => "Split Right",
             MenuAction::SplitDown => "Split Down",
             MenuAction::CloseTab => "Close Tab",
@@ -218,7 +232,10 @@ impl MenuAction {
             MenuAction::ToggleFullScreen => c"toggleFullScreen:",
             MenuAction::NextTab => c"selectNextTab:",
             MenuAction::PreviousTab => c"selectPreviousTab:",
-            MenuAction::Find => c"declineFind:",
+            MenuAction::Find => c"showFindBar:",
+            MenuAction::FindNext => c"findNextMatch:",
+            MenuAction::FindPrevious => c"findPreviousMatch:",
+            MenuAction::UseSelectionForFind => c"useSelectionForFind:",
             MenuAction::SplitRight => c"splitRight:",
             MenuAction::SplitDown => c"splitDown:",
             MenuAction::CloseTab => c"performClose:",
@@ -250,7 +267,7 @@ impl MenuAction {
 
 /// The menus' shortcuts with no config. The pane ones are iTerm2's and
 /// Ghostty's; the prompt ones Terminal.app's and iTerm2's.
-pub const DEFAULTS: [(&str, MenuAction); 32] = [
+pub const DEFAULTS: [(&str, MenuAction); 36] = [
     ("cmd+n", MenuAction::NewWindow),
     ("cmd+t", MenuAction::NewTab),
     ("cmd+w", MenuAction::Close),
@@ -283,6 +300,10 @@ pub const DEFAULTS: [(&str, MenuAction); 32] = [
     ("cmd+up", MenuAction::PreviousPrompt),
     ("cmd+down", MenuAction::NextPrompt),
     ("shift+cmd+a", MenuAction::SelectOutput),
+    ("cmd+f", MenuAction::Find),
+    ("cmd+g", MenuAction::FindNext),
+    ("shift+cmd+g", MenuAction::FindPrevious),
+    ("cmd+e", MenuAction::UseSelectionForFind),
 ];
 
 /// The menus' shortcuts that `[keybind]` can't move, and their items
@@ -870,7 +891,6 @@ mod tests {
             assert_eq!(b.get(&chord(c)), Some(&Bound::Menu(a)), "{c}");
             assert_eq!(b.chords(a), [chord(c)], "{c}");
         }
-        assert!(b.chords(MenuAction::Find).is_empty());
         assert_eq!(chord("ctrl+cmd+f").key_equivalent(), ("f".into(), COMMAND | CONTROL));
         assert_eq!(chord("cmd+}").key_equivalent(), ("}".into(), COMMAND));
         assert_eq!(chord("cmd+enter").key_equivalent(), ("\r".into(), COMMAND));

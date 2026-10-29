@@ -1998,3 +1998,70 @@ while :; do s=$(stty size); if [ "$s" != "$last" ]; then echo "two $s"; print -r
     assert_eq!(again["zoomed"], panes(again)[1]["id"], "{again}");
     assert_eq!(panes(focused)[0]["focused"], true, "{focused}");
 }
+
+/// The find bar (E.7): Cmd+F opens it with the keys in its field, typing
+/// searches after the field's delay, the count says which hit is current,
+/// Find Next and Find Previous move the view to their hit (wrapping),
+/// and Esc closes it.
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_find_bar_searches_history() {
+    if !have_metal() {
+        return;
+    }
+    let dir = TempDir::new("find");
+    let wait = "i=0; while [ \"$(stty size)\" != '20 80' ] && [ $i -lt 100 ]; do sleep 0.05; i=$((i+1)); done; ";
+    // Lines 0..60, "needle" on 5, 25 and 45; the screen shows 41..60.
+    let lines =
+        "i=0; while [ $i -lt 60 ]; do if [ $((i % 20)) -eq 5 ]; then echo \"row $i needle\"; else echo \"row $i\"; fi; i=$((i+1)); done; ";
+    // n, e, e typed into the field.
+    let typed = [osc("key 45"), osc("key 14"), osc("key 14")].concat();
+    let script = format!(
+        "{resize}{wait}{lines}{find}{dump}{typed}sleep 1; {dump}{next}{dump}{previous}{dump}{enter}{dump}{set}{dump}{esc}{dump}{quit}sleep 20",
+        enter = osc("key 36"),
+        resize = osc("resize 80 20"),
+        find = osc("menu find"),
+        dump = dump_and_wait(&dir),
+        next = osc("menu find_next"),
+        previous = osc("menu find_previous"),
+        set = osc("find row 2"),
+        esc = osc("key 53"),
+        quit = osc("quit"),
+    );
+    let (status, _) = decline(&dir, &script, true);
+    assert!(status.success(), "{status}");
+    let d = dumps(&dir);
+    assert_eq!(d.len(), 7, "{d:?}");
+    let find = |x: &Value| x["find"].clone();
+    let offset = |x: &Value| num(x, "view_offset") as u64;
+    // Open, empty, the field has the keys.
+    let f = find(&d[0]);
+    assert_eq!((f["query"].as_str(), f["focused"].as_bool()), (Some(""), Some(true)), "{}", d[0]);
+    // Typed: three hits, the one in view current and highlighted.
+    let f = find(&d[1]);
+    assert_eq!(f["query"], "nee", "{}", d[1]);
+    assert_eq!(f["hits"], 3, "{}", d[1]);
+    assert_eq!(f["count"], "3 of 3", "{}", d[1]);
+    assert_eq!(f["current_row"], 4, "{}", d[1]);
+    assert_eq!(f["highlights"], 1, "{}", d[1]);
+    assert_eq!(offset(&d[1]), 0, "{}", d[1]);
+    // Next wraps to the first, in history: the view moves to it.
+    let f = find(&d[2]);
+    assert_eq!(f["count"], "1 of 3", "{}", d[2]);
+    assert!(offset(&d[2]) > 0, "{}", d[2]);
+    assert!(f["current_row"].is_u64(), "{}", d[2]);
+    assert!(screen(&d[2]).contains("row 5 needle"), "{}", d[2]);
+    // Previous wraps back to the last.
+    let f = find(&d[3]);
+    assert_eq!(f["count"], "3 of 3", "{}", d[3]);
+    assert!(screen(&d[3]).contains("row 45 needle"), "{}", d[3]);
+    // Return in the field is Find Next.
+    let f = find(&d[4]);
+    assert_eq!(f["count"], "1 of 3", "{}", d[4]);
+    // A new query: "row 2" is rows 2 and 20..29.
+    let f = find(&d[5]);
+    assert_eq!(f["hits"], 11, "{}", d[5]);
+    // Esc closes the bar; the view stays where it is.
+    assert!(d[6]["find"].is_null(), "{}", d[6]);
+    assert_eq!(offset(&d[6]), offset(&d[5]), "{}", d[6]);
+}

@@ -175,6 +175,10 @@ pub(crate) struct Pane {
     /// The test-only `build-panic`: its next build panics, taking the
     /// snapshot (`Some(true)`) or building from it.
     panic_next: Option<bool>,
+    /// Its find bar and search, while the bar is open (E.7).
+    pub(crate) find: Option<crate::find_bar::Find>,
+    /// What it last searched for, shown again when the bar reopens.
+    pub(crate) find_query: crate::search::Query,
 }
 
 /// Building a pane's frame panicked: when last, how many times, and
@@ -1119,6 +1123,9 @@ impl WindowView {
         let mut snapped = Vec::new();
         // The panes whose snapshot or build panicked (splits design §7).
         let mut crashed = Vec::new();
+        // Panes whose search found new hits, and those to poll again.
+        let mut find_changed = Vec::new();
+        let mut find_again = Vec::new();
         for ((id, frame, t), (_, term)) in ticks.iter_mut().zip(&terms) {
             let (id, frame) = (*id, *frame);
             let p = panes.get_mut(&id).expect("shown pane");
@@ -1154,6 +1161,19 @@ impl WindowView {
                 focused,
                 preedit: Some(p.marked.as_str()),
             };
+            // The find bar's search keeps up with output, and its hits in
+            // view go into the snapshot.
+            if let Some(f) = &mut p.find {
+                let polled = f.search.poll(&mut t.state);
+                if polled.changed {
+                    find_changed.push(id);
+                }
+                if let Some(after) = polled.again {
+                    find_again.push((id, after));
+                }
+                f.marks.clear();
+                f.search.view_highlights(&t.state, &mut f.marks);
+            }
             p.builds += 1;
             // A panic taking the snapshot stays in this pane. The
             // terminal's guard is held outside the catch, and a terminal
@@ -1169,6 +1189,9 @@ impl WindowView {
                 p.render.forget();
                 crashed.push(id);
                 continue;
+            }
+            if let Some(f) = &p.find {
+                crate::search::add_highlights(p.render.frame.snapshot_mut(), &f.marks);
             }
             snapped.push((id, padding, cursor_on, focused));
         }
@@ -1274,9 +1297,22 @@ impl WindowView {
             test.dump = DumpState::Drawn(win.renderer.frames_submitted());
             poll_dump = true;
         }
+        let bars: Vec<_> = find_changed
+            .iter()
+            .filter_map(|id| panes.get(id)?.find.as_ref().map(|f| (f.bar.clone(), f.search.status())))
+            .collect();
         drop(guard);
         for pane in blinking {
             self.schedule_blink(pane);
+        }
+        for (bar, status) in bars {
+            bar.show_status(status);
+        }
+        for (pane, after) in find_again {
+            let id = self.ivars().id;
+            let _ = DispatchQueue::main().after(DispatchTime::NOW.time(after.as_nanos() as i64), move || {
+                with_view(id, |v| v.request_redraw(pane));
+            });
         }
         if let Some(text) = clipboard {
             let pb = NSPasteboard::generalPasteboard();
@@ -1384,6 +1420,9 @@ impl WindowView {
                     points(rect, scale)
                 };
                 p.view.setFrame(frame);
+                if let Some(f) = &p.find {
+                    f.bar.place(frame.size.width, if rect.y == 0 { titlebar } else { 0.0 });
+                }
                 let pad = pane_padding(&st.win.config, titlebar, scale, rect);
                 let (cols, lines) = layout::grid_size((frame.size.width, frame.size.height), scale, m.into(), pad);
                 let size = pty_size(cols, lines, m);
@@ -2381,6 +2420,8 @@ fn spawn_pane(window: usize, config: &Config, theme: &Theme, m: term_font::Metri
         builds: 0,
         crash: None,
         panic_next: None,
+        find: None,
+        find_query: crate::search::Query::default(),
     })
 }
 
@@ -2669,6 +2710,10 @@ impl WindowView {
                         None => NSBeep(),
                     },
                 },
+                Some(Control::Find(text)) => match self.focused_view() {
+                    Some(view) => view.find_text(&text),
+                    None => NSBeep(),
+                },
                 Some(Control::Quit) => {
                     crate::app::quit_now();
                     return;
@@ -2843,6 +2888,26 @@ fn write_dump(st: &mut State, window: Window) {
     let Some(test) = &mut win.test else { return };
     test.seq += 1;
     test.dump = DumpState::Idle;
+    let find = p.find.as_ref().map(|f| {
+        let t = p.session.lock_term();
+        let status = f.search.status();
+        let top = t.state.point_at(0, 0).line;
+        let current_row = f
+            .search
+            .current()
+            .and_then(|h| h.start.line.checked_sub(top))
+            .filter(|&r| r < t.state.lines() as u64)
+            .map(|r| r as usize);
+        control::FindDump {
+            query: f.bar.query().text,
+            count: f.bar.count_text(),
+            hits: status.count,
+            current: status.current,
+            current_row,
+            highlights: f.marks.len(),
+            focused: f.bar.has_focus(),
+        }
+    });
     let (screen, cols, lines, hovered_link, view_offset, selection) = {
         let t = p.session.lock_term();
         (
@@ -2879,6 +2944,7 @@ fn write_dump(st: &mut State, window: Window) {
         opened: test.opened.clone(),
         view_offset,
         selection,
+        find,
         dividers,
         zoomed,
         frames: win.renderer.frames_completed(),

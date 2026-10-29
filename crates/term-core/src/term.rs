@@ -621,6 +621,26 @@ impl Terminal {
         self.scrollback.stats()
     }
 
+    /// The scrollback limit in lines (the `scrollback` setting).
+    pub fn scrollback_limit(&self) -> usize {
+        self.scrollback.limit()
+    }
+
+    /// Change the scrollback limit on a running terminal (live config
+    /// reload). A smaller limit drops the oldest lines at once, as output
+    /// pushing them out would; 0 drops them all. A larger one keeps more
+    /// from now on, and brings back lines still stored but hidden past
+    /// the old limit. The view keeps its place as far as what is left
+    /// allows. Line numbers ([`Point`]s) don't change.
+    pub fn set_scrollback_limit(&mut self, limit: usize) {
+        if limit == self.scrollback.limit() {
+            return;
+        }
+        self.scrollback.set_limit(limit);
+        self.display_offset = self.display_offset.min(self.scrollback.len());
+        self.touch();
+    }
+
     /// The stable position of what is shown at view row `view_line` and
     /// column `col`.
     pub fn point_at(&self, view_line: usize, col: usize) -> Point {

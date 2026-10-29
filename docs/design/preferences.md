@@ -362,6 +362,15 @@ file:
   is 5.1 MB, and `/bin/cat` 1.3 MB.
 - Idle with the tab open: 0.0% CPU, 0 wakeups, one thread (both stubs).
 
+The real crate (`crates/term-prefs`, 30 Oct 2026, same machine and
+profile) is bigger than the stub: in a small binary that links only it
+(`cargo bloat --release -p term-prefs --example fake --crates`),
+term-prefs is 171 KB of code, toml_edit and toml_parser 114 KB, and std
+323 KB, much of which the app links already.
+Stripped, that binary is 913 KB against 331 KB for an empty one. So the
+app should grow by about 300–350 KB rather than 151 KB; the exact number
+is measured when `prefs` is wired into the app.
+
 ## Testing
 
 - Schema and `Config`: the field names of Config and Colors, from a small

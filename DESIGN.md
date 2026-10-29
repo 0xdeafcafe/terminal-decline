@@ -35,6 +35,7 @@ any command as its own Dock app.
 | `term-font`   | Core Text: font loading, cell metrics, glyph rasterising              |
 | `term-render` | Metal: glyph texture, per-cell instance buffer, one instanced draw    |
 | `term-app`    | AppKit window/view, keyboard + IME, mouse, clipboard, config, pins    |
+| `term-prefs`  | the preferences: settings schema, safe `config.toml` edits, the TUI (no platform code) |
 
 `term-core` has no platform code and is tested and benchmarked on its own.
 

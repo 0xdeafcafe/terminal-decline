@@ -3,6 +3,7 @@
 //! in code ([`sprite`]). [`FontConfig`] holds the user's font settings.
 
 mod config;
+mod detect;
 mod fit;
 #[cfg(test)]
 mod legacy_tests;
@@ -10,19 +11,23 @@ mod registry;
 mod shape;
 pub mod sprite;
 
-pub use config::{CellWidth, FontConfig};
+pub use config::{CellWidth, FontConfig, Tag};
 pub use fit::is_private_use;
 pub use registry::{FontId, GlyphKey, SPRITE_FONT};
 pub use shape::{Features, RunText, ShapedGlyph};
 pub use sprite::{SpriteId, is_code_drawn};
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ffi::c_void;
 use std::ptr::NonNull;
 
 use objc2_core_foundation::{CFArray, CFDictionary, CFRange, CFRetained, CFString, CGFloat, CGPoint, CGRect, CGSize, Type};
 use objc2_core_graphics::{CGBitmapContextCreate, CGColorSpace, CGContext, CGGlyph, CGImageAlphaInfo, CGImageByteOrderInfo};
-use objc2_core_text::{CTFont, CTFontDescriptor, CTFontOrientation, CTFontSymbolicTraits, kCTFontCascadeListAttribute};
+use objc2_core_text::{
+    CTFont, CTFontDescriptor, CTFontOrientation, CTFontSymbolicTraits, CTFontTableOptions, kCTFontCascadeListAttribute, kCTFontTableGSUB,
+    kCTFontTableMorx,
+};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Style {
@@ -33,6 +38,9 @@ pub enum Style {
 }
 
 impl Style {
+    /// The four styles, in face order.
+    pub const ALL: [Style; 4] = [Style::Regular, Style::Bold, Style::Italic, Style::BoldItalic];
+
     pub fn new(bold: bool, italic: bool) -> Style {
         match (bold, italic) {
             (false, false) => Style::Regular,
@@ -83,6 +91,26 @@ pub struct Fonts {
     /// Config font names that weren't found.
     missing: Vec<String>,
     rgb: CFRetained<CGColorSpace>,
+    /// Per face, the registry's id for its font: a cell is the face's to
+    /// shape in a run when its character resolves to this id. Not
+    /// [`Fonts::face_id`]: in a family with no bold, the bold face is the
+    /// regular font, id 0.
+    face_ids: [FontId; 4],
+    /// Per face, whether it has ligatures or contextual alternates on
+    /// (ligatures design §1), worked out at construction.
+    runs: [bool; 4],
+    /// Whether [`Fonts::features`] reports `runs`: off until the renderer
+    /// draws ligatures (B1.2).
+    allow_runs: bool,
+    /// The regular face's advance in pixels, which [`GlyphKey::SCALED`]
+    /// glyphs are stretched from to the cell width.
+    advance: f64,
+    /// Per face, the CTLine attributes: its font.
+    line_attrs: [CFRetained<CFDictionary<CFString, CTFont>>; 4],
+    /// Buffers `shape` reuses, so shaping a run allocates nothing.
+    scratch: RefCell<shape::Scratch>,
+    /// Whether a split glyph needs [`GlyphKey::SCALED`], by font and glyph.
+    scaled: RefCell<HashMap<(FontId, CGGlyph), bool>>,
 }
 
 // Core Text fonts are immutable and documented as thread-safe.
@@ -143,15 +171,25 @@ impl Fonts {
             }
         }
         let (metrics, x_shift) = metrics(&regular, config, scale);
+        let advance = unsafe { advance_of_m(&regular) };
         let mut faces = [regular, bold, italic, bold_italic];
+        if !config.features.is_empty() {
+            for f in &mut faces {
+                *f = with_features(f, &config.features);
+            }
+        }
         if !fallbacks.is_empty() {
             for f in &mut faces {
                 *f = with_cascade(f, &fallbacks);
             }
         }
+        let line_attrs = faces.each_ref().map(|f| shape::font_attrs(f));
+        let face_fonts = faces.clone();
         let mut registry = registry::Registry::new(faces);
+        registry.line_lookup = [!config.features.is_empty(); 4];
         let fallback_ids = fallbacks.iter().filter_map(|f| registry.id(f)).collect();
-        Fonts {
+        let face_ids = Style::ALL.map(|s| registry.id(&face_fonts[s as usize]).unwrap_or(s as FontId));
+        let mut fonts = Fonts {
             registry: RefCell::new(registry),
             clusters: RefCell::new(shape::ClusterCache::new(shape::ClusterCache::CAP)),
             metrics,
@@ -159,7 +197,100 @@ impl Fonts {
             fallback_ids,
             missing,
             rgb: CGColorSpace::new_device_rgb().expect("rgb colour space"),
+            face_ids,
+            runs: [false; 4],
+            allow_runs: false,
+            advance,
+            line_attrs,
+            scratch: RefCell::new(shape::Scratch::default()),
+            scaled: RefCell::new(HashMap::new()),
+        };
+        fonts.runs = fonts.detect_runs(&face_fonts, &config.features);
+        fonts
+    }
+
+    /// Whether each face shapes whole runs (ligatures design §1). OpenType
+    /// faces: a feature that substitutes across characters is on in their
+    /// `latn` (else `DFLT`) features, after the user's settings. Faces with
+    /// a `morx` table: a line of programming sequences shapes differently
+    /// from the per-character glyphs, or the user turned such a feature
+    /// on. Faces that are one font are decided once.
+    fn detect_runs(&self, faces: &[CFRetained<CTFont>; 4], user: &[(Tag, u32)]) -> [bool; 4] {
+        let mut runs = [false; 4];
+        for style in Style::ALL {
+            let i = style as usize;
+            if let Some(j) = (0..i).find(|&j| self.face_ids[j] == self.face_ids[i]) {
+                runs[i] = runs[j];
+                continue;
+            }
+            let font = &faces[i];
+            let morx = unsafe { font.table(kCTFontTableMorx, CTFontTableOptions(0)) }.is_some();
+            let gsub = unsafe { font.table(kCTFontTableGSUB, CTFontTableOptions(0)) };
+            runs[i] = if morx {
+                detect::user_turns_on_runs(user) || self.probe_differs(style)
+            } else if let Some(gsub) = gsub {
+                // The bytes live as long as `gsub`.
+                match detect::gsub_features(unsafe { gsub.as_bytes_unchecked() }) {
+                    Some(tags) => detect::gsub_shapes_runs(&tags, user),
+                    None => self.probe_differs(style),
+                }
+            } else {
+                false
+            };
         }
+        runs
+    }
+
+    /// [`Fonts::detect_runs`] again, for measuring what it costs.
+    #[doc(hidden)]
+    pub fn redetect_runs(&self, features: &[(Tag, u32)]) -> [bool; 4] {
+        let faces = {
+            let reg = self.registry.borrow();
+            [0, 1, 2, 3].map(|i| reg.faces[i].font.clone())
+        };
+        self.detect_runs(&faces, features)
+    }
+
+    /// Whether `style`'s face shapes [`detect::PROBE`] into anything but
+    /// the per-character glyphs: a ligature, an alternate, a deleted or
+    /// added glyph.
+    fn probe_differs(&self, style: Style) -> bool {
+        let text: Vec<u16> = detect::PROBE.encode_utf16().collect();
+        let Some(line) = self.line(&text, style) else { return false };
+        let mut got = Vec::new();
+        self.walk(&line, &mut shape::LineBufs::default(), |i, font, glyph, _, _| {
+            got.push((i, font, glyph))
+        });
+        let mut seen = vec![0u32; text.len()];
+        for &(i, font, glyph) in &got {
+            let Some(&unit) = text.get(i) else { return true };
+            if unit == b' ' as u16 {
+                continue;
+            }
+            seen[i] += 1;
+            let ch = char::from_u32(unit as u32).unwrap_or(' ');
+            match self.glyph_key(ch, style) {
+                Some(k) if k.font == font && k.glyph == glyph => {}
+                _ => return true,
+            }
+        }
+        text.iter().zip(&seen).any(|(&u, &n)| u != b' ' as u16 && n != 1)
+    }
+
+    /// How runs in `face` are to be shaped: [`Features::ligatures`] when the
+    /// face has ligatures or contextual alternates on (ligatures design
+    /// §1) and runs are allowed ([`Fonts::allow_runs`]).
+    pub fn features(&self, face: Style) -> Features {
+        Features {
+            ligatures: self.allow_runs && self.runs[face as usize],
+        }
+    }
+
+    /// Let [`Fonts::features`] report whole-run shaping for faces that
+    /// have ligatures. Off by default, so nothing draws ligatures until the
+    /// renderer can draw a glyph in pieces (B1.2 turns it on).
+    pub fn allow_runs(&mut self, allow: bool) {
+        self.allow_runs = allow;
     }
 
     /// Fallback fonts and face overrides from the config that weren't
@@ -299,11 +430,15 @@ impl Fonts {
         } else {
             1.0
         };
+        // Ligature glyphs stretched from the font's advance to the cell's,
+        // about their origin, so their ink lands on the grid.
+        let scaled = !color && key.variant & GlyphKey::SCALED != 0;
+        let sx = if scaled { self.x_scale() } else { 1.0 } * scale;
 
         const PAD: f64 = 1.0;
-        let min_x = (rect.origin.x * scale).floor() - PAD;
+        let min_x = (rect.origin.x * sx).floor() - PAD;
         let min_y = (rect.origin.y * scale).floor() - PAD;
-        let max_x = ((rect.origin.x + rect.size.width) * scale).ceil() + PAD;
+        let max_x = ((rect.origin.x + rect.size.width) * sx).ceil() + PAD;
         let max_y = ((rect.origin.y + rect.size.height) * scale).ceil() + PAD;
         let width = (max_x - min_x) as usize;
         let height = (max_y - min_y) as usize;
@@ -334,7 +469,7 @@ impl Fonts {
         CGContext::set_should_subpixel_position_fonts(Some(ctx), true);
         CGContext::set_gray_fill_color(Some(ctx), 1.0, 1.0);
         CGContext::translate_ctm(Some(ctx), -min_x, -min_y);
-        CGContext::scale_ctm(Some(ctx), scale, scale);
+        CGContext::scale_ctm(Some(ctx), sx, scale);
         let mut pos = CGPoint::new(0.0, 0.0);
         unsafe { font.draw_glyphs(NonNull::from(&mut g), NonNull::from(&mut pos), 1, ctx) };
         drop(owned);
@@ -342,11 +477,48 @@ impl Fonts {
         Some(RasterGlyph {
             width: width as u32,
             height: height as u32,
-            left: min_x as i32 + if color { 0 } else { self.x_shift },
+            left: min_x as i32 + if color || scaled { 0 } else { self.x_shift },
             top: max_y as i32,
             color,
             data,
         })
+    }
+
+    /// Cell width / advance: how much [`GlyphKey::SCALED`] glyphs are
+    /// stretched.
+    fn x_scale(&self) -> f64 {
+        self.metrics.cell_width as f64 / self.advance
+    }
+
+    /// Whether split glyph `glyph` of font `font`, drawn at its cell's
+    /// origin, would have ink 1 pixel or more off where the cell grid puts
+    /// it: x at the font's size lands at x + the centring shift, and
+    /// belongs at x × cell width / advance (ligatures design §3). Glyphs
+    /// whose ink stays in their own cell are within that whenever plain
+    /// glyphs are. Cached per glyph.
+    pub(crate) fn needs_scaling(&self, font: FontId, glyph: CGGlyph) -> bool {
+        let k = self.x_scale();
+        if (k - 1.0).abs() < 1e-9 {
+            return false;
+        }
+        if let Some(&s) = self.scaled.borrow().get(&(font, glyph)) {
+            return s;
+        }
+        let rect = {
+            let reg = self.registry.borrow();
+            let Some(face) = reg.faces.get(font as usize) else { return false };
+            let mut g = glyph;
+            let mut rect = CGRect::default();
+            unsafe {
+                face.font
+                    .bounding_rects_for_glyphs(CTFontOrientation::Horizontal, NonNull::from(&mut g), &mut rect, 1)
+            };
+            rect
+        };
+        let off = |x: f64| (x + self.x_shift as f64 - x * k).abs();
+        let s = rect.size.width > 0.0 && off(rect.origin.x).max(off(rect.origin.x + rect.size.width)) >= 1.0;
+        self.scaled.borrow_mut().insert((font, glyph), s);
+        s
     }
 
     /// An icon scaled down and centred in its cells ([`fit`]), drawn into a
@@ -395,6 +567,46 @@ impl Fonts {
     }
 }
 
+/// Make the font file at `path` available to this process only
+/// (`CTFontManagerRegisterFontsForURL`, process scope), as if installed:
+/// for tests and benchmarks with a font macOS doesn't ship. `false` when
+/// it couldn't be registered; registering the same file again is `true`.
+pub fn register_font_file(path: &std::path::Path) -> bool {
+    use objc2_core_foundation::CFURL;
+    use objc2_core_text::{CTFontManagerRegisterFontsForURL, CTFontManagerScope};
+    let Some(url) = CFURL::from_file_path(path) else { return false };
+    let mut error = std::ptr::null_mut();
+    let ok = unsafe { CTFontManagerRegisterFontsForURL(&url, CTFontManagerScope::Process, &mut error) };
+    if !error.is_null() {
+        // Already registered (kCTFontManagerErrorAlreadyRegistered, 105)
+        // is fine; release the error either way.
+        let error = unsafe { CFRetained::from_raw(NonNull::new_unchecked(error)) };
+        return ok || error.code() == 105;
+    }
+    ok
+}
+
+/// The glyph a one-character CTLine gives `ch` in `font`, with the font's
+/// feature settings applied (`zero`, `ss01`): `None` when it isn't exactly
+/// one glyph.
+pub(crate) fn glyph_by_line(font: &CTFont, ch: char) -> Option<(CFRetained<CTFont>, CGGlyph)> {
+    let mut utf16 = [0u16; 2];
+    let units = ch.encode_utf16(&mut utf16);
+    let line = shape::ct_line(units, &shape::font_attrs(font))?;
+    let runs = unsafe { line.glyph_runs() };
+    if runs.count() != 1 {
+        return None;
+    }
+    let run: &objc2_core_text::CTRun = unsafe { &*(runs.value_at_index(0) as *const objc2_core_text::CTRun) };
+    if unsafe { run.glyph_count() } != 1 {
+        return None;
+    }
+    let found = shape::run_font(run)?;
+    let mut g: CGGlyph = 0;
+    unsafe { run.glyphs(CFRange { location: 0, length: 1 }, NonNull::from(&mut g)) };
+    (g != 0 && g != 0xFFFF).then(|| (found.retain(), g))
+}
+
 /// `font` with `traits` (bold, italic), or `font` itself when its family
 /// has no such face.
 fn with_traits(font: &CTFont, traits: CTFontSymbolicTraits) -> CFRetained<CTFont> {
@@ -435,6 +647,31 @@ fn with_cascade(face: &CTFont, fallbacks: &[CFRetained<CTFont>]) -> CFRetained<C
         }
         let list = CFArray::from_retained_objects(&list);
         let attrs = CFDictionary::<CFString, CFArray<CTFontDescriptor>>::from_slices(&[kCTFontCascadeListAttribute], &[&list]);
+        let desc = CTFontDescriptor::with_attributes(attrs.as_opaque());
+        face.copy_with_attributes(0.0, std::ptr::null(), Some(&desc))
+    }
+}
+
+/// `face` with OpenType `features` set (`kCTFontFeatureSettingsAttribute`):
+/// CTLines in it, and fallback lookups through it, use them.
+fn with_features(face: &CTFont, features: &[(Tag, u32)]) -> CFRetained<CTFont> {
+    use objc2_core_foundation::{CFNumber, CFType};
+    use objc2_core_text::{kCTFontFeatureSettingsAttribute, kCTFontOpenTypeFeatureTag, kCTFontOpenTypeFeatureValue};
+    let settings: Vec<CFRetained<CFDictionary<CFString, CFType>>> = features
+        .iter()
+        .map(|&(tag, value)| {
+            let tag = CFString::from_str(tag.as_str());
+            let value = CFNumber::new_i64(value as i64);
+            let keys = unsafe { [kCTFontOpenTypeFeatureTag, kCTFontOpenTypeFeatureValue] };
+            CFDictionary::from_slices(&keys, &[&**tag as &CFType, &**value as &CFType])
+        })
+        .collect();
+    let settings = CFArray::from_retained_objects(&settings);
+    unsafe {
+        let attrs = CFDictionary::<CFString, CFArray<CFDictionary<CFString, CFType>>>::from_slices(
+            &[kCTFontFeatureSettingsAttribute],
+            &[&settings],
+        );
         let desc = CTFontDescriptor::with_attributes(attrs.as_opaque());
         face.copy_with_attributes(0.0, std::ptr::null(), Some(&desc))
     }

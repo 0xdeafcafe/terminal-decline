@@ -948,6 +948,20 @@ impl WindowView {
         self.unpause();
     }
 
+    /// A batch of history hits from the search worker for `pane`'s
+    /// search: added under the lock, and drawn (with the bar's count).
+    pub(crate) fn search_batch(&self, pane: PaneId, batch: term_core::HitBatch) {
+        let added = self.with_pane(pane, |_, p| {
+            p.find.is_some() && {
+                p.session.lock_term().state.add_search_hits(batch);
+                true
+            }
+        });
+        if added == Some(true) {
+            self.request_redraw(pane);
+        }
+    }
+
     /// Draw every pane again soon.
     fn redraw_all(&self) {
         self.with_state(|st| {
@@ -1165,8 +1179,10 @@ impl WindowView {
             // view go into the snapshot.
             if let Some(f) = &mut p.find {
                 let polled = f.search.poll(&mut t.state);
-                if polled.changed {
-                    find_changed.push(id);
+                let status = f.search.status(&t.state);
+                if polled.changed || status != f.shown {
+                    f.shown = status;
+                    find_changed.push((id, status));
                 }
                 if let Some(after) = polled.again {
                     find_again.push((id, after));
@@ -1190,8 +1206,19 @@ impl WindowView {
                 crashed.push(id);
                 continue;
             }
-            if let Some(f) = &p.find {
-                crate::search::add_highlights(p.render.frame.snapshot_mut(), &f.marks);
+            if let Some(f) = &mut p.find {
+                let snap = p.render.frame.snapshot_mut();
+                crate::search::add_highlights(snap, &f.marks);
+                f.drawn = snap
+                    .highlights
+                    .iter()
+                    .filter(|h| {
+                        matches!(
+                            h.kind,
+                            term_core::HighlightKind::SearchHit | term_core::HighlightKind::CurrentSearchHit
+                        )
+                    })
+                    .count();
             }
             snapped.push((id, padding, cursor_on, focused));
         }
@@ -1299,7 +1326,7 @@ impl WindowView {
         }
         let bars: Vec<_> = find_changed
             .iter()
-            .filter_map(|id| panes.get(id)?.find.as_ref().map(|f| (f.bar.clone(), f.search.status())))
+            .filter_map(|(id, status)| panes.get(id)?.find.as_ref().map(|f| (f.bar.clone(), *status)))
             .collect();
         drop(guard);
         for pane in blinking {
@@ -2890,11 +2917,11 @@ fn write_dump(st: &mut State, window: Window) {
     test.dump = DumpState::Idle;
     let find = p.find.as_ref().map(|f| {
         let t = p.session.lock_term();
-        let status = f.search.status();
+        let status = f.search.status(&t.state);
         let top = t.state.point_at(0, 0).line;
         let current_row = f
             .search
-            .current()
+            .current(&t.state)
             .and_then(|h| h.start.line.checked_sub(top))
             .filter(|&r| r < t.state.lines() as u64)
             .map(|r| r as usize);
@@ -2904,7 +2931,7 @@ fn write_dump(st: &mut State, window: Window) {
             hits: status.count,
             current: status.current,
             current_row,
-            highlights: f.marks.len(),
+            highlights: f.drawn,
             focused: f.bar.has_focus(),
         }
     });

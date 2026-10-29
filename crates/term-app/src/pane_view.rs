@@ -893,7 +893,8 @@ impl PaneView {
             None => {
                 let bar = FindBar::new(mtm, self, &query);
                 self.addSubview(&bar);
-                self.with(|_, p| p.find = Some(Find::new(bar.clone())));
+                let search = self.new_search();
+                self.with(|_, p| p.find = Some(Find::new(bar.clone(), search)));
                 self.place_find_bar();
                 bar
             }
@@ -915,6 +916,18 @@ impl PaneView {
         if let Some(bar) = self.with(|_, p| p.find.as_ref().map(|f| f.bar.clone())).flatten() {
             bar.place(self.frame().size.width, inset);
         }
+    }
+
+    /// term-core's search, its batches added on the main thread.
+    fn new_search(&self) -> Box<dyn crate::search::Search> {
+        let window = self.window_view().map_or(0, |w| w.id());
+        let pane = self.pane();
+        let deliver: crate::search::Deliver = std::sync::Arc::new(move |batch| {
+            dispatch2::DispatchQueue::main().exec_async(move || {
+                crate::view::with_view(window, |v| v.search_batch(pane, batch));
+            });
+        });
+        Box::new(crate::search::CoreSearch::new(deliver))
     }
 
     /// How many of the grid's top rows the find bar is over.
@@ -962,12 +975,9 @@ impl PaneView {
         let Some(Some((bar, status))) = self.with(|_, p| {
             let f = p.find.as_mut()?;
             let mut t = p.session.lock_term();
-            f.search.start(&mut t.state, &q);
-            if let Some(h) = f.search.current() {
-                crate::search::scroll_to(&mut t.state, h, covered);
-            }
+            f.search.start(&mut t.state, &q, covered);
             p.find_query = q.clone();
-            Some((f.bar.clone(), f.search.status()))
+            Some((f.bar.clone(), f.search.status(&t.state)))
         }) else {
             return;
         };
@@ -989,9 +999,10 @@ impl PaneView {
         let stepped = self.with(|_, p| {
             let f = p.find.as_mut()?;
             let mut t = p.session.lock_term();
-            let h = f.search.step(forward)?;
-            crate::search::scroll_to(&mut t.state, h, covered);
-            Some((f.bar.clone(), f.search.status()))
+            let stepped = f.search.step(&mut t.state, forward, covered);
+            let status = f.search.status(&t.state);
+            // None yet, but some may come: it jumps when one arrives.
+            (stepped || status.running).then(|| (f.bar.clone(), status))
         });
         match stepped.flatten() {
             Some((bar, status)) => {

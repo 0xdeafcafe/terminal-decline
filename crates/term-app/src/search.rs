@@ -9,9 +9,10 @@
 //! work there, so it reads at most [`MAX_ROWS`] rows nearest the bottom.
 
 use std::ops::Range;
+use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::time::{Duration, Instant};
 
-use term_core::{Content, HighlightKind, Point, Snapshot, Terminal, ViewTop, Width};
+use term_core::{Content, HighlightKind, HitBatch, Point, SearchJob, Snapshot, Terminal, ViewTop, Width};
 
 /// How a match must sit against the words around it (the bar's options
 /// menu, cells design §13.8).
@@ -80,19 +81,20 @@ impl Status {
 /// pane's terminal locked.
 pub trait Search {
     /// Search for `q` instead of whatever was searched for; an empty text
-    /// clears. The current hit is the first at or after the view's top
-    /// (the last before it when there is none after).
-    fn start(&mut self, t: &mut Terminal, q: &Query);
+    /// clears. The view may move to show a current hit, clear of the
+    /// `covered` rows the bar is over.
+    fn start(&mut self, t: &mut Terminal, q: &Query, covered: usize);
     /// Stop and forget the hits (the bar closed).
     fn cancel(&mut self, t: &mut Terminal);
     /// Once per frame while the bar is open: take in results and keep up
     /// with output.
     fn poll(&mut self, t: &mut Terminal) -> Polled;
-    fn status(&self) -> Status;
+    fn status(&self, t: &Terminal) -> Status;
     /// Make the next hit (`forward`) or the previous current, wrapping
-    /// around at either end; returns it.
-    fn step(&mut self, forward: bool) -> Option<Hit>;
-    fn current(&self) -> Option<Hit>;
+    /// around at either end, and scroll to it. False when there is none
+    /// (or none yet: it jumps when the hit arrives).
+    fn step(&mut self, t: &mut Terminal, forward: bool, covered: usize) -> bool;
+    fn current(&self, t: &Terminal) -> Option<Hit>;
     /// The hits in view, for the snapshot's highlights: (view row,
     /// columns, kind). An engine that puts its hits in the snapshot
     /// itself leaves `out` alone.
@@ -149,6 +151,111 @@ pub fn add_highlights(snap: &mut Snapshot, extra: &[(u16, Range<u16>, HighlightK
     snap.highlights = out;
 }
 
+/// Hands a batch of history hits to the main thread, which adds them
+/// with the terminal locked ([`Terminal::add_search_hits`]).
+pub type Deliver = Arc<dyn Fn(HitBatch) + Send + Sync>;
+
+/// term-core's search (cells design §13.4): the screen is searched under
+/// the lock as the query changes, history on the one search worker, its
+/// batches going back to the main thread through `deliver`. Hits and the
+/// current one live in the terminal, which puts them in the snapshot.
+pub struct CoreSearch {
+    deliver: Deliver,
+}
+
+impl CoreSearch {
+    pub fn new(deliver: Deliver) -> CoreSearch {
+        CoreSearch { deliver }
+    }
+}
+
+fn core_query(q: &Query) -> term_core::Query {
+    term_core::Query {
+        text: q.text.clone(),
+        ignore_case: q.ignore_case,
+        word: match q.word {
+            WordMatch::Contains => term_core::WordMatch::Contains,
+            WordMatch::StartsWith => term_core::WordMatch::StartsWith,
+            WordMatch::FullWord => term_core::WordMatch::FullWord,
+        },
+    }
+}
+
+fn core_hit(h: term_core::Hit) -> Hit {
+    Hit {
+        start: h.start(),
+        end: Point {
+            line: h.end_line(),
+            col: h.end_col as usize,
+        },
+    }
+}
+
+impl Search for CoreSearch {
+    fn start(&mut self, t: &mut Terminal, q: &Query, _covered: usize) {
+        let job = t.start_search(core_query(q));
+        if q.text.is_empty() {
+            return;
+        }
+        // A hit on the screen at or after the view's top becomes current
+        // as you type; history's arrive from the worker.
+        if t.search_count().total > 0 {
+            t.search_next();
+        }
+        run_on_worker(job, self.deliver.clone());
+    }
+
+    fn cancel(&mut self, t: &mut Terminal) {
+        t.stop_search();
+    }
+
+    fn poll(&mut self, _t: &mut Terminal) -> Polled {
+        // The terminal keeps its hits up with output itself; the count is
+        // compared by the caller.
+        Polled::default()
+    }
+
+    fn status(&self, t: &Terminal) -> Status {
+        let c = t.search_count();
+        Status {
+            count: c.total,
+            current: c.current,
+            running: c.running,
+            capped: c.capped,
+        }
+    }
+
+    fn step(&mut self, t: &mut Terminal, forward: bool, _covered: usize) -> bool {
+        if forward { t.search_next() } else { t.search_previous() }
+    }
+
+    fn current(&self, t: &Terminal) -> Option<Hit> {
+        t.current_hit().map(core_hit)
+    }
+
+    fn view_highlights(&self, _t: &Terminal, _out: &mut Vec<(u16, Range<u16>, HighlightKind)>) {}
+}
+
+/// The one search worker (§13.4): jobs run one at a time, in order; a
+/// newer search cancels the job before it, which then stops within a
+/// block.
+fn run_on_worker(job: SearchJob, deliver: Deliver) {
+    static WORKER: OnceLock<Mutex<mpsc::Sender<(SearchJob, Deliver)>>> = OnceLock::new();
+    let tx = WORKER.get_or_init(|| {
+        let (tx, rx) = mpsc::channel::<(SearchJob, Deliver)>();
+        std::thread::Builder::new()
+            .name("search".into())
+            .spawn(move || {
+                for (mut job, deliver) in rx {
+                    job.run(|batch| deliver(batch));
+                }
+            })
+            .expect("search worker starts");
+        Mutex::new(tx)
+    });
+    let _ = tx.lock().unwrap_or_else(|e| e.into_inner()).send((job, deliver));
+}
+
 /// The fallback reads at most this many rows, nearest the bottom.
 pub const MAX_ROWS: usize = 50_000;
 /// It keeps at most this many hits.
@@ -199,6 +306,42 @@ impl TextSearch {
         });
     }
 
+    /// [`Search::start`] without moving the view.
+    pub fn search_for(&mut self, t: &mut Terminal, q: &Query) {
+        self.query = (!q.text.is_empty()).then(|| q.clone());
+        self.run(t);
+        self.pick_current(t);
+    }
+
+    pub fn counts(&self) -> Status {
+        Status {
+            count: self.hits.len(),
+            current: self.current,
+            running: false,
+            capped: self.capped,
+        }
+    }
+
+    /// [`Search::step`] without moving the view.
+    pub fn step_hit(&mut self, forward: bool) -> Option<Hit> {
+        let n = self.hits.len();
+        if n == 0 {
+            return None;
+        }
+        let i = match self.current {
+            None if forward => 0,
+            None => n - 1,
+            Some(i) if forward => (i + 1) % n,
+            Some(i) => (i + n - 1) % n,
+        };
+        self.current = Some(i);
+        Some(self.hits[i])
+    }
+
+    pub fn current_hit(&self) -> Option<Hit> {
+        self.current.map(|i| self.hits[i])
+    }
+
     /// The first hit at or after the view's top, else the last.
     fn pick_current(&mut self, t: &Terminal) {
         let top = t.point_at(0, 0);
@@ -211,10 +354,11 @@ impl TextSearch {
 }
 
 impl Search for TextSearch {
-    fn start(&mut self, t: &mut Terminal, q: &Query) {
-        self.query = (!q.text.is_empty()).then(|| q.clone());
-        self.run(t);
-        self.pick_current(t);
+    fn start(&mut self, t: &mut Terminal, q: &Query, covered: usize) {
+        self.search_for(t, q);
+        if let Some(h) = self.current_hit() {
+            scroll_to(t, h, covered);
+        }
     }
 
     fn cancel(&mut self, _t: &mut Terminal) {
@@ -253,39 +397,25 @@ impl Search for TextSearch {
         }
     }
 
-    fn status(&self) -> Status {
-        Status {
-            count: self.hits.len(),
-            current: self.current,
-            running: false,
-            capped: self.capped,
-        }
+    fn status(&self, _t: &Terminal) -> Status {
+        self.counts()
     }
 
-    fn step(&mut self, forward: bool) -> Option<Hit> {
-        let n = self.hits.len();
-        if n == 0 {
-            return None;
-        }
-        let i = match self.current {
-            None if forward => 0,
-            None => n - 1,
-            Some(i) if forward => (i + 1) % n,
-            Some(i) => (i + n - 1) % n,
-        };
-        self.current = Some(i);
-        Some(self.hits[i])
+    fn step(&mut self, t: &mut Terminal, forward: bool, covered: usize) -> bool {
+        let Some(h) = self.step_hit(forward) else { return false };
+        scroll_to(t, h, covered);
+        true
     }
 
-    fn current(&self) -> Option<Hit> {
-        self.current.map(|i| self.hits[i])
+    fn current(&self, _t: &Terminal) -> Option<Hit> {
+        self.current_hit()
     }
 
     fn view_highlights(&self, t: &Terminal, out: &mut Vec<(u16, Range<u16>, HighlightKind)>) {
         let top = t.point_at(0, 0).line;
         let lines = t.lines() as u64;
         let cols = t.cols();
-        let current = self.current();
+        let current = self.current_hit();
         let first = self.hits.partition_point(|h| h.end.line < top);
         let mut rows: Vec<(u16, Range<u16>, HighlightKind)> = Vec::new();
         for h in self.hits[first..].iter().take_while(|h| h.start.line < top + lines) {
@@ -464,8 +594,8 @@ mod tests {
         }
         let mut t = term(20, 5, &out);
         let mut s = TextSearch::new();
-        s.start(&mut t.state, &q("foo"));
-        assert_eq!(s.status().count, 30);
+        s.search_for(&mut t.state, &q("foo"));
+        assert_eq!(s.counts().count, 30);
         assert_eq!(
             s.hits()[0],
             Hit {
@@ -475,7 +605,7 @@ mod tests {
         );
         // The view is at the bottom: the first hit at or after its top.
         let top = t.state.point_at(0, 0).line;
-        assert_eq!(s.current().unwrap().start.line, top);
+        assert_eq!(s.current_hit().unwrap().start.line, top);
         assert_eq!(t.state.display_offset(), 0, "the view is put back");
     }
 
@@ -487,17 +617,17 @@ mod tests {
         }
         let mut t = term(20, 5, &out);
         let mut s = TextSearch::new();
-        s.start(&mut t.state, &q("hit"));
-        assert_eq!(s.status().count, 4);
+        s.search_for(&mut t.state, &q("hit"));
+        assert_eq!(s.counts().count, 4);
         // No hit at or after the top (lines 36..41): the last is current.
-        assert_eq!(s.status().current, Some(3));
-        let h = s.step(true).unwrap();
+        assert_eq!(s.counts().current, Some(3));
+        let h = s.step_hit(true).unwrap();
         assert_eq!(h.start.line, 0);
         scroll_to(&mut t.state, h, 0);
         assert!(t.state.display_offset() > 0);
         let top = t.state.point_at(0, 0).line;
         assert!((top..top + 5).contains(&0));
-        let h = s.step(false).unwrap();
+        let h = s.step_hit(false).unwrap();
         assert_eq!(h.start.line, 30);
         scroll_to(&mut t.state, h, 0);
         let top = t.state.point_at(0, 0).line;
@@ -519,7 +649,7 @@ mod tests {
         // 10 columns: "0123456789abc" wraps after 9.
         let mut t = term(10, 4, "xxxxxxxhello\r\n");
         let mut s = TextSearch::new();
-        s.start(&mut t.state, &q("hello"));
+        s.search_for(&mut t.state, &q("hello"));
         assert_eq!(
             s.hits(),
             &[Hit {
@@ -542,19 +672,19 @@ mod tests {
     fn case_and_words() {
         let mut t = term(40, 3, "Foo foobar barfoo foo_x FOO\r\n");
         let mut s = TextSearch::new();
-        s.start(&mut t.state, &q("foo"));
-        assert_eq!(s.status().count, 3);
+        s.search_for(&mut t.state, &q("foo"));
+        assert_eq!(s.counts().count, 3);
         let ci = |word| Query {
             text: "foo".into(),
             ignore_case: true,
             word,
         };
-        s.start(&mut t.state, &ci(WordMatch::Contains));
-        assert_eq!(s.status().count, 5);
-        s.start(&mut t.state, &ci(WordMatch::StartsWith));
+        s.search_for(&mut t.state, &ci(WordMatch::Contains));
+        assert_eq!(s.counts().count, 5);
+        s.search_for(&mut t.state, &ci(WordMatch::StartsWith));
         let starts: Vec<usize> = s.hits().iter().map(|h| h.start.col).collect();
         assert_eq!(starts, vec![0, 4, 18, 24]);
-        s.start(&mut t.state, &ci(WordMatch::FullWord));
+        s.search_for(&mut t.state, &ci(WordMatch::FullWord));
         let starts: Vec<usize> = s.hits().iter().map(|h| h.start.col).collect();
         assert_eq!(starts, vec![0, 24]);
     }
@@ -563,7 +693,7 @@ mod tests {
     fn wide_characters_take_two_cells() {
         let mut t = term(20, 3, "a日本b\r\n");
         let mut s = TextSearch::new();
-        s.start(&mut t.state, &q("本b"));
+        s.search_for(&mut t.state, &q("本b"));
         assert_eq!(
             s.hits(),
             &[Hit {
@@ -577,25 +707,25 @@ mod tests {
     fn trailing_blanks_dont_match() {
         let mut t = term(20, 3, "ab\r\n");
         let mut s = TextSearch::new();
-        s.start(&mut t.state, &q("b "));
-        assert_eq!(s.status().count, 0);
-        s.start(&mut t.state, &q(""));
-        assert_eq!(s.status(), Status::default());
+        s.search_for(&mut t.state, &q("b "));
+        assert_eq!(s.counts().count, 0);
+        s.search_for(&mut t.state, &q(""));
+        assert_eq!(s.counts(), Status::default());
     }
 
     #[test]
     fn output_is_searched_again() {
         let mut t = term(20, 5, "one\r\n");
         let mut s = TextSearch::new();
-        s.start(&mut t.state, &q("one"));
-        assert_eq!(s.status().count, 1);
+        s.search_for(&mut t.state, &q("one"));
+        assert_eq!(s.counts().count, 1);
         t.advance(b"one again\r\n");
         let soon = s.poll(&mut t.state);
         assert!(!soon.changed && soon.again.is_some(), "not this soon");
         s.searched = s.searched.map(|(g, at)| (g, at - AGAIN_AFTER));
         assert!(s.poll(&mut t.state).changed);
-        assert_eq!(s.status().count, 2);
-        assert_eq!(s.status().current, Some(0), "the same hit stays current");
+        assert_eq!(s.counts().count, 2);
+        assert_eq!(s.counts().current, Some(0), "the same hit stays current");
     }
 
     #[test]

@@ -32,7 +32,7 @@ use objc2_foundation::{NSArray, NSObjectProtocol, NSPoint, NSRect, NSSize, NSStr
 use term_core::HighlightKind;
 
 use crate::pane_view::PaneView;
-use crate::search::{Query, Search, Status, TextSearch, WordMatch};
+use crate::search::{Query, Search, Status, WordMatch};
 
 /// The bar's height, points.
 pub const HEIGHT: f64 = 32.0;
@@ -52,16 +52,23 @@ const IGNORE_CASE: isize = 100;
 pub(crate) struct Find {
     pub(crate) bar: Retained<FindBar>,
     pub(crate) search: Box<dyn Search>,
-    /// The hits in view, as last taken for the snapshot.
+    /// The hits in view the search adds to the snapshot itself (the
+    /// fallback's), as last taken.
     pub(crate) marks: Vec<(u16, Range<u16>, HighlightKind)>,
+    /// Search highlights in the last snapshot (for the test dumps).
+    pub(crate) drawn: usize,
+    /// The count as last shown.
+    pub(crate) shown: Status,
 }
 
 impl Find {
-    pub(crate) fn new(bar: Retained<FindBar>) -> Find {
+    pub(crate) fn new(bar: Retained<FindBar>, search: Box<dyn Search>) -> Find {
         Find {
             bar,
-            search: Box::new(TextSearch::new()),
+            search,
             marks: Vec::new(),
+            drawn: 0,
+            shown: Status::default(),
         }
     }
 }

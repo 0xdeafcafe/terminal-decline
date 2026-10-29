@@ -850,6 +850,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "term-prefs"
+version = "0.0.1"
+dependencies = [
+ "proptest",
+ "toml_edit",
+]
+
+[[package]]
 name = "term-pty"
 version = "0.0.1"
 dependencies = [
@@ -942,6 +950,7 @@ dependencies = [
  "indexmap",
  "toml_datetime",
  "toml_parser",
+ "toml_writer",
  "winnow",
 ]
 

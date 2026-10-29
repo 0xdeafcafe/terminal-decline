@@ -195,6 +195,13 @@ tables and landing pads: 1.34 → 1.50 MB) and no measurable parse speed.
 - Keys with Ctrl / Option / arrows / function keys / Home / End / PgUp / PgDn
   mapped to xterm sequences; application cursor and keypad modes respected.
   While an input method is composing, every key goes to it first.
+- Ctrl and Meta work on non-Latin layouts: when the current layout's
+  character isn't ASCII, the key's character on the ASCII-capable layout
+  (the Latin layout macOS keeps for Cmd shortcuts) is used, so Ctrl+С on
+  a Russian layout sends ^C and Meta+С sends ESC c (`ascii_layout`:
+  `TISCopyCurrentASCIICapableKeyboardLayoutInputSource` + `UCKeyTranslate`
+  for every key, read once and again only after the selected input source
+  changes, which a distributed notification announces).
 - Option-as-Meta configurable, **off by default** (like Terminal.app and
   Ghostty) so Option still types `@ [ ] { } | \ ~` on European layouts.
 - Kitty keyboard protocol, "disambiguate" level: Shift+Enter, Ctrl+Enter,

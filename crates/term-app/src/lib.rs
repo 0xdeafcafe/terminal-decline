@@ -6,6 +6,7 @@
 //! [`config`] and [`pin`].
 
 pub mod app;
+mod ascii_layout;
 pub mod config;
 pub mod control;
 pub mod crash;

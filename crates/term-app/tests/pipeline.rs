@@ -297,7 +297,7 @@ fn char_key(c: char, flags: usize) -> KeyInput {
         chars_ignoring_mods: c.to_string(),
         chars_shift_only: c.to_string(),
         flags,
-        numpad: false,
+        ..KeyInput::default()
     }
 }
 

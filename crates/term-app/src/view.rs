@@ -1413,6 +1413,7 @@ pub fn content_size(config: &Config, m: term_font::Metrics, scale: f64, titlebar
 /// What `keys::translate` needs from a key event.
 fn key_input(event: &NSEvent) -> KeyInput {
     let flags = event.modifierFlags();
+    let (ascii, ascii_shifted) = crate::ascii_layout::chars(event.keyCode());
     let plain = event.charactersIgnoringModifiers().map(|s| s.to_string()).unwrap_or_default();
     let shifted = if flags.contains(NSEventModifierFlags::Shift) {
         NSEventModifierFlags::Shift
@@ -1427,6 +1428,8 @@ fn key_input(event: &NSEvent) -> KeyInput {
             .map(|s| s.to_string())
             .unwrap_or_else(|| plain.clone()),
         chars_ignoring_mods: plain,
+        ascii,
+        ascii_shifted,
         flags: flags.0,
         numpad: flags.contains(NSEventModifierFlags::NumericPad),
     }

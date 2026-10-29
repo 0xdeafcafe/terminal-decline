@@ -31,6 +31,12 @@ pub struct KeyInput {
     /// The characters with only Shift applied (not Option), for
     /// Option-as-Meta.
     pub chars_shift_only: String,
+    /// What the key types on the ASCII-capable layout (see
+    /// [`crate::ascii_layout`]), without and with Shift: used for Ctrl and
+    /// Meta when the current layout's character isn't ASCII (Ctrl+С on a
+    /// Russian layout is Ctrl+C).
+    pub ascii: Option<char>,
+    pub ascii_shifted: Option<char>,
     /// Raw `NSEventModifierFlags` bits, including the left/right Option
     /// device bits; see [`flags`].
     pub flags: usize,
@@ -124,7 +130,7 @@ fn key_bytes(input: &KeyInput, modes: KeyModes) -> Option<Vec<u8>> {
         return Some(encode_kitty_char(c, mods));
     }
     if mods.ctrl
-        && let Some(b) = ctrl_byte(c)
+        && let Some(b) = ctrl_byte(ascii_or(c, input, mods.shift))
     {
         let mut out = if meta { vec![0x1b] } else { Vec::new() };
         out.push(b);
@@ -138,10 +144,26 @@ fn key_bytes(input: &KeyInput, modes: KeyModes) -> Option<Vec<u8>> {
             &input.chars_shift_only
         };
         let mut out = vec![0x1b];
-        out.extend_from_slice(text.as_bytes());
+        match text.chars().next() {
+            Some(t) if !t.is_ascii() => {
+                let mut buf = [0; 4];
+                out.extend_from_slice(ascii_or(t, input, mods.shift).encode_utf8(&mut buf).as_bytes());
+            }
+            _ => out.extend_from_slice(text.as_bytes()),
+        }
         return Some(out);
     }
     None
+}
+
+/// `c` if it is ASCII, else what the key types on the ASCII-capable layout
+/// (with Shift if `shift`), for Ctrl and Meta on non-Latin layouts.
+fn ascii_or(c: char, input: &KeyInput, shift: bool) -> char {
+    if c.is_ascii() {
+        return c;
+    }
+    let ascii = if shift { input.ascii_shifted.or(input.ascii) } else { input.ascii };
+    ascii.unwrap_or(c)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -393,7 +415,7 @@ mod tests {
             chars_ignoring_mods: c.into(),
             chars_shift_only: c.into(),
             flags,
-            numpad: false,
+            ..KeyInput::default()
         }
     }
 
@@ -635,7 +657,7 @@ mod tests {
             chars_ignoring_mods: "a".into(),
             chars_shift_only: shift_only.into(),
             flags,
-            numpad: false,
+            ..KeyInput::default()
         };
         // (setting, left Option is Meta, right Option is Meta)
         for (setting, l, r) in [
@@ -662,6 +684,95 @@ mod tests {
         assert_eq!(translate(&press(left, ""), m), send(b"\x1ba"));
         // Special keys with Option are Alt whatever the setting.
         assert_eq!(translate(&key(0x7B, right), m), send(b"\x1b[1;3D"));
+    }
+
+    /// A key on a non-Latin layout: `here` is what the current layout
+    /// types, `ascii` what the ASCII-capable layout does.
+    fn non_latin(here: &str, shifted: &str, ascii: char, ascii_shifted: char, flags: usize) -> KeyInput {
+        let shift = flags & SHIFT != 0;
+        KeyInput {
+            keycode: 8,
+            chars: if shift { shifted.into() } else { here.into() },
+            chars_ignoring_mods: if shift { shifted.into() } else { here.into() },
+            chars_shift_only: if shift { shifted.into() } else { here.into() },
+            ascii: Some(ascii),
+            ascii_shifted: Some(ascii_shifted),
+            flags,
+            ..KeyInput::default()
+        }
+    }
+
+    #[test]
+    fn ctrl_and_meta_on_non_latin_layouts() {
+        let meta = KeyModes {
+            option_as_meta: OptionAsMeta::Both,
+            ..KeyModes::default()
+        };
+        let alt = OPTION | LEFT_OPTION;
+        let rows: &[(&str, KeyInput, KeyModes, KeyAction)] = &[
+            // Russian: the C key types с / С.
+            (
+                "ru ctrl+с",
+                non_latin("с", "С", 'c', 'C', CONTROL),
+                KeyModes::default(),
+                send(b"\x03"),
+            ),
+            (
+                "ru ctrl+shift+с",
+                non_latin("с", "С", 'c', 'C', CONTROL | SHIFT),
+                KeyModes::default(),
+                send(b"\x03"),
+            ),
+            ("ru meta+с", non_latin("с", "С", 'c', 'C', alt), meta, send(b"\x1bc")),
+            ("ru meta+shift+с", non_latin("с", "С", 'c', 'C', alt | SHIFT), meta, send(b"\x1bC")),
+            (
+                "ru ctrl+meta+с",
+                non_latin("с", "С", 'c', 'C', CONTROL | alt),
+                meta,
+                send(b"\x1b\x03"),
+            ),
+            // Greek: the C key types ψ.
+            (
+                "el ctrl+ψ",
+                non_latin("ψ", "Ψ", 'c', 'C', CONTROL),
+                KeyModes::default(),
+                send(b"\x03"),
+            ),
+            ("el meta+ψ", non_latin("ψ", "Ψ", 'c', 'C', alt), meta, send(b"\x1bc")),
+            // The [ key on the Russian layout types х: Ctrl+[ is ESC.
+            (
+                "ru ctrl+х",
+                non_latin("х", "Х", '[', '{', CONTROL),
+                KeyModes::default(),
+                send(b"\x1b"),
+            ),
+            // Without Ctrl or Meta the layout's own text is typed.
+            ("ru с", non_latin("с", "С", 'c', 'C', 0), meta, KeyAction::ToTextInput),
+            (
+                "ru option+с",
+                non_latin("с", "С", 'c', 'C', alt),
+                KeyModes::default(),
+                KeyAction::ToTextInput,
+            ),
+        ];
+        for (name, input, m, want) in rows {
+            assert_eq!(show(&translate(input, *m)), show(want), "{name}");
+        }
+        // An ASCII character on the current layout wins (Dvorak, AZERTY).
+        let dvorak = KeyInput {
+            ascii: Some('i'),
+            ..text("j", CONTROL)
+        };
+        assert_eq!(translate(&dvorak, KeyModes::default()), send(b"\x0a"));
+        // No ASCII-capable layout known: the character as it is.
+        let unknown = KeyInput {
+            ascii: None,
+            ascii_shifted: None,
+            ..non_latin("с", "С", 'c', 'C', CONTROL)
+        };
+        assert_eq!(translate(&unknown, KeyModes::default()), KeyAction::ToTextInput);
+        let unknown_meta = KeyInput { flags: alt, ..unknown };
+        assert_eq!(translate(&unknown_meta, meta), send("\x1bс".as_bytes()));
     }
 
     #[test]

@@ -20,6 +20,16 @@ fn main() {
         });
     }
 
+    if args.first().map(String::as_str) == Some("import") {
+        std::process::exit(match decline::import::run(&args[1..], &paths) {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("decline import: {e}");
+                1
+            }
+        });
+    }
+
     let mut layers: Vec<PathBuf> = vec![paths.config_file()];
     // Running as a pin: its settings, on top of the user's config.
     if let Some(p) = pin::own_pin_config(&paths) {

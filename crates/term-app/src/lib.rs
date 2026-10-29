@@ -11,6 +11,7 @@ pub mod config;
 pub mod control;
 pub mod crash;
 pub mod frame_policy;
+pub mod import;
 pub mod keybind;
 pub mod keys;
 pub mod latency;
@@ -35,6 +36,8 @@ pub const USAGE: &str = "\
 usage: decline [--config FILE] [-e PROGRAM [ARGS...]]
        decline pin NAME [--icon FILE] [--config FILE] [--cwd DIR] [--dir DIR] [--dock] -- PROGRAM [ARGS...]
        decline pin --list | --remove NAME | --update
+       decline import ghostty [PATH] [--write [--force]]
+       decline import iterm FILE.itermcolors [--name NAME] [--write [--force]]
 
 Runs a terminal window. With -e, runs PROGRAM instead of your login shell.
 `decline pin` makes PROGRAM its own macOS app, with its own Dock icon.";

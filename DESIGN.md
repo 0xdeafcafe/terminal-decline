@@ -383,6 +383,24 @@ no theme the colours are decline's defaults, as before. Programs aren't
 told about appearance changes yet: colour-scheme reports (mode 2031,
 `CSI ? 997 ; 1|2 n`) need term-core support first.
 
+Importers (`import`): `decline import ghostty [PATH]` reads Ghostty's config
+(default: the first of `~/.config/ghostty/config.ghostty`, `…/config` and
+the same in `~/Library/Application Support/com.mitchellh.ghostty`) and maps
+theme (a built-in decline theme by loose name, else the Ghostty theme file
+becomes `themes/<name>.toml`; `light:x,dark:y` becomes a pair), palette,
+foreground/background/cursor/selection colours, font-family (the first is
+`font_family`, the rest `font_fallback`), the bold/italic faces,
+font-size, adjust-cell-height/width percentages, background-opacity,
+background-blur, macos-option-as-alt, copy-on-select, window-padding-x,
+window-width/height and keybinds (actions with a decline equivalent,
+text:/csi:/esc:, unbind; not sequences or global ones). `decline import
+iterm FILE.itermcolors [--name NAME]` turns an iTerm2 preset (XML, or
+binary through `plutil`) into `themes/<name>.toml`, converting calibrated
+and P3 colours to sRGB with AppKit. Both print the TOML; `--write` writes
+it and refuses to replace any existing file without `--force` (nothing is
+written if one would be). Whatever doesn't map is listed as comments with
+the reason.
+
 Live reload (`watch`, `AppDelegate::reload_config`): the config files (the
 user's, a pin's, `--config`, and the theme files the config names) are
 watched with kqueue vnode watches on each file and its directory (editors save by renaming a new file over the old;

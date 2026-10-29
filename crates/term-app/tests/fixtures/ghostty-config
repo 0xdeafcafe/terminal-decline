@@ -1,0 +1,39 @@
+# A sample Ghostty config, for the importer's tests.
+theme = Harbour Lights
+
+font-family = "JetBrains Mono"
+font-family = Symbols Nerd Font Mono
+font-family-bold = JetBrains Mono ExtraBold
+font-size = 14.5
+font-thicken = true
+adjust-cell-height = 20%
+adjust-cell-width = 5%
+
+background-opacity = 0.92
+background-blur = true
+macos-option-as-alt = left
+copy-on-select = clipboard
+window-padding-x = 8
+window-width = 120
+window-height = 36
+scrollback-limit = 10000000
+command = /opt/homebrew/bin/fish
+
+foreground = cdd6f4
+cursor-color = #f5e0dc
+cursor-text = #11111b
+selection-background = 353749
+palette = 1=#ff5555
+palette = 9=ff6e6e
+palette = 200=#123456
+
+keybind = super+k=clear_screen
+keybind = super+shift+left_bracket=previous_tab
+keybind = super+==increase_font_size:1
+keybind = ctrl+shift+t=text:\x1b[116;6u
+keybind = alt+arrow_left=esc:b
+keybind = super+d=unbind
+keybind = ctrl+a>n=next_tab
+keybind = global:ctrl+grave_accent=toggle_quick_terminal
+keybind = super+t=new_tab
+keybind = super+shift+enter=toggle_split_zoom

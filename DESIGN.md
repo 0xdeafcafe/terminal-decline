@@ -248,7 +248,7 @@ Read once at start; later: reload on file change (FSEvents, no polling).
   via Metal counters.
 - End-to-end: wall time of `cat` 100 MB file; idle CPU over 60 s
   (`top -l`/`powermetrics`); resident memory with empty and full scrollback;
-  input latency (keypress → present) via `CAMetalLayer` timing.
+  input latency (keypress → on screen), see "Input latency" below.
 - Profile with `samply` and Instruments (`xctrace` Time Profiler + Metal
   System Trace). Compare against Ghostty on the same machine.
 
@@ -286,6 +286,94 @@ memset row reset 423 / 172 / 289 / 110. Plain text is now above the PTY's
 Caveats: window sizes, fonts and scrollback limits were not matched exactly
 yet; decline does less work (no text shaping, no grapheme clusters, no
 reflow). See the performance-testing section for the fair-comparison plan.
+
+### Input latency (keypress → on screen)
+
+`scripts/latency/run.py` (roadmap N.5). Two methods:
+
+- **In decline.** With `DECLINE_LATENCY_LOG=<file>` (test and bench runs
+  only; unset, it costs one check per key, parse and frame) decline writes
+  a JSON line per key: the event's timestamp (t0), `keyDown`, the bytes
+  handed to the writer thread (t1), the next parse in that window, taken
+  with the terminal locked (t2), the frame that shows it (start, commit,
+  GPU done) and the drawable's `presentedTime` (t3), all on one clock
+  (`CLOCK_UPTIME_RAW`, which `NSEvent`, `CACurrentMediaTime` and Metal use).
+  The driver starts decline as a throwaway app bundle through `open` (an
+  app started from a script may not be given the focus), running
+  `scripts/latency/echo.py` (raw mode, echoes each key at once) or
+  `htop -d 1` (typing into its search bar). Keys: decline posts key events
+  to its own process with `CGEventPostToPid` when asked through
+  `DECLINE_LATENCY_INPUT` (a FIFO). That needs no permission (posting to
+  another process needs Accessibility) and still goes through the window
+  server. 200 keys per run, 50–150 ms apart at random, after 6 warm-up keys.
+  Scenarios: idle; flood (a second window of the same process running
+  `yes`); htop in the same window; the display link fixed at 120 or 60 Hz
+  (`DECLINE_LATENCY_HZ`).
+- **From outside, for Ghostty and decline alike.** `scripts/latency/probe.swift`
+  posts the key to the app with `CGEventPostToPid` and watches its window
+  with ScreenCaptureKit at every refresh; the latency is the display time
+  of the first frame whose pixels changed minus the time just before
+  posting. Needs Accessibility and Screen Recording for the terminal
+  running it. Error bars: one refresh (8.3 ms at 120 Hz) per sample. On the
+  same decline frames, ScreenCaptureKit's display time is 5–13 ms (median
+  11 ms) earlier than Metal's `presentedTime`, so add about 11 ms for the
+  time to the glass; the comparison between terminals is like for like.
+  Ghostty is started with decline's defaults (Menlo 13, 100×30, padding 6,
+  no cursor blink, no config file).
+
+M1 Max, built-in ProMotion display, macOS 27, release build; the Mac was
+in use (other apps and agents running) during the runs. In decline, ms,
+p50 / p95 / p99, 200 keys per run:
+
+| scenario | key event → on glass | event → bytes to writer | writer → echo parsed | parsed → frame starts | frame build + encode | commit → on glass |
+|---|---|---|---|---|---|---|
+| idle, 120 Hz | 36.5 / 44.6 / 49.8 | 7.1 / 13.1 / 15.8 | 0.3 / 3.1 / 7.5 | 4.4 / 7.1 / 8.3 | 1.5 / 3.3 / 9.6 | 23.1 / 23.3 / 23.3 |
+| idle, 60 Hz | 35.8 / 45.1 / 49.6 | 5.3 / 9.9 / 13.1 | 0.2 / 1.4 / 3.2 | 4.7 / 13.3 / 16.0 | 0.9 / 4.9 / 6.2 | 23.8 / 24.5 / 24.6 |
+| flood, 120 Hz | 37.7 / 45.9 / 46.3 | 8.3 / 9.4 / 12.5 | 0.1 / 0.5 / 1.2 | 0.2 / 5.0 / 5.3 | 5.2 / 8.2 / 8.4 | 23.9 / 24.0 / 24.0 |
+| flood, 60 Hz | 34.3 / 41.6 / 43.3 | 2.0 / 9.9 / 12.8 | 0.1 / 0.2 / 0.8 | 4.3 / 8.0 / 16.0 | 0.7 / 8.7 / 9.6 | 24.0 / 31.3 / 31.5 |
+| htop, 120 Hz | 37.2 / 48.7 / 61.6 | 3.7 / 9.3 / 12.4 | 0.9 / 3.9 / 6.0 | 5.4 / 8.9 / 11.6 | 0.7 / 8.8 / 17.1 | 23.8 / 32.1 / 32.2 |
+| htop, 60 Hz | 36.4 / 48.9 / 51.7 | 3.2 / 9.7 / 11.7 | 0.9 / 3.9 / 6.9 | 5.6 / 14.9 / 16.7 | 0.5 / 5.2 / 9.8 | 23.9 / 32.1 / 32.3 |
+
+The GPU itself takes 0.3–0.7 ms (p50). These runs were made before t1 was
+logged ahead of the hand-off to the writer: a key whose echo was parsed
+before it was logged went unrecorded (46 of 200 at idle 60 Hz, at most 3
+elsewhere) rather than mistimed. In htop, t2 is the first output after the
+key, which can be htop's own refresh rather than its answer.
+
+From outside (key posted → pixels changed, ms; 29 and 20 keys, too few for
+a p99):
+
+| scenario | decline p50 / p95 / max | Ghostty 1.4.0 p50 / p95 / max |
+|---|---|---|
+| idle | 29.7 / 43.1 / 45.4 | 23.4 / 37.0 / 40.5 |
+| flood (second window running `yes`) | 19.5 / 28.5 / 28.5 | 9.8 / 48.3 / 48.3 |
+
+Screen Recording and Accessibility were granted only briefly, so the full
+outside comparison (200 keys, htop) is still to run:
+`scripts/latency/run.py --rates "" --external decline,ghostty`.
+
+What this shows: decline is 6–10 ms slower than Ghostty at the median, so
+the "p99 no worse than Ghostty" threshold is not met yet. Where decline's
+time goes:
+- About 23 ms from commit to `presentedTime`, nearly constant at either
+  display link rate: a frame drawn on a display link tick reaches the
+  glass about three 120 Hz refreshes later. The largest share, and the
+  first thing to try to shorten (R.6 `CAMetalDisplayLink`, presenting with
+  the Core Animation transaction, or setting the layer's contents directly).
+- The key's own redraw: typing marks the screen dirty and, with the display
+  link paused, draws at once, before the echo has arrived; the echo then
+  waits for the next tick (4–5 ms p50, up to a full tick at 60 Hz).
+- 2–8 ms (p50) from the event's timestamp to the bytes reaching the writer:
+  window-server delivery plus the text input system (`interpretKeyEvents`).
+Each change should be kept only if this harness shows lower numbers.
+
+CI: hosted macOS runners have no real display, so presented times mean
+nothing there. CI can track the part that is decline's own work, from the
+key's bytes to the encoded frame (t1 → commit): a headless test sending a
+key through `session` to `echo.py` and timing until the reader has parsed
+the echo, then `Renderer::prepare` and `encode` into an offscreen texture
+(as term-render's offscreen test does), reported like the other benches.
+Not built yet.
 
 ## Reviews
 

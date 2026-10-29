@@ -72,6 +72,9 @@ pub struct Hooks {
     /// output (see [`crate::control`]), after the output before it has been
     /// parsed. `None`, the normal case, doesn't look for them.
     pub on_control: Option<Box<dyn FnMut(String) + Send>>,
+    /// Latency harness only: called after each parse with the terminal
+    /// still locked (see [`crate::latency`]).
+    pub on_parsed: Option<Box<dyn Fn() + Send>>,
 }
 
 impl Hooks {
@@ -80,6 +83,7 @@ impl Hooks {
             wake,
             on_exit,
             on_control: None,
+            on_parsed: None,
         }
     }
 }
@@ -112,12 +116,15 @@ struct Bug;
 /// Parse `bytes` into the terminal, returning replies for the program. A
 /// panic is caught before the lock is released, and the terminal, possibly
 /// half-updated, is replaced by a fresh one of the same size.
-fn parse(term: &Mutex<Term>, bytes: &[u8]) -> Result<Vec<u8>, Bug> {
+fn parse(term: &Mutex<Term>, bytes: &[u8], on_parsed: Option<&(dyn Fn() + Send)>) -> Result<Vec<u8>, Bug> {
     let mut t = lock(term);
     let parsed = catch_unwind(AssertUnwindSafe(|| {
         test_panic(bytes);
         t.advance(bytes);
     }));
+    if let Some(f) = on_parsed {
+        f();
+    }
     match parsed {
         Ok(()) => Ok(t.state.take_replies()),
         Err(_) => {
@@ -203,6 +210,7 @@ impl Session {
             wake,
             on_exit,
             mut on_control,
+            on_parsed,
         } = hooks;
         let reader = std::thread::Builder::new().name("pty-reader".into()).spawn(move || {
             // A panic anywhere else in the loop stops the session too.
@@ -214,7 +222,7 @@ impl Session {
                     if bytes.is_empty() {
                         return Ok(());
                     }
-                    let replies = parse(&term2, bytes)?;
+                    let replies = parse(&term2, bytes, on_parsed.as_deref())?;
                     if !replies.is_empty() {
                         let _ = tx2.send(replies);
                     }

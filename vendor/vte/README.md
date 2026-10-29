@@ -2,8 +2,8 @@ vte
 ===
 
 > **Vendored copy of vte 0.15.0 for decline**, used through
-> `[patch.crates-io]` in the workspace `Cargo.toml`. Local changes, all in
-> `src/lib.rs`:
+> `[patch.crates-io]` in the workspace `Cargo.toml`. Local changes, in
+> `src/lib.rs` (tests for the string handling are in `src/string_tests.rs`):
 >
 > - `Perform::print_ascii(&[u8])`: the ground state hands each run of
 >   printable ASCII (0x20..=0x7E) over whole; C0 controls and DEL are
@@ -16,6 +16,25 @@ vte
 >   `[0xC3]`, `[0xA9, b'a', 0xFF]` lost the `a`). A C1 control completed
 >   that way is now executed, as it is when it arrives in one piece, rather
 >   than printed.
+>
+> - APC strings (`ESC _ ... ST`) have a state of their own, with
+>   `Perform::apc_start`, `apc_put(&[u8])` and `apc_end(complete)`. Data
+>   arrives in slices found with `memchr3` for ESC, CAN and SUB; `complete` is
+>   false if the string was abandoned (CAN, SUB, or ESC and anything but `\`).
+>   The ST is consumed, not reported as an `esc_dispatch`. SOS and PM are
+>   still ignored.
+> - `Perform::put_slice(&[u8])`: DCS passthrough hands over runs of data
+>   bytes whole. The default calls `put` per byte.
+> - OSC keeps its `;` separators in the raw buffer, so a parameter can be
+>   rejoined (`params[2..].join(";")`) without loss. `osc_dispatch` is
+>   unchanged: at most 16 parts, the rest of the string cut off. With a
+>   fixed-size buffer (no `std`) the separators count against its size.
+> - OSC size policy: a string passing 4 KB calls `Perform::osc_large(prefix)`
+>   once, which answers `OscLarge::Buffer(cap)` (the default, 64 KB: past the
+>   cap the string is dropped and not dispatched), `Stream` (the rest goes to
+>   `osc_put`, then `osc_end(complete)`; no `osc_dispatch`) or `Drop`. Before
+>   this the buffer was unbounded. APC and DCS data are not capped by the
+>   parser.
 >
 > Run its tests with `cargo test --manifest-path vendor/vte/Cargo.toml`.
 

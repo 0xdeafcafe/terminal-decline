@@ -28,7 +28,12 @@ if [[ ! -f "$binary" ]]; then
   exit 66
 fi
 
-app="$out_dir/Terminal Decline.app"
+# The bundle's name (the .app and CFBundleName) and the name people see
+# in menus. Set here only.
+bundle_name="Terminal Decline"
+product_name="Terminal Decline"
+
+app="$out_dir/$bundle_name.app"
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$binary" "$app/Contents/MacOS/terminal-decline"
@@ -49,9 +54,9 @@ cat > "$app/Contents/Info.plist" <<EOF
   <key>CFBundleIdentifier</key>
   <string>red.forbes.terminal-decline</string>
   <key>CFBundleName</key>
-  <string>Terminal Decline</string>
+  <string>${bundle_name}</string>
   <key>CFBundleDisplayName</key>
-  <string>Terminal Decline</string>
+  <string>${bundle_name}</string>
   <key>CFBundleExecutable</key>
   <string>terminal-decline</string>
   <key>CFBundlePackageType</key>
@@ -64,6 +69,62 @@ cat > "$app/Contents/Info.plist" <<EOF
   <string>14.0</string>
   <key>NSHighResolutionCapable</key>
   <true/>
+  <!-- Folders can be dropped on the Dock icon: each opens a window there
+       (application:openURLs:). -->
+  <key>CFBundleDocumentTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleTypeName</key>
+      <string>Folder</string>
+      <key>CFBundleTypeRole</key>
+      <string>Shell</string>
+      <key>LSHandlerRank</key>
+      <string>None</string>
+      <key>LSItemContentTypes</key>
+      <array>
+        <string>public.folder</string>
+      </array>
+    </dict>
+  </array>
+  <!-- Finder's Services menu (and the right-click menu's Services) for a
+       folder: the selectors are in crates/term-app/src/app.rs. -->
+  <key>NSServices</key>
+  <array>
+    <dict>
+      <key>NSMenuItem</key>
+      <dict>
+        <key>default</key>
+        <string>New ${product_name} Window at Folder</string>
+      </dict>
+      <key>NSMessage</key>
+      <string>newWindowAtFolder</string>
+      <key>NSPortName</key>
+      <string>${bundle_name}</string>
+      <key>NSRequiredContext</key>
+      <dict/>
+      <key>NSSendFileTypes</key>
+      <array>
+        <string>public.folder</string>
+      </array>
+    </dict>
+    <dict>
+      <key>NSMenuItem</key>
+      <dict>
+        <key>default</key>
+        <string>New ${product_name} Tab at Folder</string>
+      </dict>
+      <key>NSMessage</key>
+      <string>newTabAtFolder</string>
+      <key>NSPortName</key>
+      <string>${bundle_name}</string>
+      <key>NSRequiredContext</key>
+      <dict/>
+      <key>NSSendFileTypes</key>
+      <array>
+        <string>public.folder</string>
+      </array>
+    </dict>
+  </array>
 ${icon_entry}
 </dict>
 </plist>

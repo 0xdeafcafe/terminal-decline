@@ -19,9 +19,11 @@ any command as its own Dock app.
   that: target ≥ 2× the PTY limit.
 - **Zero UI.** The window is the terminal surface only: transparent, full-size
   content title bar with no title text, no tab bar of our own (tabs are
-  macOS's native window tabs), no settings screen, no status bar. Config is
-  a file. Menus exist only because macOS requires a menu bar (Quit, Copy,
-  Paste, New Window, New Tab); they are standard AppKit menus.
+  macOS's native window tabs), no settings window, no status bar. Config is
+  a file; Settings… (Cmd+,) is a program the app's own binary runs in a
+  terminal tab, editing that file (`docs/design/preferences.md`). Menus
+  exist only because macOS requires a menu bar (Quit, Copy, Paste, New
+  Window, New Tab); they are standard AppKit menus.
 - **Dock pins.** `terminal-decline pin` turns any command into its own macOS app.
 
 ## Modules (Cargo workspace)
@@ -144,8 +146,9 @@ a fresh one saying "Terminal Decline hit a bug and stopped this session; details
 …", its program is killed, and other windows keep running. A panic on the
 main thread (AppKit) aborts once it has been logged. Each release keeps
 its `terminal-decline.dSYM` (`split-debuginfo = "packed"`) as a release download,
-for symbolicating crash logs. Unwinding costs 157 KB of binary (unwind
-tables and landing pads: 1.34 → 1.50 MB) and no measurable parse speed.
+for symbolicating crash logs. Unwinding costs binary size (unwind tables
+and landing pads: 157 KB when it was added, 1.34 → 1.50 MB; 261 KB on 29
+Oct 2026, 1.90 → 2.16 MB) and no measurable parse speed.
 
 ## Rendering (Metal)
 
@@ -250,6 +253,11 @@ tables and landing pads: 1.34 → 1.50 MB) and no measurable parse speed.
   a line at a time, and while it is shown term-core holds, and the
   renderer draws, the run of text between its corners rather than the
   rectangle itself.
+- Right-click, or Control-click, opens a menu (Copy, Paste, Select All,
+  Clear Scrollback; Copy only with a selection, Paste only with text on
+  the clipboard) while the program isn't taking the mouse
+  (`mouse::opens_menu`); with mouse reporting on, the click goes to the
+  program as before, and Shift still overrides.
 
 ## Windows and tabs
 
@@ -295,6 +303,44 @@ bundle path from startup: if the bundle is gone rather than replaced (the
 build from before the rename to Terminal Decline, removed by the dogfood
 script), it restarts into `Terminal Decline.app` in the same folder
 (`reload::relaunch_target`).
+
+## Files, folders and Services
+
+What the app does with files and folders from the rest of macOS
+(`desktop`, used by `view` and `app`):
+
+- Files or folders dragged onto a window are typed into it as a paste
+  (bracketed when the program asked for bracketed paste): each path quoted
+  for the shell the way Terminal.app does it (`My\ File.txt`; a name with
+  a control character, which a paste would drop, as `$'…'`), separated by
+  spaces. Finder's file reference URLs are resolved to paths. A dragged
+  URL or text is typed as it is.
+- A folder dropped on the Dock icon, or `open -a "Terminal Decline" DIR`
+  (`application:openURLs:`; the bundle declares `public.folder` in
+  `CFBundleDocumentTypes`): a new window whose shell starts there; a file
+  opens in its folder. It is a tab of the window in front when macOS's
+  "Prefer tabs when opening documents" says so (Always, or In Full Screen
+  while that window is full screen; `NSWindow.userTabbingPreference`). An
+  app not yet running opens those windows instead of its first one.
+- Services (`NSServices` in the Info.plist that `scripts/bundle.sh`
+  writes): "New Terminal Decline Window at Folder" and "New Terminal
+  Decline Tab at Folder", for folders in Finder (its right-click menu's
+  Services, or Finder > Services). The app delegate is the services
+  provider (`newWindowAtFolder:userData:error:`,
+  `newTabAtFolder:userData:error:`); the tab one falls back to a window
+  when none is open. The app menu has the standard Services submenu.
+  `scripts/dogfood.sh` runs `pbs -update` so a new build's items show.
+- `confirm_close = true` (off by default): closing a window or tab while a
+  program other than the shell runs in its foreground asks first, in a
+  sheet ("vim is still running in it"), and quitting asks once for all of
+  them. "Running" is read from the shell's `proc_bsdinfo`: the terminal's
+  foreground process group (`e_tpgid`) isn't the shell's own (`running`).
+  A window started with `-e PROGRAM` counts only while that program runs
+  another in the foreground. A dogfood restart and the test-only `quit`
+  never ask.
+
+The product's name in these strings is `PRODUCT_NAME` in the code and
+`product_name` in `scripts/bundle.sh`.
 
 ## Notifications and progress
 
@@ -461,6 +507,8 @@ contents, so only a real change reloads. A reload reads every layer again
   `scrollback` (term-core has no way to change a running terminal's
   limit; once it does, the new limit can apply from the next line).
 
+`confirm_close` (see Files, folders and Services) applies at once.
+
 Errors in the edited file are notices in every window, written after the
 program's output, as at startup; new windows show the errors of the
 config in effect.
@@ -523,7 +571,7 @@ stay.
 | `cat` 100 MB coloured text | 1.44–1.53 s | 1.90 s |
 | CPU time during that `cat` | 1.6 s | 4.4 s |
 | Footprint after it (10k lines scrollback) | 59 MB | 145–177 MB |
-| Binary size | 1.5 MB (unwinding; 1.3 MB aborting) | — |
+| Binary size | 2.16 MB (unwinding; 1.90 MB aborting; 29 Oct 2026) | — |
 | Parse, plain text (1 KB pieces) | 423 MB/s | — |
 | Parse, coloured / TUI / `seq` / Unicode | 172 / 289 / 110 / 131 MB/s | — |
 

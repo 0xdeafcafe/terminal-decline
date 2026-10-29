@@ -72,6 +72,9 @@ if [[ -d "$old_app" ]]; then
   echo "removed $old_app"
 fi
 
+# Read the Services menu items (Info.plist NSServices) again.
+/System/Library/CoreServices/pbs -update || true
+
 if [[ $open_after == 1 ]] && ! pgrep -f "$dest/Contents/MacOS/terminal-decline" >/dev/null; then
   if [[ -n "$restore" ]]; then
     open "$dest" --args --restore "$restore"

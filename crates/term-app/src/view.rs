@@ -16,12 +16,14 @@ use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, ProtocolObject, Sel};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSApplication, NSCursor, NSEvent, NSEventModifierFlags, NSPasteboard, NSPasteboardTypeString, NSResponder, NSTextInputClient, NSView,
-    NSWindow, NSWindowDelegate,
+    NSAlert, NSAlertFirstButtonReturn, NSApplication, NSCursor, NSDragOperation, NSDraggingInfo, NSEvent, NSEventModifierFlags, NSMenu,
+    NSMenuItem, NSModalResponse, NSPasteboard, NSPasteboardTypeFileURL, NSPasteboardTypeString, NSPasteboardTypeURL, NSResponder,
+    NSTextInputClient, NSView, NSWindow, NSWindowDelegate,
 };
 use objc2_foundation::{
     NSArray, NSAttributedString, NSAttributedStringKey, NSKeyValueObservingOptions, NSNotFound, NSNotification,
     NSObjectNSKeyValueObserverRegistration, NSObjectProtocol, NSPoint, NSRange, NSRect, NSRunLoop, NSRunLoopCommonModes, NSSize, NSString,
+    NSURL,
 };
 use objc2_metal::{MTLCommandBuffer, MTLDrawable};
 use objc2_quartz_core::{CADisplayLink, CALayer, CAMetalDrawable, CAMetalLayer};
@@ -328,8 +330,24 @@ define_class!(
         fn paste(&self, _sender: Option<&AnyObject>) {
             let pb = NSPasteboard::generalPasteboard();
             let Some(text) = pb.stringForType(unsafe { NSPasteboardTypeString }) else { return };
-            let bracketed = self.with_state(|st| st.session.lock_term().state.modes().bracketed_paste).unwrap_or(false);
-            self.send_input(paste_bytes(&text.to_string(), bracketed));
+            self.paste_text(&text.to_string());
+        }
+
+        /// Files, URLs or text dragged onto the window are typed in: see
+        /// `performDragOperation:`.
+        #[unsafe(method(draggingEntered:))]
+        fn dragging_entered(&self, _info: &ProtocolObject<dyn NSDraggingInfo>) -> NSDragOperation {
+            NSDragOperation::Copy
+        }
+
+        #[unsafe(method(draggingUpdated:))]
+        fn dragging_updated(&self, _info: &ProtocolObject<dyn NSDraggingInfo>) -> NSDragOperation {
+            NSDragOperation::Copy
+        }
+
+        #[unsafe(method(performDragOperation:))]
+        fn perform_drag_operation(&self, info: &ProtocolObject<dyn NSDraggingInfo>) -> bool {
+            self.drop_from(&info.draggingPasteboard())
         }
 
         #[unsafe(method(selectAll:))]
@@ -393,6 +411,19 @@ define_class!(
         fn window_did_change_occlusion(&self, _n: &NSNotification) {
             if self.sync_visibility() {
                 self.request_redraw();
+            }
+        }
+
+        /// With `confirm_close`, ask first while a program runs.
+        #[unsafe(method(windowShouldClose:))]
+        fn window_should_close(&self, window: &NSWindow) -> bool {
+            let ask = self.with_state(|st| st.config.confirm_close).unwrap_or(false);
+            match self.running_program().filter(|_| ask) {
+                Some(program) => {
+                    self.ask_to_close(window, &program);
+                    false
+                }
+                None => true,
             }
         }
 
@@ -500,6 +531,20 @@ fn string_of(obj: &AnyObject) -> String {
     obj.downcast_ref::<NSString>().map(|s| s.to_string()).unwrap_or_default()
 }
 
+/// The files and folders on `pb`, as paths (Finder's file reference URLs
+/// resolved).
+pub(crate) fn file_paths(pb: &NSPasteboard) -> Vec<String> {
+    let Some(items) = pb.pasteboardItems() else { return Vec::new() };
+    items
+        .iter()
+        .filter_map(|item| item.stringForType(unsafe { NSPasteboardTypeFileURL }))
+        .filter_map(|url| NSURL::URLWithString(&url))
+        .filter(|url| url.isFileURL())
+        .filter_map(|url| url.filePathURL().and_then(|u| u.path()))
+        .map(|p| p.to_string())
+        .collect()
+}
+
 pub struct Launch {
     pub command: Command,
     pub fonts: Fonts,
@@ -523,6 +568,8 @@ impl TerminalView {
         });
         let view: Retained<TerminalView> = unsafe { msg_send![super(this), initWithFrame: frame] };
         view.setWantsLayer(true);
+        let types = unsafe { [NSPasteboardTypeFileURL, NSPasteboardTypeURL, NSPasteboardTypeString] };
+        view.registerForDraggedTypes(&NSArray::from_slice(&types));
         VIEWS.with(|v| v.borrow_mut().insert(id, Weak::from_retained(&view)));
         view
     }
@@ -1154,6 +1201,92 @@ impl TerminalView {
         self.with_state(|st| st.session.send(bytes));
     }
 
+    /// Type `text` as a paste: bracketed when the program asked for it.
+    fn paste_text(&self, text: &str) {
+        let bracketed = self
+            .with_state(|st| st.session.lock_term().state.modes().bracketed_paste)
+            .unwrap_or(false);
+        self.send_input(paste_bytes(text, bracketed));
+    }
+
+    /// Something dropped on the window: files and folders as their paths,
+    /// quoted for the shell and separated by spaces; else a URL or text as
+    /// it is.
+    fn drop_from(&self, pb: &NSPasteboard) -> bool {
+        let paths = file_paths(pb);
+        let text = if !paths.is_empty() {
+            crate::desktop::dropped_text(&paths)
+        } else {
+            let text = unsafe { pb.stringForType(NSPasteboardTypeURL) }.or_else(|| unsafe { pb.stringForType(NSPasteboardTypeString) });
+            match text {
+                Some(t) => t.to_string(),
+                None => return false,
+            }
+        };
+        self.paste_text(&text);
+        true
+    }
+
+    /// The program running in the foreground, if it isn't the shell (see
+    /// [`crate::running`]).
+    pub fn running_program(&self) -> Option<String> {
+        let pid = self.with_state(|st| st.session.pid()).flatten()?;
+        crate::running::foreground_program(pid)
+    }
+
+    /// Ask, in a sheet on `window`, whether to close it while `program`
+    /// runs; close it if so.
+    fn ask_to_close(&self, window: &NSWindow, program: &str) {
+        if window.attachedSheet().is_some() {
+            return;
+        }
+        let mtm = MainThreadMarker::from(self);
+        let (title, text) = crate::running::close_question(program);
+        let alert = NSAlert::new(mtm);
+        alert.setMessageText(&NSString::from_str(&title));
+        alert.setInformativeText(&NSString::from_str(&text));
+        alert.addButtonWithTitle(&NSString::from_str("Close"));
+        alert.addButtonWithTitle(&NSString::from_str("Cancel"));
+        let id = self.ivars().id;
+        let done = RcBlock::new(move |response: NSModalResponse| {
+            if response == NSAlertFirstButtonReturn {
+                with_view(id, |v| v.close_window());
+            }
+        });
+        alert.beginSheetModalForWindow_completionHandler(window, Some(&done));
+    }
+
+    /// The right-click (or Control-click) menu: Copy, Paste, Select All and
+    /// Clear Scrollback, for when the program isn't taking the mouse.
+    fn show_context_menu(&self, event: &NSEvent) {
+        let mtm = MainThreadMarker::from(self);
+        let has_selection = self
+            .with_state(|st| st.session.lock_term().state.selection_text().is_some_and(|t| !t.is_empty()))
+            .unwrap_or(false);
+        let can_paste = unsafe { NSPasteboard::generalPasteboard().stringForType(NSPasteboardTypeString) }.is_some();
+        let menu = NSMenu::new(mtm);
+        menu.setAutoenablesItems(false);
+        let add = |title: &str, action: Sel, enabled: bool| {
+            let item = unsafe {
+                NSMenuItem::initWithTitle_action_keyEquivalent(
+                    NSMenuItem::alloc(mtm),
+                    &NSString::from_str(title),
+                    Some(action),
+                    &NSString::new(),
+                )
+            };
+            unsafe { item.setTarget(Some(self)) };
+            item.setEnabled(enabled);
+            menu.addItem(&item);
+        };
+        add("Copy", sel!(copy:), has_selection);
+        add("Paste", sel!(paste:), can_paste);
+        add("Select All", sel!(selectAll:), true);
+        menu.addItem(&NSMenuItem::separatorItem(mtm));
+        add("Clear Scrollback", sel!(clearBuffer:), true);
+        NSMenu::popUpContextMenu_withEvent_forView(&menu, event, self);
+    }
+
     fn handle_key(&self, event: &NSEvent) {
         if latency::get().is_some() {
             let times = (event.timestamp(), latency::now());
@@ -1313,6 +1446,10 @@ impl TerminalView {
         if let Some((_, sgr)) = self.reporting(event) {
             self.with_state(|st| st.mouse_button = press.then_some(button));
             self.send_mouse(button + Self::mods_of(event), line, col, press, sgr);
+            return;
+        }
+        if press && mouse::opens_menu(false, button, event.modifierFlags().contains(NSEventModifierFlags::Control)) {
+            self.show_context_menu(event);
             return;
         }
         if button != mouse::LEFT || !press {
@@ -1682,8 +1819,14 @@ impl TerminalView {
                     }
                 }
                 Some(Control::Front) => bring_to_front(self.ivars().id),
+                Some(Control::Drop(paths)) => self.paste_text(&crate::desktop::dropped_text(&paths)),
+                Some(Control::Close) => {
+                    if let Some(window) = self.window() {
+                        window.performClose(None);
+                    }
+                }
                 Some(Control::Quit) => {
-                    objc2_app_kit::NSApplication::sharedApplication(MainThreadMarker::from(self)).terminate(None);
+                    crate::app::quit_now();
                     return;
                 }
             }
@@ -1727,6 +1870,7 @@ impl TerminalView {
                         .and_then(|(t, me)| t.iter().position(|w| std::ptr::eq::<NSWindow>(&*w, &*me)))
                         .unwrap_or(0),
                     visible: self.visible(),
+                    sheet: self.window().is_some_and(|w| w.attachedSheet().is_some()),
                     top_inset: self.titlebar_height(),
                     badge: objc2_app_kit::NSApplication::sharedApplication(MainThreadMarker::from(self))
                         .dockTile()
@@ -1748,6 +1892,7 @@ struct Window {
     tabs: usize,
     tab: usize,
     visible: bool,
+    sheet: bool,
     top_inset: f64,
     badge: Option<String>,
     active: bool,
@@ -1772,6 +1917,7 @@ fn write_dump(st: &mut State, window: Window) {
         tabs: window.tabs,
         tab: window.tab,
         visible: window.visible,
+        sheet: window.sheet,
         hidden: st.hidden,
         pad_top,
         notifications: crate::notify::stats(),

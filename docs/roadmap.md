@@ -43,6 +43,7 @@ set, not only perf work: shaping, images and the updater each cost something.
 | N.7 | Crash handling: panic hook → `~/Library/Logs/terminal-decline/` + os_log; dSYMs kept per release; release builds unwind (not abort) so a crash in one pane's parser shows an error in that pane and other windows keep running | me | M |
 | N.8 | CI cost while private: macOS nightlies only when `main` changed since last run | me | S |
 | N.9 | Pre-beta tags as `0.0.x`; `CFBundleVersion` an integer build number (nightlies too) | me | S |
+| N.10 | Rename to Terminal Decline everywhere (app, bundle id, command with `decline` alias, config dir with migration, pins, cask; was E.17), before signed builds go out, P.1/P.2 and Sparkle; steps in order in docs/design/preferences.md | agent | S |
 
 ## F — Formats (the foundation)
 
@@ -83,7 +84,7 @@ set, not only perf work: shaping, images and the updater each cost something.
 | E.11 | Secure Keyboard Entry (menu) | S |
 | E.13 | vttest (named menus) and esctest2 (checked-in list of accepted failures) | M |
 | E.14 | Small bugs: VS16 with autowrap off; CSI M on the top row | S |
-| E.18 | Preferences: Cmd+, opens a tab running the built-in settings TUI (sectioned list, live preview, keeps comments in config.toml); design in docs/design/preferences.md | M |
+| E.18 | Preferences: Cmd+, opens a tab running the built-in settings TUI (hand-rolled, its own process; sectioned list, live preview, keeps comments in config.toml), with the change to the reload's notices and chord recording through the app; the Pins section after P.2; design in docs/design/preferences.md | M |
 | E.16 | Release: make repo + tap public, **then** tag `0.1.0`; changelog (git-cliff); cask caveats + `zap`; smoke on macOS 14 | S |
 
 ## B — Betas to 1.0 (0.x releases)

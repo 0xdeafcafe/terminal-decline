@@ -9,7 +9,11 @@
 //! - `font +1` / `font -1`: change the font size by one point;
 //! - `tab`: open a new tab beside this window, running the same program;
 //! - `front`: bring this window or tab to the front;
-//! - `quit`: quit the app.
+//! - `drop PATH[<tab>PATH…]`: as if those files were dragged onto the
+//!   window (paths separated by tabs, so they may hold spaces);
+//! - `close`: close the window as Cmd+W does (asking first with
+//!   `confirm_close`);
+//! - `quit`: quit the app, without asking.
 //!
 //! While this is on, the window draws even when covered by other windows,
 //! so a dump never waits for a frame that is never drawn.
@@ -110,17 +114,26 @@ pub enum Control {
     Tab,
     /// Bring this window or tab to the front (as a notification click does).
     Front,
+    /// Files dropped on the window.
+    Drop(Vec<String>),
+    /// Shell > Close.
+    Close,
     Quit,
 }
 
 impl Control {
     pub fn parse(s: &str) -> Option<Control> {
+        if let Some(paths) = s.trim_start().strip_prefix("drop ") {
+            let paths: Vec<String> = paths.split('\t').filter(|p| !p.is_empty()).map(str::to_owned).collect();
+            return (!paths.is_empty()).then_some(Control::Drop(paths));
+        }
         let mut words = s.split_whitespace();
         let c = match words.next()? {
             "dump" => Control::Dump,
             "quit" => Control::Quit,
             "tab" => Control::Tab,
             "front" => Control::Front,
+            "close" => Control::Close,
             "resize" => Control::Resize {
                 cols: words.next()?.parse().ok().filter(|&c| c > 0)?,
                 lines: words.next()?.parse().ok().filter(|&l| l > 0)?,
@@ -152,6 +165,8 @@ pub struct Dump {
     pub pad_top: u32,
     /// Notifications so far, for the whole app (see [`crate::notify`]).
     pub notifications: crate::notify::Stats,
+    /// Whether a sheet (the question `confirm_close` asks) is showing.
+    pub sheet: bool,
     /// The Dock icon's badge (progress).
     pub badge: Option<String>,
     /// Whether the app is active, and whether it holds Secure Keyboard
@@ -269,6 +284,11 @@ mod tests {
             ("tab", Some(Control::Tab)),
             ("tab 2", None),
             ("front", Some(Control::Front)),
+            ("close", Some(Control::Close)),
+            ("drop /a b\t/c", Some(Control::Drop(vec!["/a b".into(), "/c".into()]))),
+            ("drop /x", Some(Control::Drop(vec!["/x".into()]))),
+            ("drop ", None),
+            ("drop", None),
             ("dump now", None),
             ("rm -rf", None),
             ("", None),

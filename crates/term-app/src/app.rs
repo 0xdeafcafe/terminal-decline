@@ -1,21 +1,23 @@
 //! Application: delegate, menus, and opening windows.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject, Sel};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSAutoresizingMaskOptions, NSBackingStoreType, NSColor,
-    NSEventModifierFlags, NSMenu, NSMenuItem, NSScreen, NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState,
-    NSVisualEffectView, NSWindow, NSWindowOrderingMode, NSWindowStyleMask, NSWindowTabbingMode, NSWindowTitleVisibility,
+    NSAlert, NSAlertFirstButtonReturn, NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSApplicationTerminateReply,
+    NSAutoresizingMaskOptions, NSBackingStoreType, NSColor, NSEventModifierFlags, NSMenu, NSMenuItem, NSPasteboard, NSScreen,
+    NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView, NSWindow, NSWindowOrderingMode,
+    NSWindowStyleMask, NSWindowTabbingMode, NSWindowTitleVisibility, NSWindowUserTabbingPreference,
 };
-use objc2_foundation::{NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSString};
+use objc2_foundation::{NSArray, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSString, NSURL};
 use term_font::Fonts;
 use term_pty::Command;
 
 use crate::config::Config;
+use crate::desktop::{self, FrontWindow, Open, TabPreference};
 use crate::keybind::{Keybinds, MenuAction};
 use crate::reload::SavedWindow;
 use crate::secure_input::{self, SecureInput};
@@ -54,6 +56,15 @@ pub struct AppIvars {
     windows: RefCell<Vec<(Retained<NSWindow>, Retained<TerminalView>)>>,
     /// Secure Keyboard Entry (Terminal Decline menu).
     secure: RefCell<SecureInput>,
+    /// Whether `applicationDidFinishLaunching:` has run.
+    launched: Cell<bool>,
+    /// Folders opened with the app before it finished launching (a folder
+    /// dropped on the Dock icon of an app not running): their windows open
+    /// instead of the first window.
+    opened_at_launch: RefCell<Vec<String>>,
+    /// Quit without asking, even with `confirm_close` (a restart into a
+    /// new build, or the test-only `quit`).
+    quit_without_asking: Cell<bool>,
 }
 
 define_class!(
@@ -69,10 +80,17 @@ define_class!(
         #[unsafe(method(applicationDidFinishLaunching:))]
         fn did_finish_launching(&self, _n: &NSNotification) {
             let restore = std::mem::take(&mut *self.ivars().restore.borrow_mut());
-            if restore.is_empty() {
+            let folders = std::mem::take(&mut *self.ivars().opened_at_launch.borrow_mut());
+            self.ivars().launched.set(true);
+            if restore.is_empty() && folders.is_empty() {
                 self.open_window(None, Place::Cascade, None);
             }
             self.restore(restore);
+            for dir in folders {
+                self.open_folder(dir, None);
+            }
+            let mtm = MainThreadMarker::from(self);
+            unsafe { NSApplication::sharedApplication(mtm).setServicesProvider(Some(self)) };
             self.watch_for_new_build();
             self.watch_config();
             crate::latency::listen(|cmd| {
@@ -81,7 +99,6 @@ define_class!(
                     delegate.latency_command(cmd);
                 }
             });
-            let mtm = MainThreadMarker::from(self);
             #[allow(deprecated)]
             NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
         }
@@ -93,6 +110,45 @@ define_class!(
                 self.open_window(None, Place::Cascade, None);
             }
             true
+        }
+
+        /// Folders (or files, which open in their folder) dropped on the
+        /// Dock icon or opened with `open -a`: a window there, or a tab when
+        /// macOS prefers tabs.
+        #[unsafe(method(application:openURLs:))]
+        fn open_urls(&self, _app: &NSApplication, urls: &NSArray<NSURL>) {
+            for dir in folders_of(urls.iter().filter_map(|u| u.path()).map(|p| p.to_string())) {
+                if self.ivars().launched.get() {
+                    self.open_folder(dir, None);
+                } else {
+                    self.ivars().opened_at_launch.borrow_mut().push(dir);
+                }
+            }
+        }
+
+        /// With `confirm_close`, ask before quitting while programs run.
+        #[unsafe(method(applicationShouldTerminate:))]
+        fn should_terminate(&self, _app: &NSApplication) -> NSApplicationTerminateReply {
+            if self.ivars().quit_without_asking.get() || !self.ivars().config.borrow().confirm_close {
+                return NSApplicationTerminateReply::TerminateNow;
+            }
+            let views: Vec<_> = self.ivars().windows.borrow().iter().map(|(_, v)| v.clone()).collect();
+            let programs: Vec<String> = views.iter().filter_map(|v| v.running_program()).collect();
+            if programs.is_empty() {
+                return NSApplicationTerminateReply::TerminateNow;
+            }
+            let mtm = MainThreadMarker::from(self);
+            let (title, text) = crate::running::quit_question(&self.ivars().app_name, &programs);
+            let alert = NSAlert::new(mtm);
+            alert.setMessageText(&NSString::from_str(&title));
+            alert.setInformativeText(&NSString::from_str(&text));
+            alert.addButtonWithTitle(&NSString::from_str("Quit"));
+            alert.addButtonWithTitle(&NSString::from_str("Cancel"));
+            if alert.runModal() == NSAlertFirstButtonReturn {
+                NSApplicationTerminateReply::TerminateNow
+            } else {
+                NSApplicationTerminateReply::TerminateCancel
+            }
         }
 
         #[unsafe(method(applicationShouldTerminateAfterLastWindowClosed:))]
@@ -122,6 +178,23 @@ define_class!(
             // Open in the same directory as the window in front.
             let cwd = self.key_view().and_then(|v| v.foreground_cwd());
             self.open_window(cwd, Place::Cascade, None);
+        }
+
+        /// Services > New Terminal Decline Window at Folder (NSServices in
+        /// the bundle's Info.plist).
+        #[unsafe(method(newWindowAtFolder:userData:error:))]
+        fn new_window_at_folder(&self, pb: &NSPasteboard, _data: Option<&NSString>, _error: *mut *mut NSString) {
+            for dir in folders_of(crate::view::file_paths(pb)) {
+                self.open_folder(dir, Some(Open::Window));
+            }
+        }
+
+        /// Services > New Terminal Decline Tab at Folder.
+        #[unsafe(method(newTabAtFolder:userData:error:))]
+        fn new_tab_at_folder(&self, pb: &NSPasteboard, _data: Option<&NSString>, _error: *mut *mut NSString) {
+            for dir in folders_of(crate::view::file_paths(pb)) {
+                self.open_folder(dir, Some(Open::Tab));
+            }
         }
 
         /// Shell > New Tab: a tab of the window in front, in its directory.
@@ -198,6 +271,9 @@ impl AppDelegate {
             watcher: RefCell::new(None),
             app_name: app_name.into(),
             restore: RefCell::new(restore),
+            launched: Cell::new(false),
+            opened_at_launch: RefCell::new(Vec::new()),
+            quit_without_asking: Cell::new(false),
             notices: RefCell::new(notices.into()),
             fonts_checked: std::cell::Cell::new(false),
             windows: RefCell::new(Vec::new()),
@@ -293,8 +369,51 @@ impl AppDelegate {
             eprintln!("terminal-decline: couldn't start the new build: {e}");
             return;
         }
+        self.quit_without_asking();
+    }
+
+    /// Quit, without asking whatever `confirm_close` says.
+    fn quit_without_asking(&self) {
+        self.ivars().quit_without_asking.set(true);
         let mtm = MainThreadMarker::from(self);
         NSApplication::sharedApplication(mtm).terminate(None);
+    }
+
+    /// A window in `dir`, or a tab of the window in front: as `how` says,
+    /// else as macOS's tab preference says. The app comes to the front, as
+    /// it does for any document opened.
+    fn open_folder(&self, dir: String, how: Option<Open>) {
+        let mtm = MainThreadMarker::from(self);
+        let front = self.front_window();
+        let how = how.unwrap_or_else(|| {
+            let pref = match NSWindow::userTabbingPreference(mtm) {
+                NSWindowUserTabbingPreference::Always => TabPreference::Always,
+                NSWindowUserTabbingPreference::Manual => TabPreference::Manual,
+                _ => TabPreference::InFullScreen,
+            };
+            let front = front.as_ref().map(|w| FrontWindow {
+                full_screen: w.styleMask().contains(NSWindowStyleMask::FullScreen),
+            });
+            desktop::open_folder_as(pref, front)
+        });
+        let place = match (how, front) {
+            (Open::Tab, Some(window)) => Place::TabOf(window),
+            _ => Place::Cascade,
+        };
+        self.open_window(Some(dir), place, None);
+        NSApplication::sharedApplication(mtm).activate();
+    }
+
+    /// The key window if it is ours, else the frontmost of ours (an
+    /// inactive app has no key window).
+    fn front_window(&self) -> Option<Retained<NSWindow>> {
+        let mtm = MainThreadMarker::from(self);
+        self.key_window().or_else(|| {
+            NSApplication::sharedApplication(mtm)
+                .orderedWindows()
+                .iter()
+                .find(|w| self.view_of(w).is_some())
+        })
     }
 
     /// Each window to reopen after a restart, tabs in order with their
@@ -591,6 +710,29 @@ pub(crate) fn secure_input_held() -> bool {
     delegate.is_some_and(|d| d.ivars().secure.borrow().held())
 }
 
+/// Quit without asking (the test-only `quit` control command).
+pub(crate) fn quit_now() {
+    let delegate = DELEGATE.with(|d| d.borrow().as_ref().and_then(|w| w.load()));
+    if let Some(delegate) = delegate {
+        delegate.quit_without_asking();
+    }
+}
+
+/// The folders to open for `paths` (files open in their folder), each
+/// once, in order.
+fn folders_of(paths: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut folders: Vec<String> = Vec::new();
+    for p in paths {
+        if let Some(dir) = desktop::folder_for(std::path::Path::new(&p)) {
+            let dir = dir.to_string_lossy().into_owned();
+            if !folders.contains(&dir) {
+                folders.push(dir);
+            }
+        }
+    }
+    folders
+}
+
 /// A new tab beside `window` (the test-only `tab` control command).
 pub(crate) fn open_tab_beside(window: &NSWindow) {
     let delegate = DELEGATE.with(|d| d.borrow().as_ref().and_then(|w| w.load()));
@@ -661,6 +803,15 @@ fn fixed(mtm: MainThreadMarker, title: &str, action: Sel, chord: &str, binds: &K
     it
 }
 
+/// The standard Services submenu, which macOS fills.
+fn services_item(mtm: MainThreadMarker) -> Retained<NSMenuItem> {
+    let menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("Services"));
+    let holder = item(mtm, "Services", None, "");
+    holder.setSubmenu(Some(&menu));
+    NSApplication::sharedApplication(mtm).setServicesMenu(Some(&menu));
+    holder
+}
+
 /// The menu bar. macOS needs one; these are the standard items plus the
 /// terminal's few shortcuts, with the keys `binds` gives them.
 pub fn build_menus(mtm: MainThreadMarker, app_name: &str, binds: &Keybinds) -> Retained<NSMenu> {
@@ -673,6 +824,8 @@ pub fn build_menus(mtm: MainThreadMarker, app_name: &str, binds: &Keybinds) -> R
         app_name,
         &[
             item(mtm, "Secure Keyboard Entry", Some(sel!(toggleSecureKeyboardEntry:)), ""),
+            NSMenuItem::separatorItem(mtm),
+            services_item(mtm),
             NSMenuItem::separatorItem(mtm),
             f(&format!("Hide {app_name}"), sel!(hide:), "cmd+h"),
             f("Hide Others", sel!(hideOtherApplications:), "alt+cmd+h"),

@@ -10,6 +10,7 @@ mod ascii_layout;
 pub mod config;
 pub mod control;
 pub mod crash;
+pub mod desktop;
 pub mod frame_policy;
 pub mod import;
 pub mod keybind;
@@ -21,6 +22,7 @@ pub mod notify;
 pub mod paths;
 pub mod pin;
 pub mod reload;
+pub mod running;
 pub mod secure_input;
 pub mod select;
 pub mod session;
@@ -31,6 +33,11 @@ mod view;
 pub mod watch;
 
 pub use paths::Paths;
+
+/// The product's name as people see it, in menus, Services and questions.
+/// The one place it is spelled in the code; the bundle's own name is set
+/// in `scripts/bundle.sh`.
+pub const PRODUCT_NAME: &str = "Terminal Decline";
 
 /// The app's bundle id, also its defaults domain and os_log subsystem.
 pub const BUNDLE_ID: &str = "red.forbes.terminal-decline";

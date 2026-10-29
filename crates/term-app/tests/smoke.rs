@@ -601,7 +601,8 @@ fn smoke_config_errors_show_in_the_window() {
     assert_eq!(d.len(), 1, "{d:?}");
     let s = screen(&d[0]);
     assert!(s.starts_with("terminal-decline: config: font_sise: unknown field"), "{s}");
-    assert!(s.contains("ignored|\nprogram output|"), "{s}");
+    // Joined where the long notice wrapped (⏎).
+    assert!(s.replace("⏎\n", "").contains("; ignored|\nprogram output|"), "{s}");
 }
 
 /// The first run after the rename moves `~/.config/decline` to
@@ -855,4 +856,129 @@ fn smoke_config_reloads_when_edited() {
         "a good edit shows nothing: {}",
         screen(&d[recoloured])
     );
+}
+
+/// Files dropped on the window are typed in as a paste: each path quoted
+/// for the shell, separated by spaces, bracketed while the program asks
+/// for bracketed paste. (The test-only `drop` command goes the same way as
+/// a drag from Finder once the paths are off the pasteboard.)
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_dropped_files_are_typed_as_a_paste() {
+    if !have_metal() {
+        return;
+    }
+    let dir = TempDir::new("drop");
+    let d = dir.path().display();
+    let first = ["/tmp/My Files/a (1).txt", "/tmp/$HOME & co"];
+    let second = ["/Users/me/it is ~here"];
+    let bracketed = format!("\x1b[200~{}\x1b[201~", terminal_decline::desktop::dropped_text(&first));
+    let plain = terminal_decline::desktop::dropped_text(&second);
+    let script = format!(
+        "printf '\\033[?2004h'; stty -icanon -echo min 1 time 0; {drop1}\
+         dd bs=1 count={n1} of='{d}/got1' 2>/dev/null; \
+         printf '\\033[?2004l'; {drop2}\
+         dd bs=1 count={n2} of='{d}/got2' 2>/dev/null; {quit}sleep 20",
+        drop1 = osc(&format!("drop {}", first.join("\\t"))),
+        drop2 = osc(&format!("drop {}", second.join("\\t"))),
+        n1 = bracketed.len(),
+        n2 = plain.len(),
+        quit = osc("quit"),
+    );
+    let (status, _) = decline(&dir, &script, true);
+    assert!(status.success(), "{status}");
+    let got = |name: &str| std::fs::read_to_string(dir.path().join(name)).unwrap_or_default();
+    assert_eq!(got("got1"), bracketed);
+    assert_eq!(
+        got("got1"),
+        "\x1b[200~/tmp/My\\ Files/a\\ \\(1\\).txt /tmp/\\$HOME\\ \\&\\ co\x1b[201~"
+    );
+    assert_eq!(got("got2"), plain);
+    assert_eq!(plain, "/Users/me/it\\ is\\ \\~here");
+}
+
+/// A folder opened with the app (`open -a`, as a folder dropped on its
+/// Dock icon is): an app that isn't running starts with a window there
+/// and no other, and a running one opens another window (or a tab, as the
+/// macOS tab setting says) in the next folder.
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_folders_opened_with_the_app() {
+    if !have_metal() {
+        return;
+    }
+    let dir = TempDir::new("open-folder");
+    let sub = |name: &str| {
+        let p = dir.path().join(name);
+        std::fs::create_dir_all(&p).unwrap();
+        p.display().to_string()
+    };
+    let (a, b) = (sub("dir-a"), sub("dir b"));
+    let name = format!("Terminal Decline Open {}", std::process::id());
+    let app_path = dir.path().join("Applications").join(format!("{name}.app"));
+    let d = dir.path().display();
+    let two_dumped = format!("[ \"$(wc -l < '{}')\" -ge 2 ]", dir.dump_file().display());
+    let script = format!(
+        "echo \"in $(basename \"$PWD\")\"; {dump}\
+         if mkdir '{d}/first' 2>/dev/null; then \
+           /usr/bin/open -a '{app}' '{b}'; \
+           i=0; while ! {two_dumped} && [ $i -lt 200 ]; do sleep 0.05; i=$((i+1)); done; {quit}\
+         fi; sleep 20",
+        dump = osc("dump"),
+        quit = osc("quit"),
+        app = app_path.display(),
+    );
+    let app = temp_bundle(&dir, &name, &script);
+    assert_eq!(app, app_path);
+    let mut open = Command::new("/usr/bin/open");
+    open.args(["-n", "-W", "--env"])
+        .arg(format!("DECLINE_TEST_DUMP={}", dir.dump_file().display()))
+        .arg("--env")
+        .arg(format!("XDG_CONFIG_HOME={}", dir.config_home().display()))
+        .arg("--stderr")
+        .arg(dir.path().join("stderr.txt"))
+        .arg("-a")
+        .arg(&app)
+        .arg(&a);
+    let (status, _) = run(&mut open);
+    let lsregister = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister";
+    let _ = Command::new(lsregister).arg("-u").arg(&app).status();
+    let stderr = std::fs::read_to_string(dir.path().join("stderr.txt")).unwrap_or_default();
+    assert!(status.success(), "open: {status}; the app's stderr:\n{stderr}");
+    let all = dumps(&dir);
+    assert_eq!(all.len(), 2, "{all:?}\nstderr:\n{stderr}");
+    let place = |x: &Value| (num(x, "window") as u32, screen(x).lines().next().unwrap_or("").to_string());
+    assert_eq!(place(&all[0]), (1, "in dir-a|".into()), "{all:?}");
+    assert_eq!(place(&all[1]), (2, "in dir b|".into()), "{all:?}");
+}
+
+/// `confirm_close = true`: closing a window while a program runs asks
+/// first (a sheet, and the window stays); at the shell's prompt it closes
+/// at once.
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_confirm_close_asks_while_a_program_runs() {
+    if !have_metal() {
+        return;
+    }
+    let dir = TempDir::new("confirm");
+    std::fs::create_dir_all(dir.config_home().join("terminal-decline")).unwrap();
+    std::fs::write(dir.config_home().join("terminal-decline/config.toml"), "confirm_close = true\n").unwrap();
+    // A job in the foreground, as an interactive shell runs one.
+    let job = dir.path().join("job.sh");
+    std::fs::write(&job, format!("{}sleep 1; {}{}sleep 20\n", osc("close"), osc("dump"), osc("quit"))).unwrap();
+    let (status, _) = decline(&dir, &format!("set -m; /bin/sh '{}'; sleep 20", job.display()), true);
+    assert!(status.success(), "{status}");
+    let d = dumps(&dir);
+    assert_eq!(d.len(), 1, "{d:?}");
+    assert_eq!(d[0]["sheet"], true, "{}", d[0]);
+
+    // Nothing running: the window closes, and with it the app.
+    let dir = TempDir::new("confirm-idle");
+    std::fs::create_dir_all(dir.config_home().join("terminal-decline")).unwrap();
+    std::fs::write(dir.config_home().join("terminal-decline/config.toml"), "confirm_close = true\n").unwrap();
+    let (status, elapsed) = decline(&dir, &format!("{}sleep 20", osc("close")), true);
+    assert!(status.success(), "{status}");
+    assert!(elapsed < Duration::from_secs(15), "closed after {elapsed:?}");
+    assert!(dumps(&dir).is_empty());
 }

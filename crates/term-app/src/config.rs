@@ -152,6 +152,9 @@ pub struct Config {
     /// Copy a selection to the clipboard as soon as it is made with the
     /// mouse, without Cmd+C.
     pub copy_on_select: bool,
+    /// Ask before closing a window or quitting while a program other than
+    /// the shell runs in the foreground.
+    pub confirm_close: bool,
     pub columns: u16,
     pub lines: u16,
     /// Program and arguments to run instead of the login shell.
@@ -191,6 +194,7 @@ impl Default for Config {
             opacity: 1.0,
             blur: false,
             copy_on_select: false,
+            confirm_close: false,
             columns: 100,
             lines: 30,
             command: Vec::new(),
@@ -811,6 +815,15 @@ mod tests {
         assert!(!c.copy_on_select);
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert!(errors[0].starts_with("config: copy_on_select: "), "{errors:?}");
+    }
+
+    #[test]
+    fn confirm_close_is_off_unless_set() {
+        assert!(!Config::default().confirm_close);
+        assert!(parse("confirm_close = true").0.confirm_close);
+        let (c, errors) = parse("confirm_close = 1");
+        assert!(!c.confirm_close);
+        assert!(errors[0].starts_with("config: confirm_close: "), "{errors:?}");
     }
 
     #[test]

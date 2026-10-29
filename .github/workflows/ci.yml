@@ -121,6 +121,9 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: nextest
+      # The bundled-app smoke tests embed the pinned Sparkle.
+      - name: Fetch Sparkle
+        run: scripts/sparkle.sh
       - run: cargo nextest run --workspace --locked --profile ci --run-ignored only -E 'binary(smoke)'
       - uses: actions/upload-artifact@v4
         if: always()

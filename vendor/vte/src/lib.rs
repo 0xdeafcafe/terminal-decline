@@ -45,6 +45,9 @@ const MAX_INTERMEDIATES: usize = 2;
 const MAX_OSC_PARAMS: usize = 16;
 const MAX_OSC_RAW: usize = 1024;
 
+/// An OSC string longer than this is reported to [`Perform::osc_large`].
+const OSC_LARGE_THRESHOLD: usize = 4096;
+
 /// Parser for raw _VTE_ protocol which delegates actions to a [`Perform`]
 ///
 /// [`Perform`]: trait.Perform.html
@@ -64,6 +67,8 @@ pub struct Parser<const OSC_RAW_BUF_SIZE: usize = MAX_OSC_RAW> {
     osc_raw: Vec<u8>,
     osc_params: [(usize, usize); MAX_OSC_PARAMS],
     osc_num_params: usize,
+    osc_mode: OscMode,
+    osc_limit: usize,
     ignoring: bool,
     partial_utf8: [u8; 4],
     partial_utf8_len: usize,
@@ -117,6 +122,9 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
         while i != bytes.len() {
             match self.state {
                 State::Ground => i += self.advance_ground(performer, &bytes[i..]),
+                State::ApcString | State::DcsPassthrough | State::OscString => {
+                    i += self.advance_string(performer, &bytes[i..])
+                },
                 _ => {
                     // Inlining it results in worse codegen.
                     let byte = bytes[i];
@@ -152,6 +160,9 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
         while i != bytes.len() && !performer.terminated() {
             match self.state {
                 State::Ground => i += self.advance_ground(performer, &bytes[i..]),
+                State::ApcString | State::DcsPassthrough | State::OscString => {
+                    i += self.advance_string(performer, &bytes[i..])
+                },
                 _ => {
                     // Inlining it results in worse codegen.
                     let byte = bytes[i];
@@ -180,6 +191,10 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
             State::EscapeIntermediate => self.advance_esc_intermediate(performer, byte),
             State::OscString => self.advance_osc_string(performer, byte),
             State::SosPmApcString => self.anywhere(performer, byte),
+            State::ApcString => {
+                self.advance_apc(performer, &[byte]);
+            },
+            State::ApcEscape => self.advance_apc_escape(performer, byte),
             State::Ground => unreachable!(),
         }
     }
@@ -316,7 +331,7 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
     #[inline(always)]
     fn advance_dcs_passthrough<P: Perform>(&mut self, performer: &mut P, byte: u8) {
         match byte {
-            0x00..=0x17 | 0x19 | 0x1C..=0x7E => performer.put(byte),
+            0x00..=0x17 | 0x19 | 0x1C..=0x7E => performer.put_slice(&[byte]),
             0x18 | 0x1A => {
                 performer.unhook();
                 performer.execute(byte);
@@ -356,7 +371,11 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
                 performer.esc_dispatch(self.intermediates(), self.ignoring, byte);
                 self.state = State::Ground
             },
-            0x58 => self.state = State::SosPmApcString,
+            0x58 | 0x5E => self.state = State::SosPmApcString,
+            0x5F => {
+                performer.apc_start();
+                self.state = State::ApcString
+            },
             0x59..=0x5A => {
                 performer.esc_dispatch(self.intermediates(), self.ignoring, byte);
                 self.state = State::Ground
@@ -372,9 +391,10 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
             0x5D => {
                 self.osc_raw.clear();
                 self.osc_num_params = 0;
+                self.osc_mode = OscMode::Normal;
+                self.osc_limit = OSC_LARGE_THRESHOLD;
                 self.state = State::OscString
             },
-            0x5E..=0x5F => self.state = State::SosPmApcString,
             0x60..=0x7E => {
                 performer.esc_dispatch(self.intermediates(), self.ignoring, byte);
                 self.state = State::Ground
@@ -408,29 +428,20 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
         match byte {
             0x00..=0x06 | 0x08..=0x17 | 0x19 | 0x1C..=0x1F => (),
             0x07 => {
-                self.osc_end(performer, byte);
+                self.osc_finish(performer, byte);
                 self.state = State::Ground
             },
             0x18 | 0x1A => {
-                self.osc_end(performer, byte);
+                self.osc_finish(performer, byte);
                 performer.execute(byte);
                 self.state = State::Ground
             },
             0x1B => {
-                self.osc_end(performer, byte);
+                self.osc_finish(performer, byte);
                 self.reset_params();
                 self.state = State::Escape
             },
-            0x3B => {
-                #[cfg(not(feature = "std"))]
-                {
-                    if self.osc_raw.is_full() {
-                        return;
-                    }
-                }
-                self.action_osc_put_param()
-            },
-            _ => self.action_osc_put(byte),
+            _ => self.action_osc_put(performer, byte),
         }
     }
 
@@ -532,7 +543,8 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
             // All other params depend on previous indexing.
             _ => {
                 let prev = self.osc_params[param_idx - 1];
-                let begin = prev.1;
+                // Skip the separator after the previous parameter.
+                let begin = prev.1 + 1;
                 self.osc_params[param_idx] = (begin, idx);
             },
         }
@@ -540,22 +552,155 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
         self.osc_num_params += 1;
     }
 
+    /// Store one byte of an OSC string; `;` is stored too, and also ends a
+    /// parameter. Applies the size policy (see [`Perform::osc_large`]).
     #[inline(always)]
-    fn action_osc_put(&mut self, byte: u8) {
+    fn action_osc_put<P: Perform>(&mut self, performer: &mut P, byte: u8) {
+        match self.osc_mode {
+            OscMode::Drop => return,
+            OscMode::Stream => return performer.osc_put(&[byte]),
+            OscMode::Normal | OscMode::Buffer => (),
+        }
+        if self.osc_raw.len() >= self.osc_limit && !self.osc_over_limit(performer, byte) {
+            return;
+        }
         #[cfg(not(feature = "std"))]
         {
             if self.osc_raw.is_full() {
                 return;
             }
         }
+        if byte == b';' {
+            self.action_osc_put_param();
+        }
         self.osc_raw.push(byte);
     }
 
-    fn osc_end<P: Perform>(&mut self, performer: &mut P, byte: u8) {
-        self.action_osc_put_param();
-        self.osc_dispatch(performer, byte);
+    /// The buffered OSC string reached its limit. Returns whether `byte`
+    /// should still be stored.
+    #[cold]
+    #[inline(never)]
+    fn osc_over_limit<P: Perform>(&mut self, performer: &mut P, byte: u8) -> bool {
+        if self.osc_mode == OscMode::Normal {
+            match performer.osc_large(&self.osc_raw) {
+                OscLarge::Buffer(cap) => {
+                    self.osc_mode = OscMode::Buffer;
+                    self.osc_limit = cap;
+                },
+                OscLarge::Stream => {
+                    self.osc_mode = OscMode::Stream;
+                    performer.osc_put(&[byte]);
+                    return false;
+                },
+                OscLarge::Drop => {
+                    self.osc_mode = OscMode::Drop;
+                    return false;
+                },
+            }
+        }
+        if self.osc_raw.len() >= self.osc_limit {
+            self.osc_mode = OscMode::Drop;
+            return false;
+        }
+        true
+    }
+
+    fn osc_finish<P: Perform>(&mut self, performer: &mut P, byte: u8) {
+        match self.osc_mode {
+            OscMode::Normal | OscMode::Buffer => {
+                self.action_osc_put_param();
+                self.osc_dispatch(performer, byte);
+            },
+            OscMode::Stream => performer.osc_end(byte != 0x18 && byte != 0x1A),
+            OscMode::Drop => (),
+        }
         self.osc_raw.clear();
         self.osc_num_params = 0;
+        self.osc_mode = OscMode::Normal;
+    }
+
+    /// Advance inside a string state (APC, DCS passthrough, OSC), handing
+    /// over whole runs where there are any. Returns the bytes used.
+    #[inline(never)]
+    fn advance_string<P: Perform>(&mut self, performer: &mut P, bytes: &[u8]) -> usize {
+        match self.state {
+            State::ApcString => self.advance_apc(performer, bytes),
+            State::DcsPassthrough => self.advance_dcs_run(performer, bytes),
+            State::OscString if self.osc_mode == OscMode::Stream => {
+                self.advance_osc_stream(performer, bytes)
+            },
+            _ => {
+                self.advance_osc_string(performer, bytes[0]);
+                1
+            },
+        }
+    }
+
+    /// The rest of a streamed OSC string: pass the run before the next
+    /// control byte whole, and handle a control byte alone.
+    #[inline]
+    fn advance_osc_stream<P: Perform>(&mut self, performer: &mut P, bytes: &[u8]) -> usize {
+        let run = bytes.iter().position(|&b| b < 0x20).unwrap_or(bytes.len());
+        if run > 0 {
+            performer.osc_put(&bytes[..run]);
+            return run;
+        }
+        self.advance_osc_string(performer, bytes[0]);
+        1
+    }
+
+    /// Inside an APC string: pass everything up to ESC, CAN or SUB whole.
+    #[inline]
+    fn advance_apc<P: Perform>(&mut self, performer: &mut P, bytes: &[u8]) -> usize {
+        match memchr::memchr3(0x1B, 0x18, 0x1A, bytes) {
+            None => {
+                performer.apc_put(bytes);
+                bytes.len()
+            },
+            Some(end) => {
+                if end > 0 {
+                    performer.apc_put(&bytes[..end]);
+                }
+                if bytes[end] == 0x1B {
+                    self.state = State::ApcEscape;
+                } else {
+                    performer.apc_end(false);
+                    performer.execute(bytes[end]);
+                    self.state = State::Ground;
+                }
+                end + 1
+            },
+        }
+    }
+
+    /// The byte after an ESC inside an APC string.
+    fn advance_apc_escape<P: Perform>(&mut self, performer: &mut P, byte: u8) {
+        if byte == b'\\' {
+            performer.apc_end(true);
+            self.state = State::Ground;
+        } else {
+            // Abandoned: the ESC starts a new escape sequence.
+            performer.apc_end(false);
+            self.reset_params();
+            self.state = State::Escape;
+            self.advance_esc(performer, byte);
+        }
+    }
+
+    /// Inside DCS passthrough: pass the run of data bytes whole, and handle
+    /// any other byte alone.
+    #[inline]
+    fn advance_dcs_run<P: Perform>(&mut self, performer: &mut P, bytes: &[u8]) -> usize {
+        let run = bytes
+            .iter()
+            .position(|&b| matches!(b, 0x18 | 0x1A | 0x1B | 0x7F..=0xFF))
+            .unwrap_or(bytes.len());
+        if run > 0 {
+            performer.put_slice(&bytes[..run]);
+            return run;
+        }
+        self.advance_dcs_passthrough(performer, bytes[0]);
+        1
     }
 
     /// Reset escape sequence parameters and intermediates.
@@ -794,6 +939,34 @@ fn printable_ascii_len(bytes: &[u8]) -> usize {
     i
 }
 
+/// What the parser is doing with the OSC string it is reading.
+#[derive(PartialEq, Eq, Debug, Default, Copy, Clone)]
+enum OscMode {
+    /// Buffering, below the 4 KB threshold.
+    #[default]
+    Normal,
+    /// Buffering up to the limit the performer chose.
+    Buffer,
+    /// Passing the rest to the performer.
+    Stream,
+    /// Discarding the rest; nothing will be dispatched.
+    Drop,
+}
+
+/// What to do with an OSC string that has passed 4 KB; the answer to
+/// [`Perform::osc_large`].
+#[derive(PartialEq, Eq, Debug, Copy, Clone)]
+pub enum OscLarge {
+    /// Keep buffering up to this many bytes in all (separators included).
+    /// Past it the string is dropped, and not dispatched.
+    Buffer(usize),
+    /// Pass the rest to [`Perform::osc_put`], then call [`Perform::osc_end`].
+    /// [`Perform::osc_dispatch`] is not called.
+    Stream,
+    /// Throw the string away.
+    Drop,
+}
+
 #[derive(PartialEq, Eq, Debug, Default, Copy, Clone)]
 enum State {
     CsiEntry,
@@ -811,6 +984,8 @@ enum State {
     SosPmApcString,
     #[default]
     Ground,
+    ApcString,
+    ApcEscape,
 }
 
 /// Performs actions requested by the Parser
@@ -856,6 +1031,43 @@ pub trait Perform {
     /// Pass bytes as part of a device control string to the handle chosen in
     /// `hook`. C0 controls will also be passed to the handler.
     fn put(&mut self, _byte: u8) {}
+
+    /// Pass several bytes of a device control string at once, to the handler
+    /// chosen in `hook`. The default calls [`Perform::put`] for each byte, so
+    /// an implementation of `put` alone sees the same bytes in the same order.
+    #[inline]
+    fn put_slice(&mut self, data: &[u8]) {
+        for &byte in data {
+            self.put(byte);
+        }
+    }
+
+    /// `ESC _`: an application program command starts (kitty graphics:
+    /// `ESC _ G ...`).
+    fn apc_start(&mut self) {}
+
+    /// Part of the command, in order. The command may arrive in any number of
+    /// calls, however it was split across `advance` calls.
+    fn apc_put(&mut self, _data: &[u8]) {}
+
+    /// The command ended. `complete` is true for ST (`ESC \`), false if it
+    /// was abandoned (CAN, SUB, or ESC followed by anything else).
+    fn apc_end(&mut self, _complete: bool) {}
+
+    /// An OSC string has passed 4 KB. `prefix` is what has arrived, `;`
+    /// separators included. The answer says what to do with the rest; the
+    /// default buffers up to 64 KB. Called once per string, and only when it
+    /// is longer than 4 KB.
+    fn osc_large(&mut self, _prefix: &[u8]) -> OscLarge {
+        OscLarge::Buffer(64 * 1024)
+    }
+
+    /// After [`OscLarge::Stream`]: the rest of the string, in pieces.
+    fn osc_put(&mut self, _data: &[u8]) {}
+
+    /// After [`OscLarge::Stream`]: the string ended. `complete` is false if
+    /// it ended with CAN or SUB, true for BEL or ESC.
+    fn osc_end(&mut self, _complete: bool) {}
 
     /// Called when a device control string is terminated.
     ///
@@ -1118,7 +1330,8 @@ mod tests {
                 assert_eq!(params[1].len(), NUM_BYTES + INPUT_END.len());
 
                 #[cfg(not(feature = "std"))]
-                assert_eq!(params[1].len(), MAX_OSC_RAW - params[0].len());
+                // The buffer holds the `;` separator too.
+                assert_eq!(params[1].len(), MAX_OSC_RAW - params[0].len() - 1);
             },
             _ => panic!("expected osc sequence"),
         }
@@ -1428,7 +1641,8 @@ mod tests {
             Sequence::Osc(params, _) => {
                 assert_eq!(params.len(), 2);
                 assert_eq!(params[0], b"52");
-                assert_eq!(params[1].len(), OSC_BUFFER_SIZE - params[0].len());
+                // The buffer holds the `;` separator too.
+                assert_eq!(params[1].len(), OSC_BUFFER_SIZE - params[0].len() - 1);
                 for item in params[1].iter() {
                     assert_eq!(*item, b'a');
                 }
@@ -1445,7 +1659,7 @@ mod tests {
         const INPUT_END: &[u8] = b"\x1b\\";
 
         let mut dispatcher = Dispatcher::default();
-        let mut parser: Parser<5> = Parser::new_with_size();
+        let mut parser: Parser<6> = Parser::new_with_size();
 
         parser.advance(&mut dispatcher, INPUT_START);
         parser.advance(&mut dispatcher, INPUT_MIDDLE);
@@ -1751,3 +1965,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(all(test, feature = "std"))]
+mod string_tests;

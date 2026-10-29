@@ -137,31 +137,47 @@ pub fn watch(exe: PathBuf, on_change: impl FnOnce() + Send + 'static) -> std::io
         }
         return Err(e);
     }
+    let before = identity(&exe);
     std::thread::Builder::new().name("build-watch".into()).spawn(move || {
         let mut event: libc::kevent = unsafe { std::mem::zeroed() };
         loop {
             let n = unsafe { libc::kevent(kq, std::ptr::null(), 0, &mut event, 1, std::ptr::null()) };
-            if n > 0 {
-                break;
-            }
             if n < 0 && std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
                 return;
             }
+            if n <= 0 {
+                continue;
+            }
+            // Let the installer finish putting the new bundle in place.
+            std::thread::sleep(Duration::from_millis(400));
+            // macOS touches the executable's attributes when it runs it
+            // again (the Settings tab runs this same binary) or checks its
+            // signature: only a different file is a new build.
+            if before.is_some() && identity(&exe) == before {
+                continue;
+            }
+            break;
         }
         unsafe {
             libc::close(fd);
             libc::close(kq);
         }
-        // Let the installer finish putting the new bundle in place.
-        std::thread::sleep(Duration::from_millis(400));
         on_change();
     })?;
     Ok(())
 }
 
+/// What tells one build's executable from another: the file, its size
+/// and when it was last written. `None` once it is gone.
+fn identity(exe: &Path) -> Option<(u64, u64, u64, i64, i64)> {
+    use std::os::unix::fs::MetadataExt;
+    let m = std::fs::metadata(exe).ok()?;
+    Some((m.dev(), m.ino(), m.size(), m.mtime(), m.mtime_nsec()))
+}
+
 fn restore_file() -> PathBuf {
     let base = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
-    base.join("Library/Caches/terminal-decline/restore.json")
+    base.join(format!("Library/Caches/terminal-decline/restore-{}.json", std::process::id()))
 }
 
 pub fn save(windows: &[SavedWindow]) -> std::io::Result<PathBuf> {
@@ -335,6 +351,29 @@ mod tests {
         // How dogfood.sh installs: the old file goes away, a new one appears.
         std::fs::remove_file(&exe).unwrap();
         std::fs::write(&exe, b"new").unwrap();
+        rx.recv_timeout(Duration::from_secs(5)).expect("no change seen");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn watch_ignores_attribute_changes() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("terminal-decline-watch-attr-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("terminal-decline");
+        std::fs::write(&exe, b"build").unwrap();
+        let (tx, rx) = mpsc::channel();
+        watch(exe.clone(), move || tx.send(()).unwrap()).unwrap();
+        // What running the same executable again, or a signature check,
+        // does to it: its attributes change, the file doesn't.
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(
+            rx.recv_timeout(Duration::from_secs(1)).is_err(),
+            "restarted for an attribute change"
+        );
+        // A real new build is still seen afterwards.
+        std::fs::remove_file(&exe).unwrap();
+        std::fs::write(&exe, b"new build").unwrap();
         rx.recv_timeout(Duration::from_secs(5)).expect("no change seen");
         let _ = std::fs::remove_dir_all(&dir);
     }

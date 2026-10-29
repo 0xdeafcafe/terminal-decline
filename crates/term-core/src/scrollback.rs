@@ -338,14 +338,19 @@ fn encode(row: &Row, styles: &[Style], out: &mut Vec<u8>, body: &mut Vec<u8>, ru
     // look (it leaves out the link), so a new look may extend the last run.
     const KEY: u64 = 0xFFFF_FFFF << 32 | Cell::WIDTH;
     let mut last_key = u64::MAX;
-    for &c in cells {
+    for (i, &c) in cells.iter().enumerate() {
         if c.is_spacer() {
             continue;
         }
         let cp = c.codepoint();
-        if cp < 0x80 {
+        // One test for the usual case: a narrow ASCII character (or none),
+        // not a cluster.
+        if c.bits() & (Cell::CONTENT & !0x7F | Cell::KIND) == 0 {
             body[at] = if cp == 0 { b' ' } else { cp as u8 };
             at += 1;
+        } else if c.is_cluster() {
+            // History keeps a cluster's first scalar until v2 (§17.5).
+            at += row.first_char(i).encode_utf8(&mut body[at..at + 4]).len();
         } else {
             at += c.ch().encode_utf8(&mut body[at..at + 4]).len();
         }
@@ -592,11 +597,10 @@ mod tests {
                 _ => Cell::BLANK,
             });
         }
-        Row {
-            cells,
-            wrapped: r.below(2) == 0,
-            ..Row::default()
-        }
+        let mut row = Row::new(0, Cell::BLANK);
+        row.cells = cells;
+        row.wrapped = r.below(2) == 0;
+        row
     }
 
     #[test]
@@ -679,11 +683,10 @@ mod tests {
     }
 
     fn row_of(cells: Vec<Cell>, wrapped: bool) -> Row {
-        Row {
-            cells,
-            wrapped,
-            ..Row::default()
-        }
+        let mut row = Row::new(0, Cell::BLANK);
+        row.cells = cells;
+        row.wrapped = wrapped;
+        row
     }
 
     #[test]

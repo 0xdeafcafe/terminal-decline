@@ -76,6 +76,10 @@ pub struct SnapRow {
     /// already has this row. A history row may have fewer cells than the
     /// screen is wide (the rest are blank) or more (cut off).
     pub cells: Option<Range<u32>>,
+    /// Its clusters in [`Snapshot::cluster_spans`], by slot: a cluster
+    /// cell's slot `s` is `cluster_spans[clusters.start + s]`. Empty when
+    /// the row wasn't copied or has no clusters.
+    pub clusters: Range<u32>,
     /// Its highlights in [`Snapshot::highlights`], left to right.
     pub highlights: Range<u32>,
 }
@@ -141,6 +145,11 @@ pub struct Snapshot {
     /// style ids index `screen`'s table (the mirror); history rows' index
     /// `history_styles`.
     pub cells: Vec<Cell>,
+    /// The cluster text of the rows copied this time, back to back.
+    pub cluster_text: String,
+    /// Per copied row, by slot: (offset, length) into `cluster_text`; a
+    /// free slot has length 0.
+    pub cluster_spans: Vec<(u32, u16)>,
     /// `screen`'s style ids interned since the last snapshot, with their
     /// styles (the whole table after a renumbering, a new table or a new
     /// terminal).
@@ -164,6 +173,17 @@ impl Snapshot {
     pub fn row_cells(&self, row: &SnapRow) -> Option<&[Cell]> {
         let r = row.cells.as_ref()?;
         Some(&self.cells[r.start as usize..r.end as usize])
+    }
+
+    /// The text of the cluster in slot `slot` of `row` (a cluster cell's
+    /// [`Cell::codepoint`]); empty if there is none.
+    pub fn cluster(&self, row: &SnapRow, slot: u32) -> &str {
+        let i = row.clusters.start as usize + slot as usize;
+        if i >= row.clusters.end as usize {
+            return "";
+        }
+        let (at, len) = self.cluster_spans[i];
+        &self.cluster_text[at as usize..at as usize + len as usize]
     }
 
     /// `row`'s highlights.
@@ -203,6 +223,8 @@ impl Terminal {
         let popped = self.popped_from;
         out.rows.clear();
         out.cells.clear();
+        out.cluster_text.clear();
+        out.cluster_spans.clear();
         out.style_updates.clear();
         out.history_styles.clear();
         out.highlights.clear();
@@ -248,6 +270,7 @@ impl Terminal {
             let i = first + view_line;
             let mut flags = RowFlags::default();
             let start = out.cells.len() as u32;
+            let clusters = out.cluster_spans.len() as u32;
             let (key, copied) = if i < history {
                 let key = RowKey::History { line, col: 0 };
                 flags.set(RowFlags::HISTORY, true);
@@ -274,6 +297,15 @@ impl Terminal {
                 let copied = !(same_terminal && have(key));
                 if copied {
                     out.cells.extend_from_slice(&row.cells);
+                    if let Some(store) = row.clusters() {
+                        // The store's text in one copy, holes and all (at
+                        // most half of it, §6.1), with its spans moved up.
+                        let (text, spans) = store.raw();
+                        let base = out.cluster_text.len() as u32;
+                        out.cluster_text.push_str(text);
+                        out.cluster_spans
+                            .extend(spans.map(|(at, len)| if len == 0 { (base, 0) } else { (base + at, len) }));
+                    }
                 }
                 (key, copied)
             };
@@ -281,6 +313,7 @@ impl Terminal {
                 key,
                 flags,
                 cells: copied.then_some(start..out.cells.len() as u32),
+                clusters: clusters..out.cluster_spans.len() as u32,
                 highlights,
             });
         }

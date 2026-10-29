@@ -7,6 +7,7 @@ use std::borrow::Cow;
 
 pub use crate::cell::Width;
 use crate::cell::{Cell, Row};
+use crate::clusters::Clusters;
 use crate::style::Style;
 
 /// What a cell shows.
@@ -29,6 +30,8 @@ pub struct CellRef<'a> {
     /// The styles its row's style ids index: the screen's table, or a
     /// history row's own list.
     styles: &'a [Style],
+    /// Its row's cluster store, which a cluster cell's slot indexes.
+    clusters: Option<&'a Clusters>,
 }
 
 /// Identifies a cell's style cheaply: two cells **of the same row** with
@@ -39,14 +42,26 @@ pub struct CellRef<'a> {
 pub struct StyleKey(u32);
 
 impl<'a> CellRef<'a> {
-    #[inline]
+    #[cfg(test)]
     pub(crate) fn new(cell: Cell, styles: &'a [Style]) -> CellRef<'a> {
-        CellRef { cell, styles }
+        CellRef {
+            cell,
+            styles,
+            clusters: None,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn in_row(cell: Cell, styles: &'a [Style], clusters: Option<&'a Clusters>) -> CellRef<'a> {
+        CellRef { cell, styles, clusters }
     }
 
     #[inline]
     pub fn content(&self) -> Content<'a> {
         let cp = self.cell.codepoint();
+        if self.cell.is_cluster() {
+            return Content::Cluster(self.clusters.map_or("", |x| x.get(cp)));
+        }
         if cp == 0 {
             return Content::Empty;
         }
@@ -136,13 +151,18 @@ impl<'a> RowRef<'a> {
     /// The cell at `col`; blank past the end of the row.
     #[inline]
     pub fn cell(&self, col: usize) -> CellRef<'_> {
-        CellRef::new(self.row.cells.get(col).copied().unwrap_or(Cell::BLANK), &self.styles)
+        CellRef::in_row(
+            self.row.cells.get(col).copied().unwrap_or(Cell::BLANK),
+            &self.styles,
+            self.row.clusters(),
+        )
     }
 
     /// The stored cells, left to right.
     pub fn cells(&self) -> impl DoubleEndedIterator<Item = CellRef<'_>> + ExactSizeIterator + '_ {
         let styles: &[Style] = &self.styles;
-        self.row.cells.iter().map(move |&c| CellRef::new(c, styles))
+        let clusters = self.row.clusters();
+        self.row.cells.iter().map(move |&c| CellRef::in_row(c, styles, clusters))
     }
 
     /// The line continues onto the next row (soft wrap).

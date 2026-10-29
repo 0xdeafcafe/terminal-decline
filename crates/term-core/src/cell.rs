@@ -1,6 +1,8 @@
 //! Packed cell storage. One cell is 8 bytes (§4 of the cells design): what
 //! it shows, how wide it is, and an id in its screen's style table.
 
+use crate::clusters::Clusters;
+
 /// A colour as stored in a style. The top byte says what kind it is:
 /// 0 = the terminal's default, 1 = a palette index, 2 = 24-bit RGB.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Hash)]
@@ -73,11 +75,15 @@ pub enum Width {
 pub struct Cell(u64);
 
 const _: () = assert!(std::mem::size_of::<Cell>() == 8);
+// A row: its change counter, cells, `wrapped` and the boxed extras (§6.1).
+const _: () = assert!(std::mem::size_of::<Row>() == 48);
 
 impl Cell {
     pub const BLANK: Cell = Cell(0);
     pub const CONTENT: u64 = (1 << 21) - 1;
     pub const KIND: u64 = 3 << 21;
+    /// Kind 1: the content is a slot in the row's cluster store.
+    pub const CLUSTER: u64 = 1 << 21;
     pub const WIDTH: u64 = 3 << 23;
     const WIDTH_SHIFT: u32 = 23;
     pub const PROTECTED: u64 = 1 << 25;
@@ -170,9 +176,13 @@ impl Cell {
         (self.0 & Self::CONTENT) as u32
     }
 
-    /// The character shown; a space for an empty cell.
+    /// The character shown; a space for an empty cell. A cluster cell's
+    /// text is in its row ([`Row::text_at`]); this gives a space for it.
     #[inline]
     pub fn ch(self) -> char {
+        if self.0 & Self::KIND != 0 {
+            return ' ';
+        }
         match self.codepoint() {
             0 => ' ',
             c => char::from_u32(c).unwrap_or(' '),
@@ -184,6 +194,18 @@ impl Cell {
     pub const fn is_blank(self) -> bool {
         self.0 & Self::NOT_BLANK == 0
     }
+
+    /// A grapheme cluster cell: its content is a slot in the row's store.
+    #[inline]
+    pub const fn is_cluster(self) -> bool {
+        self.0 & Self::KIND == Self::CLUSTER
+    }
+
+    /// This cell (style and width kept) holding cluster `slot`.
+    #[inline]
+    pub const fn with_cluster(self, slot: u32) -> Cell {
+        Cell(self.0 & !(Self::CONTENT | Self::KIND) | Self::CLUSTER | slot as u64)
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -191,10 +213,24 @@ pub struct Row {
     /// The row's change counter (§9.1): changes whenever its content does,
     /// and only then. 0 for rows not on a screen.
     pub seq: u64,
+    /// The cells. Overwriting a cluster cell must free its slot first
+    /// ([`Row::free_clusters`]); moving cells within the row keeps them.
     pub cells: Vec<Cell>,
     /// The line continues onto the next row (soft wrap).
     pub wrapped: bool,
+    /// Only rows with clusters have one (§6.1).
+    extra: Option<Box<RowExtra>>,
 }
+
+/// What only some rows need. Prompt marks (§11.6) join it later.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct RowExtra {
+    clusters: Clusters,
+}
+
+/// A store whose buffers are under this is kept, emptied, when its row is
+/// reset: a status line redrawing emoji doesn't allocate each time.
+const KEEP_EXTRA_BYTES: usize = 1024;
 
 impl Row {
     pub fn new(cols: usize, fill: Cell) -> Row {
@@ -202,6 +238,7 @@ impl Row {
             seq: 0,
             cells: vec![fill; cols],
             wrapped: false,
+            extra: None,
         }
     }
 
@@ -214,6 +251,123 @@ impl Row {
             self.cells.resize(cols, fill);
         }
         self.wrapped = false;
+        if self.extra.is_some() {
+            self.clear_clusters();
+        }
+    }
+
+    #[cold]
+    fn clear_clusters(&mut self) {
+        if let Some(x) = &mut self.extra {
+            if x.clusters.capacity_bytes() > KEEP_EXTRA_BYTES {
+                self.extra = None;
+            } else {
+                x.clusters.clear();
+            }
+        }
+    }
+
+    /// Fill every cell with `fill` (not a cluster), freeing all clusters.
+    pub fn fill(&mut self, fill: Cell) {
+        self.cells.fill(fill);
+        if self.extra.is_some() {
+            self.clear_clusters();
+        }
+    }
+
+    /// The row's cluster store, if it has one.
+    #[inline]
+    pub fn clusters(&self) -> Option<&Clusters> {
+        self.extra.as_deref().map(|x| &x.clusters)
+    }
+
+    /// The text of the cell at `col`: its cluster, or its character
+    /// (nothing for an empty cell), appended to `out`.
+    pub fn text_at(&self, col: usize, out: &mut String) {
+        let c = self.get(col);
+        if c.is_cluster() {
+            out.push_str(self.clusters().map_or("", |x| x.get(c.codepoint())));
+        } else if c.codepoint() != 0 {
+            out.push(c.ch());
+        }
+    }
+
+    /// The first scalar of the cell at `col`; a space for an empty cell.
+    pub fn first_char(&self, col: usize) -> char {
+        let c = self.get(col);
+        if c.is_cluster() {
+            return self.clusters().and_then(|x| x.get(c.codepoint()).chars().next()).unwrap_or(' ');
+        }
+        c.ch()
+    }
+
+    /// Free the clusters of the cells in `range`, leaving the cells as they
+    /// are: the caller overwrites them next.
+    #[inline]
+    pub fn free_clusters(&mut self, range: std::ops::Range<usize>) {
+        if let Some(x) = &mut self.extra {
+            for c in &self.cells[range] {
+                if c.is_cluster() {
+                    x.clusters.free(c.codepoint());
+                }
+            }
+        }
+    }
+
+    /// Make the cell at `col` hold `text` (a whole cluster within the
+    /// caps), keeping its style and width. False if the row is out of
+    /// room: the cell then holds the cluster's first scalar.
+    pub fn set_cluster(&mut self, col: usize, text: &str) -> bool {
+        self.free_clusters(col..col + 1);
+        let x = self.extra.get_or_insert_with(Default::default);
+        let cell = self.cells[col];
+        match x.clusters.insert(text) {
+            Some(slot) => {
+                self.cells[col] = cell.with_cluster(slot);
+                true
+            }
+            None => {
+                let first = text.chars().next().unwrap_or(' ');
+                self.cells[col] = cell.style_part().with_char(first).with_width(cell.width());
+                false
+            }
+        }
+    }
+
+    /// Add `c` to the content of the cell at `col` (a character or a
+    /// cluster). False, and nothing changes, if the caps or the row's room
+    /// don't allow it, or the cell is empty.
+    pub fn push_to_cell(&mut self, col: usize, c: char) -> bool {
+        let cell = self.cells[col];
+        if cell.is_cluster() {
+            let slot = cell.codepoint();
+            return self.extra.as_mut().is_some_and(|x| x.clusters.push(slot, c));
+        }
+        let Some(first) = char::from_u32(cell.codepoint()).filter(|_| cell.codepoint() != 0) else {
+            return false;
+        };
+        let mut buf = [0u8; 8];
+        let n = first.encode_utf8(&mut buf).len();
+        let m = c.encode_utf8(&mut buf[n..]).len();
+        let text = std::str::from_utf8(&buf[..n + m]).expect("two scalars are UTF-8");
+        let x = self.extra.get_or_insert_with(Default::default);
+        match x.clusters.insert(text) {
+            Some(slot) => {
+                self.cells[col] = cell.with_cluster(slot);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Make the row `cols` cells wide: cells past it are dropped (and their
+    /// clusters freed), new ones are blank.
+    pub fn resize_cells(&mut self, cols: usize) {
+        if cols < self.cells.len() {
+            let len = self.cells.len();
+            self.free_clusters(cols..len);
+        }
+        self.cells.resize(cols, Cell::BLANK);
     }
 
     pub fn get(&self, col: usize) -> Cell {

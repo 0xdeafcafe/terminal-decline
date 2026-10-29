@@ -138,6 +138,11 @@ pub struct Modes {
     pub mouse_sgr: bool,
     /// 2026: the app is mid-update; hold off drawing until it ends.
     pub synchronized: bool,
+    /// 2027, on by default: scalars join grapheme clusters by the UAX #29
+    /// rules, and a cluster's width follows §6.3 of the cells design. Off
+    /// (legacy): only zero-width scalars join the cell before them, and a
+    /// cell keeps its first scalar's width.
+    pub grapheme_clusters: bool,
 }
 
 impl Default for Modes {
@@ -155,6 +160,7 @@ impl Default for Modes {
             mouse: MouseMode::Off,
             mouse_sgr: false,
             synchronized: false,
+            grapheme_clusters: true,
         }
     }
 }
@@ -285,7 +291,14 @@ pub struct Terminal {
     /// Which of G0/G1 is in use (SI/SO).
     active_charset: usize,
     line_drawing: bool,
+    /// The last grapheme printed, for REP: its character, or None when it
+    /// is a cluster, which is then `last_cluster` (kept by value, at most
+    /// 128 bytes, so REP works after its cell has been overwritten), of
+    /// `last_cluster_width` cells, with the segmenter state after it.
     last_char: Option<char>,
+    last_cluster: String,
+    last_cluster_width: u8,
+    last_seg: Segmenter,
     /// East Asian Ambiguous characters are this many cells wide (1 or 2),
     /// a setting (§6.3).
     ambiguous: u8,
@@ -376,6 +389,9 @@ impl Terminal {
             active_charset: 0,
             line_drawing: false,
             last_char: None,
+            last_cluster: String::new(),
+            last_cluster_width: 1,
+            last_seg: Segmenter::default(),
             ambiguous: 1,
             grapheme: GraphemeState::default(),
             grapheme_plain: None,
@@ -758,6 +774,10 @@ impl Terminal {
             for col in 0..len {
                 let cell = row.cell(col);
                 let here = Point { line, col };
+                if cell.width() == Width::EdgeSpacer {
+                    // Padding where a wide character didn't fit.
+                    continue;
+                }
                 if cell.is_spacer() {
                     if let Some(last) = cells.last_mut() {
                         last.1 = here;
@@ -820,7 +840,7 @@ impl Terminal {
             for col in start..end.min(row.len().max(start)) {
                 let cell = row.cell(col);
                 if !cell.is_spacer() {
-                    text.push(cell.ch());
+                    cell.push_text(&mut text);
                 }
             }
             if !wrapped {
@@ -1140,17 +1160,19 @@ impl Terminal {
     fn erase_cells(&mut self, row: usize, range: std::ops::Range<usize>) {
         let blank = self.blank();
         self.touch_row(row);
-        let cells = &mut self.screen[row].cells;
-        let end = range.end.min(cells.len());
-        let start = range.start.min(end);
-        cells[start..end].fill(blank);
+        let r = &mut self.screen[row];
+        let len = r.cells.len();
+        let mut end = range.end.min(len);
+        let mut start = range.start.min(end);
         // Don't leave half of a wide character behind.
-        if start > 0 && cells[start - 1].is_wide() {
-            cells[start - 1] = blank;
+        if start > 0 && r.cells[start - 1].is_wide() {
+            start -= 1;
         }
-        if end < cells.len() && cells[end].is_spacer() {
-            cells[end] = blank;
+        if end < len && r.cells[end].width() == Width::Spacer {
+            end += 1;
         }
+        r.free_clusters(start..end);
+        r.cells[start..end].fill(blank);
     }
 
     fn save_cursor(&mut self) {
@@ -1189,18 +1211,58 @@ impl Terminal {
         }
     }
 
+    /// ICH: insert `n` blank cells at the cursor, pushing the rest of the
+    /// row right; cells pushed off the end free their clusters.
+    #[inline(never)]
+    fn insert_chars(&mut self, n: usize) {
+        let (row, col) = (self.cursor.row, self.cursor.col);
+        let n = n.min(self.cols - col);
+        let blank = self.blank();
+        let r = &mut self.screen[row];
+        let len = r.cells.len();
+        r.free_clusters(len - n..len);
+        let cells = &mut r.cells;
+        cells[col..].rotate_right(n);
+        cells[col..col + n].fill(blank);
+        self.repair_wide(row);
+    }
+
+    /// DCH: delete `n` cells at the cursor (freeing their clusters), pulling
+    /// the rest of the row left and filling the end with blanks.
+    #[inline(never)]
+    fn delete_chars(&mut self, n: usize) {
+        let (row, col) = (self.cursor.row, self.cursor.col);
+        let n = n.min(self.cols - col);
+        let blank = self.blank();
+        let r = &mut self.screen[row];
+        r.free_clusters(col..col + n);
+        let cells = &mut r.cells;
+        cells[col..].rotate_left(n);
+        let len = cells.len();
+        cells[len - n..].fill(blank);
+        self.repair_wide(row);
+    }
+
     /// After shifting cells sideways, blank any half of a wide character
-    /// that lost its other half.
+    /// that lost its other half, and any spacer away from where it
+    /// belongs: a spacer not after a wide cell, or an edge spacer not in
+    /// the last column of a wrapped row.
     fn repair_wide(&mut self, row: usize) {
         let blank = self.blank();
         self.touch_row(row);
-        let cells = &mut self.screen[row].cells;
-        for i in 0..cells.len() {
-            let c = cells[i];
-            let orphan_lead = c.is_wide() && !cells.get(i + 1).is_some_and(|n| n.is_spacer());
-            let orphan_spacer = c.is_spacer() && (i == 0 || !cells[i - 1].is_wide());
-            if orphan_lead || orphan_spacer {
-                cells[i] = blank;
+        let r = &mut self.screen[row];
+        let len = r.cells.len();
+        for i in 0..len {
+            let c = r.cells[i];
+            let misplaced = match c.width() {
+                Width::Narrow => false,
+                Width::Wide => r.cells.get(i + 1).is_none_or(|n| n.width() != Width::Spacer),
+                Width::Spacer => i == 0 || !r.cells[i - 1].is_wide(),
+                Width::EdgeSpacer => i + 1 != len || !r.wrapped,
+            };
+            if misplaced {
+                r.free_clusters(i..i + 1);
+                r.cells[i] = blank;
             }
         }
     }
@@ -1311,26 +1373,163 @@ impl Terminal {
             return;
         }
         self.sync_grapheme();
-        let joins = self.grapheme.seg.push(c, p);
+        let width = p.width_with(self.ambiguous) as usize;
+        let rules_join = self.grapheme.seg.push(c, p);
+        // Legacy (mode 2027 off): only zero-width scalars join.
+        let joins = if self.modes.grapheme_clusters { rules_join } else { width == 0 };
         if let Some(log) = &mut self.grapheme_log {
             log_scalar(log, c, joins);
         }
-        let width = p.width_with(self.ambiguous) as usize;
-        if width == 0 {
-            if c == '\u{FE0F}' {
-                self.widen_previous();
+        if joins {
+            if let Some((row, col)) = self.grapheme.at {
+                self.join_cell(row, col, c);
+                return;
             }
-            if !joins {
-                // A cluster that starts with a zero-width scalar has no cell.
-                self.grapheme.at = None;
+            if width == 0 {
+                // The cluster has no cell (it started with a zero-width
+                // scalar): dropped.
+                return;
             }
-            // Joining marks need grapheme storage, which cells don't have yet.
+            // A scalar with a width joining a cluster with no cell: the
+            // cell starts with it.
+            self.grapheme.seg = Segmenter::start(c, p);
+        } else if width == 0 {
+            // A cluster that starts with a zero-width scalar has no cell.
+            self.grapheme.at = None;
             return;
         }
-        let at = self.put_char(c, width);
-        if !joins || self.grapheme.at.is_none() {
-            self.grapheme.at = at;
+        self.grapheme.at = self.put_char(c, width);
+    }
+
+    /// `c` joined the cluster in the cell at (`row`, `col`), the last one
+    /// printed: add it to the cell, and fix the cell's width in place when
+    /// the cluster's width changed (§6.3).
+    #[inline(never)]
+    fn join_cell(&mut self, row: usize, col: usize, c: char) {
+        if !self.screen[row].push_to_cell(col, c) {
+            // Past the caps (32 scalars, 128 bytes, 8 KB a row): dropped.
+            return;
         }
+        // The row changed without a cell being written: its counter must
+        // change too (§9.1). This also covers widening or narrowing the
+        // cell in place, which stays in this row.
+        self.touch_row(row);
+        // REP repeats the whole cluster. The cell held `last_char` (its
+        // first scalar) or `last_cluster` until now, so the copy grows
+        // with it.
+        if let Some(first) = self.last_char.take() {
+            self.last_cluster.clear();
+            self.last_cluster.push(first);
+        }
+        if self.last_cluster.len() + c.len_utf8() <= crate::clusters::MAX_BYTES {
+            self.last_cluster.push(c);
+        }
+        let have = if self.screen[row].cells[col].is_wide() { 2 } else { 1 };
+        let want = if self.modes.grapheme_clusters {
+            self.grapheme.seg.width(self.ambiguous)
+        } else {
+            have
+        };
+        self.last_cluster_width = want;
+        self.last_seg = self.grapheme.seg;
+        if want > have {
+            self.widen(row, col);
+        } else if want < have {
+            self.narrow(row, col);
+        }
+    }
+
+    /// The narrow cluster at (`row`, `col`), just before the cursor, became
+    /// two cells wide (VS16, a second regional indicator, a skin tone,
+    /// U+20E3): the next cell becomes its spacer and the cursor moves one
+    /// right. In the last column, with autowrap on, the cluster moves to
+    /// the start of the next row and leaves an edge spacer; with autowrap
+    /// off it stays narrow.
+    #[cold]
+    #[inline(never)]
+    fn widen(&mut self, row: usize, col: usize) {
+        let cols = self.cols;
+        if col + 1 < cols {
+            if self.modes.insert {
+                // Make room rather than overwrite what follows.
+                let r = &mut self.screen[row];
+                r.free_clusters(cols - 1..cols);
+                r.cells[cols - 1] = Cell::BLANK;
+                r.cells[col + 1..].rotate_right(1);
+                self.repair_wide(row);
+            }
+            // The spacer goes where the next cell is: erase a wide
+            // character or cluster there whole.
+            if self.screen[row].cells[col + 1].bits() & (Cell::WIDTH | Cell::KIND) != 0 {
+                self.erase_cells(row, col + 1..col + 2);
+            }
+            // Read again: the erase may have renumbered the ids.
+            let cells = &mut self.screen[row].cells;
+            let cell = cells[col];
+            cells[col] = cell.with_width(Width::Wide);
+            cells[col + 1] = cell.style_part().with_width(Width::Spacer);
+            if col + 2 >= cols {
+                self.cursor.col = cols - 1;
+                self.cursor.pending_wrap = self.modes.autowrap;
+            } else {
+                self.cursor.col = col + 2;
+                self.cursor.pending_wrap = false;
+            }
+            return;
+        }
+        if !self.modes.autowrap {
+            return;
+        }
+        let mut text = String::new();
+        self.screen[row].text_at(col, &mut text);
+        let first = text.chars().next().unwrap_or(' ');
+        let blank = self.blank();
+        let r = &mut self.screen[row];
+        r.free_clusters(col..col + 1);
+        r.cells[col] = blank.with_width(Width::EdgeSpacer);
+        r.wrapped = true;
+        self.cursor.col = 0;
+        self.cursor.pending_wrap = false;
+        self.linefeed();
+        self.grapheme.at = self.put_char(first, 2);
+        if let Some((r, c)) = self.grapheme.at
+            && text.len() > first.len_utf8()
+        {
+            self.screen[r].set_cluster(c, &text);
+        }
+        self.last_char = None;
+    }
+
+    /// The wide cluster at (`row`, `col`) became one cell wide (VS15): its
+    /// spacer becomes a blank in the same style, and the cursor moves one
+    /// left.
+    #[cold]
+    #[inline(never)]
+    fn narrow(&mut self, row: usize, col: usize) {
+        let cells = &mut self.screen[row].cells;
+        let cell = cells[col];
+        cells[col] = cell.with_width(Width::Narrow);
+        cells[col + 1] = cell.style_part();
+        self.cursor.col = col + 1;
+        self.cursor.pending_wrap = false;
+    }
+
+    /// REP of a cluster: `n` copies of `last_cluster`, each in its own slot.
+    #[cold]
+    #[inline(never)]
+    fn repeat_cluster(&mut self, n: usize) {
+        let text = std::mem::take(&mut self.last_cluster);
+        let Some(first) = text.chars().next() else { return };
+        let width = self.last_cluster_width as usize;
+        for _ in 0..n {
+            let at = self.put_char(first, width);
+            if let Some((r, c)) = at {
+                self.screen[r].set_cluster(c, &text);
+            }
+            self.grapheme = GraphemeState { at, seg: self.last_seg };
+        }
+        self.last_char = None;
+        self.last_cluster = text;
     }
 
     /// Write one character of `width` (1 or 2) cells at the cursor, wrapping
@@ -1348,8 +1547,12 @@ impl Terminal {
             if !self.modes.autowrap {
                 return None;
             }
-            self.erase_cells(self.cursor.row, self.cursor.col..self.cols);
-            self.screen[self.cursor.row].wrapped = true;
+            let row = self.cursor.row;
+            self.erase_cells(row, self.cursor.col..self.cols);
+            // The last column is padding: an edge spacer.
+            let last = &mut self.screen[row].cells[self.cols - 1];
+            *last = last.with_width(Width::EdgeSpacer);
+            self.screen[row].wrapped = true;
             self.cursor.col = 0;
             self.linefeed();
         }
@@ -1361,8 +1564,10 @@ impl Terminal {
             self.repair_wide(row);
         }
         let cells = &mut self.screen[row].cells;
-        // Only overwriting part of a wide character needs cleanup.
-        let touches_wide = cells[col].is_wide_part() || (width == 2 && cells[col + 1].is_wide_part());
+        // Only overwriting part of a wide character, or a cluster, needs
+        // cleanup.
+        const PARTS: u64 = Cell::WIDTH | Cell::KIND;
+        let touches_wide = cells[col].bits() & PARTS != 0 || (width == 2 && cells[col + 1].bits() & PARTS != 0);
         if touches_wide {
             self.erase_cells(row, col..col + width);
         }
@@ -1396,6 +1601,9 @@ impl Terminal {
     /// wide character, and the modes that change what a character does
     /// (insert, DEC line drawing, autowrap off), go one character at a time.
     fn write_ascii(&mut self, bytes: &[u8]) {
+        if self.grapheme_plain.is_none() && self.grapheme.seg.after_prepend() {
+            return self.write_ascii_after_prepend(bytes);
+        }
         let Some(&last) = bytes.last() else { return };
         if self.modes.insert || self.line_drawing || !self.modes.autowrap {
             for &b in bytes {
@@ -1442,6 +1650,18 @@ impl Terminal {
         }
         self.last_char = Some(last as char);
         self.segment_ascii(bytes);
+    }
+
+    /// The first byte joins the Prepend scalar before it (U+0600 + `1`): it
+    /// goes into that cell, by the rules, and the rest as usual.
+    #[cold]
+    #[inline(never)]
+    fn write_ascii_after_prepend(&mut self, bytes: &[u8]) {
+        let Some((&first, rest)) = bytes.split_first() else { return };
+        self.write_char(first as char);
+        if !rest.is_empty() {
+            self.write_ascii(rest);
+        }
     }
 
     /// Bring the grapheme state up to date after `write_ascii` wrote `bytes`
@@ -1536,37 +1756,6 @@ impl Terminal {
         if g.seg.is_reset() { GraphemeState::default() } else { g }
     }
 
-    /// U+FE0F after a narrow symbol asks for emoji presentation, which is two
-    /// cells wide (what Ghostty, kitty and WezTerm do, and what `string-width`
-    /// based TUIs expect).
-    fn widen_previous(&mut self) {
-        if self.cursor.pending_wrap || self.cursor.col == 0 {
-            return;
-        }
-        let (row, col) = (self.cursor.row, self.cursor.col - 1);
-        let cell = self.screen[row].cells[col];
-        if cell.is_wide_part() || cell.codepoint() < 0x2000 {
-            return;
-        }
-        // The spacer goes where the next cell is; if that is the left half of
-        // a wide character, erase the whole of it rather than half.
-        if self.screen[row].cells[col + 1].is_wide() {
-            self.erase_cells(row, col + 1..col + 2);
-        }
-        // Read again: the erase may have renumbered the ids.
-        self.touch_row(row);
-        let cells = &mut self.screen[row].cells;
-        let cell = cells[col];
-        cells[col] = cell.with_width(Width::Wide);
-        cells[col + 1] = cell.style_part().with_width(Width::Spacer);
-        if col + 2 >= self.cols {
-            self.cursor.col = self.cols - 1;
-            self.cursor.pending_wrap = self.modes.autowrap;
-        } else {
-            self.cursor.col = col + 2;
-        }
-    }
-
     fn mode_state(&self, mode: u16, private: bool) -> u8 {
         let set = |b: bool| if b { 1 } else { 2 };
         if !private {
@@ -1590,8 +1779,7 @@ impl Terminal {
             1006 => set(self.modes.mouse_sgr),
             2004 => set(self.modes.bracketed_paste),
             2026 => set(self.modes.synchronized),
-            // Unicode core: VS16 widening is always on.
-            2027 => 3,
+            2027 => set(self.modes.grapheme_clusters),
             _ => 0,
         }
     }
@@ -1671,6 +1859,7 @@ impl Terminal {
             1006 => self.modes.mouse_sgr = on,
             2004 => self.modes.bracketed_paste = on,
             2026 => self.modes.synchronized = on,
+            2027 => self.modes.grapheme_clusters = on,
             _ => {}
         }
     }
@@ -1786,11 +1975,15 @@ fn default_tabs(cols: usize) -> Vec<bool> {
 fn resize_screen(screen: &mut VecDeque<Row>, cursor: &mut Cursor, cols: usize, lines: usize) -> Vec<Row> {
     let mut removed = Vec::new();
     for row in screen.iter_mut() {
-        row.cells.resize(cols, Cell::BLANK);
-        if let Some(last) = row.cells.last_mut()
-            && last.is_wide()
-        {
-            *last = Cell::BLANK;
+        let old = row.cells.len();
+        row.resize_cells(cols);
+        // An edge spacer no longer in the last column is a blank.
+        if cols > old && old > 0 && row.cells[old - 1].width() == Width::EdgeSpacer {
+            row.cells[old - 1] = row.cells[old - 1].style_part();
+        }
+        if row.cells.last().is_some_and(|c| c.is_wide()) {
+            row.free_clusters(cols - 1..cols);
+            row.cells[cols - 1] = Cell::BLANK;
         }
     }
     while screen.len() > lines {
@@ -1987,15 +2180,7 @@ impl Perform for Terminal {
             self.cursor.pending_wrap = false;
         }
         match (action, intermediates) {
-            ('@', []) => {
-                let (row, col) = (self.cursor.row, self.cursor.col);
-                let n = a1.min(self.cols - col);
-                let blank = self.blank();
-                let cells = &mut self.screen[row].cells;
-                cells[col..].rotate_right(n);
-                cells[col..col + n].fill(blank);
-                self.repair_wide(row);
-            }
+            ('@', []) => self.insert_chars(a1),
             ('A', []) => self.move_rows(-(a1 as isize)),
             ('B' | 'e', []) => self.move_rows(a1 as isize),
             ('C' | 'a', []) => self.goto_col(self.cursor.col + a1),
@@ -2094,16 +2279,7 @@ impl Perform for Terminal {
                     self.cursor.pending_wrap = false;
                 }
             }
-            ('P', []) => {
-                let (row, col) = (self.cursor.row, self.cursor.col);
-                let n = a1.min(self.cols - col);
-                let blank = self.blank();
-                let cells = &mut self.screen[row].cells;
-                cells[col..].rotate_left(n);
-                let len = cells.len();
-                cells[len - n..].fill(blank);
-                self.repair_wide(row);
-            }
+            ('P', []) => self.delete_chars(a1),
             ('X', []) => {
                 let (row, col) = (self.cursor.row, self.cursor.col);
                 self.erase_cells(row, col..col + a1);
@@ -2111,10 +2287,13 @@ impl Perform for Terminal {
             ('S', []) => self.scroll_up(a1),
             ('T', []) => self.scroll_down(a1),
             ('b', []) => {
+                let n = a1.min(self.cols * self.lines);
                 if let Some(c) = self.last_char {
-                    for _ in 0..a1.min(self.cols * self.lines) {
+                    for _ in 0..n {
                         self.write_char(c);
                     }
+                } else if !self.last_cluster.is_empty() {
+                    self.repeat_cluster(n);
                 }
             }
             ('c', []) => self.replies.extend_from_slice(b"\x1b[?62;22c"),
@@ -2255,7 +2434,7 @@ impl Perform for Terminal {
             }
             ([b'#'], b'8') => {
                 for row in &mut self.screen {
-                    row.cells.fill(Cell::BLANK.with_char('E'));
+                    row.fill(Cell::BLANK.with_char('E'));
                 }
                 self.touch_screen_rows();
             }
@@ -2428,10 +2607,13 @@ impl Terminal {
                             return Err(format!("{name} row {r} col {c}: spacer in another style than its wide cell"));
                         }
                     }
-                    if cell.width() == Width::EdgeSpacer {
-                        return Err(format!("{name} row {r} col {c}: edge spacer (not written yet)"));
+                    if cell.width() == Width::EdgeSpacer && (c + 1 != cols || !row.wrapped) {
+                        return Err(format!(
+                            "{name} row {r} col {c}: edge spacer not in the last column of a wrapped row"
+                        ));
                     }
                 }
+                check_clusters(row).map_err(|e| format!("{name} row {r}: {e}"))?;
             }
         }
         // The cached templates name live ids of the active screen's table,
@@ -2470,6 +2652,9 @@ impl Terminal {
                 self.scrollback.len()
             ));
         }
+        if self.last_cluster.len() > crate::clusters::MAX_BYTES {
+            return Err(format!("the last grapheme is {} bytes", self.last_cluster.len()));
+        }
         if self.tabs.len() != cols {
             return Err(format!("{} tab stops for {cols} columns", self.tabs.len()));
         }
@@ -2499,7 +2684,10 @@ impl Terminal {
         for line in 0..self.lines {
             let row = self.visible_row(line);
             let len = row.cells().rposition(|c| !c.is_blank()).map_or(0, |i| i + 1);
-            let text: String = row.cells().take(len).filter(|c| !c.is_spacer()).map(|c| c.ch()).collect();
+            let mut text = String::new();
+            for c in row.cells().take(len).filter(|c| !c.is_spacer()) {
+                c.push_text(&mut text);
+            }
             let kept = text.trim_end_matches(' ');
             out.push_str(kept);
             out.extend(std::iter::repeat_n('·', text.len() - kept.len()));
@@ -2529,18 +2717,18 @@ impl Terminal {
     }
 }
 
-/// A screen cell is a narrow, wide or spacer scalar (no clusters or
-/// placeholders yet), its spare bits are zero, and its style id is live
-/// with SE matching the style.
+/// A screen cell is a narrow, wide or spacer scalar, or a narrow or wide
+/// cluster (no placeholders yet), its spare bits are zero, and its style
+/// id is live with SE matching the style.
 fn check_cell(cell: Cell, styles: &StyleTable) -> Result<(), String> {
     let bits = cell.bits();
-    if bits & (Cell::KIND | Cell::PROTECTED | 0x1F << 27) != 0 {
-        return Err(format!("cell {bits:#x} has kind, protected or spare bits set"));
+    if bits & (Cell::PROTECTED | 0x1F << 27) != 0 || (bits & Cell::KIND != 0 && !cell.is_cluster()) {
+        return Err(format!("cell {bits:#x} has a placeholder kind, protected or spare bits set"));
     }
-    if cell.codepoint() != 0 && char::from_u32(cell.codepoint()).is_none() {
+    if !cell.is_cluster() && cell.codepoint() != 0 && char::from_u32(cell.codepoint()).is_none() {
         return Err(format!("cell {bits:#x} holds no scalar"));
     }
-    if cell.is_spacer() && cell.codepoint() != 0 {
+    if cell.is_spacer() && (cell.codepoint() != 0 || cell.is_cluster()) {
         return Err(format!("spacer {bits:#x} holds a character"));
     }
     let id = cell.style_id();
@@ -2549,6 +2737,29 @@ fn check_cell(cell: Cell, styles: &StyleTable) -> Result<(), String> {
     }
     if cell.shows_empty() != styles.get(id).shows_empty() {
         return Err(format!("SE bit of {bits:#x} doesn't match style {id}"));
+    }
+    Ok(())
+}
+
+/// A row's clusters (§17.3): every cluster cell's slot is live in the
+/// row's store, each live slot is held by exactly one cell, the store is
+/// consistent, and a row without a store has no cluster cells.
+fn check_clusters(row: &Row) -> Result<(), String> {
+    let mut slots: Vec<u32> = row.cells.iter().filter(|c| c.is_cluster()).map(|c| c.codepoint()).collect();
+    let Some(store) = row.clusters() else {
+        return match slots.first() {
+            Some(s) => Err(format!("cluster cell (slot {s}) in a row without a store")),
+            None => Ok(()),
+        };
+    };
+    store.check()?;
+    slots.sort_unstable();
+    if let Some(w) = slots.windows(2).find(|w| w[0] == w[1]) {
+        return Err(format!("slot {} held by two cells", w[0]));
+    }
+    let live: Vec<u32> = store.live_slots().collect();
+    if slots != live {
+        return Err(format!("cells hold slots {slots:?}, live slots are {live:?}"));
     }
     Ok(())
 }

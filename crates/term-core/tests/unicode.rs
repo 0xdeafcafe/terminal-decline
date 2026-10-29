@@ -260,8 +260,9 @@ fn ascii_runs_leave_the_state_on_their_last_cell() {
     t.state.record_graphemes(true);
     t.advance("abc1\u{FE0F}\u{20E3}xe\u{0301}".as_bytes());
     assert_eq!(t.state.take_graphemes(), ["a", "b", "c", "1\u{FE0F}\u{20E3}", "x", "e\u{0301}"]);
+    // The keycap is two cells wide.
     let g = t.state.grapheme_state();
-    assert_eq!(g.at, Some((0, 5)));
+    assert_eq!(g.at, Some((0, 6)));
 
     t.advance("\u{0600}12".as_bytes());
     assert_eq!(t.state.take_graphemes(), ["\u{0600}1", "2"]);
@@ -349,6 +350,9 @@ fn ambiguous_width_applies_to_new_output_only() {
         ]
     );
     assert_eq!(t.state.take_replies(), b"\x1b[1;7R");
+    // VS15 stays one cell, emoji two.
+    t.advance("\r\x1b[K↔\u{FE0E}❤\u{FE0F}".as_bytes());
+    assert_eq!(t.state.cursor().col(), 3);
     // A reset keeps the setting, which is 1 or 2.
     t.advance(b"\x1bc");
     assert_eq!(t.state.ambiguous_width(), 2);
@@ -356,4 +360,114 @@ fn ambiguous_width_applies_to_new_output_only() {
     assert_eq!(t.state.ambiguous_width(), 2);
     t.state.set_ambiguous_width(0);
     assert_eq!(t.state.ambiguous_width(), 1);
+}
+
+/// What the cells should hold after printing `s` on one wide row: one cell
+/// per cluster that has a scalar with a width (leading zero-width scalars
+/// of a cluster have no cell and are dropped), its text within the caps
+/// (32 scalars, 128 bytes; a scalar past them is dropped), and its width
+/// by §6.3. With mode 2027 off (`legacy`), each scalar with a width starts
+/// a cell of its own width and zero-width ones join the cell before.
+fn expected_cells(s: &str, ambiguous: u8, legacy: bool) -> Vec<(String, u8)> {
+    let w = |c: char| props(c).width_with(ambiguous);
+    let push = |text: &mut String, c: char| {
+        if text.chars().count() < 32 && text.len() + c.len_utf8() <= 128 {
+            text.push(c);
+        }
+    };
+    let mut out: Vec<(String, u8)> = Vec::new();
+    if legacy {
+        for c in s.chars() {
+            if w(c) > 0 {
+                out.push((c.to_string(), w(c)));
+            } else if let Some((text, _)) = out.last_mut() {
+                push(text, c);
+            }
+        }
+        return out;
+    }
+    for g in graphemes(s) {
+        let Some(i) = g.char_indices().find(|&(_, c)| w(c) > 0).map(|(i, _)| i) else {
+            continue;
+        };
+        let mut text = String::new();
+        for c in g[i..].chars() {
+            push(&mut text, c);
+        }
+        out.push((text, cluster_width(&g[i..], ambiguous)));
+    }
+    out
+}
+
+/// The cells of row 0, up to the cursor: text and width.
+fn printed_cells(s: &str, ambiguous: u8, legacy: bool, byte_at_a_time: bool, bulk: bool) -> Vec<(String, u8)> {
+    let mut t = Term::new(400, 2, 10);
+    t.state.set_bulk_ascii(bulk);
+    t.state.set_ambiguous_width(ambiguous);
+    if legacy {
+        t.advance(b"\x1b[?2027l");
+    }
+    if byte_at_a_time {
+        for b in s.as_bytes() {
+            t.advance(std::slice::from_ref(b));
+        }
+    } else {
+        t.advance(s.as_bytes());
+    }
+    let row = t.state.visible_row(0);
+    let end = t.state.cursor().col();
+    (0..end)
+        .map(|col| row.cell(col))
+        .filter(|c| !c.is_spacer())
+        .map(|c| {
+            let mut text = String::new();
+            c.push_text(&mut text);
+            (text, if c.width() == term_core::Width::Wide { 2 } else { 1 })
+        })
+        .collect()
+}
+
+proptest! {
+    #![proptest_config(config())]
+
+    /// The cells written equal the clusters the segmenter finds, with the
+    /// widths of §6.3, at both ambiguous-width settings and in legacy mode;
+    /// fed whole or one byte at a time, with bulk ASCII on or off.
+    #[test]
+    fn cells_hold_the_clusters(s in text(), ambiguous in 1u8..=2, legacy in any::<bool>()) {
+        let expected = expected_cells(&s, ambiguous, legacy);
+        for (byte_at_a_time, bulk) in [(false, true), (true, true), (false, false)] {
+            prop_assert_eq!(
+                &printed_cells(&s, ambiguous, legacy, byte_at_a_time, bulk),
+                &expected,
+                "bytes {} bulk {}", byte_at_a_time, bulk
+            );
+        }
+    }
+}
+
+/// The emoji sequence shapes the design names (presentation, modifier,
+/// flag, keycap, ZWJ and tag sequences) are each one cell two wide, at
+/// both ambiguous-width settings.
+#[test]
+fn emoji_sequences_are_two_cells_at_both_settings() {
+    for s in [
+        "❤\u{FE0F}",
+        "↔\u{FE0F}",
+        "👍\u{1F3FD}",
+        "🇬🇧",
+        "1\u{FE0F}\u{20E3}",
+        "#\u{20E3}",
+        "👨\u{200D}👩\u{200D}👧",
+        "🏳\u{FE0F}\u{200D}🌈",
+        "🏴\u{E0067}\u{E0062}\u{E0073}\u{E0063}\u{E0074}\u{E007F}",
+    ] {
+        for ambiguous in [1, 2] {
+            assert_eq!(
+                printed_cells(s, ambiguous, false, false, true),
+                vec![(s.to_string(), 2)],
+                "{s:?} at {ambiguous}"
+            );
+        }
+    }
 }

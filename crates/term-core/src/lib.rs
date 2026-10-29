@@ -6,6 +6,7 @@
 //! the scrollback tests; they will change.
 
 pub mod cell;
+pub mod clusters;
 pub mod rows;
 pub mod scrollback;
 pub mod style;

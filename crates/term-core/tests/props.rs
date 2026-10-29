@@ -174,6 +174,25 @@ fn cluster() -> impl Strategy<Value = Vec<u8>> {
         "漢字界",
         "ｱｲ",
         "😀😀",
+        "1\u{FE0F}\u{20E3}",
+        "#\u{20E3}",
+        "1\u{FE0F}",
+        "👍\u{1F3FD}",
+        "😀\u{FE0E}",
+        "⌚\u{FE0E}",
+        "🇬🇧🇺",
+        "\u{0915}\u{094D}\u{0937}",
+        "e\u{0301}\u{0308}\u{0301}\u{0308}",
+        "\u{0600}1",
+        "\u{1100}\u{1161}\u{11A8}",
+        "§±①",
+        "❤\u{200D}🔥",
+        "\u{1F600}\u{1F3FD}\u{1F3FD}",
+        "a\u{0301}\x1b[3b",
+        "👨\u{200D}👩\x1b[2b",
+        "\x1b[?2027l",
+        "\x1b[?2027h",
+        "\x1b[?2027$p",
     ])
     .prop_map(|s| s.as_bytes().to_vec())
 }
@@ -225,6 +244,8 @@ enum Step {
     SelectAll,
     /// Leave the view where it is, through `view_top` and `set_view_top`.
     KeepView,
+    /// Change the ambiguous-width setting.
+    Ambiguous(u8),
 }
 
 fn step() -> impl Strategy<Value = Step> {
@@ -238,6 +259,7 @@ fn step() -> impl Strategy<Value = Step> {
         2 => (0u8..3, point).prop_map(|(k, p)| Step::Gesture(k, p)),
         1 => Just(Step::SelectAll),
         1 => Just(Step::KeepView),
+        1 => (1u8..=2).prop_map(Step::Ambiguous),
     ]
 }
 
@@ -270,6 +292,17 @@ fn apply(t: &mut Term, step: &Step) {
             let (offset, top) = (t.state.display_offset(), t.state.view_top());
             t.state.set_view_top(top);
             assert_eq!(t.state.display_offset(), offset, "{top:?}");
+        }
+        Step::Ambiguous(w) => {
+            // Cells already written keep their width (§17.3, 9).
+            let before: Vec<String> = (0..t.state.lines())
+                .map(|l| format!("{:?}", row_state(&t.state.visible_row(l))))
+                .collect();
+            t.state.set_ambiguous_width(*w);
+            let after: Vec<String> = (0..t.state.lines())
+                .map(|l| format!("{:?}", row_state(&t.state.visible_row(l))))
+                .collect();
+            assert_eq!(before, after, "changing the ambiguous width changed the screen");
         }
     }
 }
@@ -351,6 +384,10 @@ fn bulk_piece() -> impl Strategy<Value = Vec<u8>> {
         "\u{0600}",
         "\u{0600}1",
         "\u{093F}",
+        "\u{1F1EC}",
+        "\u{1F3FD}",
+        "\u{094D}\u{0937}",
+        "\u{1161}",
     ]);
     let modes = select(vec![
         "\x1b[4h",
@@ -394,6 +431,8 @@ fn bulk_piece() -> impl Strategy<Value = Vec<u8>> {
         "\x1b[6n",
         "\x1b[?25$p",
         "\x1b[3J",
+        "\x1b[?2027l",
+        "\x1b[?2027h",
     ]);
     prop_oneof![
         8 => prop::collection::vec(0x20u8..0x7f, 1..300),
@@ -417,6 +456,7 @@ enum BulkStep {
     Output(Vec<u8>),
     Resize(usize, usize),
     ScrollView(isize),
+    Ambiguous(u8),
 }
 
 fn bulk_step() -> impl Strategy<Value = BulkStep> {
@@ -424,6 +464,7 @@ fn bulk_step() -> impl Strategy<Value = BulkStep> {
         14 => prop::collection::vec(bulk_piece(), 1..12).prop_map(|ps| BulkStep::Output(ps.concat())),
         1 => (1usize..=90, 1usize..=14).prop_map(|(c, l)| BulkStep::Resize(c, l)),
         1 => (-20isize..=20).prop_map(BulkStep::ScrollView),
+        1 => (1u8..=2).prop_map(BulkStep::Ambiguous),
     ]
 }
 
@@ -438,13 +479,18 @@ type ScreenState = (
     GraphemeState,
 );
 
-/// One cell as a reader sees it: empty or not, character, width, style.
-type CellState = (bool, char, Width, Style);
+/// One cell as a reader sees it: empty or not, its text (a cluster's
+/// whole), width, style.
+type CellState = (bool, String, Width, Style);
 
 fn row_state(r: &RowRef) -> (Vec<CellState>, bool) {
     let cells = r
         .cells()
-        .map(|c| (c.content() == Content::Empty, c.ch(), c.width(), c.style()))
+        .map(|c| {
+            let mut text = String::new();
+            c.push_text(&mut text);
+            (c.content() == Content::Empty, text, c.width(), c.style())
+        })
         .collect();
     (cells, r.wrapped())
 }
@@ -513,6 +559,10 @@ proptest! {
                 BulkStep::ScrollView(d) => {
                     fast.state.scroll_view(*d);
                     slow.state.scroll_view(*d);
+                }
+                BulkStep::Ambiguous(w) => {
+                    fast.state.set_ambiguous_width(*w);
+                    slow.state.set_ambiguous_width(*w);
                 }
             }
             prop_assert_eq!(screen_state(&fast), screen_state(&slow), "after {:?}", step);
@@ -598,14 +648,10 @@ fn cells(styles: Vec<Style>) -> impl Strategy<Value = Vec<Cell>> {
 fn row() -> impl Strategy<Value = (Row, Vec<Style>)> {
     styles().prop_flat_map(|styles| {
         (prop::collection::vec(cells(styles.clone()), 0..60), any::<bool>(), Just(styles)).prop_map(|(cells, wrapped, styles)| {
-            (
-                Row {
-                    cells: cells.concat(),
-                    wrapped,
-                    ..Row::default()
-                },
-                styles,
-            )
+            let mut row = Row::new(0, Cell::BLANK);
+            row.cells = cells.concat();
+            row.wrapped = wrapped;
+            (row, styles)
         })
     })
 }
@@ -854,7 +900,15 @@ impl Mirrors {
                 };
                 let state = cells
                     .iter()
-                    .map(|c| (c.codepoint() == 0, c.ch(), c.width(), styles[c.style_id() as usize]))
+                    .map(|c| {
+                        let text = if c.is_cluster() {
+                            snap.cluster(row, c.codepoint()).to_string()
+                        } else {
+                            c.ch().to_string()
+                        };
+                        let empty = !c.is_cluster() && c.codepoint() == 0;
+                        (empty, text, c.width(), styles[c.style_id() as usize])
+                    })
                     .collect();
                 self.copied += 1;
                 prop_assert!(self.rows.insert(row.key, state).is_none(), "{:?} copied though cached", row.key);

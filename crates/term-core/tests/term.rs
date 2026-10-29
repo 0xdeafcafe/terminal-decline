@@ -368,7 +368,7 @@ fn vs16_does_not_break_the_next_wide_char() {
     let mut t = Term::new(6, 1, 0);
     t.advance("a漢\r⚠\u{FE0F}".as_bytes());
     assert_snapshot!(t.state.dump(), @r"
-    ⚠|
+    ⚠️|
     cursor=(0,2) alt=false offset=0
     ");
 }
@@ -485,7 +485,7 @@ fn vs16_next_to_a_narrow_char_overwrites_it() {
     let mut t = Term::new(6, 1, 0);
     t.advance("abc\r⚠\u{FE0F}".as_bytes());
     assert_snapshot!(t.state.dump(), @r"
-    ⚠c|
+    ⚠️c|
     cursor=(0,2) alt=false offset=0
     ");
 }

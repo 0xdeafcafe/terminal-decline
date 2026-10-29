@@ -394,3 +394,46 @@ fn snapshot_dimensions_and_counter() {
     assert_eq!(snap.terminal_id, t.state.terminal_id());
     assert_eq!(snap.popped_from, None, "nothing pulls lines back yet");
 }
+
+#[test]
+fn a_scalar_joining_a_cluster_changes_its_row() {
+    let mut t = Term::new(10, 2, 0);
+    t.advance(b"e");
+    let mut c = Cache::default();
+    c.take(&mut t);
+    // A combining mark, VS16 (widening in place) and a skin tone each
+    // join the cell before without writing a new one.
+    for (start, join) in [("", "\u{301}"), ("\x1b[3C❤", "\u{FE0F}"), ("\x1b[6C👍", "\u{1F3FD}")] {
+        t.advance(start.as_bytes());
+        c.take(&mut t);
+        let before = t.state.row_seqs();
+        t.advance(join.as_bytes());
+        let after = t.state.row_seqs();
+        assert_ne!(before[0], after[0], "{join:?}");
+        assert_eq!(before[1], after[1], "{join:?}");
+        assert_eq!(c.take(&mut t), [0], "{join:?}");
+        t.advance(b"\r");
+    }
+}
+
+#[test]
+fn snapshots_carry_cluster_text() {
+    let mut t = Term::new(10, 2, 0);
+    t.advance("ae\u{301}👍\u{1F3FD}\r\nplain".as_bytes());
+    let mut c = Cache::default();
+    c.take(&mut t);
+    let snap = &c.snap;
+    let row = &snap.rows[0];
+    let cells = snap.row_cells(row).unwrap();
+    let texts: Vec<&str> = cells
+        .iter()
+        .filter(|c| c.is_cluster())
+        .map(|c| snap.cluster(row, c.codepoint()))
+        .collect();
+    assert_eq!(texts, ["e\u{301}", "👍\u{1F3FD}"]);
+    // A row without clusters has none.
+    assert!(snap.rows[1].clusters.is_empty());
+    // Taken again with nothing new: no cells and no clusters copied.
+    c.take(&mut t);
+    assert!(c.snap.cluster_spans.is_empty() && c.snap.cluster_text.is_empty());
+}

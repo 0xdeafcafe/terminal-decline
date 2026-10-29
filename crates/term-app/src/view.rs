@@ -1006,6 +1006,9 @@ impl WindowView {
         }
         let mut clipboard = None;
         let mut blinking = Vec::new();
+        // The panes whose snapshots were taken, shaped and built once the
+        // terminals are unlocked (ligatures design §5).
+        let mut snapped = Vec::new();
         for ((id, frame, t), (_, term)) in ticks.iter_mut().zip(&terms) {
             let (id, frame) = (*id, *frame);
             let p = panes.get_mut(&id).expect("shown pane");
@@ -1026,19 +1029,41 @@ impl WindowView {
                 blinking.push(id);
             }
             let pad = pane_padding(&win.config, titlebar, win.scale, p.rect);
+            let (padding, cursor_on) = ((pad.x, pad.top), p.cursor_on || !focused);
             let input = FrameInput {
                 theme: &win.theme,
                 metrics: win.renderer.metrics(),
-                padding: (pad.x, pad.top),
-                cursor_on: p.cursor_on || !focused,
+                padding,
+                cursor_on,
                 focused,
                 preedit: Some(p.marked.as_str()),
             };
-            win.renderer.build_pane(&mut p.render, &mut t.state, &input);
+            // Only the snapshot needs the lock.
+            win.renderer.snapshot_pane(&mut p.render, &mut t.state, &input);
+            snapped.push((id, padding, cursor_on, focused));
         }
         // With the terminals still locked: the keys whose output this frame shows.
         let timed = latency::get().map(|l| (l, l.take_for_frame(self.ivars().id, rate)));
         drop(ticks);
+        // Shaping and building, unlocked. Rarely the glyph textures were
+        // emptied since a pane's snapshot (by another pane's build): that
+        // pane is built again with its terminal locked.
+        for (id, padding, cursor_on, focused) in snapped {
+            let p = panes.get_mut(&id).expect("shown pane");
+            // The input the snapshot was taken with.
+            let input = FrameInput {
+                theme: &win.theme,
+                metrics: win.renderer.metrics(),
+                padding,
+                cursor_on,
+                focused,
+                preedit: Some(p.marked.as_str()),
+            };
+            if !win.renderer.build_from_snapshot(&mut p.render, &input) {
+                let mut t = crate::session::lock(p.session.term());
+                win.renderer.build_pane(&mut p.render, &mut t.state, &input);
+            }
+        }
         let (w, h) = {
             let s = self.ivars().layer.drawableSize();
             (s.width as u32, s.height as u32)

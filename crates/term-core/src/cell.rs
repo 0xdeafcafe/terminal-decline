@@ -355,6 +355,14 @@ impl Row {
         c.ch()
     }
 
+    /// Make room in the row's cluster store for `slots` clusters of
+    /// `bytes` bytes in all (decoding a history line).
+    pub fn reserve_clusters(&mut self, slots: usize, bytes: usize) {
+        if slots > 0 {
+            self.extra.get_or_insert_with(Default::default).clusters.reserve(slots, bytes);
+        }
+    }
+
     /// Free the clusters of the cells in `range`, leaving the cells as they
     /// are: the caller overwrites them next.
     #[inline]

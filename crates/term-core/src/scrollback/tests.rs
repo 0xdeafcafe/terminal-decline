@@ -268,9 +268,39 @@ fn edge_spacer_and_width_exceptions() {
 }
 
 #[test]
-fn placeholders_are_left_for_a_later_flag() {
-    // Reserved now so the format doesn't change when they arrive.
-    assert_eq!(flag::EXTRA, 0x80);
+fn long_lines_record_their_text_length() {
+    let d = [Style::DEFAULT];
+    let mut sb = Scrollback::new(100);
+    for len in [LONG_TEXT - 1, LONG_TEXT, 300] {
+        let mut row = Row::new(400, Cell::BLANK);
+        put(&mut row, &d, 0, 0, &"q".repeat(len));
+        sb.push(&row, &d);
+        // With a style too, through the general encoder.
+        row.cells[0] = Cell::template(1, false).with_char('Q');
+        sb.push(
+            &row,
+            &[
+                Style::DEFAULT,
+                Style {
+                    attrs: Attrs::BOLD,
+                    ..Style::DEFAULT
+                },
+            ],
+        );
+    }
+    let heads: Vec<_> = (0..6).map(|i| sb.locate(i).map(|(v, n)| head(v.meta_of(n)).1).unwrap()).collect();
+    assert_eq!(heads, [None, None, Some(LONG_TEXT), Some(LONG_TEXT), Some(300), Some(300)]);
+    assert_eq!(
+        &sb.open.meta[sb.open.starts[4] as usize..][..4],
+        [flag::EXTRA, extra::TLEN, 0xAC, 0x02]
+    );
+    sb.check_all().unwrap();
+    for (i, len) in [LONG_TEXT - 1, LONG_TEXT - 1, LONG_TEXT, LONG_TEXT, 300, 300]
+        .into_iter()
+        .enumerate()
+    {
+        assert_eq!(sb.text(i).unwrap().len(), len);
+    }
 }
 
 #[test]
@@ -458,6 +488,20 @@ fn widths_without_a_lookup_agree_with_the_table() {
 }
 
 #[test]
+fn utf8_is_read_back_as_written() {
+    let s = "aé€😀\u{7FF}\u{800}\u{FFFF}\u{10000}\u{10FFFF}";
+    let (mut i, mut out) = (0, String::new());
+    while i < s.len() {
+        let (c, n) = utf8_at(s.as_bytes(), i);
+        out.push(c);
+        i += n;
+    }
+    assert_eq!(out, s);
+    // Cut short: no panic, and nothing read past the end.
+    assert_eq!(utf8_at(&[0xF0, 0x9F], 0).1, 2);
+}
+
+#[test]
 fn varint_edge_values() {
     let cases: &[(u32, usize)] = &[
         (0, 1),
@@ -507,7 +551,7 @@ fn varint_truncated_input_stops_at_the_end() {
 
 #[test]
 fn find_end_finds_the_first_end_byte() {
-    for len in 0..40 {
+    for len in 0..100 {
         for at in 0..=len {
             let mut text = vec![b'x'; len];
             if at < len {
@@ -992,6 +1036,25 @@ fn ambiguous_setting_is_kept_per_block() {
     }
     let (blocks, ambiguous): (Vec<_>, Vec<_>) = sb.sealed().map(|(d, n)| (n, d.ambiguous())).unzip();
     assert_eq!((blocks, ambiguous), (vec![1, 2], vec![1, 2]));
+}
+
+#[test]
+fn reading_lines_in_turn_matches_reading_each() {
+    let mut r = Rng(31);
+    let styles = random_styles(&mut r, 10);
+    let mut sb = Scrollback::new(100_000);
+    for _ in 0..3000 {
+        sb.push(&random_row(&mut r, &styles), &styles);
+    }
+    let mut reader = HistoryReader::default();
+    let (mut a, mut sa, mut la) = (Row::default(), Vec::new(), Vec::new());
+    let (mut b, mut sbs, mut lb) = (Row::default(), Vec::new(), Vec::new());
+    // In turn, with jumps (a reader for one line doesn't fit another).
+    for i in (0..sb.len()).chain(10..40).chain([7, 8, 2999, 0, 1]) {
+        assert!(sb.read(i, 80, &mut a, &mut sa, &mut la, &mut reader));
+        assert!(sb.get_at_width(i, 80, &mut b, &mut sbs, &mut lb));
+        assert_eq!((&a.cells, a.wrapped), (&b.cells, b.wrapped), "line {i}");
+    }
 }
 
 #[test]

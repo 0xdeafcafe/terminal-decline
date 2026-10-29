@@ -27,8 +27,9 @@
 //! text:  the line's UTF-8, then 0x0A if the line ends its logical line
 //! ```
 //!
-//! - `tlen`: the text length, for WRAPPED lines only (their text has no end
-//!   byte). Wrapped lines keep every cell, trailing blanks as spaces;
+//! - `tlen`: the text length, for WRAPPED lines (their text has no end
+//!   byte) and, behind the `extra` byte's TLEN bit, for unwrapped lines
+//!   with 128 bytes of text or more. Wrapped lines keep every cell, trailing blanks as spaces;
 //!   others stop at the last cell with content.
 //! - text: one entry per cell: a scalar, a cluster's scalars, a space for
 //!   an empty cell; nothing for spacers.
@@ -88,8 +89,36 @@ mod flag {
     pub const FILL: u8 = 1 << 5;
     /// Prompt marks follow (OSC 133).
     pub const MARKS: u8 = 1 << 6;
-    /// An `extra` byte follows the flags (placeholders, PR 10).
+    /// An `extra` byte follows the flags.
     pub const EXTRA: u8 = 1 << 7;
+}
+
+/// Bits of a stored line's `extra` byte. Bit 0 is placeholders (PR 10),
+/// bits 1–2 double width and height (later).
+mod extra {
+    /// An unwrapped line's text length follows too, as for wrapped lines:
+    /// written for text of [`super::LONG_TEXT`] bytes or more, so walking
+    /// from a checkpoint past long lines (a gradient's 480 bytes) needs no
+    /// scan for their end byte.
+    pub const TLEN: u8 = 1 << 3;
+}
+
+/// Unwrapped lines with this much text or more record its length.
+const LONG_TEXT: usize = 128;
+
+/// A stored line's flags, its text length if recorded (`tlen`), and where
+/// its sections start in its meta.
+#[inline]
+fn head(meta: &[u8]) -> (u8, Option<usize>, usize) {
+    let flags = meta[0];
+    let mut pos = 1;
+    let mut has_tlen = flags & flag::WRAPPED != 0;
+    if flags & flag::EXTRA != 0 {
+        has_tlen |= meta.get(1).is_some_and(|x| x & extra::TLEN != 0);
+        pos = 2;
+    }
+    let tlen = has_tlen.then(|| get_varint(meta, &mut pos) as usize);
+    (flags, tlen, pos)
 }
 
 /// What a sealed block holds. It never changes, and is shared as
@@ -501,9 +530,12 @@ impl OpenBlock {
         // default style, so the text is a byte copy and there are no runs.
         if cells[..len].iter().fold(0, |a, c| a | c.bits()) & !0x7F == 0 && !row.has_marks() {
             let end = if wrapped { cols } else { trim_spaces(&cells[..len]) };
-            room(&mut self.meta, 6);
+            room(&mut self.meta, 7);
             if wrapped {
                 self.meta.push(flag::WRAPPED);
+                put_varint(&mut self.meta, end as u32);
+            } else if end >= LONG_TEXT {
+                self.meta.extend_from_slice(&[flag::EXTRA, extra::TLEN]);
                 put_varint(&mut self.meta, end as u32);
             } else {
                 self.meta.push(0);
@@ -544,6 +576,8 @@ impl OpenBlock {
         let text_start = self.text.len();
         let amb = self.ambiguous;
         let (mut scalars, mut cluster_end, mut entry, mut width_next) = (0u32, 0u32, 0u32, 0u32);
+        // The last scalar looked up in the Unicode table and its width.
+        let mut last = ('\0', 1);
         for &c in &cells[..text_end] {
             if c.is_spacer() {
                 continue;
@@ -583,7 +617,10 @@ impl OpenBlock {
                     cp => char::from_u32(cp).unwrap_or(' '),
                 };
                 push_utf8(&mut self.text, ch);
-                predicted = single_width(ch, amb);
+                if ch != last.0 {
+                    last = (ch, single_width(ch, amb));
+                }
+                predicted = last.1;
                 scalars += 1;
             }
             let actual = if c.is_wide() { 2 } else { 1 };
@@ -631,12 +668,17 @@ impl OpenBlock {
         flags |= if scratch.widths.is_empty() { 0 } else { flag::WIDTHS };
         flags |= if fill && !scratch.runs.is_empty() { flag::FILL } else { 0 };
         flags |= if row.has_marks() { flag::MARKS } else { 0 };
+        let long = !wrapped && tlen >= LONG_TEXT;
+        flags |= if long { flag::EXTRA } else { 0 };
         room(
             &mut self.meta,
             6 + 6 + scratch.runs.len() * 8 + scratch.clusters.len() * 10 + scratch.widths.len() * 6 + 4 * 12,
         );
         self.meta.push(flags);
-        if wrapped {
+        if long {
+            self.meta.push(extra::TLEN);
+        }
+        if wrapped || long {
             put_varint(&mut self.meta, tlen as u32);
         }
         if !scratch.runs.is_empty() {
@@ -866,10 +908,7 @@ impl<'a> View<'a> {
         if flags & flag::MARKS == 0 {
             return;
         }
-        let mut pos = 1 + (flags & flag::EXTRA != 0) as usize;
-        if flags & flag::WRAPPED != 0 {
-            get_varint(meta, &mut pos);
-        }
+        let (_, _, pos) = head(meta);
         read_marks(meta, marks_at(meta, flags, pos), f);
     }
 
@@ -886,11 +925,21 @@ impl<'a> View<'a> {
     /// Where line `n`'s text starts in `text`, and its length (without the
     /// end byte).
     fn text_span(&self, n: usize) -> (usize, usize) {
-        let k = n / CHECKPOINT;
-        let mut at = self.checkpoints[k] as usize;
-        for j in k * CHECKPOINT..n {
-            at += self.stored_len(j, at);
-        }
+        self.text_span_from(n, None)
+    }
+
+    /// [`View::text_span`], starting from `start` (line `n`'s text start,
+    /// known from reading the line before) instead of a checkpoint.
+    #[inline]
+    fn text_span_from(&self, n: usize, start: Option<usize>) -> (usize, usize) {
+        let at = start.unwrap_or_else(|| {
+            let k = n / CHECKPOINT;
+            let mut at = self.checkpoints[k] as usize;
+            for j in k * CHECKPOINT..n {
+                at += self.stored_len(j, at);
+            }
+            at
+        });
         let len = self.stored_len(n, at);
         let ends = self.flags(n) & flag::WRAPPED == 0;
         (at, len - ends as usize)
@@ -900,12 +949,9 @@ impl<'a> View<'a> {
     /// wrapped line, up to and including the end byte otherwise.
     #[inline]
     fn stored_len(&self, n: usize, at: usize) -> usize {
-        let meta = self.meta_of(n);
-        if meta[0] & flag::WRAPPED != 0 {
-            let mut pos = 1 + (meta[0] & flag::EXTRA != 0) as usize;
-            get_varint(meta, &mut pos) as usize
-        } else {
-            find_end(&self.text[at..]).map_or(self.text.len() - at, |i| i + 1)
+        match head(self.meta_of(n)) {
+            (flags, Some(tlen), _) => tlen + (flags & flag::WRAPPED == 0) as usize,
+            _ => find_end(&self.text[at..]).map_or(self.text.len() - at, |i| i + 1),
         }
     }
 
@@ -922,58 +968,51 @@ impl<'a> View<'a> {
     /// Expand line `n` into `row` (its cells' style ids indexing `styles`,
     /// the default first, and their links indexing `links`, `None` first).
     /// With FILL, the last run's style is carried on to `fill_to` cells.
-    fn decode(&self, n: usize, fill_to: usize, row: &mut Row, styles: &mut Vec<Style>, links: &mut Vec<Option<Arc<LinkValue>>>) {
+    /// `start` is where the line's text starts, if the caller knows. Returns
+    /// where the next line's text starts.
+    fn decode(
+        &self,
+        n: usize,
+        start: Option<usize>,
+        fill_to: usize,
+        row: &mut Row,
+        styles: &mut Vec<Style>,
+        links: &mut Vec<Option<Arc<LinkValue>>>,
+    ) -> usize {
         let meta = self.meta_of(n);
-        let flags = meta[0];
-        let mut pos = 1 + (flags & flag::EXTRA != 0) as usize;
-        if flags & flag::WRAPPED != 0 {
-            get_varint(meta, &mut pos);
-        }
-        let (at, len) = self.text_span(n);
-        let text = std::str::from_utf8(&self.text[at..at + len]).unwrap_or("");
+        let (flags, _, mut pos) = head(meta);
+        let (at, len) = self.text_span_from(n, start);
+        let next = at + len + (flags & flag::WRAPPED == 0) as usize;
+        // The text was written as UTF-8 by the encoder: it is read
+        // without validating the whole line again (a cluster's text is
+        // checked when it is stored in the row).
+        let text = &self.text[at..at + len];
         row.reset(0, Cell::BLANK);
+        // One allocation for a new row, whatever its runs and text add.
+        row.cells.reserve(text.len().max(fill_to) + 1);
         row.wrapped = flags & flag::WRAPPED != 0;
         styles.clear();
         styles.push(Style::DEFAULT);
         links.clear();
         links.push(None);
 
+        // The runs first: each lays down its cells as blanks in its style,
+        // and the text then fills in content, so the runs are read once
+        // and each cell is written once or twice.
         let runs_at = pos;
         if flags & flag::STYLED != 0 {
-            for _ in 0..get_varint(meta, &mut pos) {
-                if get_varint(meta, &mut pos) & 7 == 7 {
-                    get_varint(meta, &mut pos);
-                }
-            }
-        }
-
-        if flags & (flag::CLUSTERS | flag::WIDTHS) == 0 && text.is_ascii() {
-            row.cells.reserve(text.len() + 1);
-            row.cells.extend(
-                text.bytes()
-                    .map(|b| if b == b' ' { Cell::BLANK } else { Cell::BLANK.with_char(b as char) }),
-            );
-        } else {
-            self.decode_text(meta, &mut pos, flags, text, row);
-        }
-        if flags & flag::EDGE != 0 {
-            row.cells.push(Cell::BLANK.with_width(Width::EdgeSpacer));
-        }
-
-        if flags & flag::STYLED != 0 {
-            let mut pos = runs_at;
-            let mut col = 0;
             // Slot → template in `styles`, direct-mapped: a style used by
             // several runs is decoded once (a miss just adds it again).
-            let mut seen: [(u32, Cell); 16] = [(0, Cell::BLANK); 16];
-            for _ in 0..get_varint(meta, &mut pos) {
+            let mut seen: [(u32, Cell); 32] = [(0, Cell::BLANK); 32];
+            let runs = get_varint(meta, &mut pos);
+            styles.reserve(runs as usize);
+            for _ in 0..runs {
                 let v = get_varint(meta, &mut pos);
                 let mut slot = v & 7;
                 if slot == 7 {
                     slot = get_varint(meta, &mut pos);
                 }
-                let cells = (v >> 3) as usize;
-                let e = &mut seen[(slot & 15) as usize];
+                let e = &mut seen[(slot & 31) as usize];
                 let t = if slot == 0 {
                     Cell::BLANK
                 } else if e.0 == slot {
@@ -989,16 +1028,26 @@ impl<'a> View<'a> {
                     *e = (slot, t);
                     t
                 };
-                let have = row.cells.len().min(col + cells);
-                if t != Cell::BLANK {
-                    for c in &mut row.cells[col.min(have)..have] {
-                        *c = c.with_style(t);
-                    }
-                }
-                if col + cells > have {
-                    row.cells.resize(col + cells, t);
-                }
-                col += cells;
+                let len = row.cells.len() + (v >> 3) as usize;
+                row.cells.resize(len, t);
+            }
+        }
+
+        if flags & (flag::CLUSTERS | flag::WIDTHS) == 0 && text.is_ascii() {
+            let bytes = text;
+            let styled = row.cells.len().min(bytes.len());
+            let ascii = |b: u8| if b == b' ' { 0 } else { b as u64 };
+            for (c, &b) in row.cells[..styled].iter_mut().zip(bytes) {
+                *c = Cell::from_bits(c.bits() | ascii(b));
+            }
+            row.cells.extend(bytes[styled..].iter().map(|&b| Cell::from_bits(ascii(b))));
+            if flags & flag::EDGE != 0 {
+                place(row, bytes.len(), Cell::BLANK.with_width(Width::EdgeSpacer));
+            }
+        } else {
+            let col = self.decode_text(meta, &mut pos, flags, text, row);
+            if flags & flag::EDGE != 0 {
+                place(row, col, Cell::BLANK.with_width(Width::EdgeSpacer));
             }
         }
         if flags & flag::FILL != 0
@@ -1010,17 +1059,20 @@ impl<'a> View<'a> {
         if flags & flag::MARKS != 0 {
             read_marks(meta, marks_at(meta, flags, runs_at), |m| row.set_mark(m));
         }
+        next
     }
 
     /// The text of a line with clusters, width exceptions or non-ASCII
-    /// characters, into cells.
+    /// characters, into cells (filling in those the runs laid down).
+    /// Returns the column after it.
     #[inline(never)]
-    fn decode_text(&self, meta: &[u8], pos: &mut usize, flags: u8, text: &str, row: &mut Row) {
+    fn decode_text(&self, meta: &[u8], pos: &mut usize, flags: u8, text: &[u8], row: &mut Row) -> usize {
         let mut clusters = 0;
         if flags & flag::CLUSTERS != 0 {
             clusters = get_varint(meta, pos);
         }
         let clusters_at = *pos;
+        row.reserve_clusters(clusters as usize, text.len());
         if flags & flag::CLUSTERS != 0 {
             for _ in 0..clusters * 2 {
                 get_varint(meta, pos);
@@ -1053,17 +1105,24 @@ impl<'a> View<'a> {
         }
 
         let amb = self.ambiguous;
-        let (mut scalar, mut entry) = (0u32, 0u32);
-        let mut chars = text.char_indices();
-        while let Some((at, c)) = chars.next() {
-            let mut end = at + c.len_utf8();
+        let (mut scalar, mut entry, mut col) = (0u32, 0u32, 0usize);
+        // The last scalar looked up and its width: runs of one character
+        // (box drawing, a gradient's blocks) look it up once.
+        let mut last = ('\0', 1);
+        let mut i = 0;
+        while i < text.len() {
+            let (c, n) = utf8_at(text, i);
+            let at = i;
+            i += n;
+            let mut end = i;
             let cluster = scalar == next_cluster;
             let mut cluster_width = 1;
             if cluster {
                 cluster_width = 1 + (extra & 1) as u8;
                 for _ in 0..extra >> 1 {
-                    if let Some((i, d)) = chars.next() {
-                        end = i + d.len_utf8();
+                    if i < text.len() {
+                        i += utf8_at(text, i).1;
+                        end = i;
                     }
                 }
                 scalar += 1 + (extra >> 1);
@@ -1090,26 +1149,30 @@ impl<'a> View<'a> {
                 w
             } else if cluster {
                 cluster_width
+            } else if c == last.0 {
+                last.1
             } else {
-                single_width(c, amb)
+                last = (c, single_width(c, amb));
+                last.1
             };
             entry += 1;
-            let col = row.cells.len();
             let cell = if c == ' ' && !cluster {
                 Cell::BLANK
             } else {
                 Cell::BLANK.with_char(c)
             };
             if w == 2 {
-                row.cells.push(cell.with_width(Width::Wide));
-                row.cells.push(Cell::BLANK.with_width(Width::Spacer));
+                place(row, col, cell.with_width(Width::Wide));
+                place(row, col + 1, Cell::BLANK.with_width(Width::Spacer));
             } else {
-                row.cells.push(cell);
+                place(row, col, cell);
             }
             if cluster {
-                row.set_cluster(col, &text[at..end]);
+                row.set_cluster(col, std::str::from_utf8(&text[at..end]).unwrap_or("\u{FFFD}\u{FFFD}"));
             }
+            col += w as usize;
         }
+        col
     }
 
     /// Check line `n`'s meta: every section reads to where the next line
@@ -1118,19 +1181,20 @@ impl<'a> View<'a> {
     fn check_line(&self, n: usize, meta_end: usize) -> Result<(), String> {
         let meta = &self.meta[self.starts[n] as usize..meta_end];
         let flags = *meta.first().ok_or("empty meta")?;
-        if flags & flag::EXTRA != 0 {
-            return Err(format!("flags {flags:#x}: an extra byte, which nothing writes yet"));
+        if flags & flag::EXTRA != 0 && meta.get(1) != Some(&extra::TLEN) {
+            return Err(format!("extra byte {:?}: only TLEN is written yet", meta.get(1)));
         }
         let (at, len) = self.text_span(n);
         let text = std::str::from_utf8(self.text.get(at..at + len).ok_or("text past the end")?).map_err(|e| e.to_string())?;
         if text.bytes().any(|b| b < 0x20 && b != 0) {
             return Err(format!("text {text:?} holds a control"));
         }
-        let mut pos = 1;
-        if flags & flag::WRAPPED != 0 {
-            get_varint(meta, &mut pos);
-        } else if self.text.get(at + len) != Some(&END) {
+        let (_, tlen, mut pos) = head(meta);
+        if flags & flag::WRAPPED == 0 && self.text.get(at + len) != Some(&END) {
             return Err("an unwrapped line without its end byte".into());
+        }
+        if tlen.is_some_and(|t| t != len) || (flags & flag::WRAPPED == 0 && (tlen.is_some() != (len >= LONG_TEXT))) {
+            return Err(format!("text length {tlen:?} recorded for {len} bytes"));
         }
         if flags & flag::STYLED != 0 {
             let runs = get_varint(meta, &mut pos);
@@ -1225,21 +1289,71 @@ impl<'a> View<'a> {
     }
 }
 
-/// The first 0x0A in `text`, eight bytes at a time.
+/// The scalar starting at byte `i` of `text` (UTF-8 the encoder wrote)
+/// and its length in bytes. Bytes that aren't UTF-8 read as U+FFFD.
+#[inline(always)]
+fn utf8_at(text: &[u8], i: usize) -> (char, usize) {
+    let b = |k: usize| text.get(i + k).copied().unwrap_or(0) as u32 & 0x3F;
+    let x = text[i] as u32;
+    let (cp, n) = if x < 0x80 {
+        (x, 1)
+    } else if x < 0xE0 {
+        ((x & 0x1F) << 6 | b(1), 2)
+    } else if x < 0xF0 {
+        ((x & 0x0F) << 12 | b(1) << 6 | b(2), 3)
+    } else {
+        ((x & 0x07) << 18 | b(1) << 12 | b(2) << 6 | b(3), 4)
+    };
+    (char::from_u32(cp).unwrap_or('\u{FFFD}'), n.min(text.len() - i))
+}
+
+/// Put content `cell` (in the default style) at `col`: into the cell a run
+/// laid down there, keeping its style, or as a new cell at the end.
+#[inline(always)]
+fn place(row: &mut Row, col: usize, cell: Cell) {
+    match row.cells.get_mut(col) {
+        Some(c) => *c = Cell::from_bits(c.bits() | cell.bits()),
+        None => row.cells.push(cell),
+    }
+}
+
+/// The first 0x0A in `text`. Walking from a checkpoint skips up to 15
+/// lines this way, so it tests 32 bytes at a time (four words, each with
+/// the zero-byte trick on `word ^ 0x0A0A…`), then finds the byte.
 #[inline]
 fn find_end(text: &[u8]) -> Option<usize> {
     const LO: u64 = 0x0101_0101_0101_0101;
     const HI: u64 = 0x8080_8080_8080_8080;
+    const PAT: u64 = LO * END as u64;
+    #[inline(always)]
+    fn zero(w: u64) -> u64 {
+        let w = w ^ PAT;
+        w.wrapping_sub(LO) & !w & HI
+    }
+    let word = |i: usize| u64::from_le_bytes(text[i..i + 8].try_into().expect("8 bytes"));
     let mut i = 0;
+    while i + 32 <= text.len() && zero(word(i)) | zero(word(i + 8)) | zero(word(i + 16)) | zero(word(i + 24)) == 0 {
+        i += 32;
+    }
     while i + 8 <= text.len() {
-        let w = u64::from_le_bytes(text[i..i + 8].try_into().expect("8 bytes")) ^ (LO * END as u64);
-        let zero = w.wrapping_sub(LO) & !w & HI;
-        if zero != 0 {
-            return Some(i + (zero.trailing_zeros() / 8) as usize);
+        let z = zero(word(i));
+        if z != 0 {
+            // The lowest flagged byte is the first 0x0A (any false flags
+            // come after a real one).
+            return Some(i + (z.trailing_zeros() / 8) as usize);
         }
         i += 8;
     }
     text[i..].iter().position(|&b| b == END).map(|p| i + p)
+}
+
+/// Where the next line's text starts, for reading lines one after another
+/// ([`Scrollback::read`]).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct HistoryReader {
+    /// The block (its first line) and the line it is for.
+    next: Option<(u64, u64)>,
+    at: usize,
 }
 
 /// What history holds, for measuring.
@@ -1535,8 +1649,30 @@ impl Scrollback {
         styles: &mut Vec<Style>,
         links: &mut Vec<Option<Arc<LinkValue>>>,
     ) -> bool {
+        self.read(i, cols, row, styles, links, &mut HistoryReader::default())
+    }
+
+    /// [`Scrollback::get_at_width`] for lines read one after another (the
+    /// rows of a view): `reader` remembers where the next line's text
+    /// starts, so reading line `i + 1` after line `i` needs no walk from a
+    /// checkpoint. A reader is only good while history doesn't change:
+    /// use a new one each time it may have.
+    pub fn read(
+        &self,
+        i: usize,
+        cols: usize,
+        row: &mut Row,
+        styles: &mut Vec<Style>,
+        links: &mut Vec<Option<Arc<LinkValue>>>,
+        reader: &mut HistoryReader,
+    ) -> bool {
         let Some((view, n)) = self.locate(i) else { return false };
-        view.decode(n, cols, row, styles, links);
+        let line = self.start + i as u64;
+        let first = line - n as u64;
+        let start = (reader.next == Some((first, line))).then_some(reader.at);
+        let at = view.decode(n, start, cols, row, styles, links);
+        reader.next = (n + 1 < view.starts.len()).then_some((first, line + 1));
+        reader.at = at;
         true
     }
 

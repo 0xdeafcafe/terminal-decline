@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::{CursorShape, LinkValue, Terminal};
 use crate::cell::{Cell, Row, Width};
+use crate::scrollback::HistoryReader;
 use crate::style::Style;
 
 /// Where [`Terminal`] ids come from: unique in the process, so a terminal
@@ -271,6 +272,8 @@ impl Terminal {
         let hovered = hovered_link.as_ref().and_then(|l| self.styles.links().find(l));
         let history = self.scrollback.len();
         let first = history - self.display_offset;
+        // History rows are read one after another.
+        let mut reader = HistoryReader::default();
         for view_line in 0..self.lines {
             let line = self.point_at(view_line, 0).line;
             let highlights = out.highlights.len() as u32;
@@ -336,7 +339,7 @@ impl Terminal {
                 let copied = !kept
                     && self
                         .scrollback
-                        .get_at_width(i, self.cols, &mut out.row, &mut out.row_styles, &mut out.row_links);
+                        .read(i, self.cols, &mut out.row, &mut out.row_styles, &mut out.row_links, &mut reader);
                 if copied {
                     // The row's own style list joins the snapshot's, and its
                     // cells' ids move up by where it starts.

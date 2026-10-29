@@ -10,7 +10,7 @@ mod registry;
 mod shape;
 pub mod sprite;
 
-pub use config::{CellWidth, FontConfig};
+pub use config::{CellWidth, FontConfig, Tag};
 pub use fit::is_private_use;
 pub use registry::{FontId, GlyphKey, SPRITE_FONT};
 pub use shape::{Features, RunText, ShapedGlyph};

@@ -35,7 +35,8 @@ pub struct GlyphKey {
     /// fitted to these cells and sprites drawn across them; coverage glyphs
     /// are drawn at the font's size whatever this says.
     pub cells: u8,
-    /// Flags for how the glyph is drawn: [`GlyphKey::FITTED`] for icons;
+    /// Flags for how the glyph is drawn: [`GlyphKey::FITTED`] for icons,
+    /// [`GlyphKey::SCALED`] for ligature glyphs stretched to the cell grid;
     /// the other bits are spare (synthetic bold, a later subpixel phase).
     pub variant: u8,
 }
@@ -44,6 +45,12 @@ impl GlyphKey {
     /// `variant` flag: an icon, scaled down and centred to fit `cells`
     /// cells and never drawn past them (E.4; see `term_font::fit`).
     pub const FITTED: u8 = 1;
+
+    /// `variant` flag: a glyph of a shaped run ([`ShapedGlyph::split`](crate::ShapedGlyph::split))
+    /// drawn scaled horizontally by cell width / advance, so a ligature's
+    /// ink lands on its cells when the cell isn't the font's advance wide
+    /// (ligatures design §3). Scaled and plain bitmaps never share a key.
+    pub const SCALED: u8 = 2;
 
     /// The key for a code-drawn shape across `cells` cells.
     pub fn sprite(id: SpriteId, cells: u8) -> GlyphKey {

@@ -19,8 +19,7 @@ use objc2_core_text::{CTFont, CTLine, CTRun, kCTFontAttributeName};
 
 use crate::{FontId, Fonts, GlyphKey, SpriteId, Style};
 
-/// How runs are shaped. Today only ligatures; E.4's `font_features` list
-/// joins it.
+/// How a face's runs are shaped, from [`Fonts::features`].
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 pub struct Features {
     /// Shape whole runs with the font's ligatures and contextual
@@ -40,6 +39,14 @@ pub struct ShapedGlyph {
     /// for the second and later glyphs of a cluster (combining marks).
     pub dx: i16,
     pub dy: i16,
+    /// A glyph of a shaped run that isn't the cell's own: its glyph differs
+    /// from what [`Fonts::glyph_key`] gives the cell's character alone (a
+    /// ligature, a contextual alternate, a ligature's blank spacer), or it
+    /// covers more cells than its cell is wide. Its ink can reach into the
+    /// cells either side, so the renderer draws it in pieces, one per cell
+    /// (ligatures design §4.1). Never set for icons, sprites or a face's
+    /// own wide glyphs.
+    pub split: bool,
 }
 
 /// A run's text, cell by cell, with the table that maps each UTF-16 unit
@@ -270,6 +277,14 @@ struct LineGlyph {
 }
 
 impl Fonts {
+    /// How runs in `face` are to be shaped: [`Features::ligatures`] when the
+    /// face has ligatures or contextual alternates on (ligatures design
+    /// §1). Always off for now; B1.1 detects them.
+    pub fn features(&self, face: Style) -> Features {
+        let _ = face;
+        Features::default()
+    }
+
     /// Shape `run` in `face` into glyphs on the cell grid, appended to
     /// `out`. Spaces give no glyphs; code-drawn characters give sprite keys
     /// across their cells. Keys follow [`Fonts::glyph_key`]'s rule: colour
@@ -309,6 +324,7 @@ impl Fonts {
                         key,
                         dx: 0,
                         dy: 0,
+                        split: false,
                     });
                 }
                 continue;
@@ -319,6 +335,7 @@ impl Fonts {
                 key: g.key,
                 dx: g.dx,
                 dy: g.dy,
+                split: false,
             };
             if let Some(hit) = self.clusters.borrow_mut().get(face, text) {
                 out.extend(hit.iter().map(place));
@@ -410,6 +427,7 @@ impl Fonts {
                 key,
                 dx: (g.x - ox).round() as i16,
                 dy: -(g.y - oy).round() as i16,
+                split: false,
             });
         }
     }
@@ -533,6 +551,11 @@ mod tests {
         assert_eq!(c.len(), 0);
         c.insert(Style::Regular, &[1], &g(1));
         assert_eq!(c.get(Style::Regular, &[1]).unwrap(), &g(1));
+    }
+
+    #[test]
+    fn shaped_glyphs_stay_14_bytes() {
+        assert_eq!(std::mem::size_of::<ShapedGlyph>(), 14);
     }
 
     #[test]

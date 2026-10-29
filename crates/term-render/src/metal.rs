@@ -504,4 +504,11 @@ pub fn configure_layer(layer: &CAMetalLayer, device: &Device, opaque: bool) {
     layer.setOpaque(opaque);
     // Draw only when told to, not on the layer's own schedule.
     layer.setPresentsWithTransaction(false);
+    // Hand each frame to the window server as soon as the GPU is done,
+    // instead of holding it for the display's next refresh: the window
+    // server composites at the refresh anyway, so a window doesn't tear,
+    // and frames reach the glass a refresh or two sooner (see DESIGN.md
+    // "Input latency"). It also stops `nextDrawable` blocking the main
+    // thread while both drawables wait for refreshes.
+    layer.setDisplaySyncEnabled(false);
 }

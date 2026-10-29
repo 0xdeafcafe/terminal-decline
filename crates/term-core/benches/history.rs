@@ -131,7 +131,7 @@ fn bench(c: &mut Criterion) {
             let mut sb = Scrollback::new(LINES);
             b.iter(|| {
                 for row in rows.iter().cycle().take(LINES) {
-                    sb.push_keyed(black_box(row), &styles, [1, 0]);
+                    sb.push_keyed(black_box(row), &styles, &[], [1, 0]);
                 }
             });
         });

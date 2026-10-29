@@ -139,7 +139,7 @@ fn full_width_background_line() {
     assert_eq!(back.cells.len(), 160);
     assert!(back.cells.iter().all(|c| back_styles[c.style_id() as usize] == styles[1]));
     let (mut wide, mut wide_styles) = (Row::default(), Vec::new());
-    assert!(sb.get_at_width(0, 200, &mut wide, &mut wide_styles));
+    assert!(sb.get_at_width(0, 200, &mut wide, &mut wide_styles, &mut Vec::new()));
     assert_eq!(wide.cells.len(), 200);
     assert_eq!(wide_styles[wide.cells[199].style_id() as usize], styles[1]);
     assert!(sb.fill(0));
@@ -268,10 +268,121 @@ fn edge_spacer_and_width_exceptions() {
 }
 
 #[test]
-fn placeholders_and_marks_are_left_for_later_flags() {
+fn placeholders_are_left_for_a_later_flag() {
     // Reserved now so the format doesn't change when they arrive.
-    assert_eq!(flag::MARKS, 0x40);
     assert_eq!(flag::EXTRA, 0x80);
+}
+
+#[test]
+fn prompt_line_with_marks() {
+    let d = [Style::DEFAULT];
+    let mut row = Row::new(80, Cell::BLANK);
+    put(&mut row, &d, 0, 0, "$ ls");
+    row.set_mark(Mark {
+        kind: MarkKind::Prompt,
+        col: 0,
+        status: None,
+    });
+    row.set_mark(Mark {
+        kind: MarkKind::Input,
+        col: 2,
+        status: None,
+    });
+    row.set_mark(Mark {
+        kind: MarkKind::End,
+        col: 0,
+        status: Some(300),
+    });
+    let mut sb = Scrollback::new(10);
+    sb.push(&row, &d);
+    sb.push(&Row::new(80, Cell::BLANK.with_char('x')), &d);
+    let (meta, _) = stored(&sb);
+    // Plain text with marks: flags, then count, and per mark kind (bit 7:
+    // a status follows), column, status.
+    assert_eq!(meta[..10], [0x40, 3, 0x01, 0, 0x02, 2, 0x84, 0, 0xAC, 0x02]);
+    let (back, _) = sb.get(0).unwrap();
+    assert_eq!(back.marks().collect::<Vec<_>>(), row.marks().collect::<Vec<_>>());
+    assert_eq!(sb.marks(0), row.marks().collect::<Vec<_>>());
+    assert!(sb.has_marks(0) && !sb.has_marks(1));
+    sb.check_all().unwrap();
+}
+
+#[test]
+fn marked_lines_skip_blocks_without_marks() {
+    let d = [Style::DEFAULT];
+    let mut sb = Scrollback::new(100_000);
+    let plain = Row::new(100, Cell::BLANK.with_char('p'));
+    let mut marked = plain.clone();
+    marked.set_mark(Mark {
+        kind: MarkKind::Prompt,
+        col: 0,
+        status: None,
+    });
+    let at = [5usize, 2000, 2001, 9000];
+    for i in 0..10_000 {
+        sb.push(if at.contains(&i) { &marked } else { &plain }, &d);
+    }
+    let blocks: Vec<bool> = sb.sealed().map(|(b, _)| b.has_marks()).collect();
+    assert!(blocks.iter().filter(|&&m| !m).count() >= 5, "{blocks:?}");
+    let mut down = Vec::new();
+    let mut i = 0;
+    while let Some(j) = sb.marked(i, false) {
+        down.push(j);
+        i = j + 1;
+    }
+    assert_eq!(down, at);
+    let mut up = Vec::new();
+    let mut i = sb.len();
+    while let Some(j) = sb.marked(i, true) {
+        up.push(j);
+        i = j;
+    }
+    up.reverse();
+    assert_eq!(up, at);
+}
+
+#[test]
+fn links_go_into_the_blocks_own_table() {
+    let a = Arc::new(LinkValue {
+        uri: "https://a".into(),
+        id: None,
+    });
+    let b = Arc::new(LinkValue {
+        uri: "https://b".into(),
+        id: Some("x".into()),
+    });
+    // The screen's link table, and styles naming it (ids 2 and 5).
+    let mut links: Vec<Option<Arc<LinkValue>>> = vec![None; 6];
+    links[2] = Some(a.clone());
+    links[5] = Some(b.clone());
+    let styles = vec![
+        Style::DEFAULT,
+        Style { link: 2, ..Style::DEFAULT },
+        Style {
+            link: 5,
+            fg: Color::indexed(3),
+            ..Style::DEFAULT
+        },
+        Style {
+            link: 2,
+            attrs: Attrs::BOLD,
+            ..Style::DEFAULT
+        },
+    ];
+    let mut row = Row::new(20, Cell::BLANK);
+    let mut c = put(&mut row, &styles, 0, 1, "aa");
+    c = put(&mut row, &styles, c, 2, "bb");
+    c = put(&mut row, &styles, c, 3, "AA");
+    put(&mut row, &styles, c, 0, "plain");
+    let mut sb = Scrollback::new(10);
+    sb.push_keyed(&row, &styles, &links, [1, 0]);
+    assert_eq!(sb.open.links, [a.clone(), b.clone()], "each link once, by value");
+    let (mut back, mut back_styles, mut back_links) = (Row::default(), Vec::new(), Vec::new());
+    assert!(sb.get_at_width(0, 0, &mut back, &mut back_styles, &mut back_links));
+    let link = |col: usize| back_links[back_styles[back.cells[col].style_id() as usize].link as usize].clone();
+    assert_eq!([link(0), link(2), link(4), link(6)], [Some(a.clone()), Some(b), Some(a), None]);
+    assert_eq!(back_styles[back.cells[4].style_id() as usize].attrs, Attrs::BOLD);
+    sb.check_all().unwrap();
 }
 
 #[test]
@@ -558,7 +669,7 @@ fn rows_read_back_as_written() {
         for (i, row) in rows.iter().enumerate() {
             // Sometimes keep the slot cache from line to line (one table).
             let key = if round % 2 == 0 { [1, 1] } else { [0, 0] };
-            sb.push_keyed(row, &styles, key);
+            sb.push_keyed(row, &styles, &[], key);
             if i % 17 == 16 {
                 sb.set_ambiguous(1 + r.below(2) as u8);
             }
@@ -579,7 +690,7 @@ fn rows_round_trip_through_sealed_blocks() {
     let mut sb = Scrollback::new(100_000);
     let rows: Vec<Row> = (0..5000).map(|_| random_row(&mut r, &styles)).collect();
     for row in &rows {
-        sb.push_keyed(row, &styles, [3, 0]);
+        sb.push_keyed(row, &styles, &[], [3, 0]);
     }
     assert!(sb.stats().sealed_blocks >= 3, "{:?}", sb.stats());
     sb.check_all().unwrap();
@@ -602,12 +713,12 @@ fn the_slot_cache_follows_the_table() {
     let mut row = Row::new(3, Cell::BLANK);
     row.cells[0] = Cell::template(1, false).with_char('x');
     let mut sb = Scrollback::new(10);
-    sb.push_keyed(&row, &[Style::DEFAULT, red], [5, 0]);
+    sb.push_keyed(&row, &[Style::DEFAULT, red], &[], [5, 0]);
     // A sweep freed id 1 and a new style took it: a new key.
-    sb.push_keyed(&row, &[Style::DEFAULT, green], [5, 1]);
+    sb.push_keyed(&row, &[Style::DEFAULT, green], &[], [5, 1]);
     // Another table (the primary screen's rows while the alternate one is
     // shown) with the same id for another style.
-    sb.push_keyed(&row, &[Style::DEFAULT, red], [6, 0]);
+    sb.push_keyed(&row, &[Style::DEFAULT, red], &[], [6, 0]);
     let fg = |i| {
         let (row, styles) = sb.get(i).unwrap();
         styles[row.cells[0].style_id() as usize].fg

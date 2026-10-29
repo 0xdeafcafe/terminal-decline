@@ -50,7 +50,8 @@ use std::collections::{HashMap, VecDeque};
 use std::hash::{BuildHasherDefault, Hasher};
 use std::sync::Arc;
 
-use crate::cell::{Cell, Color, ColorKind, Row, Width};
+use crate::cell::{Cell, Color, ColorKind, Mark, MarkKind, Row, Width};
+use crate::links::LinkValue;
 use crate::style::{Attrs, Style, Underline};
 use crate::unicode;
 
@@ -85,8 +86,7 @@ mod flag {
     pub const WIDTHS: u8 = 1 << 4;
     /// The last run's style fills to the end of the row.
     pub const FILL: u8 = 1 << 5;
-    /// Prompt marks follow (OSC 133, with PR 9).
-    #[allow(dead_code)]
+    /// Prompt marks follow (OSC 133).
     pub const MARKS: u8 = 1 << 6;
     /// An `extra` byte follows the flags (placeholders, PR 10).
     pub const EXTRA: u8 = 1 << 7;
@@ -109,6 +109,9 @@ pub struct BlockData {
     styles: Box<[u8]>,
     /// Offset of each dictionary entry (slot 1 onwards) in `styles`.
     style_starts: Box<[u16]>,
+    /// The block's own hyperlinks (OSC 8), which dictionary entries name
+    /// by index (1 onwards). Shared with the screen's link table by `Arc`.
+    links: Box<[Arc<LinkValue>]>,
     /// Stable line number of the first line.
     first: u64,
     /// The width every line here was written at, 0 if mixed.
@@ -117,6 +120,13 @@ pub struct BlockData {
     ambiguous: u8,
     /// The first line continues a logical line from the block before.
     head_continues: bool,
+    /// Some line here has prompt marks (OSC 133).
+    has_marks: bool,
+}
+
+/// Bytes a block counts for one of its links.
+fn link_bytes(l: &LinkValue) -> usize {
+    std::mem::size_of::<Arc<LinkValue>>() + std::mem::size_of::<LinkValue>() + 16 + l.uri.len() + l.id.as_ref().map_or(0, |s| s.len())
 }
 
 impl BlockData {
@@ -128,6 +138,7 @@ impl BlockData {
             checkpoints: &self.checkpoints,
             styles: &self.styles,
             style_starts: &self.style_starts,
+            links: &self.links,
             ambiguous: self.ambiguous,
         }
     }
@@ -142,6 +153,7 @@ impl BlockData {
             + self.checkpoints.len() * 2
             + self.styles.len()
             + self.style_starts.len() * 2
+            + self.links.iter().map(|l| link_bytes(l)).sum::<usize>()
     }
 
     /// Stable line number of the first line.
@@ -173,6 +185,11 @@ impl BlockData {
     pub fn head_continues(&self) -> bool {
         self.head_continues
     }
+
+    /// Some line here has prompt marks.
+    pub fn has_marks(&self) -> bool {
+        self.has_marks
+    }
 }
 
 /// History's own record of a sealed block, changed only under the lock.
@@ -198,8 +215,15 @@ struct OpenBlock {
     width: u16,
     ambiguous: u8,
     head_continues: bool,
-    /// Style (link left out) → dictionary slot, for this block only.
+    has_marks: bool,
+    /// Style (its link an index in `links`) → dictionary slot, for this
+    /// block only.
     dict: HashMap<Style, u32, BuildHasherDefault<FxHasher>>,
+    links: Vec<Arc<LinkValue>>,
+    /// Link → its index in `links` (1 onwards).
+    link_index: HashMap<Arc<LinkValue>, u32>,
+    /// Bytes the links count.
+    link_bytes: usize,
     /// Screen style id → slot, indexed by `id & 63`, in front of `dict`:
     /// the common case is one compare per run. Reset with the block, and
     /// whenever the screen's table may have reused ids (a sweep, another
@@ -271,7 +295,11 @@ impl OpenBlock {
             width: u16::MAX,
             ambiguous,
             head_continues: false,
+            has_marks: false,
             dict: HashMap::default(),
+            links: Vec::new(),
+            link_index: HashMap::new(),
+            link_bytes: 0,
             cache: [NO_ENTRY; 64],
         }
     }
@@ -288,6 +316,7 @@ impl OpenBlock {
             checkpoints: &self.checkpoints,
             styles: &self.styles,
             style_starts: &self.style_starts,
+            links: &self.links,
             ambiguous: self.ambiguous,
         }
     }
@@ -302,6 +331,8 @@ impl OpenBlock {
             + self.styles.capacity()
             + self.style_starts.capacity() * 2
             + self.dict.capacity() * (std::mem::size_of::<(Style, u32)>() + 1)
+            + self.link_bytes
+            + self.link_index.capacity() * (std::mem::size_of::<(Arc<LinkValue>, u32)>() + 1)
     }
 
     fn reset_cache(&mut self) {
@@ -320,17 +351,19 @@ impl OpenBlock {
             checkpoints: b.checkpoints.into_boxed_slice(),
             styles: b.styles.into_boxed_slice(),
             style_starts: b.style_starts.into_boxed_slice(),
+            links: b.links.into_boxed_slice(),
             first: b.first,
             width: if b.width == u16::MAX { 0 } else { b.width },
             ambiguous: b.ambiguous,
             head_continues: b.head_continues,
+            has_marks: b.has_marks,
         }
     }
 
     /// The dictionary slot of screen style `id` (0 = default), adding the
     /// style to the dictionary when it is new.
     #[inline]
-    fn slot(&mut self, id: u32, styles: &[Style]) -> u32 {
+    fn slot(&mut self, id: u32, styles: &[Style], links: &[Option<Arc<LinkValue>>]) -> u32 {
         if id == 0 {
             return 0;
         }
@@ -338,16 +371,18 @@ impl OpenBlock {
         if e.0 == id {
             return e.1;
         }
-        self.slot_slow(id, styles)
+        self.slot_slow(id, styles, links)
     }
 
     #[cold]
     #[inline(never)]
-    fn slot_slow(&mut self, id: u32, styles: &[Style]) -> u32 {
+    fn slot_slow(&mut self, id: u32, styles: &[Style], links: &[Option<Arc<LinkValue>>]) -> u32 {
         let mut s = styles.get(id as usize).copied().unwrap_or_default();
-        // Links get their own per-block table with OSC 8 (PR 9); until
-        // then there are none to keep.
-        s.link = 0;
+        // The link moves to the block's own table.
+        s.link = match links.get(s.link as usize).and_then(|l| l.as_ref()) {
+            Some(l) => self.link(l),
+            None => 0,
+        };
         let slot = if s == Style::DEFAULT {
             0
         } else if let Some(&slot) = self.dict.get(&s) {
@@ -365,9 +400,21 @@ impl OpenBlock {
         slot
     }
 
+    /// The block's index for `link`, adding it when it is new.
+    fn link(&mut self, link: &Arc<LinkValue>) -> u32 {
+        if let Some(&i) = self.link_index.get(link) {
+            return i;
+        }
+        self.links.push(link.clone());
+        self.link_bytes += link_bytes(link);
+        let i = self.links.len() as u32;
+        self.link_index.insert(link.clone(), i);
+        i
+    }
+
     /// Store `row`. False, with nothing changed, if a part would pass
     /// 64 KB.
-    fn push(&mut self, row: &Row, styles: &[Style], scratch: &mut Scratch) -> bool {
+    fn push(&mut self, row: &Row, styles: &[Style], links: &[Option<Arc<LinkValue>>], scratch: &mut Scratch) -> bool {
         let before = (self.meta.len(), self.text.len(), self.styles.len(), self.style_starts.len());
         let n = self.lines();
         room(&mut self.starts, 1);
@@ -377,10 +424,11 @@ impl OpenBlock {
             room(&mut self.checkpoints, 1);
             self.checkpoints.push(before.1 as u16);
         }
-        self.encode(row, styles, scratch);
+        self.encode(row, styles, links, scratch);
         if self.meta.len() <= PART && self.text.len() <= PART && self.styles.len() <= PART {
             let w = row.cells.len() as u16;
             self.width = if n == 0 || self.width == w { w } else { 0 };
+            self.has_marks |= row.has_marks();
             return true;
         }
         // Undo it: the caller seals the block (or, for an empty block,
@@ -399,18 +447,20 @@ impl OpenBlock {
         }
         let slots = before.3 as u32;
         self.dict.retain(|_, s| *s <= slots);
+        // Links the dropped entries added stay: unused, and freed with the
+        // block.
         self.reset_cache();
         false
     }
 
-    fn encode(&mut self, row: &Row, styles: &[Style], scratch: &mut Scratch) {
+    fn encode(&mut self, row: &Row, styles: &[Style], links: &[Option<Arc<LinkValue>>], scratch: &mut Scratch) {
         let cells = &row.cells[..];
         let cols = cells.len();
         let wrapped = row.wrapped;
 
         // Common case: every cell is narrow ASCII (or empty) in the
         // default style, so the text is a byte copy and there are no runs.
-        if cells.iter().fold(0, |a, c| a | c.bits()) & !0x7F == 0 {
+        if cells.iter().fold(0, |a, c| a | c.bits()) & !0x7F == 0 && !row.has_marks() {
             let end = if wrapped { cols } else { ascii_text_end(cells) };
             room(&mut self.meta, 6);
             if wrapped {
@@ -516,7 +566,7 @@ impl OpenBlock {
             let id = c.style_id();
             if id != last_id {
                 last_id = id;
-                slot = self.slot(id, styles);
+                slot = self.slot(id, styles, links);
             }
             match scratch.runs.last_mut() {
                 Some((n, s)) if *s == slot => *n += 1,
@@ -534,9 +584,10 @@ impl OpenBlock {
         flags |= if scratch.clusters.is_empty() { 0 } else { flag::CLUSTERS };
         flags |= if scratch.widths.is_empty() { 0 } else { flag::WIDTHS };
         flags |= if fill && !scratch.runs.is_empty() { flag::FILL } else { 0 };
+        flags |= if row.has_marks() { flag::MARKS } else { 0 };
         room(
             &mut self.meta,
-            6 + 6 + scratch.runs.len() * 8 + scratch.clusters.len() * 10 + scratch.widths.len() * 6,
+            6 + 6 + scratch.runs.len() * 8 + scratch.clusters.len() * 10 + scratch.widths.len() * 6 + 4 * 12,
         );
         self.meta.push(flags);
         if wrapped {
@@ -565,6 +616,20 @@ impl OpenBlock {
             for &(gap, w) in &scratch.widths {
                 put_varint(&mut self.meta, gap);
                 self.meta.push(w);
+            }
+        }
+        if flags & flag::MARKS != 0 {
+            // count, then per mark: kind (bit 7: an exit status follows),
+            // column, status.
+            let at = self.meta.len();
+            self.meta.push(0);
+            for m in row.marks() {
+                self.meta[at] += 1;
+                self.meta.push(m.kind as u8 | if m.status.is_some() { 0x80 } else { 0 });
+                put_varint(&mut self.meta, m.col as u32);
+                if let Some(status) = m.status {
+                    put_varint(&mut self.meta, status);
+                }
             }
         }
     }
@@ -670,10 +735,72 @@ struct View<'a> {
     checkpoints: &'a [u16],
     styles: &'a [u8],
     style_starts: &'a [u16],
+    links: &'a [Arc<LinkValue>],
     ambiguous: u8,
 }
 
+/// Where a line's marks start in its meta: after its runs, clusters and
+/// width exceptions, from `pos` (the runs).
+fn marks_at(meta: &[u8], flags: u8, mut pos: usize) -> usize {
+    if flags & flag::STYLED != 0 {
+        for _ in 0..get_varint(meta, &mut pos) {
+            if get_varint(meta, &mut pos) & 7 == 7 {
+                get_varint(meta, &mut pos);
+            }
+        }
+    }
+    if flags & flag::CLUSTERS != 0 {
+        for _ in 0..get_varint(meta, &mut pos) * 2 {
+            get_varint(meta, &mut pos);
+        }
+    }
+    if flags & flag::WIDTHS != 0 {
+        for _ in 0..get_varint(meta, &mut pos) {
+            get_varint(meta, &mut pos);
+            pos += 1;
+        }
+    }
+    pos
+}
+
+/// A line's marks, from where they start in its meta.
+fn read_marks(meta: &[u8], mut pos: usize, mut f: impl FnMut(Mark)) {
+    let count = meta.get(pos).copied().unwrap_or(0);
+    pos += 1;
+    for _ in 0..count {
+        let k = meta.get(pos).copied().unwrap_or(0);
+        pos += 1;
+        let col = get_varint(meta, &mut pos);
+        let status = (k & 0x80 != 0).then(|| get_varint(meta, &mut pos));
+        let kind = match k & 0x7F {
+            1 => MarkKind::Prompt,
+            2 => MarkKind::Input,
+            3 => MarkKind::Output,
+            _ => MarkKind::End,
+        };
+        f(Mark {
+            kind,
+            col: col.min(u16::MAX as u32) as u16,
+            status,
+        });
+    }
+}
+
 impl<'a> View<'a> {
+    /// Line `n`'s marks.
+    fn marks(&self, n: usize, f: impl FnMut(Mark)) {
+        let meta = self.meta_of(n);
+        let flags = meta[0];
+        if flags & flag::MARKS == 0 {
+            return;
+        }
+        let mut pos = 1 + (flags & flag::EXTRA != 0) as usize;
+        if flags & flag::WRAPPED != 0 {
+            get_varint(meta, &mut pos);
+        }
+        read_marks(meta, marks_at(meta, flags, pos), f);
+    }
+
     #[inline]
     fn meta_of(&self, n: usize) -> &'a [u8] {
         &self.meta[self.starts[n] as usize..]
@@ -721,9 +848,9 @@ impl<'a> View<'a> {
     }
 
     /// Expand line `n` into `row` (its cells' style ids indexing `styles`,
-    /// the default first). With FILL, the last run's style is carried on
-    /// to `fill_to` cells.
-    fn decode(&self, n: usize, fill_to: usize, row: &mut Row, styles: &mut Vec<Style>) {
+    /// the default first, and their links indexing `links`, `None` first).
+    /// With FILL, the last run's style is carried on to `fill_to` cells.
+    fn decode(&self, n: usize, fill_to: usize, row: &mut Row, styles: &mut Vec<Style>, links: &mut Vec<Option<Arc<LinkValue>>>) {
         let meta = self.meta_of(n);
         let flags = meta[0];
         let mut pos = 1 + (flags & flag::EXTRA != 0) as usize;
@@ -736,6 +863,8 @@ impl<'a> View<'a> {
         row.wrapped = flags & flag::WRAPPED != 0;
         styles.clear();
         styles.push(Style::DEFAULT);
+        links.clear();
+        links.push(None);
 
         let runs_at = pos;
         if flags & flag::STYLED != 0 {
@@ -778,7 +907,11 @@ impl<'a> View<'a> {
                 } else if e.0 == slot {
                     e.1
                 } else {
-                    let s = self.style(slot);
+                    let mut s = self.style(slot);
+                    if s.link != 0 {
+                        links.push(self.links.get(s.link as usize - 1).cloned());
+                        s.link = links.len() as u32 - 1;
+                    }
                     styles.push(s);
                     let t = Cell::template(styles.len() as u32 - 1, s.shows_empty());
                     *e = (slot, t);
@@ -801,6 +934,9 @@ impl<'a> View<'a> {
             && row.cells.len() < fill_to
         {
             row.cells.resize(fill_to, last.style_part());
+        }
+        if flags & flag::MARKS != 0 {
+            read_marks(meta, marks_at(meta, flags, runs_at), |m| row.set_mark(m));
         }
     }
 
@@ -910,8 +1046,8 @@ impl<'a> View<'a> {
     fn check_line(&self, n: usize, meta_end: usize) -> Result<(), String> {
         let meta = &self.meta[self.starts[n] as usize..meta_end];
         let flags = *meta.first().ok_or("empty meta")?;
-        if flags & (flag::MARKS | flag::EXTRA) != 0 {
-            return Err(format!("flags {flags:#x}: marks or extra, which nothing writes yet"));
+        if flags & flag::EXTRA != 0 {
+            return Err(format!("flags {flags:#x}: an extra byte, which nothing writes yet"));
         }
         let (at, len) = self.text_span(n);
         let text = std::str::from_utf8(self.text.get(at..at + len).ok_or("text past the end")?).map_err(|e| e.to_string())?;
@@ -934,6 +1070,13 @@ impl<'a> View<'a> {
                 let slot = if v & 7 == 7 { get_varint(meta, &mut pos) } else { v & 7 };
                 if slot as usize > self.style_starts.len() {
                     return Err(format!("run names slot {slot}, the dictionary has {}", self.style_starts.len()));
+                }
+                if slot > 0 && self.style(slot).link as usize > self.links.len() {
+                    return Err(format!(
+                        "slot {slot} names link {}, the block has {}",
+                        self.style(slot).link,
+                        self.links.len()
+                    ));
                 }
             }
         }
@@ -958,6 +1101,24 @@ impl<'a> View<'a> {
                 pos += 1;
                 if !matches!(w, Some(1 | 2)) {
                     return Err(format!("width exception {w:?}"));
+                }
+            }
+        }
+        if flags & flag::MARKS != 0 {
+            let count = meta.get(pos).copied().unwrap_or(0);
+            if !(1..=4).contains(&count) {
+                return Err(format!("{count} marks"));
+            }
+            pos += 1;
+            for _ in 0..count {
+                let k = meta.get(pos).copied().unwrap_or(0);
+                pos += 1;
+                if !(1..=4).contains(&(k & 0x7F)) || (k & 0x80 != 0 && k & 0x7F != 4) {
+                    return Err(format!("mark kind {k:#x}"));
+                }
+                get_varint(meta, &mut pos);
+                if k & 0x80 != 0 {
+                    get_varint(meta, &mut pos);
                 }
             }
         }
@@ -1141,13 +1302,14 @@ impl Scrollback {
     /// Store a row (trailing blank cells dropped); its cells' style ids
     /// index `styles`.
     pub fn push(&mut self, row: &Row, styles: &[Style]) {
-        self.push_keyed(row, styles, [0, 0]);
+        self.push_keyed(row, styles, &[], [0, 0]);
     }
 
-    /// [`Scrollback::push`] for rows of one style table, named by `key`
-    /// (its epoch and sweep count): while it stays the same, the slot
-    /// cache is kept from line to line.
-    pub fn push_keyed(&mut self, row: &Row, styles: &[Style], key: [u64; 2]) {
+    /// [`Scrollback::push`] for rows of one screen's style table, whose
+    /// styles' `link`s index `links` (the screen's link table), named by
+    /// `key` (the table's epoch and sweep count): while it stays the same,
+    /// the slot cache is kept from line to line.
+    pub fn push_keyed(&mut self, row: &Row, styles: &[Style], links: &[Option<Arc<LinkValue>>], key: [u64; 2]) {
         self.end += 1;
         if self.limit == 0 {
             // Nothing is kept, but the count goes on: line numbers are the
@@ -1164,12 +1326,12 @@ impl Scrollback {
             self.open.head_continues = self.last_wrapped;
         }
         // An empty row always fits.
-        if !self.open.push(row, styles, &mut self.scratch) {
+        if !self.open.push(row, styles, links, &mut self.scratch) {
             if self.open.lines() > 0 {
                 self.seal();
                 self.open.head_continues = self.last_wrapped;
             }
-            if !self.open.push(row, styles, &mut self.scratch) {
+            if !self.open.push(row, styles, links, &mut self.scratch) {
                 // Too wide for a block (only past 4096 columns): cut it.
                 let mut cut = row.clone();
                 cut.resize_cells(MAX_CELLS);
@@ -1177,9 +1339,9 @@ impl Scrollback {
                     cut.free_clusters(MAX_CELLS - 1..MAX_CELLS);
                     cut.cells[MAX_CELLS - 1] = Cell::BLANK;
                 }
-                if !self.open.push(&cut, styles, &mut self.scratch) {
+                if !self.open.push(&cut, styles, links, &mut self.scratch) {
                     debug_assert!(false, "a 4096-cell row fits in an empty block");
-                    self.open.push(&Row::default(), styles, &mut self.scratch);
+                    self.open.push(&Row::default(), styles, links, &mut self.scratch);
                 }
             }
         }
@@ -1237,12 +1399,12 @@ impl Scrollback {
     /// sealed block only the entry's count goes down; the shared data
     /// stays as it is until the block is freed. Records the lowest line
     /// popped. False, leaving the buffers alone, if history is empty.
-    pub fn pop_into(&mut self, fill_to: usize, row: &mut Row, styles: &mut Vec<Style>) -> bool {
+    pub fn pop_into(&mut self, fill_to: usize, row: &mut Row, styles: &mut Vec<Style>, links: &mut Vec<Option<Arc<LinkValue>>>) -> bool {
         if self.is_empty() {
             return false;
         }
         let line = self.end - 1;
-        self.get_at_width(self.len() - 1, fill_to, row, styles);
+        self.get_at_width(self.len() - 1, fill_to, row, styles, links);
         if self.open.lines() > 0 {
             self.open.pop();
         } else {
@@ -1267,7 +1429,7 @@ impl Scrollback {
     pub fn pop(&mut self) -> Option<(Row, Vec<Style>)> {
         let mut row = Row::default();
         let mut styles = Vec::new();
-        self.pop_into(0, &mut row, &mut styles).then_some((row, styles))
+        self.pop_into(0, &mut row, &mut styles, &mut Vec::new()).then_some((row, styles))
     }
 
     /// The lowest line number popped since the last call, if any (§9.1):
@@ -1287,15 +1449,71 @@ impl Scrollback {
     /// [`Scrollback::get`] into buffers the caller reuses (the snapshot,
     /// §9.2). Returns false, leaving them alone, if there is no line `i`.
     pub fn get_into(&self, i: usize, row: &mut Row, styles: &mut Vec<Style>) -> bool {
-        self.get_at_width(i, 0, row, styles)
+        self.get_at_width(i, 0, row, styles, &mut Vec::new())
     }
 
-    /// [`Scrollback::get_into`] for a row shown `cols` wide: a FILL line's
-    /// last style carries on to the end of the row.
-    pub fn get_at_width(&self, i: usize, cols: usize, row: &mut Row, styles: &mut Vec<Style>) -> bool {
+    /// [`Scrollback::get_into`] for a row shown `cols` wide (a FILL line's
+    /// last style carries on to the end of the row), with the links its
+    /// styles' `link`s index (`None` first).
+    pub fn get_at_width(
+        &self,
+        i: usize,
+        cols: usize,
+        row: &mut Row,
+        styles: &mut Vec<Style>,
+        links: &mut Vec<Option<Arc<LinkValue>>>,
+    ) -> bool {
         let Some((view, n)) = self.locate(i) else { return false };
-        view.decode(n, cols, row, styles);
+        view.decode(n, cols, row, styles, links);
         true
+    }
+
+    /// Line `i`'s OSC 133 marks, without decoding its cells.
+    pub fn marks(&self, i: usize) -> Vec<Mark> {
+        let mut out = Vec::new();
+        if let Some((v, n)) = self.locate(i) {
+            v.marks(n, |m| out.push(m));
+        }
+        out
+    }
+
+    /// Whether line `i` has marks, from its flags.
+    pub fn has_marks(&self, i: usize) -> bool {
+        self.locate(i).is_some_and(|(v, n)| v.flags(n) & flag::MARKS != 0)
+    }
+
+    /// The nearest line with marks before line `i` (`up`) or at or after
+    /// it, skipping blocks with none (§11.6): only flags bytes are read.
+    pub fn marked(&self, i: usize, up: bool) -> Option<usize> {
+        let len = self.len();
+        let mut j = if up { i.min(len).checked_sub(1)? } else { i };
+        while j < len {
+            let line = self.start + j as u64;
+            // The block holding `line`: its lines (visible ones) and marks.
+            let (lo, hi, any) = if line >= self.open.first {
+                (self.open.first, self.end, self.open.has_marks)
+            } else {
+                let b = &self.blocks[self.blocks.partition_point(|b| b.data.first <= line) - 1];
+                (b.data.first, b.data.first + b.len as u64, b.data.has_marks)
+            };
+            let lo = (lo.max(self.start) - self.start) as usize;
+            let hi = (hi - self.start) as usize;
+            if any {
+                if up {
+                    if let Some(k) = (lo..=j).rev().find(|&k| self.has_marks(k)) {
+                        return Some(k);
+                    }
+                } else if let Some(k) = (j..hi).find(|&k| self.has_marks(k)) {
+                    return Some(k);
+                }
+            }
+            if up {
+                j = lo.checked_sub(1)?;
+            } else {
+                j = hi;
+            }
+        }
+        None
     }
 
     /// Whether line `i` soft-wraps onto the next, without decoding it.
@@ -1479,8 +1697,7 @@ mod head {
 }
 mod more {
     pub const UNDERLINE: u8 = 1 << 0;
-    /// The link (PR 9).
-    #[allow(dead_code)]
+    /// The link: an index in the block's link table.
     pub const LINK: u8 = 1 << 1;
     pub const IMAGE_HIGH: u8 = 1 << 2;
 }
@@ -1498,12 +1715,17 @@ fn put_style(out: &mut Vec<u8>, s: &Style) {
         h |= head::ATTRS;
         put_varint(out, s.attrs.bits() as u32);
     }
-    let m = if s.underline != Underline::None { more::UNDERLINE } else { 0 } | if s.image_id_high != 0 { more::IMAGE_HIGH } else { 0 };
+    let m = if s.underline != Underline::None { more::UNDERLINE } else { 0 }
+        | if s.link != 0 { more::LINK } else { 0 }
+        | if s.image_id_high != 0 { more::IMAGE_HIGH } else { 0 };
     if m != 0 {
         h |= head::MORE;
         out.push(m);
         if m & more::UNDERLINE != 0 {
             out.push(s.underline as u8);
+        }
+        if m & more::LINK != 0 {
+            put_varint(out, s.link);
         }
         if m & more::IMAGE_HIGH != 0 {
             out.push(s.image_id_high);
@@ -1540,6 +1762,9 @@ fn get_style(data: &[u8]) -> Style {
                 _ => Underline::None,
             };
             pos += 1;
+        }
+        if m & more::LINK != 0 {
+            s.link = get_varint(data, &mut pos);
         }
         if m & more::IMAGE_HIGH != 0 {
             s.image_id_high = data.get(pos).copied().unwrap_or(0);

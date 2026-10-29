@@ -533,9 +533,20 @@ impl Terminal {
 
     fn history_row(&self, i: usize) -> RowRef<'_> {
         let mut row = Row::default();
-        let mut styles = Vec::new();
-        self.scrollback.get_at_width(i, self.cols, &mut row, &mut styles);
-        RowRef::new(Cow::Owned(row), Cow::Owned(styles))
+        let (mut styles, mut links) = (Vec::new(), Vec::new());
+        self.scrollback.get_at_width(i, self.cols, &mut row, &mut styles, &mut links);
+        RowRef::new(Cow::Owned(row), Cow::Owned(styles)).with_links(Cow::Owned(links))
+    }
+
+    /// The history index (0 = oldest kept) of buffer line `line`, if it is
+    /// a stored history line.
+    fn history_index(&self, line: u64) -> Option<usize> {
+        if self.alt_active || line >= self.top_line {
+            return None;
+        }
+        let back = self.top_line - line;
+        let sb = self.scrollback.len();
+        (back <= sb as u64).then(|| sb - back as usize)
     }
 
     /// The cursor's position on the screen, and the pen it writes with.
@@ -726,8 +737,7 @@ impl Terminal {
     }
 
     /// The OSC 8 hyperlink at `p`, by value (on either half of a wide
-    /// character). History lines have none until history stores links
-    /// (scrollback v2).
+    /// character), on the screen or in history.
     pub fn link_at(&self, p: Point) -> Option<LinkValue> {
         self.row_at(p.line)?.link(p.col).cloned()
     }
@@ -753,12 +763,11 @@ impl Terminal {
 
     /// The OSC 133 marks on line `line`, in the order they were written
     /// (by column; at the same column a command's output and end come
-    /// before the next prompt). History lines have none until history stores marks
-    /// (scrollback v2).
+    /// before the next prompt), on the screen or in history.
     pub fn marks_at(&self, line: u64) -> Vec<Mark> {
         let mut marks: Vec<Mark> = match self.screen_line(line) {
             Some(row) => row.marks().collect(),
-            None => Vec::new(),
+            None => self.history_index(line).map_or_else(Vec::new, |i| self.scrollback.marks(i)),
         };
         marks.sort_by_key(|m| (m.col, mark_rank(m.kind)));
         marks
@@ -780,17 +789,32 @@ impl Terminal {
     }
 
     /// Lines holding marks, nearest first: before `line` going up, or
-    /// after it going down. (With history v2 this skips blocks without
-    /// marks, §11.6; today history holds none, so only screen lines are
-    /// read.)
+    /// after it going down. History lines are found from their flags,
+    /// skipping blocks without marks (§11.6).
     fn marked_lines(&self, line: u64, up: bool) -> Box<dyn Iterator<Item = u64> + '_> {
         let lo = self.first_line().max(self.top_line);
         let hi = self.top_line + self.lines as u64;
         let has = move |l: &u64| self.screen_line(*l).is_some_and(Row::has_marks);
+        // History lines, as buffer lines (on the primary screen only).
+        let base = self.top_line - self.scrollback.len() as u64;
+        let history = !self.alt_active;
         if up {
-            Box::new((lo..line.min(hi)).rev().filter(has))
+            let screen = (lo..line.min(hi)).rev().filter(has);
+            let mut at = (history && line > base).then(|| (line.min(self.top_line) - base) as usize);
+            let older = std::iter::from_fn(move || {
+                let i = self.scrollback.marked(at?, true)?;
+                at = Some(i);
+                Some(base + i as u64)
+            });
+            Box::new(screen.chain(older))
         } else {
-            Box::new((line.saturating_add(1).max(lo)..hi).filter(has))
+            let mut at = (history && line.saturating_add(1) < self.top_line).then(|| (line.saturating_add(1).max(base) - base) as usize);
+            let newer = std::iter::from_fn(move || {
+                let i = self.scrollback.marked(at?, false)?;
+                at = Some(i + 1);
+                Some(base + i as u64)
+            });
+            Box::new(newer.chain((line.saturating_add(1).max(lo)..hi).filter(has)))
         }
     }
 
@@ -817,12 +841,19 @@ impl Terminal {
     /// and last cell. `None` if there is no C mark for it or the output
     /// is empty.
     pub fn command_output(&self, p: Point) -> Option<(Point, Point)> {
-        // Every mark in the order written. (Screen lines only, until
-        // history keeps marks; then this reads only the lines of blocks
-        // with marks.)
-        let lines = self.top_line..self.top_line + self.lines as u64;
+        // Every mark in the order written, history's included (only the
+        // lines of blocks with marks are read).
+        let first = self.first_line();
+        let lines = self.marked_lines(first.saturating_sub(1), false);
+        let lines: Vec<u64> = if first == 0 && self.marks_at(0).is_empty() {
+            lines.collect()
+        } else if first == 0 {
+            std::iter::once(0).chain(lines).collect()
+        } else {
+            lines.collect()
+        };
         let marks: Vec<(Point, MarkKind)> = lines
-            .filter(|&l| self.screen_line(l).is_some_and(Row::has_marks))
+            .into_iter()
             .flat_map(|line| {
                 self.marks_at(line)
                     .into_iter()
@@ -1082,8 +1113,12 @@ impl Terminal {
             self.other_top_line += removed.len() as u64;
             // Those rows' ids are in the primary screen's table.
             for row in removed {
-                self.scrollback
-                    .push_keyed(&row, self.other_styles.styles(), self.other_styles.version());
+                self.scrollback.push_keyed(
+                    &row,
+                    self.other_styles.styles(),
+                    self.other_styles.links().as_slice(),
+                    self.other_styles.version(),
+                );
                 self.follow_history();
             }
             if let Some(saved) = &mut self.saved_primary {
@@ -1283,7 +1318,8 @@ impl Terminal {
     /// whether or not it keeps it, so its line numbers stay the screen's.
     #[inline]
     fn push_scrollback(&mut self, row: &Row) {
-        self.scrollback.push_keyed(row, self.styles.styles(), self.styles.version());
+        self.scrollback
+            .push_keyed(row, self.styles.styles(), self.styles.links().as_slice(), self.styles.version());
         self.follow_history();
     }
 
@@ -2888,14 +2924,20 @@ impl Terminal {
         }
         self.clear_grapheme();
         self.styles.set_sweeps_blocked(true);
-        let (mut row, mut styles) = (Row::default(), Vec::new());
+        let (mut row, mut styles, mut links) = (Row::default(), Vec::new(), Vec::new());
         for _ in 0..n {
-            if !self.scrollback.pop_into(self.cols, &mut row, &mut styles) {
+            if !self.scrollback.pop_into(self.cols, &mut row, &mut styles, &mut links) {
                 break;
             }
             let ids: Vec<Cell> = styles
                 .iter()
-                .map(|s| if *s == Style::DEFAULT { Cell::BLANK } else { self.intern(*s) })
+                .map(|s| {
+                    let mut s = *s;
+                    if let Some(Some(l)) = links.get(s.link as usize) {
+                        s.link = self.styles.links_mut().intern(l);
+                    }
+                    if s == Style::DEFAULT { Cell::BLANK } else { self.intern(s) }
+                })
                 .collect();
             for c in &mut row.cells {
                 *c = c.with_style(ids[c.style_id() as usize]);

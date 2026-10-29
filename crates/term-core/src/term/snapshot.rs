@@ -9,9 +9,10 @@
 //! each row and the cursor.
 
 use std::ops::Range;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::{CursorShape, Terminal};
+use super::{CursorShape, LinkValue, Terminal};
 use crate::cell::{Cell, Row, Width};
 use crate::style::Style;
 
@@ -171,6 +172,7 @@ pub struct Snapshot {
     /// Decoding buffers for history rows, kept to save allocating.
     row: Row,
     row_styles: Vec<Style>,
+    row_links: Vec<Option<Arc<LinkValue>>>,
 }
 
 impl Snapshot {
@@ -265,7 +267,8 @@ impl Terminal {
         let selection = self.selection.map(|s| s.ordered());
         // The hovered link's id in the screen's table: cells are compared
         // with it, which is comparing by value within one table.
-        let hovered = self.hover.and_then(|p| self.link_at(p)).and_then(|l| self.styles.links().find(&l));
+        let hovered_link = self.hover.and_then(|p| self.link_at(p));
+        let hovered = hovered_link.as_ref().and_then(|l| self.styles.links().find(l));
         let history = self.scrollback.len();
         let first = history - self.display_offset;
         for view_line in 0..self.lines {
@@ -285,15 +288,25 @@ impl Terminal {
                 }
             }
             let i = first + view_line;
-            // History rows (v1) hold no links, so only screen rows can
-            // show the hovered one.
-            if let Some(id) = hovered
-                && i >= history
-            {
-                let row = &self.screen[i - history];
+            // A history row's links are its own: compared by value.
+            let history_row = (i < history && hovered_link.is_some()).then(|| self.history_row(i));
+            let on_link = |col: usize| -> bool {
+                match &history_row {
+                    Some(r) => col < r.len() && r.link(col) == hovered_link.as_ref(),
+                    None => {
+                        let row = &self.screen[i - history];
+                        hovered.is_some_and(|id| row.cells.get(col).is_some_and(|c| self.styles.get(c.style_id()).link == id))
+                    }
+                }
+            };
+            if hovered_link.is_some() {
+                let len = match &history_row {
+                    Some(r) => r.len(),
+                    None => self.screen[i - history].cells.len(),
+                };
                 let mut run: Option<usize> = None;
-                for col in 0..=row.cells.len() {
-                    let on = row.cells.get(col).is_some_and(|c| self.styles.get(c.style_id()).link == id);
+                for col in 0..=len {
+                    let on = on_link(col);
                     match (on, run) {
                         (true, None) => run = Some(col),
                         (false, Some(start)) => {
@@ -320,7 +333,10 @@ impl Terminal {
                 flags.set(RowFlags::WRAPPED, self.scrollback.wrapped(i));
                 flags.set(RowFlags::FILL, self.scrollback.fill(i));
                 let kept = same_history && popped.is_none_or(|p| line < p) && have(key);
-                let copied = !kept && self.scrollback.get_at_width(i, self.cols, &mut out.row, &mut out.row_styles);
+                let copied = !kept
+                    && self
+                        .scrollback
+                        .get_at_width(i, self.cols, &mut out.row, &mut out.row_styles, &mut out.row_links);
                 if copied {
                     // The row's own style list joins the snapshot's, and its
                     // cells' ids move up by where it starts.

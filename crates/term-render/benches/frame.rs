@@ -23,13 +23,27 @@ impl GlyphSource for Cached {
     }
 }
 
-fn screen(cols: usize, lines: usize, coloured: bool) -> Term {
+/// How the bench screen is coloured.
+#[derive(Clone, Copy, PartialEq)]
+enum Colours {
+    Plain,
+    /// A new colour pair every 7 cells, like syntax-highlighted code.
+    Coloured,
+    /// Bold every other cell, plain in between: the style changes on every
+    /// cell, but there are only two styles.
+    Alternating,
+}
+
+fn screen(cols: usize, lines: usize, colours: Colours) -> Term {
     let mut t = Term::new(cols, lines, 0);
     let mut s = String::new();
     for l in 0..lines {
         for c in 0..cols {
-            if coloured && c % 7 == 0 {
+            if colours == Colours::Coloured && c % 7 == 0 {
                 s.push_str(&format!("\x1b[38;5;{};48;5;{}m", (l + c) % 256, (l * 3 + c) % 256));
+            }
+            if colours == Colours::Alternating {
+                s.push_str(if c % 2 == 0 { "\x1b[1;31m" } else { "\x1b[0m" });
             }
             s.push((b'!' + ((l * cols + c) % 90) as u8) as char);
         }
@@ -51,12 +65,13 @@ fn bench(c: &mut Criterion) {
         underline_thickness: 2,
         strike_offset: 8,
     };
-    for (name, cols, lines, coloured) in [
-        ("80x24 plain", 80, 24, false),
-        ("300x100 plain", 300, 100, false),
-        ("300x100 coloured", 300, 100, true),
+    for (name, cols, lines, colours) in [
+        ("80x24 plain", 80, 24, Colours::Plain),
+        ("300x100 plain", 300, 100, Colours::Plain),
+        ("300x100 coloured", 300, 100, Colours::Coloured),
+        ("300x100 per-cell style", 300, 100, Colours::Alternating),
     ] {
-        let t = screen(cols, lines, coloured);
+        let t = screen(cols, lines, colours);
         let mut frame = Frame::default();
         c.bench_function(&format!("frame {name}"), |b| {
             b.iter(|| {

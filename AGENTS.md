@@ -46,6 +46,13 @@ which rebuilds clone pins as stub pins (asking first, since macOS resets a
 rebuilt pin's permissions). Test pins go in a temp dir with a temp `HOME`,
 never in `~/Applications`.
 
+## Smoke tests open real windows
+
+The app smoke tests (`--run-ignored only`, `binary(smoke)`) open real
+windows on Alex's screen. Don't run them locally: CI runs them on every
+push to main and on `ci/**` branches (push one to check a change). Run a
+single smoke test locally only when debugging it, and say so.
+
 ## Agents in worktrees
 
 Each worktree builds its own `target/` (several GB). When your work is

@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Writes the seed corpus for the `parse` fuzz target to fuzz/corpus/parse.
+"""Writes the seed corpora for the fuzz targets: `parse` in fuzz/corpus/parse
+(terminal output, with images: kitty graphics, iTerm2 files, Sixel) and the
+term-image targets (`sixel`, `kitty_keys`, `iterm_args`, `inflate`, `sniff`)
+in fuzz/corpus/<target>. (`decode` has real image files, committed as they are.)
 
 The files are committed; re-run this after changing it:
 
@@ -11,8 +14,11 @@ fuzz-only commands from fuzz/steps.rs mixed in (0xFF 'R' = resize, 'V' =
 scroll the view, 'S' = select, 'C' = clear the selection, 'A' = set the
 ambiguous width).
 """
+import base64
 import os
+import struct
 import sys
+import zlib
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(ROOT, "fuzz", "corpus", "parse")
@@ -186,7 +192,208 @@ def history():
     return b"".join(out)
 
 
+def png(width, height, rgba):
+    """A tiny valid RGBA PNG, `rgba` being one pixel repeated."""
+
+    def chunk(kind, body):
+        crc = zlib.crc32(kind + body) & 0xFFFFFFFF
+        return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", crc)
+
+    raw = b"".join(b"\x00" + bytes(rgba) * width for _ in range(height))
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(raw))
+        + chunk(b"IEND", b"")
+    )
+
+
+def b64(data):
+    return base64.b64encode(data).decode()
+
+
+def kitty(keys, payload=b""):
+    """One kitty graphics command: ESC _ G keys ; base64 payload ESC backslash."""
+    body = keys + (";" + b64(payload) if payload else "")
+    return f"{ESC}_G{body}{ST}"
+
+
+def sixel(body, params="0;0;0"):
+    return f"{ESC}P{params}q{body}{ST}"
+
+
+SIXEL_BAND = '"1;1;8;12#0;2;100;0;0#1;2;0;100;0#0!8~$#1!8N-#0!8~'
+PIXELS_2X2 = bytes([255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255])
+
+
+def images_kitty():
+    """Kitty graphics: raw and PNG transmission, chunks, ids, placements,
+    queries, deletes, animation, Unicode placeholders, and the id-less
+    frames mpv sends (no i=, so each is a new image)."""
+    parts = [
+        kitty("a=q,i=31,s=2,v=2,f=32", PIXELS_2X2),
+        kitty("a=T,f=32,s=2,v=2,i=1,c=4,r=2", PIXELS_2X2),
+        kitty("a=T,f=100,i=2,p=1,q=2", png(8, 8, (0, 128, 255, 255))),
+        # Chunked, split across commands.
+        kitty("a=t,f=32,s=2,v=2,i=3,m=1", PIXELS_2X2[:8]) + kitty("m=0", PIXELS_2X2[8:]),
+        kitty("a=p,i=3,p=2,x=0,y=0,w=1,h=1,X=2,Y=1,z=-1"),
+        kitty("a=p,i=1,p=3,c=10,r=3,C=1"),
+        # id-less frames, like mpv: each replaces the last on screen.
+        "".join(f"{CSI}H" + kitty("a=T,f=32,s=2,v=2,q=2", PIXELS_2X2) for _ in range(4)),
+        # Image numbers, then a file and shared memory the terminal must refuse.
+        kitty("a=T,I=7,f=32,s=2,v=2", PIXELS_2X2),
+        kitty("a=t,t=f,f=100,i=9", b"/etc/passwd"),
+        kitty("a=t,t=s,f=32,s=2,v=2,i=10", b"/td-no-such-shm"),
+        # Compressed, and a size far past the payload.
+        kitty("a=t,o=z,f=32,s=2,v=2,i=11", zlib.compress(PIXELS_2X2)),
+        kitty("a=t,f=32,s=100,v=100,i=12", PIXELS_2X2),
+        # Animation: a frame, a control, composition.
+        kitty("a=f,i=1,r=1,x=0,y=0,s=1,v=1,f=32,z=40", b"\xff\x00\x00\xff"),
+        kitty("a=a,i=1,s=3,v=1"),
+        kitty("a=c,i=1,r=1,c=2"),
+        # Unicode placeholders: id in the foreground colour, row and column as
+        # combining diacritics (U+0305 and U+030D are 0 and 1).
+        kitty("a=T,U=1,f=32,s=2,v=2,i=4,c=2,r=2", PIXELS_2X2),
+        f"{CSI}38;5;4m" + "\U0010eeee\u0305\u0305\U0010eeee\u0305\u030d\r\n"
+        + "\U0010eeee\u030d\u0305\U0010eeee\u030d\u030d" + f"{CSI}m\r\n",
+        # Deletes: by id, at the cursor, by column, with data freed, everything.
+        kitty("a=d,d=i,i=1"),
+        kitty("a=d,d=A"),
+        kitty("a=d,d=c,x=1"),
+        kitty("a=d,d=I,i=2"),
+        "text" + kitty("a=T,f=32,s=2,v=2,i=20", PIXELS_2X2) + "\r\n" * 30,
+        kitty("a=d,d=a"),
+        # Malformed.
+        f"{ESC}_Gnot=keys{ST}{ESC}_G;{ST}{ESC}_Ga=Z,i=-1{ST}{ESC}_G" + "a=T," * 50 + ST,
+    ]
+    out = []
+    for i, p in enumerate(parts):
+        out.append(t(p))
+        if i == 4:
+            out.append(resize(30, 10))
+        if i == 9:
+            out.append(scroll_view(-3))
+            out.append(select(0, 0, 9, 29))
+        if i == 14:
+            out.append(resize(80, 24))
+        if i == 18:
+            out.append(t(f"{CSI}?1049h"))
+        if i == 20:
+            out.append(t(f"{CSI}?1049l{CSI}3J"))
+    return b"".join(out)
+
+
+def images_iterm():
+    """iTerm2 OSC 1337: inline files, sizes in cells, pixels and percent,
+    names, multipart transfer, and bad arguments."""
+    img = png(6, 4, (255, 128, 0, 255))
+    parts = [
+        f"{OSC}1337;File=inline=1;size={len(img)};name={b64(b'a.png')}:{b64(img)}\x07",
+        f"{OSC}1337;File=inline=1;width=10;height=3;preserveAspectRatio=0:{b64(img)}{ST}",
+        f"{OSC}1337;File=inline=1;width=50%;height=20px:{b64(img)}\x07",
+        f"{OSC}1337;File=inline=0;name={b64(b'download.bin')}:{b64(b'x' * 64)}\x07",
+        f"{OSC}1337;MultipartFile=inline=1;size={len(img)}\x07"
+        + f"{OSC}1337;FilePart={b64(img[:30])}\x07{OSC}1337;FilePart={b64(img[30:])}\x07{OSC}1337;FileEnd\x07",
+        f"{OSC}1337;File=inline=1;size=999999999:{b64(img)}\x07",
+        f"{OSC}1337;File=inline=1;width=auto;height=auto;:%%%not base64%%%\x07",
+        f"{OSC}1337;File=:\x07{OSC}1337;File={ST}{OSC}1337;File=;;;=;:{ST}",
+        f"{OSC}1337;File=name={b64(b'n' * 3000)};inline=1:{b64(img)}\x07",
+        f"{OSC}1337;SetMark\x07{OSC}1337;CursorShape=1\x07{OSC}1337;ReportCellSize\x07",
+    ]
+    out = [t(p) + t("\r\n") for p in parts]
+    out.insert(3, resize(40, 12))
+    return b"".join(out)
+
+
+def images_sixel():
+    """Sixel: palette, raster attributes, repeats, band moves, background
+    select, an image never ended, and text after each."""
+    parts = [
+        sixel(SIXEL_BAND),
+        sixel('#0;2;0;0;0#1;1;120;50;100;50!20~$-#1!20~', "9;1;0"),
+        sixel('"1;1;4000;4000#2;2;0;0;100!1000~$-!1000~'),
+        sixel("#0;2;100;100;100~~~~$#1;2;0;0;0NNNN-~~~~-~~~~", "0;2;0"),
+        sixel("?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"),
+        sixel("#999;2;300;300;300~#0;3;0;0;0~#0;4~!0~!99999999~"),
+        f"{ESC}Pq#0;2;100;0;0~~~~",  # never ended
+        sixel(SIXEL_BAND),
+    ]
+    out = [t(p) + t("text after\r\n") for p in parts]
+    out.insert(2, resize(20, 8))
+    out.insert(5, scroll_view(-4))
+    out.insert(7, select(0, 0, 7, 19))
+    return b"".join(out)
+
+
+def seeds_sixel():
+    """sixel target: one byte of P1 (low nibble) and P2 (high), then the data."""
+    bodies = [SIXEL_BAND, '"1;1;2;6#0;2;0;0;0#0!2~', "#0;1;0;100;50;50~$-~", "!99999~-!99999~"]
+    return {f"seed-sixel-{i}": bytes([[0x00, 0x10, 0x21, 0x01][i]]) + t(b) for i, b in enumerate(bodies)}
+
+
+def seeds_kitty_keys():
+    keys = [
+        "a=T,f=32,s=2,v=2,i=1,c=4,r=2",
+        "a=t,f=100,i=2,p=1,q=2,m=1",
+        "a=p,i=3,p=2,x=0,y=0,w=1,h=1,X=2,Y=1,z=-1,C=1",
+        "a=d,d=i,i=1",
+        "a=d,d=A",
+        "a=q,i=31,s=1,v=1,f=24,t=d,o=z",
+        "a=f,i=1,r=1,z=40,c=2",
+        "I=7,U=1,a=T",
+        "a=Z,i=-1,i=2,i=3",
+    ]
+    return {f"seed-keys-{i}": t(k) for i, k in enumerate(keys)}
+
+
+def seeds_iterm_args():
+    img = png(2, 2, (1, 2, 3, 255))
+    bodies = [
+        f"inline=1;size={len(img)};name={b64(b'a.png')}:{b64(img)}",
+        "inline=1;width=10;height=3;preserveAspectRatio=0:AAAA",
+        "width=50%;height=20px;inline=1:",
+        "width=auto;height=auto;doNotMoveCursor=1",
+        f"name={b64(b'n' * 600)};size=99999999999999999999",
+        ";;;=;=;a=b=c:",
+    ]
+    return {f"seed-iterm-{i}": t(b) for i, b in enumerate(bodies)}
+
+
+def seeds_inflate():
+    """inflate target: one byte (slice size minus one), then a zlib stream."""
+    data = [b"", b"hello hello hello hello", bytes(range(256)) * 8, b"\x00" * 5000]
+    out = {f"seed-zlib-{i}": bytes([[0, 6, 63, 255][i]]) + zlib.compress(d) for i, d in enumerate(data)}
+    out["seed-zlib-truncated"] = bytes([3]) + zlib.compress(bytes(range(256)))[:-6]
+    out["seed-zlib-stored"] = bytes([7]) + zlib.compress(b"stored block", 0)
+    return out
+
+
+def seeds_sniff():
+    """sniff target: the head of a few small files."""
+    return {
+        "seed-png": png(3, 5, (9, 8, 7, 255))[:64],
+        "seed-png-truncated": png(3, 5, (9, 8, 7, 255))[:20],
+        "seed-gif": b"GIF89a\x04\x00\x03\x00\x80\x00\x00" + b"\x00" * 16,
+        "seed-jpeg": b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00\xff\xc0\x00\x11\x08\x00\x03\x00\x04\x03\x01\x22\x00",
+        "seed-webp": b"RIFF\x1a\x00\x00\x00WEBPVP8X\x0a\x00\x00\x00\x10\x00\x00\x00\x03\x00\x00\x04\x00\x00",
+        "seed-junk": b"<html><body>not an image",
+    }
+
+
+# Seeds for the other targets, by corpus directory.
+OTHER_SEEDS = {
+    "sixel": seeds_sixel,
+    "kitty_keys": seeds_kitty_keys,
+    "iterm_args": seeds_iterm_args,
+    "inflate": seeds_inflate,
+    "sniff": seeds_sniff,
+}
+
+
 SEEDS = {
+    "seed-images-kitty": images_kitty,
+    "seed-images-iterm": images_iterm,
+    "seed-images-sixel": images_sixel,
     "seed-vim": vim,
     "seed-less": less,
     "seed-sgr": sgr,
@@ -200,19 +407,21 @@ SEEDS = {
 
 def main():
     check = "--check" in sys.argv[1:]
-    os.makedirs(OUT, exist_ok=True)
+    files = {os.path.join(OUT, name): make() for name, make in SEEDS.items()}
+    for target, make in OTHER_SEEDS.items():
+        for name, data in make().items():
+            files[os.path.join(ROOT, "fuzz", "corpus", target, name)] = data
     stale = []
-    for name, make in SEEDS.items():
-        data = make()
-        path = os.path.join(OUT, name)
+    for path, data in files.items():
         if check:
             try:
                 with open(path, "rb") as f:
                     if f.read() != data:
-                        stale.append(name)
+                        stale.append(os.path.relpath(path, ROOT))
             except FileNotFoundError:
-                stale.append(name)
+                stale.append(os.path.relpath(path, ROOT))
         else:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, "wb") as f:
                 f.write(data)
             print(f"{path}: {len(data)} bytes")

@@ -1140,6 +1140,36 @@ the switch.
 | I.6 | ci + fuzz | fuzz targets in the nightly rotation, the `parse` target with images on, dictionary entries, the pressure scenarios added | S | I.1, I.2 |
 | I.7 | docs | DESIGN.md (Rendering, memory, idle), the manual checklist, numbers on the standard set, roadmap B.3/B.5 marked; the hidden switch removed | S | I.3, I.5b |
 
+**Landed (I.6).** Fuzzing and pressure, ahead of the image code being
+complete (the seeds and dictionary entries simply find nothing to do until
+I.2 and I.3 land).
+
+- **Nightly rotation**: `.github/workflows/fuzz.yml` is a matrix, one job
+  per target, all of them every night (not one per night as planned:
+  they run in parallel, so it costs no more wall time). `parse` gets 20
+  minutes, the term-image targets (`sixel`, `kitty_keys`, `iterm_args`,
+  `inflate`, `sniff`) and `decode` 5 each. Each target has its own corpus
+  cache entry (`fuzz-corpus-<target>-<run>`), its own crash artifact
+  (`fuzz-crash-<target>`) and its issues carry the target in the title.
+  Manual runs can name targets and minutes. CI builds all targets.
+- **`parse` with images on**: `fuzz/steps.rs` makes the terminal under
+  test with a 4 MB pool with images enabled (not the process pool, which
+  the hidden switch leaves off); `TD_FUZZ_IMAGES=0` goes back to the
+  process pool. The corpus replay test shares the file, so it replays
+  with images on too. Image jobs are dropped after each slice (no host).
+- **Seeds**: `scripts/fuzz-seed.py` writes `parse` seeds for kitty
+  graphics (all actions, chunks, id-less frames, placeholders, refused
+  file and shm media), iTerm2 `File=` and Sixel, mixed with resizes,
+  scrolling, selections and the alternate screen, and seeds for the five
+  term-image targets. Dictionaries: `parse.dict` gains the image
+  sequences; `sixel.dict`, `kitty_keys.dict` and `iterm_args.dict` are new.
+- **Pressure** (`scripts/pressure/gen.py` generates them on the fly, `run.py`
+  runs them with `TD_IMAGES=1`): `images_flood` (500 id-less 1600 x 1000
+  PNG frames), `images_ids`, `images_tiny`, `images_chunks_abandoned`,
+  `images_scrollback`, `sixel_flood`, `sixel_huge`. Not run yet:
+  footprint numbers come with I.5b. `images_hidden_tab` waits for a way
+  to drive tabs.
+
 **Landed (I.0).** What was built (`term-core/src/image.rs`,
 `image/pool.rs` and its tests), and where it differs from §4 and §5:
 - **Graphics** is one per screen (cells §8.1), boxed in the terminal,
@@ -1179,6 +1209,91 @@ the switch.
   (`BlockData::images`); `Scrollback::take_freed_images` hands the lists
   of freed blocks back (rather than `push` returning them). The terminal
   starts taking them with I.3, when own images exist.
+
+**Landed (I.2).** What was built (`term-core/src/term/graphics.rs`, the
+`Graphics` deletes and scrolling in `image.rs`, `image/host.rs`, tests
+in `tests/kitty.rs` and a graphics property test in `tests/props.rs`),
+and where it differs from §3 and §4:
+- **Routing, chunks, commands, replies** as §3.1–§3.3, §3.5 and §3.6.
+  Reply codes: `EINVAL`, `ENOENT`, `EBADF` (any medium error),
+  `ENODATA`, `EFBIG`, `EBADPNG` (kitty's for data that doesn't decode).
+  A new transmit with another medium abandons an upload in progress,
+  as a delete does. Commands with `P`/`Q`/`H`/`V` or an animation
+  action are dropped with no reply; icat with an animated GIF is not
+  checked yet.
+- **The host**: the terminal holds an `Arc<dyn ImageHost>`
+  (`set_image_host`, kept across RIS); until the app sets one it is
+  `RustHost::new()` (Vec buffers, term-image decoding, media refused).
+  `RustHost::with_media()` is the test host (`std::fs` files, the temp
+  file rules simplified to the temp directory and the name, a map for
+  shared memory). `run_job(host, terminal_id, job)` runs a job;
+  `ImageJob::Read` gained `size` and `compressed`, and `JobDone` carries
+  the pixels and opacity.
+- **Headers off the lock**: PNG from a file or shared memory is sized
+  from its first 64 KB at once for `a=t` too, so every image has its
+  size when stored. With `set_reads_off_lock(true)` the parser stops
+  after such a command (`Term::advance_until_head`); the session takes
+  `take_head_read()`, reads it unlocked and calls `head_read_done`.
+  Off (the default, and tests), `Term::advance` reads it inline;
+  normal parsing doesn't go through the stopping parser.
+- **Budget**: reservations are made when the size is known (raw: at the
+  first chunk; PNG: encoded bytes as they arrive, the pixels at the
+  last chunk; media: at open), not when a job starts as §4.2 says.
+  The encoded copy is not kept after decoding yet (§5.4), and the
+  `ImageHost::decode` signature doesn't report opacity, so PNG images
+  are never "opaque" for the id-less replacement (mpv sends `f=24`).
+- **Placements**: scroll regions move those wholly inside, drop those
+  scrolled out, and leave those crossing a margin (cells §8.2); the
+  alternate screen drops them as they scroll off, and its images are
+  cleared on entering and leaving it; ED 2 deletes those on screen, ED
+  3 those in history; lines leaving history drop theirs one scroll
+  late. The image cap drops the oldest unplaced image first, the
+  placement cap the topmost placement.
+- **Snapshot**: the shape of `SnapPlacement` and `SnapVirtual` is
+  unchanged; placements reaching into the view are listed in (z, pool
+  id, serial) order with their view row (negative above the view, one
+  row per line), and when any row in view has placeholders, every
+  virtual placement of a ready image is listed (not only those the
+  cells name). The snapshot doesn't call `drawn`: the frame does (I.4).
+- **Not built**: the producer hold-back and the stalled-upload stop by
+  the pool (§3.2, §4.2), `image_file_transfer` (the app's host decides),
+  re-decoding lost images (§5.4), images in the `dump`, the
+  `images` bench (§9).
+
+**Landed (I.4).** Drawing, in term-render (`images.rs` without Metal,
+`pixels.rs`, `metal.rs`, `shaders.metal`); where it differs from §6:
+- **`MetalPixels`** is a shared-storage `MTLBuffer` with rows padded to
+  the device's linear texture alignment; `PixelAlloc` makes them from any
+  thread (`Renderer::pixel_alloc`, or `PixelAlloc::system_default` for
+  the app's decode queue). Pixels of any other type (the tests'
+  `VecBuffer`) are listed but not drawn.
+- **`ImageInstance` is 48 bytes**, not 32: it carries the clamp rectangle
+  (the source rectangle inset by half a texel) besides the texels at the
+  quad's edges, so the pieces of one image sample across their seams and
+  never outside the source. Instances are clipped to the grid in f32 and
+  rounded to whole pixels, the texels following the rounded edges.
+- **Layers**: the frame's `rects` split at the end of the backgrounds
+  (`Frame::split`); per pane: images under the backgrounds, backgrounds,
+  images under the text (and placeholder pieces), highlights, block
+  cursor and decorations, glyphs, images above the text, then the
+  bar/underline/hollow cursor again over them. Without images the draws
+  are the same as before. Highlights over cells covered by images under
+  the text are drawn at half their alpha.
+- **Placeholders**: a cached row keeps its runs of placeholder cells
+  (merged as §6.3 says) in its row cache entry; the pieces are rebuilt
+  each frame from the snapshot's `virtual_placements` (a run naming
+  placement 0 takes any of the image's). A placeholder's content bits are
+  no longer read as a character.
+- **The texture map** is per window, keyed by (pool entry, generation),
+  rebuilt each frame from the panes' images and emptied on hide.
+- **`pool.drawn`** is called by the frame after building from a snapshot,
+  with the images it drew (and once more when it draws none after some).
+- **Test injection**: `Renderer::build_pane_with` (and
+  `Frame::snapshot_mut` between `snapshot` and `build_snapshot`) put
+  placements in a snapshot; no term-core change.
+- **Measured** (`cargo bench -p term-render --bench frame -- with_images`,
+  80×24, rows cached, on a loaded machine): no images 2.9 µs, ten
+  placements 4.7 µs, a 40×20 placeholder image (20 pieces) 3.3 µs.
 
 V.1 and I.1 can start now. After I.0: I.2 (core), I.4 (render) at once,
 then I.5a (app) once I.4's `MetalPixels` is in; I.3 follows I.2. B.3 is

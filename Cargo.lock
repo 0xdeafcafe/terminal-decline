@@ -957,6 +957,7 @@ dependencies = [
  "criterion",
  "insta",
  "memchr",
+ "png",
  "proptest",
  "term-image",
  "unicode-segmentation",
@@ -1049,6 +1050,7 @@ dependencies = [
  "proptest",
  "term-core",
  "term-font",
+ "term-image",
  "unicode-width",
 ]
 

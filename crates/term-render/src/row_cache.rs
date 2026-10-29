@@ -17,6 +17,7 @@ use std::hash::{BuildHasherDefault, Hasher};
 use term_core::{RowKey, ScreenId, Snapshot, Style, Terminal};
 
 use crate::frame::{GlyphInstance, RectInstance, Theme};
+use crate::images::PieceRun;
 
 /// The cell a decoration belongs to, and how the block cursor
 /// recolours it.
@@ -45,6 +46,9 @@ pub(crate) struct Entry {
     pub glyphs: Vec<GlyphInstance>,
     pub decorations: Vec<RectInstance>,
     pub decoration_marks: Vec<Mark>,
+    /// Its runs of kitty placeholder cells (images.md §6.3): the pieces of
+    /// images drawn over it each frame.
+    pub pieces: Vec<PieceRun>,
     /// The frame that last showed it.
     used: u64,
 }
@@ -55,6 +59,7 @@ impl Entry {
         self.glyphs.clear();
         self.decorations.clear();
         self.decoration_marks.clear();
+        self.pieces.clear();
     }
 }
 

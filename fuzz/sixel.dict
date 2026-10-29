@@ -1,0 +1,18 @@
+# Dictionary for the `sixel` target. The first input byte holds P1 (low
+# nibble) and P2 (high nibble); the rest is what follows `DCS P1;P2 q`.
+raster="\"1;1;8;12"
+raster_big="\"1;1;4000;4000"
+raster_zero="\"0;0;0;0"
+pal_rgb="#0;2;100;0;0"
+pal_hls="#1;1;120;50;100"
+pal_use="#1"
+pal_big="#999;2;300;300;300"
+pal_bad_kind="#0;3;0;0;0"
+repeat="!8~"
+repeat_big="!99999999~"
+repeat_zero="!0~"
+cr="$"
+nl="-"
+data="~~~~NNNN????"
+range_low="?"
+range_high="~"

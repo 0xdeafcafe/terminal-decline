@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use super::history::{Unit, ViewRow};
 use super::{CursorShape, LinkValue, Terminal};
 use crate::cell::{Cell, Row, Width};
-use crate::image::{SnapPlacement, SnapVirtual};
+use crate::image::{ImageState, Layer, SnapImage, SnapPlacement, SnapVirtual};
 use crate::scrollback::HistoryReader;
 use crate::style::Style;
 
@@ -274,11 +274,14 @@ impl Terminal {
         out.placements.clear();
         out.virtual_placements.clear();
         // Images the pool evicted since the last command or snapshot are
-        // lost (§5.2); nothing is drawn from them yet, so the pool is told
-        // of no drawn images until drawing lands (I.4).
-        if !self.graphics.is_empty() {
+        // lost (§5.2).
+        let with_images = !self.graphics.is_empty();
+        if with_images {
             self.graphics.apply_evictions();
         }
+        // Each view row's pieces of stored lines, to place images by.
+        let mut row_pieces: Vec<(usize, super::history::Piece)> = Vec::new();
+        let mut any_placeholders = false;
         out.terminal_id = self.terminal_id;
         out.history_epoch = self.history_epoch;
         out.popped_from = popped;
@@ -319,6 +322,10 @@ impl Terminal {
         for &at in view_rows.iter() {
             let highlights = out.highlights.len() as u32;
             self.view_pieces(at, &mut pieces);
+            if with_images {
+                let r = out.rows.len();
+                row_pieces.extend(pieces.iter().map(|p| (r, *p)));
+            }
             // Stored columns `a..b` of `line`, as this row's columns.
             let cols_of = |line: u64, a: usize, b: usize, out: &mut Vec<Range<usize>>| {
                 for p in &pieces {
@@ -499,6 +506,7 @@ impl Terminal {
                     (key, copied)
                 }
             };
+            any_placeholders |= flags.contains(RowFlags::PLACEHOLDERS);
             out.rows.push(SnapRow {
                 key,
                 flags,
@@ -506,6 +514,10 @@ impl Terminal {
                 clusters: clusters..out.cluster_spans.len() as u32,
                 highlights,
             });
+        }
+
+        if with_images {
+            self.snapshot_images(out, &row_pieces, any_placeholders);
         }
 
         let at = self.cursor_in_view();
@@ -519,6 +531,71 @@ impl Terminal {
 
         // Whatever changes from here on gets a new counter.
         self.batch_start = self.counter + 1;
+    }
+
+    /// The images in view (images.md §4.4): direct placements reaching
+    /// into it and, when placeholder cells are in view, the virtual
+    /// placements of ready images. The frame tells the pool what it drew
+    /// (I.4).
+    fn snapshot_images(&mut self, out: &mut Snapshot, row_pieces: &[(usize, super::history::Piece)], placeholders: bool) {
+        let Some(first) = row_pieces.first().map(|(_, p)| p.line) else {
+            return;
+        };
+        let last = row_pieces.last().map_or(first, |(_, p)| p.line);
+        let pool = self.graphics.pool().clone();
+        let snap_image = |g: &crate::image::Graphics, key| -> Option<SnapImage> {
+            let image = g.image(key).filter(|i| i.state == ImageState::Ready)?;
+            let id = image.pool?;
+            let (pixels, generation) = pool.pixels(id)?;
+            Some(SnapImage {
+                pool: id,
+                generation,
+                pixels,
+                width: image.width,
+                height: image.height,
+            })
+        };
+        for (key, p) in self.graphics.placements_in(first, last + 1) {
+            let Some(image) = snap_image(&self.graphics, p.image) else {
+                continue;
+            };
+            // The view row and column of its top-left cell; above the view,
+            // one row per line.
+            let at = row_pieces.iter().find_map(|(r, piece)| {
+                piece
+                    .view_cols(p.line, p.col as usize, p.col as usize + 1)
+                    .map(|c| (*r as i32, c.start))
+            });
+            let (view_row, col) = at.unwrap_or(((p.line as i64 - first as i64) as i32, p.col as usize));
+            out.placements.push(SnapPlacement {
+                image,
+                view_row,
+                col: to_u16(col),
+                cols: p.cols,
+                rows: p.rows,
+                offset: p.offset,
+                src: p.src,
+                layer: Layer::of_z(p.z),
+                z: p.z,
+                serial: key.1,
+            });
+        }
+        // z, then image, then serial (cells §8.1).
+        out.placements.sort_by_key(|p| (p.z, p.image.pool, p.serial));
+        if placeholders {
+            for v in self.graphics.virtual_placements() {
+                let Some(image) = snap_image(&self.graphics, v.image) else {
+                    continue;
+                };
+                out.virtual_placements.push(SnapVirtual {
+                    key: (v.image, v.id),
+                    image,
+                    cols: v.cols,
+                    rows: v.rows,
+                    fit: v.fit,
+                });
+            }
+        }
     }
 
     /// Process-wide unique (§9.1).

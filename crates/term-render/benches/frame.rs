@@ -479,5 +479,105 @@ fn bench_ligatures(c: &mut Criterion) {
     ligatures(c, &input);
 }
 
-criterion_group!(benches, bench, bench_ligatures);
+/// Images (images.md §9): an 80×24 screen whose rows are all cached,
+/// with no images, with ten direct placements put in each snapshot, and
+/// with a 40×20 placeholder image (20 runs) drawn through its cells.
+fn bench_images(c: &mut Criterion) {
+    use std::sync::Arc;
+    use term_core::image::{Fit, ImageKey, Layer, SnapImage, SnapPlacement, SnapVirtual, VecBuffer, placeholder};
+    use term_core::{ImagePool, PixelBuffer};
+
+    let theme = Theme::default();
+    let input = FrameInput {
+        theme: &theme,
+        metrics: Metrics {
+            cell_width: 16,
+            cell_height: 34,
+            baseline: 26,
+            underline_offset: 3,
+            underline_thickness: 2,
+            strike_offset: 8,
+        },
+        padding: (12, 12),
+        cursor_on: true,
+        focused: true,
+        preedit: None,
+    };
+    let pool = ImagePool::new(32 << 20);
+    let image = |w: u32, h: u32| {
+        let pixels: Arc<dyn PixelBuffer> = Arc::new(VecBuffer::new(w, h));
+        let id = pool.reserve(1, pixels.allocated_size(), None).unwrap();
+        let generation = pool.set_pixels(id, pixels.clone());
+        SnapImage {
+            pool: id,
+            generation,
+            pixels,
+            width: w,
+            height: h,
+        }
+    };
+    let placements: Vec<SnapPlacement> = (0..10)
+        .map(|i| SnapPlacement {
+            image: image(64, 64),
+            view_row: i * 2,
+            col: (i * 7) as u16,
+            cols: 6,
+            rows: 3,
+            offset: (0, 0),
+            src: [0, 0, 0, 0],
+            layer: if i % 2 == 0 { Layer::AboveText } else { Layer::BelowText },
+            z: if i % 2 == 0 { i } else { -i },
+            serial: i as u64,
+        })
+        .collect();
+
+    let mut t = screen(80, 24, Colours::Plain);
+    let mut frame = Frame::default();
+    c.bench_function("frame 80x24 with_images none", |b| {
+        b.iter(|| {
+            frame.snapshot(&mut t.state, black_box(&input), 0);
+            frame.build_snapshot(black_box(&input), &mut Cached);
+            black_box(frame.images.instances.len())
+        })
+    });
+    c.bench_function("frame 80x24 with_images 10 placements", |b| {
+        b.iter(|| {
+            frame.snapshot(&mut t.state, black_box(&input), 0);
+            frame.snapshot_mut().placements.extend_from_slice(&placements);
+            frame.build_snapshot(black_box(&input), &mut Cached);
+            black_box(frame.images.instances.len())
+        })
+    });
+
+    let mut t = Term::new(80, 24, 0, ImagePool::new(32 << 20));
+    let mut text = String::from("\x1b[38;5;7m");
+    for row in 0..20 {
+        text.push(placeholder::PLACEHOLDER);
+        text.push(placeholder::diacritic(row).unwrap());
+        for _ in 1..40 {
+            text.push(placeholder::PLACEHOLDER);
+        }
+        text.push_str("\r\n");
+    }
+    t.advance(text.as_bytes());
+    let v = SnapVirtual {
+        key: (ImageKey::Kitty(7), 0),
+        image: image(640, 680),
+        cols: 40,
+        rows: 20,
+        fit: Fit::Contain,
+    };
+    let mut frame = Frame::default();
+    c.bench_function("frame 80x24 with_images placeholders", |b| {
+        b.iter(|| {
+            frame.snapshot(&mut t.state, black_box(&input), 0);
+            frame.snapshot_mut().virtual_placements.push(v.clone());
+            frame.build_snapshot(black_box(&input), &mut Cached);
+            black_box(frame.images.instances.len())
+        })
+    });
+    assert_eq!(frame.images.instances.len(), 20);
+}
+
+criterion_group!(benches, bench, bench_ligatures, bench_images);
 criterion_main!(benches);

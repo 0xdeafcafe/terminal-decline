@@ -116,3 +116,31 @@ jobs:
           name: conformance
           path: target/conformance/results/
           if-no-files-found: warn
+
+  smoke-macos-14:
+    # The minimum supported macOS (LSMinimumSystemVersion 14.0, the cask's
+    # `>= :sonoma`): the app smoke tests CI runs on macos-latest, built
+    # and run on macOS 14. Only when main changed, like the jobs above:
+    # macOS minutes cost 10x while the repo is private.
+    needs: changed
+    if: needs.changed.outputs.run == 'true'
+    name: app smoke tests (macOS 14)
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: smoke-macos-14
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+      - run: sw_vers
+      - run: cargo nextest run --workspace --locked --profile ci --run-ignored only -E 'binary(smoke)'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: smoke-macos-14
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: ignore

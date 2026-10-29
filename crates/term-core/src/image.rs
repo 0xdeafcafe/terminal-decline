@@ -6,6 +6,7 @@
 //! graphics is I.2, iTerm2 and Sixel I.3), and images stay behind the
 //! hidden switch ([`images_switch`]) until drawing and the host land.
 
+mod host;
 pub mod placeholder;
 mod pool;
 
@@ -16,6 +17,7 @@ use std::sync::{Arc, OnceLock};
 
 use term_image::PixelTarget;
 
+pub use host::{RustHost, run_job};
 pub use pool::{Encoded, ImagePool, PoolId, Refused};
 
 /// kitty ids, id-less kitty images and decline's own (Sixel, iTerm2) are
@@ -328,6 +330,13 @@ impl Graphics {
             self.unplace(old);
         }
         p.rows = p.rows.min(MAX_PLACEMENT_ROWS);
+        while self.placements.len() >= MAX_PLACEMENTS {
+            // The cap (§4.1): the topmost placement goes.
+            let Some(first) = self.placements.keys().next().copied() else {
+                break;
+            };
+            self.unplace(first);
+        }
         let key = (p.line, self.next_serial);
         self.next_serial += 1;
         self.tallest = self.tallest.max(p.rows);
@@ -338,7 +347,9 @@ impl Graphics {
         if let Some(i) = self.images.get_mut(&p.image) {
             i.refs.placements += 1;
         }
+        let image = p.image;
         self.placements.insert(key, p);
+        self.sync_placed(image);
         key
     }
 
@@ -359,6 +370,8 @@ impl Graphics {
             i.refs.placements = i.refs.placements.saturating_sub(1);
             if matches!(p.image, ImageKey::Anonymous(_)) && i.refs.placements == 0 {
                 self.remove(p.image);
+            } else {
+                self.sync_placed(p.image);
             }
         }
         if self.placements.is_empty() {
@@ -431,6 +444,7 @@ impl Graphics {
             && !matches!(key.0, ImageKey::Own(_))
         {
             i.refs.placements += 1;
+            self.sync_placed(key.0);
         }
     }
 
@@ -441,6 +455,205 @@ impl Graphics {
             return self.virtual_placements.get(&(image, id));
         }
         self.virtual_placements.values().filter(|v| v.image == image).min_by_key(|v| v.id)
+    }
+
+    /// Whether any direct placement exists (a cheap test for the scroll
+    /// paths).
+    pub fn has_placements(&self) -> bool {
+        !self.placements.is_empty()
+    }
+
+    pub fn virtual_placements(&self) -> impl Iterator<Item = &VirtualPlacement> {
+        self.virtual_placements.values()
+    }
+
+    /// Tell the pool whether `key` is placed (its eviction class, §5.3).
+    fn sync_placed(&self, key: ImageKey) {
+        if let Some(i) = self.images.get(&key)
+            && let Some(id) = i.pool
+        {
+            self.pool.set_placed(id, i.refs.placements > 0);
+        }
+    }
+
+    /// Delete the direct placements `f` picks among those whose top line
+    /// is in `lines` (all if None). With `free`, kitty images left with
+    /// no placement go too (upper-case deletes, §3.5); id-less ones go
+    /// with their last placement anyway.
+    pub fn delete_placements(&mut self, lines: Option<(u64, u64)>, free: bool, mut f: impl FnMut(&Placement) -> bool) {
+        let keys: Vec<(u64, u64)> = match lines {
+            Some((top, bottom)) => self.placements_in(top, bottom).filter(|(_, p)| f(p)).map(|(k, _)| *k).collect(),
+            None => self.placements.iter().filter(|(_, p)| f(p)).map(|(k, _)| *k).collect(),
+        };
+        let mut images = Vec::new();
+        for k in keys {
+            if let Some(p) = self.unplace(k) {
+                images.push(p.image);
+            }
+        }
+        if free {
+            images.sort_unstable();
+            images.dedup();
+            for key in images {
+                self.free_if_unplaced(key);
+            }
+        }
+    }
+
+    /// Delete the placements (direct, everywhere, and virtual) of the
+    /// images `f` picks, only placement `placement` if not 0; with `free`,
+    /// images left with none go too, placed or never placed (§3.5 `i`,
+    /// `n`, `r`).
+    pub fn delete_images(&mut self, placement: u32, free: bool, f: impl Fn(ImageKey) -> bool) {
+        let mut keys: Vec<ImageKey> = self.images.keys().copied().filter(|k| f(*k)).collect();
+        keys.sort_unstable();
+        for key in keys {
+            let direct: Vec<(u64, u64)> = self
+                .by_image
+                .get(&key)
+                .map(|v| {
+                    v.iter()
+                        .copied()
+                        .filter(|k| placement == 0 || self.placements[k].id == placement)
+                        .collect()
+                })
+                .unwrap_or_default();
+            for k in direct {
+                self.unplace(k);
+            }
+            let virtuals: Vec<(ImageKey, u32)> = self
+                .virtual_placements
+                .keys()
+                .copied()
+                .filter(|(i, id)| *i == key && (placement == 0 || *id == placement))
+                .collect();
+            for v in virtuals {
+                self.unset_virtual(v);
+            }
+            if free {
+                self.free_if_unplaced(key);
+            }
+        }
+    }
+
+    /// Remove a virtual placement.
+    pub fn unset_virtual(&mut self, key: (ImageKey, u32)) -> Option<VirtualPlacement> {
+        let v = self.virtual_placements.remove(&key)?;
+        if !matches!(key.0, ImageKey::Own(_))
+            && let Some(i) = self.images.get_mut(&key.0)
+        {
+            i.refs.placements = i.refs.placements.saturating_sub(1);
+            if matches!(key.0, ImageKey::Anonymous(_)) && i.refs.placements == 0 {
+                self.remove(key.0);
+                return Some(v);
+            }
+        }
+        self.sync_placed(key.0);
+        Some(v)
+    }
+
+    fn free_if_unplaced(&mut self, key: ImageKey) {
+        if !matches!(key, ImageKey::Own(_)) && self.images.get(&key).is_some_and(|i| i.refs.placements == 0) {
+            self.remove(key);
+        }
+    }
+
+    /// Make room for one more image under the cap (§4.1): the oldest
+    /// unplaced image goes first, else the oldest.
+    pub fn make_room_for_image(&mut self) {
+        while self.images.len() >= MAX_IMAGES {
+            let victim = self
+                .images
+                .values()
+                .filter(|i| !matches!(i.key, ImageKey::Own(_)))
+                .min_by_key(|i| (i.refs.placements > 0, i.generation))
+                .map(|i| i.key);
+            match victim {
+                Some(k) => {
+                    self.remove(k);
+                }
+                None => break,
+            }
+        }
+    }
+
+    /// A kitty id not in use, from the counter (`I=` with no `i`).
+    pub fn free_kitty_id(&mut self) -> u32 {
+        loop {
+            let key = self.new_key(ImageKey::Kitty);
+            if !self.images.contains_key(&key) {
+                return key_id(key);
+            }
+        }
+    }
+
+    /// Scroll the placements entirely inside screen rows `top..=bottom`
+    /// by `n` rows, up or down, with the screen's first line at
+    /// `top_line` before the scroll and `new_top_line` after (cells §8.2):
+    /// those scrolled out of the region go, unless they scroll into
+    /// history (`to_history`, a region at the top of the primary screen);
+    /// those below the region keep their row, so their line follows the
+    /// screen's; those crossing a margin stay where they are.
+    #[allow(clippy::too_many_arguments)]
+    pub fn scroll_region(
+        &mut self,
+        top_line: u64,
+        new_top_line: u64,
+        lines: usize,
+        (top, bottom): (usize, usize),
+        n: usize,
+        up: bool,
+        to_history: bool,
+    ) {
+        let keys: Vec<(u64, u64)> = self.placements_in(top_line, top_line + lines as u64).map(|(k, _)| *k).collect();
+        for k in keys {
+            let (old_line, rows) = (self.placements[&k].line, self.placements[&k].rows);
+            if old_line < top_line {
+                continue;
+            }
+            let r0 = (old_line - top_line) as usize;
+            let r1 = r0 + rows.max(1) as usize - 1;
+            let new_row: Option<isize> = if r0 >= top && r1 <= bottom {
+                if up {
+                    let to = r0 as isize - n as isize;
+                    if to < top as isize && !to_history { None } else { Some(to) }
+                } else if r1 + n > bottom {
+                    None
+                } else {
+                    Some((r0 + n) as isize)
+                }
+            } else if r0 > bottom {
+                Some(r0 as isize)
+            } else {
+                continue;
+            };
+            match new_row {
+                None => {
+                    self.unplace(k);
+                }
+                Some(row) => {
+                    let line = (new_top_line as i64 + row as i64).max(0) as u64;
+                    if line != old_line {
+                        self.move_placement(k, line);
+                    }
+                }
+            }
+        }
+    }
+
+    fn move_placement(&mut self, old: (u64, u64), line: u64) {
+        let Some(mut p) = self.placements.remove(&old) else { return };
+        p.line = line;
+        let new = (line, old.1);
+        if p.id != 0 {
+            self.by_id.insert((p.image, p.id), new);
+        }
+        if let Some(v) = self.by_image.get_mut(&p.image) {
+            for k in v.iter_mut().filter(|k| **k == old) {
+                *k = new;
+            }
+        }
+        self.placements.insert(new, p);
     }
 
     /// Free everything (ED 3 of history placements is the caller's; this
@@ -497,7 +710,32 @@ impl Graphics {
                 return Err(format!("by_id {k:?} is stale"));
             }
         }
+        if self.images.len() > MAX_IMAGES || self.placements.len() > MAX_PLACEMENTS {
+            return Err(format!(
+                "{} images, {} placements: past the caps",
+                self.images.len(),
+                self.placements.len()
+            ));
+        }
+        for (key, image) in &self.images {
+            let virtuals = if matches!(key, ImageKey::Own(_)) {
+                0
+            } else {
+                self.virtual_placements.keys().filter(|v| v.0 == *key).count()
+            };
+            let direct = self.by_image.get(key).map_or(0, |v| v.len());
+            if image.refs.placements as usize != direct + virtuals {
+                return Err(format!(
+                    "{key:?} counts {} placements, has {}",
+                    image.refs.placements,
+                    direct + virtuals
+                ));
+            }
+        }
         for (k, p) in &self.placements {
+            if !self.images.contains_key(&p.image) {
+                return Err(format!("placement {k:?} of a missing image {:?}", p.image));
+            }
             if k.0 != p.line || p.rows > self.tallest {
                 return Err(format!(
                     "placement {k:?} at line {} with {} rows (tallest {})",
@@ -639,6 +877,10 @@ pub enum ImageJob {
         generation: u32,
         medium: OpenMedium,
         then: AfterRead,
+        /// The image's size (raw: `s` × `v`; encoded: from its header).
+        size: (u32, u32),
+        /// kitty `o=z`: the data is zlib-compressed.
+        compressed: bool,
     },
 }
 
@@ -651,14 +893,28 @@ impl ImageJob {
 }
 
 /// A finished job, handed back with [`crate::Terminal::image_job_done`].
-#[derive(Debug)]
 pub struct JobDone {
     pub job: JobId,
     /// The terminal that queued it; a job for another is dropped.
     pub terminal_id: u64,
     pub image: ImageKey,
     pub generation: u32,
-    pub result: Result<(), ImageError>,
+    /// The pixels, allocated by the host when the job ran.
+    pub result: Result<Arc<dyn PixelBuffer>, ImageError>,
+    /// Every pixel had alpha 255 (known for raw data only).
+    pub opaque: bool,
+}
+
+impl fmt::Debug for JobDone {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("JobDone")
+            .field("job", &self.job)
+            .field("terminal_id", &self.terminal_id)
+            .field("image", &self.image)
+            .field("generation", &self.generation)
+            .field("ok", &self.result.is_ok())
+            .finish()
+    }
 }
 
 /// An image as the renderer gets it: no pool lock needed to reach its

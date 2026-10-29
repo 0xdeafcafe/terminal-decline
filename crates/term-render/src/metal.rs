@@ -33,7 +33,10 @@ use term_core::Terminal;
 use term_font::{FontConfig, Fonts, GlyphKey, Style};
 
 use crate::frame::{Frame, FrameInput, GlyphInstance, GlyphSlot, GlyphSource, RectInstance, Rgba};
+use crate::images::ImageInstance;
 use crate::packer::{NoRoom, ShelfPacker};
+use crate::pixels::{MetalPixels, PixelAlloc};
+use term_core::image::{Layer, PoolId};
 
 type Device = ProtocolObject<dyn MTLDevice>;
 type Buffer = ProtocolObject<dyn MTLBuffer>;
@@ -91,6 +94,7 @@ pub struct Gpu {
     queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
     rect_pipeline: Retained<Pipeline>,
     glyph_pipeline: Retained<Pipeline>,
+    image_pipeline: Retained<Pipeline>,
 }
 
 impl Gpu {
@@ -114,11 +118,13 @@ impl Gpu {
         };
         let rect_pipeline = pipeline("rect_vertex", "rect_fragment");
         let glyph_pipeline = pipeline("glyph_vertex", "glyph_fragment");
+        let image_pipeline = pipeline("image_vertex", "image_fragment");
         Gpu {
             device,
             queue,
             rect_pipeline,
             glyph_pipeline,
+            image_pipeline,
         }
     }
 }
@@ -741,6 +747,8 @@ struct Span {
     origin: [f32; 2],
     rects: Range<usize>,
     glyphs: Range<usize>,
+    /// The pane's image instances in the frame's image buffer.
+    images: Range<usize>,
 }
 
 /// A window's own drawing state: instance buffers, in flight by turns,
@@ -748,6 +756,15 @@ struct Span {
 struct Window {
     rect_buffers: [InstanceBuffer; FRAMES_IN_FLIGHT],
     glyph_buffers: [InstanceBuffer; FRAMES_IN_FLIGHT],
+    image_buffers: [InstanceBuffer; FRAMES_IN_FLIGHT],
+    /// Textures over the images drawn last frame, by pool entry and
+    /// generation (images.md §6.2): rebuilt each frame with only the
+    /// images drawn in it, emptied when the window hides.
+    textures: HashMap<(PoolId, u32), Retained<Texture>>,
+    /// Last frame's map, while this frame's is made.
+    old_textures: HashMap<(PoolId, u32), Retained<Texture>>,
+    /// Per span, this frame's texture of each of its pane's images.
+    span_textures: Vec<Option<Retained<Texture>>>,
     frame_index: usize,
     in_flight: Arc<InFlight>,
     spans: Vec<Span>,
@@ -780,7 +797,7 @@ impl Window {
         // fill (when its background isn't the pass's clear colour) and
         // rects, then the dividers; each pane's glyphs.
         self.spans.clear();
-        let (mut rects, mut glyphs) = (0, 0);
+        let (mut rects, mut glyphs, mut images) = (0, 0, 0);
         for (pane, p) in panes.iter().enumerate() {
             let Some(s) = p.scissor.clamped(width, height) else {
                 continue;
@@ -797,6 +814,7 @@ impl Window {
             // Glyphs placed in textures since emptied would draw other
             // glyphs: such a pane draws its backgrounds until rebuilt.
             let n_glyphs = if p.pane.built_with == current { frame.glyphs.len() } else { 0 };
+            let n_images = frame.images.instances.len();
             self.spans.push(Span {
                 pane,
                 fill,
@@ -809,9 +827,11 @@ impl Window {
                 origin: [p.origin.0 as f32, p.origin.1 as f32],
                 rects: rects..rects + n_rects,
                 glyphs: glyphs..glyphs + n_glyphs,
+                images: images..images + n_images,
             });
             rects += n_rects;
             glyphs += n_glyphs;
+            images += n_images;
         }
         let divider_rects = rects..rects + dividers.len();
         rects += dividers.len();
@@ -820,6 +840,30 @@ impl Window {
         self.frame_index = (i + 1) % FRAMES_IN_FLIGHT;
         let rect_buf = self.rect_buffers[i].reserve(&gpu.device, rects * size_of::<RectInstance>());
         let glyph_buf = self.glyph_buffers[i].reserve(&gpu.device, glyphs * size_of::<GlyphInstance>());
+        let image_buf = self.image_buffers[i].reserve(&gpu.device, images * size_of::<ImageInstance>());
+        // This frame's textures: kept from the last frame, or made over
+        // the image's buffer. Pixels from elsewhere (tests' `Vec`s) can't
+        // be drawn and are skipped.
+        std::mem::swap(&mut self.textures, &mut self.old_textures);
+        self.textures.clear();
+        self.span_textures.clear();
+        for span in &self.spans {
+            for image in &panes[span.pane].pane.frame.images.images {
+                let key = (image.pool, image.generation);
+                let texture = match self.textures.get(&key) {
+                    Some(t) => Some(t.clone()),
+                    None => self.old_textures.remove(&key).or_else(|| {
+                        let pixels = image.pixels.as_any().downcast_ref::<MetalPixels>()?;
+                        pixels.texture()
+                    }),
+                };
+                if let Some(t) = &texture {
+                    self.textures.insert(key, t.clone());
+                }
+                self.span_textures.push(texture);
+            }
+        }
+        self.old_textures.clear();
         // SAFETY: every span lies within the counts the buffers were
         // reserved for, and the dividers come after them.
         unsafe {
@@ -837,6 +881,11 @@ impl Window {
                     && !span.glyphs.is_empty()
                 {
                     write(buf, span.glyphs.start, &frame.glyphs);
+                }
+                if let Some(buf) = &image_buf
+                    && !span.images.is_empty()
+                {
+                    write(buf, span.images.start, &frame.images.instances);
                 }
             }
             if let Some(buf) = &rect_buf {
@@ -878,18 +927,74 @@ impl Window {
                 enc.setFragmentTexture_atIndex(Some(&cache.color.texture), 1);
             }
         }
+        let set_glyph_textures = || {
+            if glyph_buf.is_some() {
+                unsafe {
+                    enc.setFragmentTexture_atIndex(Some(&cache.mask.texture), 0);
+                    enc.setFragmentTexture_atIndex(Some(&cache.color.texture), 1);
+                }
+            }
+        };
+        let mut textures_at = 0;
         for span in &self.spans {
             enc.setScissorRect(span.scissor);
             let uniforms = [viewport[0], viewport[1], span.origin[0], span.origin[1]];
+            let frame = &panes[span.pane].pane.frame;
+            let pane_textures = &self.span_textures[textures_at..textures_at + frame.images.images.len()];
+            textures_at += frame.images.images.len();
+            // The layers (images.md §6.3): images under the backgrounds,
+            // the backgrounds, images under the text, highlights and
+            // decorations, glyphs, images above the text, the cursor again.
+            let draws = &frame.images.draws;
+            let images_in = |layer: Layer| {
+                let Some(buf) = &image_buf else { return false };
+                let mut any = false;
+                for d in draws.iter().filter(|d| d.layer == layer) {
+                    let Some(texture) = &pane_textures[d.image as usize] else {
+                        continue;
+                    };
+                    unsafe { enc.setFragmentTexture_atIndex(Some(texture), 0) };
+                    let at = span.images.start + d.instances.start as usize;
+                    draw(&gpu.image_pipeline, buf, &uniforms, &(at..at + d.instances.len()));
+                    any = true;
+                }
+                any
+            };
+            images_in(Layer::BelowBackground);
             if let Some(buf) = &rect_buf
                 && !span.rects.is_empty()
             {
-                draw(&gpu.rect_pipeline, buf, &uniforms, &span.rects);
+                // The fill comes before the frame's rects.
+                let split = span.rects.start + span.fill.is_some() as usize + frame.split.backgrounds.min(frame.rects.len());
+                if draws.iter().any(|d| d.layer == Layer::BelowText) {
+                    draw(&gpu.rect_pipeline, buf, &uniforms, &(span.rects.start..split));
+                    images_in(Layer::BelowText);
+                    draw(&gpu.rect_pipeline, buf, &uniforms, &(split..span.rects.end));
+                } else {
+                    draw(&gpu.rect_pipeline, buf, &uniforms, &span.rects);
+                }
+            } else {
+                images_in(Layer::BelowText);
+            }
+            let above = draws.iter().any(|d| d.layer == Layer::AboveText);
+            if draws.iter().any(|d| d.layer != Layer::AboveText) {
+                set_glyph_textures();
             }
             if let Some(buf) = &glyph_buf
                 && !span.glyphs.is_empty()
             {
                 draw(&gpu.glyph_pipeline, buf, &uniforms, &span.glyphs);
+            }
+            if above && images_in(Layer::AboveText) {
+                set_glyph_textures();
+                if let Some(buf) = &rect_buf
+                    && !frame.split.cursor.is_empty()
+                    && frame.split.cursor.end <= frame.rects.len()
+                {
+                    let at = span.rects.start + span.fill.is_some() as usize;
+                    let cursor = at + frame.split.cursor.start..at + frame.split.cursor.end;
+                    draw(&gpu.rect_pipeline, buf, &uniforms, &cursor);
+                }
             }
         }
         if let Some(buf) = &rect_buf
@@ -973,6 +1078,10 @@ impl Renderer {
             window: Window {
                 rect_buffers: std::array::from_fn(|_| InstanceBuffer { buffer: None, capacity: 0 }),
                 glyph_buffers: std::array::from_fn(|_| InstanceBuffer { buffer: None, capacity: 0 }),
+                image_buffers: std::array::from_fn(|_| InstanceBuffer { buffer: None, capacity: 0 }),
+                textures: HashMap::new(),
+                old_textures: HashMap::new(),
+                span_textures: Vec::new(),
                 frame_index: 0,
                 in_flight: Arc::new(InFlight::default()),
                 spans: Vec::new(),
@@ -995,6 +1104,7 @@ impl Renderer {
         }
         self.window.in_flight.wait_idle();
         self.hidden = true;
+        self.window.textures.clear();
         {
             let mut cache = self.shared.glyphs.borrow_mut();
             cache.hidden += 1;
@@ -1133,6 +1243,36 @@ impl Renderer {
     /// [`build_pane`](Self::build_pane), with the terminal locked.
     pub fn build_from_snapshot(&mut self, pane: &mut PaneRender, input: &FrameInput) -> bool {
         finish(&self.shared, self.fonts_id, &self.fonts, pane, input)
+    }
+
+    /// [`build_pane`](Self::build_pane), with `inject` changing the
+    /// snapshot before it is built: how tests put images in a snapshot
+    /// (its `placements` and `virtual_placements`) until term-core's
+    /// protocols make them. Test aid.
+    #[doc(hidden)]
+    pub fn build_pane_with(
+        &mut self,
+        pane: &mut PaneRender,
+        term: &mut Terminal,
+        input: &FrameInput,
+        inject: impl FnOnce(&mut term_core::Snapshot),
+    ) {
+        self.snapshot_pane(pane, term, input);
+        inject(pane.frame.snapshot_mut());
+        let built = self.build_from_snapshot(pane, input);
+        assert!(built, "the glyph textures were emptied while building");
+    }
+
+    /// Makes image pixels this renderer can draw, from any thread.
+    pub fn pixel_alloc(&self) -> PixelAlloc {
+        PixelAlloc::new(self.shared.gpu.device.clone())
+    }
+
+    /// Images with textures this window keeps (those drawn in its last
+    /// frame). Test aid.
+    #[doc(hidden)]
+    pub fn image_textures(&self) -> usize {
+        self.window.textures.len()
     }
 
     /// Build the full-window pane's instances ([`build_pane`](Self::build_pane)

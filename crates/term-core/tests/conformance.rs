@@ -371,6 +371,33 @@ fn dl_never_goes_to_scrollback() {
     assert_eq!(t.state.scrollback_len(), 0);
 }
 
+#[test]
+fn dl_on_the_top_row_keeps_history_and_line_numbers() {
+    // DL on row 0, of the whole screen or of a region starting there,
+    // pulls the rows up without pushing the deleted one into scrollback;
+    // line numbers stay, the deleted row's prompt mark goes with it and
+    // the blank row that comes in has the pen's background.
+    for region in ["", "\x1b[1;3r"] {
+        let mut t = new(5, 4);
+        t.advance(b"\x1b]133;A\x07$ x\r\n\x1b]133;A\x07$ y\r\nc\r\nd");
+        let first = t.state.point_at(0, 0);
+        t.advance(format!("{region}\x1b[44m\x1b[H\x1b[M").as_bytes());
+        assert_eq!(pos(&t), (0, 0));
+        assert_eq!(t.state.scrollback_len(), 0);
+        assert_eq!(t.state.point_at(0, 0), first, "line numbers don't move");
+        let (want, blank) = if region.is_empty() {
+            (["$ y", "c", "d", ""], 3)
+        } else {
+            (["$ y", "c", "", "d"], 2)
+        };
+        assert_eq!(screen(&t), want);
+        let below = t.state.point_at(3, 0);
+        assert_eq!(t.state.previous_prompt(below.line), Some(first), "y's mark moved up to row 0");
+        assert!(t.state.visible_row(blank).cells().all(|c| c.style().bg != Color::default()));
+        t.state.check_invariants().unwrap();
+    }
+}
+
 // ---------------------------------------------------------------- insert mode
 
 #[test]

@@ -248,6 +248,11 @@ pub enum Command {
     /// `open <program> [args…]`: open a window running it, behind the key
     /// window.
     Open(Vec<String>),
+    /// `type <hex>`: send these bytes from the first window as if typed
+    /// there, without the window server (`t0` is then when the command was
+    /// handled). Works without the focus, which macOS may refuse while
+    /// someone types in another app.
+    Type(Vec<u8>),
 }
 
 impl Command {
@@ -263,6 +268,17 @@ impl Command {
                     return None;
                 }
                 Command::Open(argv)
+            }
+            "type" => {
+                let hex = words.next()?;
+                if hex.is_empty() || hex.len() % 2 != 0 {
+                    return None;
+                }
+                let bytes: Option<Vec<u8>> = (0..hex.len())
+                    .step_by(2)
+                    .map(|i| u8::from_str_radix(hex.get(i..i + 2)?, 16).ok())
+                    .collect();
+                Command::Type(bytes?)
             }
             _ => return None,
         };
@@ -404,6 +420,10 @@ mod tests {
             ("key 0", Some(Command::Key { keycode: 0 })),
             ("open yes", Some(Command::Open(vec!["yes".into()]))),
             ("open htop -d 1", Some(Command::Open(vec!["htop".into(), "-d".into(), "1".into()]))),
+            ("type 617f", Some(Command::Type(vec![b'a', 0x7f]))),
+            ("type 6", None),
+            ("type zz", None),
+            ("type", None),
             ("open", None),
             ("key", None),
             ("key x", None),

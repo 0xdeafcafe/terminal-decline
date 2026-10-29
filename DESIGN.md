@@ -296,7 +296,11 @@ reflow). See the performance-testing section for the fair-comparison plan.
   server. 200 keys per run, 50–150 ms apart at random, after 6 warm-up keys.
   Scenarios: idle; flood (a second window of the same process running
   `yes`); htop in the same window; the display link fixed at 120 or 60 Hz
-  (`DECLINE_LATENCY_HZ`).
+  (`DECLINE_LATENCY_HZ`). With `--type` the driver instead sends the FIFO
+  command `type <hex>`, which hands the key's bytes to the first window as
+  `keyDown` would, without the window server: it works without the focus
+  (macOS refuses to activate an app while someone types in another), and
+  t0 is then `keyDown`.
 - **From outside, for Ghostty and decline alike.** `scripts/latency/probe.swift`
   posts the key to the app with `CGEventPostToPid` and watches its window
   with ScreenCaptureKit at every refresh; the latency is the display time

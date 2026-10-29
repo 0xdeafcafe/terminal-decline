@@ -818,6 +818,14 @@ impl TerminalView {
         self.request_redraw();
     }
 
+    /// Bytes typed for the latency harness (its `type` command).
+    pub fn latency_type(&self, bytes: Vec<u8>) {
+        let t = latency::now();
+        self.with_state(|st| st.key_t0 = Some((t, t)));
+        self.send_input(bytes);
+        self.with_state(|st| st.key_t0 = None);
+    }
+
     fn send_raw(&self, bytes: Vec<u8>) {
         self.with_state(|st| st.session.send(bytes));
     }

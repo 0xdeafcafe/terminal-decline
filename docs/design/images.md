@@ -20,7 +20,7 @@ Modules named here:
   decoders that need no terminal state: kitty control keys, streaming
   base64, zlib inflate with an output cap, iTerm2 arguments, the Sixel
   decoder, pixel conversion, and the format sniffing and size reading of
-  PNG/JPEG/GIF headers. Small, fuzzed on its own, used by term-core.
+  PNG/JPEG/GIF/WebP headers. Small, fuzzed on its own, used by term-core.
 - **term-render**: Metal; draws image pieces and owns the Metal pixel
   buffers. One renderer per window draws every pane in it (B.2,
   docs/design/splits.md).
@@ -65,14 +65,14 @@ Modules named here:
 | Which kitty actions | transmit `t`, transmit+place `T`, place `p`, delete `d`, query `q`; Unicode placeholders (`U=1`); image numbers (`I=`); chunking (`m=`); zlib (`o=z`); formats 24, 32, 100 (PNG) | what `kitten icat`, yazi, image.nvim, timg, chafa, mpv use |
 | Not in 1.0 | animation (`a=f`, `a=a`, `a=c`), relative placements (`P=`, `Q=`, `H=`, `V=`): handled as kitty handles an unknown action (§3.6) | no target program needs them; open question 1 |
 | Transmission media | direct (`t=d`) always; file (`t=f`), temp file (`t=t`), shared memory (`t=s`), opened and checked at once, read later off the lock (§3.4); on by default | `kitten icat` probes them locally and falls back to direct over SSH; mpv uses shared memory |
-| iTerm2 | `OSC 1337;File=` (inline only), `MultipartFile`/`FilePart`/`FileEnd`; PNG, JPEG, GIF (first frame); decoded at the size drawn | `imgcat`, yazi's iTerm2 mode |
+| iTerm2 | `OSC 1337;File=` (inline only), `MultipartFile`/`FilePart`/`FileEnd`; PNG, JPEG, GIF, WebP (first frame of animations); decoded at the size drawn | `imgcat`, yazi's iTerm2 mode |
 | Sixel | in 1.0: a streaming decoder in term-image, fuzzed; DA1 reports `4`; XTSMGRAPHICS; modes 80, 1070, 8452 | `chafa --format sixel`, `img2sixel`, lsix |
 | Where pixels live | one **shared-storage Metal buffer** per image, allocated by the host, written by the decoder, sampled by the GPU through a texture made over that buffer | one copy for CPU and GPU (cells §8.4); no uploads |
 | Budget | **32 MB per process** (setting `image_memory`), across every window and tab, counting pixel buffers at their allocated size, encoded bytes kept, and transfers in progress, each once; metadata capped | Alex's decision |
 | Who enforces it | a process-wide `ImagePool` in term-core with its own lock (taken after a terminal's, never before; survives a panic) | eviction can free an idle image of another window without that window's terminal lock |
 | Eviction | hidden windows' images first, then images with no placement, then least recently drawn; never an image drawn in a shown window's latest frame; pixels go before small encoded copies | an image scrolled into history comes back when scrolled to, if it was compressed |
 | Hidden windows | buffers of images that can be decoded again are made **purgeable** while hidden | roadmap B.3 "volatile while hidden" |
-| Size before decode | read from the header by term-image (PNG, JPEG with EXIF orientation, GIF) in microseconds, so cursor movement and placeholder cells happen in stream order; decoding is off the lock | `a=T` and iTerm2 move the cursor by the image's size before the next byte is parsed |
+| Size before decode | read from the header by term-image (PNG, JPEG with EXIF orientation, GIF, WebP) in microseconds, so cursor movement and placeholder cells happen in stream order; decoding is off the lock | `a=T` and iTerm2 move the cursor by the image's size before the next byte is parsed |
 | Drawing | one instanced draw per run of placements of one image in (z, id) order, one quad per placement or per run of placeholder cells; layers as cells §8.1 | a 40×20 placeholder image is 20 quads, not 800 |
 | Scrollback | kitty direct placements stay in the placement table by line number until their block is freed; placeholder images (kitty's and our own) are cells and go into history with their text | cells §8.2, §8.3, §11.7 |
 | Until it all lands | a hidden switch keeps images off in daily builds (no replies to `APC G`, no `4` in DA1) until drawing and the host are merged | programs fall back to text instead of showing empty boxes |
@@ -699,9 +699,11 @@ is measured in PR I.5.
 - **Sniffing and sizes** are pure Rust in term-image (Linux-testable,
   fuzzed): PNG (`IHDR`), GIF (logical screen descriptor), JPEG (the frame
   header, plus the EXIF orientation tag, which swaps width and height for
-  orientations 5–8). Anything else is refused before ImageIO sees a byte
-  (cells §8.4's list: PNG, JPEG, GIF; HEIC is open question 4). Sub-µs,
-  under the lock.
+  orientations 5–8), WebP (the first chunk: `VP8 `, `VP8L`, or `VP8X`'s
+  canvas; its EXIF orientation is not applied, as browsers don't).
+  Anything else is refused before a decoder sees a byte (cells §8.4's
+  list: PNG, JPEG, GIF, plus WebP since Alex's decision; HEIC is open
+  question 4). Sub-µs, under the lock.
 - **Decoding** (term-app, on the queue, off the lock): ImageIO's
   `CGImageSourceCreateImageAtIndex` (index 0: GIFs show their first
   frame) with `kCGImageSourceShouldCache = false`, drawn into a
@@ -726,6 +728,25 @@ is measured in PR I.5.
   Sixel), more than the 100–150 KB estimated. `jpeg-decoder` starts one
   short-lived thread per colour component for images over 128 × 128 (its
   built-in heuristic; rayon is off).
+- **WebP** (Alex's decision, after I.1): `image-webp` (pure Rust, the
+  `image` crate's decoder; no features, no threads), lossy, lossless and
+  alpha; an animated WebP shows its first frame, as a GIF does. It has no
+  scaled decoding, so the whole image is decoded at full size as RGB or
+  RGBA and then streamed through the same scaler and colour conversion
+  (ICC profile from `ICCP`, else sRGB). Its own memory limit covers only
+  metadata chunks, so `decode` first checks an estimate against
+  `transient`: the output (3 or 4 bytes a pixel) plus 4 bytes a pixel of
+  working copy (YUV and alpha planes, or the lossless RGBA frame), plus 8
+  more for an animation's canvas and frame; a counting allocator test
+  holds the real peak under it (a 1600 × 1200 lossy photo peaks at
+  9.0 MB of an estimated 13.4 MB). Measured (`cargo bench -p term-image
+  --bench decode`, M-series Mac, colour conversion on, same run as PNG
+  8.4 ms and JPEG 15.9–19 ms): the 1624 × 1018 screenshot as lossless
+  WebP 9.6 ms at its size, 12.5 ms halved; the 1600 × 1200 photo as lossy
+  WebP (`cwebp -q 80`, 15 KB) 20.4 ms at its size, 22.3 ms at 400 × 300
+  (no DCT scaling to help, unlike JPEG's 3.2 ms). Binary size +196 KB
+  stripped (200,768 bytes; thin LTO, measured as for the other decoders:
+  a release binary calling `decode`, before and after).
 - ImageIO parses untrusted bytes from programs (possibly remote), and a
   crash in it takes every window. Sniffing in Rust narrows what reaches
   it, and decoding off the lock keeps a slow image from stalling frames,
@@ -848,7 +869,7 @@ truncated and is ignored (cells §14).
 The base64 after `:` streams into an encoded buffer. At the end
 (`osc_end(true)` or dispatch):
 
-1. sniff and read the size (§6.1; PNG/JPEG/GIF only; anything else is
+1. sniff and read the size (§6.1; PNG/JPEG/GIF/WebP only; anything else is
    dropped);
 2. the cell box: `auto` is the image's size in cells, scaled down to fit
    the screen's width (iTerm2 does this); percentages are of the screen;
@@ -976,13 +997,14 @@ A string abandoned (`dcs_end(false)`, CAN/SUB) drops the image.
 | Header sniff under the lock | < 1 µs | `cargo bench -p term-image --bench probe` |
 | shm / file open and checks under the lock | 10–50 µs | `images` bench with a test host using real `shm_open` (term-app bench) |
 | PNG decode, 1624×1018 screenshot | 5–15 ms, on the queue | term-app bench on fixtures |
+| WebP decode, 1600×1200 lossy photo | measured 20 ms at any drawn size (decoded whole, then scaled), on the queue | `cargo bench -p term-image --bench decode` (`webp_*`) |
 | Sixel decode | 150–300 MB/s | `cargo bench -p term-image --bench sixel` on chafa output of a 1000×1000 photo (checked-in fixture) |
 | iTerm2 stream, 2 MB PNG | dominated by base64, ≥ 500 MB/s | `images` bench (`iterm_png_2mb`) |
 | Frame build, 10 images on screen | + ≤ 10 µs | `cargo bench -p term-render --bench frame` gains `with_images` |
 | GPU time, one window-sized image | + ≤ 0.1 ms | Metal counters, as the render bench does |
 | Footprint: images at the budget | peak − idle ≤ 32 MB + 4 MB (the 4 MB for metadata, ImageIO's own buffers beyond the reserved headroom, and allocator slack; measured and the margin set from the numbers in I.5) | `scripts/pressure/run.py` gains `images_flood` (mpv-like: 500 id-less 1600×1000 frames) and `images_tiny` (20,000 1×1 images); `/usr/bin/footprint -p <pid>` before, at peak, after |
 | Footprint with no images | unchanged (the pool and an empty `Graphics` are < 1 KB) | standard set before/after each PR |
-| Binary size | + ~60 KB (miniz_oxide) + ~40 KB (decoder, sniffing, protocols); measured in I.1: +50 KB for those, +321 KB for the PNG/JPEG/GIF decoders (stripped, thin LTO) | `ls -l` of the release library, recorded per PR |
+| Binary size | + ~60 KB (miniz_oxide) + ~40 KB (decoder, sniffing, protocols); measured in I.1: +50 KB for those, +321 KB for the PNG/JPEG/GIF decoders (stripped, thin LTO); +196 KB for WebP (`image-webp`, same way); JPEG XL (`jxl-oxide`) measured at +1.54 MB and left out (§12) | `ls -l` of the release library, recorded per PR |
 | Idle | 0% CPU, 0 wakeups, also with a lost image in view | `top -l 2 -s 5 -stats cpu,idlew` with an image on screen, and with the budget full of protected images and a lost one in view |
 | Parse speed of text | unchanged (an APC/DCS branch only) | `cargo bench -p term-core --bench parse` within noise; the parse-speed gate (cells §17.4) |
 
@@ -1007,8 +1029,14 @@ working).
   one go), padding at a chunk's end, bad characters.
 - inflate: a 1 KB stream that inflates to 1 GB is refused after the cap
   with at most the cap allocated; truncated streams.
-- sniffing: PNG/GIF/JPEG sizes, EXIF orientations 1–8, truncated and
-  garbage headers, TIFF/PDF/HEIC/SVG refused.
+- sniffing: PNG/GIF/JPEG/WebP (lossy, lossless, extended) sizes, EXIF
+  orientations 1–8, truncated and garbage headers, TIFF/PDF/HEIC/SVG/WAV
+  refused.
+- WebP decoding: lossy, lossless, alpha (lossy `ALPH` and lossless),
+  animated (first frame) fixtures checked by hand and against golden
+  images (`tests/webp_golden.rs`), ICC tagging, limits, every truncation;
+  the decoder's allocations counted against its estimate
+  (`tests/decode_memory.rs`).
 - iTerm2 args: every key and size form; base64 names; garbage.
 - Sixel: golden images (one colour, repeats, `$` and `-`, HLS with a known
   colour checking hue 0 is blue, RGB colours, transparent vs background,

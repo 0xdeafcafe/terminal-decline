@@ -1,6 +1,6 @@
-//! PNG, JPEG and GIF (first frame) decoded in pure Rust, so a bad image
-//! from a program can't crash every window through a platform decoder
-//! (Alex's decision, images.md §12 question 3).
+//! PNG, JPEG, GIF and WebP (first frame of animated ones) decoded in pure
+//! Rust, so a bad image from a program can't crash every window through a
+//! platform decoder (Alex's decision, images.md §12 question 3).
 //!
 //! [`decode`] writes premultiplied BGRA into a [`PixelTarget`] already
 //! allocated at the size wanted ([`fit`] picks it from the header), so an
@@ -15,9 +15,15 @@
 //!     size, which its DCT scaling brings down by up to 8× each way first
 //!     (a 4032 × 3024 photo drawn at 1000 px wide is decoded at 1008 ×
 //!     756);
-//!   - GIF (`gif`): the first frame as palette indices, a byte a pixel.
+//!   - GIF (`gif`): the first frame as palette indices, a byte a pixel;
+//!   - WebP (`image-webp`): the whole image as RGB or RGBA at full size
+//!     (it has no scaled decoding), plus its own working copy: the YUV
+//!     planes (lossy), an RGBA frame (lossless), or the canvas and a frame
+//!     (animated). Checked against the limit before decoding.
 //! - Each decoder's own allocations are capped by [`Options::transient`].
-//! - Colour profiles and gamma are ignored: pixels are taken as sRGB.
+//! - Colour: converted to Display P3 from the image's ICC profile, or from
+//!   sRGB if it has none ([`Options::display_p3`]); gamma chunks are
+//!   ignored.
 
 use crate::color::ToP3;
 use crate::probe::{self, Format, Probe};
@@ -58,7 +64,7 @@ fn colour_for(icc: Option<&[u8]>, options: &Options, own: &mut Option<ToP3>) -> 
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DecodeError {
-    /// Not PNG, JPEG or GIF, or a header that doesn't say its size.
+    /// Not PNG, JPEG, GIF or WebP, or a header that doesn't say its size.
     Unsupported,
     /// The decoder refused the data.
     Corrupt(String),
@@ -128,6 +134,7 @@ pub fn decode(bytes: &[u8], into: &mut dyn PixelTarget, limits: &Options) -> Res
         Format::Png => png(bytes, into, limits)?,
         Format::Jpeg => jpeg(bytes, &p, into, limits)?,
         Format::Gif => gif(bytes, into, limits)?,
+        Format::Webp => webp(bytes, into, limits)?,
     };
     Ok(Decoded {
         opaque,
@@ -282,6 +289,46 @@ fn gif_error(e: gif::DecodingError) -> DecodeError {
     match e {
         gif::DecodingError::OutOfMemory => DecodeError::TooLarge,
         gif::DecodingError::Io(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => DecodeError::Truncated,
+        e => DecodeError::Corrupt(e.to_string()),
+    }
+}
+
+fn webp(bytes: &[u8], into: &mut dyn PixelTarget, limits: &Options) -> Result<bool, DecodeError> {
+    let mut d = image_webp::WebPDecoder::new(Cursor::new(bytes)).map_err(webp_error)?;
+    d.set_memory_limit(limits.transient);
+    let (sw, sh) = d.dimensions();
+    let alpha = d.has_alpha();
+    // image-webp allocates its output and working buffers without checking
+    // its limit (which covers metadata chunks only), so check the sum here:
+    // the output at 3 or 4 bytes a pixel, plus 4 a pixel for its own copy
+    // (lossless decodes RGBA; lossy holds 1.5–2.5 of YUV and alpha), plus
+    // 8 more for an animation's canvas and first frame.
+    let pixels = sw as u64 * sh as u64;
+    let own = if d.is_animated() { 12 } else { 4 };
+    let out = d.output_buffer_size().ok_or(DecodeError::TooLarge)?;
+    if out as u64 + pixels * own > limits.transient as u64 {
+        return Err(DecodeError::TooLarge);
+    }
+    let icc = d.icc_profile().map_err(webp_error)?;
+    let mut buf = vec![0; out];
+    d.read_image(&mut buf).map_err(webp_error)?;
+    let (layout, px) = if alpha { (Src::Rgba, 4) } else { (Src::Rgb, 3) };
+    let mut own = None;
+    let convert = colour_for(icc.as_deref(), limits, &mut own);
+    let colour = convert.then(|| own.as_ref().unwrap_or(ToP3::srgb()));
+    let mut sink = Sink::new((sw, sh), 1, colour, into);
+    for row in buf.chunks_exact(sw as usize * px).take(sh as usize) {
+        sink.row(layout, row);
+    }
+    sink.finish()
+}
+
+fn webp_error(e: image_webp::DecodingError) -> DecodeError {
+    use image_webp::DecodingError as E;
+    match e {
+        E::IoError(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => DecodeError::Truncated,
+        E::MemoryLimitExceeded | E::ImageTooLarge => DecodeError::TooLarge,
+        E::UnsupportedFeature(_) => DecodeError::Unsupported,
         e => DecodeError::Corrupt(e.to_string()),
     }
 }
@@ -739,6 +786,141 @@ mod tests {
         let mut t = VecPixels::new(16, 12);
         decode(gif, &mut t, &raw()).unwrap();
         check_quadrants(&t, 0);
+    }
+
+    /// A lossless WebP from image-webp's encoder, with an ICC profile if
+    /// given (the extended format).
+    fn webp_bytes(w: u32, h: u32, rgba: &[u8], icc: Option<Vec<u8>>) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut e = image_webp::WebPEncoder::new(&mut out);
+        if let Some(icc) = icc {
+            e.set_icc_profile(icc);
+        }
+        e.encode(rgba, w, h, image_webp::ColorType::Rgba8).unwrap();
+        out
+    }
+
+    #[test]
+    fn webp_lossless_at_its_own_size() {
+        let bytes = webp_bytes(4, 2, &rgba_4x2(), None);
+        let p = probe::probe(&bytes).unwrap();
+        assert_eq!((p.format, p.width, p.height), (Format::Webp, 4, 2));
+        let mut t = VecPixels::new(4, 2);
+        let d = decode(&bytes, &mut t, &raw()).unwrap();
+        assert_eq!(
+            d,
+            Decoded {
+                opaque: false,
+                source: (4, 2)
+            }
+        );
+        assert_eq!(t.pixel(0, 0), [0, 0, 255, 255]);
+        assert_eq!(t.pixel(1, 0), [0, 255, 0, 255]);
+        assert_eq!(t.pixel(2, 0), [255, 0, 0, 255]);
+        assert_eq!(t.pixel(3, 0), [128, 128, 128, 128]);
+        assert_eq!(t.pixel(2, 1), [128, 128, 128, 255]);
+        assert_eq!(t.pixel(3, 1), [0, 0, 0, 0]);
+        // Halved: each pixel averages a 2 × 2 block, as for PNG.
+        let mut t = VecPixels::new(2, 1);
+        decode(&bytes, &mut t, &raw()).unwrap();
+        assert_eq!(t.pixel(0, 0), [64, 128, 128, 255]);
+    }
+
+    #[test]
+    fn webp_lossy_and_lossless() {
+        let lossy = include_bytes!("../tests/fixtures/quadrants-64x48-lossy.webp");
+        let lossless = include_bytes!("../tests/fixtures/quadrants-64x48-lossless.webp");
+        for (bytes, tolerance) in [(&lossy[..], 40), (&lossless[..], 0)] {
+            for (w, h) in [(64, 48), (32, 24), (16, 12), (7, 5), (100, 75)] {
+                let mut t = VecPixels::new(w, h);
+                let d = decode(bytes, &mut t, &raw()).unwrap();
+                assert!(d.opaque);
+                assert_eq!(d.source, (64, 48));
+                check_quadrants(&t, tolerance);
+            }
+        }
+    }
+
+    /// Opaque red top-left, green at alpha 128 top-right, opaque blue
+    /// bottom-left, transparent bottom-right; premultiplied BGRA.
+    fn check_alpha_quadrants(t: &VecPixels, tolerance: u8) {
+        let (w, h) = (t.width(), t.height());
+        let near = |a: [u8; 4], b: [u8; 4]| a.iter().zip(b).all(|(&x, y)| x.abs_diff(y) <= tolerance);
+        for (x, y, want) in [
+            (w / 4, h / 4, [0, 0, 255, 255]),
+            (3 * w / 4, h / 4, [0, 128, 0, 128]),
+            (w / 4, 3 * h / 4, [255, 0, 0, 255]),
+            (3 * w / 4, 3 * h / 4, [0, 0, 0, 0]),
+        ] {
+            assert!(near(t.pixel(x, y), want), "({x}, {y}) is {:?}, want {want:?}", t.pixel(x, y));
+        }
+    }
+
+    #[test]
+    fn webp_alpha_and_animation() {
+        for (name, bytes, tolerance) in [
+            ("lossless", &include_bytes!("../tests/fixtures/alpha-64x48-lossless.webp")[..], 0),
+            (
+                "lossy, ALPH chunk",
+                &include_bytes!("../tests/fixtures/alpha-64x48-lossy.webp")[..],
+                40,
+            ),
+            // Its second frame is black: the first is shown, as for GIF.
+            ("animated", &include_bytes!("../tests/fixtures/animated-64x48.webp")[..], 40),
+        ] {
+            for (w, h) in [(64, 48), (16, 12)] {
+                let mut t = VecPixels::new(w, h);
+                let d = decode(bytes, &mut t, &raw()).unwrap();
+                assert!(!d.opaque, "{name}");
+                assert_eq!(d.source, (64, 48), "{name}");
+                check_alpha_quadrants(&t, tolerance);
+            }
+        }
+    }
+
+    #[test]
+    fn webp_converted_to_display_p3() {
+        let red = [255, 0, 0, 255];
+        let [r, g, b] = ToP3::srgb().rgb([255, 0, 0]);
+        let mut t = VecPixels::new(1, 1);
+        decode(&webp_bytes(1, 1, &red, None), &mut t, &Options::default()).unwrap();
+        assert_eq!(t.pixel(0, 0), [b, g, r, 255]);
+        let p3 = [(0.680, 0.320), (0.265, 0.690), (0.150, 0.060)];
+        let tagged = webp_bytes(1, 1, &red, Some(crate::color::tests::icc(p3)));
+        decode(&tagged, &mut t, &Options::default()).unwrap();
+        assert_eq!(t.pixel(0, 0), [0, 0, 255, 255]);
+        // A lossy photo, through the whole path.
+        let photo = include_bytes!("../tests/fixtures/photo-1600x1200.webp");
+        let (w, h) = fit(&probe::probe(photo).unwrap(), (400, 400));
+        assert_eq!((w, h), (400, 300));
+        let mut t = VecPixels::new(w, h);
+        assert!(decode(photo, &mut t, &Options::default()).unwrap().opaque);
+        let [b, g, r, _] = t.pixel(10, 5);
+        assert!(b > r && b > 150, "{b} {g} {r}");
+    }
+
+    #[test]
+    fn webp_errors_and_limits() {
+        let bytes = include_bytes!("../tests/fixtures/alpha-64x48-lossy.webp");
+        let mut t = VecPixels::new(64, 48);
+        let l = raw();
+        assert_eq!(decode(&bytes[..20], &mut t, &l), Err(DecodeError::Truncated));
+        // Cut anywhere: no panic, and an error unless only the end of the
+        // lossy data is missing (VP8 reads zeros past it, as libwebp does).
+        for n in 0..bytes.len() {
+            let r = decode(&bytes[..n], &mut t, &l);
+            assert!(r.is_err() || n > bytes.len() - 8, "length {n}");
+        }
+        let photo = include_bytes!("../tests/fixtures/photo-1600x1200.webp");
+        let mut t = VecPixels::new(400, 300);
+        // 1600 × 1200 × (3 + 4) is 13.44 MB.
+        let tight = |transient| Options { transient, ..raw() };
+        assert_eq!(decode(photo, &mut t, &tight(13_439_999)), Err(DecodeError::TooLarge));
+        assert!(decode(photo, &mut t, &tight(13_440_000)).is_ok());
+        let animated = include_bytes!("../tests/fixtures/animated-64x48.webp");
+        let mut t = VecPixels::new(64, 48);
+        assert_eq!(decode(animated, &mut t, &tight(64 * 48 * 15)), Err(DecodeError::TooLarge));
+        assert!(decode(animated, &mut t, &tight(64 * 48 * 16)).is_ok());
     }
 
     #[test]

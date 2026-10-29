@@ -1,10 +1,13 @@
 //! Format sniffing and sizes from the first bytes of an image, so the
 //! terminal knows an image's size (and moves the cursor by it) before it
-//! is decoded (images.md §6.1). PNG, JPEG and GIF only; anything else is
-//! refused before a decoder sees a byte.
+//! is decoded (images.md §6.1). PNG, JPEG, GIF and WebP only; anything
+//! else is refused before a decoder sees a byte.
 //!
 //! - PNG: the `IHDR` chunk, in the first 33 bytes.
 //! - GIF: the logical screen descriptor, in the first 10 bytes.
+//! - WebP: the first chunk's header (`VP8 `, `VP8L` or `VP8X`, the canvas
+//!   of an extended or animated file), in the first 30 bytes. Its EXIF
+//!   orientation is not applied, as browsers don't.
 //! - JPEG: the frame header (`SOFn`), after any number of segments, and
 //!   the EXIF orientation from `APP1`. Orientations 5–8 turn the image a
 //!   quarter, so the size reported is the size shown, width and height
@@ -15,6 +18,7 @@ pub enum Format {
     Png,
     Jpeg,
     Gif,
+    Webp,
 }
 
 /// What the header says.
@@ -24,7 +28,7 @@ pub struct Probe {
     /// The size as shown, after the orientation.
     pub width: u32,
     pub height: u32,
-    /// EXIF orientation, 1–8 (1 = as stored). Always 1 for PNG and GIF.
+    /// EXIF orientation, 1–8 (1 = as stored). Always 1 for PNG, GIF and WebP.
     pub orientation: u8,
 }
 
@@ -43,7 +47,7 @@ impl Probe {
 pub enum ProbeError {
     /// The bytes end before the header does; more might settle it.
     NeedMore,
-    /// Not PNG, JPEG or GIF (TIFF, PDF, HEIC, SVG, …).
+    /// Not PNG, JPEG, GIF or WebP (TIFF, PDF, HEIC, SVG, …).
     Unsupported,
     /// The format's signature, but a broken or zero-sized header.
     Corrupt,
@@ -71,9 +75,17 @@ pub fn sniff(head: &[u8]) -> Option<Format> {
         Some(Format::Jpeg)
     } else if head.starts_with(b"GIF87a") || head.starts_with(b"GIF89a") {
         Some(Format::Gif)
+    } else if head.len() >= 12 && head.starts_with(b"RIFF") && &head[8..12] == b"WEBP" {
+        Some(Format::Webp)
     } else {
         None
     }
+}
+
+/// `head` is shorter than a WebP signature (`RIFF`, a size, `WEBP`) and
+/// could still become one.
+fn webp_prefix(head: &[u8]) -> bool {
+    head.len() < 12 && b"RIFF".starts_with(&head[..head.len().min(4)]) && b"WEBP".starts_with(head.get(8..).unwrap_or(&[]))
 }
 
 /// Format and size from the first bytes of an image. `NeedMore` means the
@@ -86,7 +98,8 @@ pub fn probe(head: &[u8]) -> Result<Probe, ProbeError> {
         Some(Format::Png) => png(head),
         Some(Format::Jpeg) => jpeg(head),
         Some(Format::Gif) => gif(head),
-        None if prefixes.iter().any(|p| head.len() < p.len() && p.starts_with(head)) => Err(ProbeError::NeedMore),
+        Some(Format::Webp) => webp(head),
+        None if prefixes.iter().any(|p| head.len() < p.len() && p.starts_with(head)) || webp_prefix(head) => Err(ProbeError::NeedMore),
         None => Err(ProbeError::Unsupported),
     }
 }
@@ -135,6 +148,49 @@ fn gif(head: &[u8]) -> Result<Probe, ProbeError> {
     let w = u16::from_le_bytes([head[6], head[7]]) as u32;
     let h = u16::from_le_bytes([head[8], head[9]]) as u32;
     sized(Format::Gif, w, h, 1)
+}
+
+fn le16(b: &[u8]) -> u32 {
+    u16::from_le_bytes([b[0], b[1]]) as u32
+}
+
+fn le24(b: &[u8]) -> u32 {
+    u32::from_le_bytes([b[0], b[1], b[2], 0])
+}
+
+fn webp(head: &[u8]) -> Result<Probe, ProbeError> {
+    // `RIFF`, size, `WEBP`, then the first chunk: fourcc, size, data.
+    let need = |n: usize| if head.len() < n { Err(ProbeError::NeedMore) } else { Ok(()) };
+    need(16)?;
+    let (w, h) = match &head[12..16] {
+        // Lossy: a 3-byte frame tag, the start code, 14-bit width and
+        // height (the top two bits are a scale, ignored by decoders).
+        b"VP8 " => {
+            need(30)?;
+            if head[23..26] != [0x9D, 0x01, 0x2A] {
+                return Err(ProbeError::Corrupt);
+            }
+            (le16(&head[26..]) & 0x3FFF, le16(&head[28..]) & 0x3FFF)
+        }
+        // Lossless: signature 0x2F, then width − 1 and height − 1 in 14
+        // bits each.
+        b"VP8L" => {
+            need(25)?;
+            if head[20] != 0x2F {
+                return Err(ProbeError::Corrupt);
+            }
+            let bits = u32::from_le_bytes([head[21], head[22], head[23], head[24]]);
+            ((bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1)
+        }
+        // Extended: flags, then the canvas width − 1 and height − 1 in 24
+        // bits each.
+        b"VP8X" => {
+            need(30)?;
+            (le24(&head[24..]) + 1, le24(&head[27..]) + 1)
+        }
+        _ => return Err(ProbeError::Corrupt),
+    };
+    sized(Format::Webp, w, h, 1)
 }
 
 fn jpeg(head: &[u8]) -> Result<Probe, ProbeError> {
@@ -332,6 +388,60 @@ pub(crate) mod tests {
         assert_eq!(probe(b"GIF89a\0\0\x10\0"), Err(ProbeError::Corrupt));
     }
 
+    /// A WebP file's start: `RIFF`, a size, `WEBP`, a chunk header and
+    /// `data`.
+    pub fn webp_header(chunk: &[u8; 4], data: &[u8]) -> Vec<u8> {
+        let mut v = b"RIFF\x00\x10\0\0WEBP".to_vec();
+        v.extend_from_slice(chunk);
+        v.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        v.extend_from_slice(data);
+        v
+    }
+
+    #[test]
+    fn webp_sizes() {
+        let webp = |w, h| Probe {
+            format: Format::Webp,
+            width: w,
+            height: h,
+            orientation: 1,
+        };
+        // Lossy: frame tag, start code, 14-bit sizes with a scale on top.
+        let mut vp8 = vec![0x10, 0x02, 0x00, 0x9D, 0x01, 0x2A];
+        vp8.extend_from_slice(&(1600u16 | 0x4000).to_le_bytes());
+        vp8.extend_from_slice(&1200u16.to_le_bytes());
+        let lossy = webp_header(b"VP8 ", &vp8);
+        assert_eq!(probe(&lossy), Ok(webp(1600, 1200)));
+        assert_eq!(probe(&lossy[..29]), Err(ProbeError::NeedMore));
+        let mut bad = lossy.clone();
+        bad[24] = 0;
+        assert_eq!(probe(&bad), Err(ProbeError::Corrupt));
+        // Lossless: 0x2F, then 14-bit width − 1 and height − 1.
+        let bits: u32 = (64 - 1) | ((48 - 1) << 14) | (1 << 28);
+        let mut vp8l = vec![0x2F];
+        vp8l.extend_from_slice(&bits.to_le_bytes());
+        let lossless = webp_header(b"VP8L", &vp8l);
+        assert_eq!(probe(&lossless), Ok(webp(64, 48)));
+        assert_eq!(probe(&lossless[..24]), Err(ProbeError::NeedMore));
+        // Extended: the canvas, 24 bits each, past 16384.
+        let mut vp8x = vec![0x10, 0, 0, 0];
+        vp8x.extend_from_slice(&(20_000u32 - 1).to_le_bytes()[..3]);
+        vp8x.extend_from_slice(&(3u32 - 1).to_le_bytes()[..3]);
+        assert_eq!(probe(&webp_header(b"VP8X", &vp8x)), Ok(webp(20_000, 3)));
+        // A zero size, an unknown first chunk.
+        assert_eq!(
+            probe(&webp_header(b"VP8 ", &[0x10, 0x02, 0x00, 0x9D, 0x01, 0x2A, 0, 0, 5, 0])),
+            Err(ProbeError::Corrupt)
+        );
+        assert_eq!(probe(&webp_header(b"ALPH", &[0; 10])), Err(ProbeError::Corrupt));
+        // Every prefix of the signature might still be WebP.
+        for n in 0..16 {
+            assert_eq!(probe(&lossy[..n]), Err(ProbeError::NeedMore), "length {n}");
+        }
+        assert_eq!(sniff(&lossy[..12]), Some(Format::Webp));
+        assert_eq!(probe(b"RIFF\0\0\0\0WAV"), Err(ProbeError::Unsupported));
+    }
+
     #[test]
     fn jpeg_sizes_and_orientations() {
         let plain = jpeg_header(4032, 3024, None);
@@ -370,13 +480,13 @@ pub(crate) mod tests {
     #[test]
     fn garbage_and_other_formats_are_refused() {
         let others: [&[u8]; 8] = [
+            b"RIFF\0\0\0\0WAVEfmt ",                       // WAV
             b"II*\0\x08\0\0\0",                            // TIFF
             b"MM\0*\0\0\0\x08",                            // TIFF
             b"%PDF-1.7\n",                                 // PDF
             b"\0\0\0\x18ftypheic\0\0\0\0mif1heic",         // HEIC
             b"<?xml version=\"1.0\"?><svg>",               // SVG
             b"<svg xmlns=\"http://www.w3.org/2000/svg\">", // SVG
-            b"RIFF\0\0\0\0WEBPVP8 ",                       // WebP
             b"BM\x36\0\0\0",                               // BMP
         ];
         for o in others {

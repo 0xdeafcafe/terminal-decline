@@ -66,9 +66,10 @@ fn probe_and_inflate_mutations() {
         v
     };
     let jpeg = b"\xff\xd8\xff\xe1\0\x22Exif\0\0II*\0\x08\0\0\0\x01\0\x12\x01\x03\0\x01\0\0\0\x06\0\0\0\0\0\0\0\xff\xc0\0\x11\x08\0\x10\0\x20\x03\x01\x22\0\x02\x11\x01\x03\x11\x01".to_vec();
+    let webp = include_bytes!("fixtures/alpha-64x48-lossy.webp")[..40].to_vec();
     let z = miniz_oxide::deflate::compress_to_vec_zlib(&[7u8; 5000], 6);
     for _ in 0..20_000 {
-        for base in [&png, &jpeg, &z] {
+        for base in [&png, &jpeg, &webp, &z] {
             let mut m = base.clone();
             for _ in 0..1 + r.next() % 4 {
                 let i = (r.next() as usize) % m.len();
@@ -84,8 +85,13 @@ fn probe_and_inflate_mutations() {
 #[test]
 fn decoders_on_mutated_images() {
     use term_image::decode::{Options, decode};
-    let fixtures: [&[u8]; 4] = [
+    let fixtures: [&[u8]; 9] = [
         include_bytes!("fixtures/quadrants-64x48.jpg"),
+        include_bytes!("fixtures/quadrants-64x48-lossy.webp"),
+        include_bytes!("fixtures/quadrants-64x48-lossless.webp"),
+        include_bytes!("fixtures/alpha-64x48-lossy.webp"),
+        include_bytes!("fixtures/alpha-64x48-lossless.webp"),
+        include_bytes!("fixtures/animated-64x48.webp"),
         include_bytes!("fixtures/quadrants-64x48.gif"),
         include_bytes!("fixtures/rgba-4x2-adam7.png"),
         include_bytes!("fixtures/gradient-300x300-adam7.png"),

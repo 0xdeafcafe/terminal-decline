@@ -11,6 +11,7 @@ pub mod control;
 pub mod crash;
 pub mod frame_policy;
 pub mod keys;
+pub mod latency;
 pub mod layout;
 pub mod mouse;
 pub mod paths;

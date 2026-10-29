@@ -41,14 +41,20 @@ define_class!(
         fn did_finish_launching(&self, _n: &NSNotification) {
             let restore = std::mem::take(&mut *self.ivars().restore.borrow_mut());
             if restore.is_empty() {
-                self.open_window(None, None);
+                self.open_window(None, None, None);
             }
             for w in restore {
                 let [x, y, width, height] = w.frame;
                 let frame = NSRect::new(NSPoint::new(x, y), objc2_foundation::NSSize::new(width, height));
-                self.open_window(w.cwd, Some(frame));
+                self.open_window(w.cwd, Some(frame), None);
             }
             self.watch_for_new_build();
+            crate::latency::listen(|cmd| {
+                let delegate = DELEGATE.with(|d| d.borrow().as_ref().and_then(|w| w.load()));
+                if let Some(delegate) = delegate {
+                    delegate.latency_command(cmd);
+                }
+            });
             let mtm = MainThreadMarker::from(self);
             #[allow(deprecated)]
             NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
@@ -58,7 +64,7 @@ define_class!(
         fn should_handle_reopen(&self, _app: &NSApplication, has_visible: bool) -> bool {
             // Dock icon clicked with no windows open: open one.
             if !has_visible {
-                self.open_window(None, None);
+                self.open_window(None, None, None);
             }
             true
         }
@@ -74,7 +80,7 @@ define_class!(
         fn new_window(&self, _sender: Option<&AnyObject>) {
             // Open in the same directory as the window in front.
             let cwd = self.key_view().and_then(|v| v.foreground_cwd());
-            self.open_window(cwd, None);
+            self.open_window(cwd, None, None);
         }
 
         #[unsafe(method(windowClosed:))]
@@ -144,6 +150,34 @@ impl AppDelegate {
         NSApplication::sharedApplication(mtm).terminate(None);
     }
 
+    /// A command from the latency harness (see [`crate::latency`]).
+    fn latency_command(&self, cmd: crate::latency::Command) {
+        use crate::latency::Command as C;
+        let mtm = MainThreadMarker::from(self);
+        match cmd {
+            C::Key { keycode } => {
+                // Keys go to the key window, which only an active app has;
+                // macOS may have refused activation at launch.
+                let app = NSApplication::sharedApplication(mtm);
+                if !app.isActive() {
+                    app.activate();
+                    if let Some((w, _)) = self.ivars().windows.borrow().first() {
+                        w.makeKeyAndOrderFront(None);
+                    }
+                }
+                crate::latency::post_key(keycode);
+            }
+            C::Open(argv) => {
+                // Behind the window being typed in, which stays key.
+                let key = NSApplication::sharedApplication(mtm).keyWindow();
+                self.open_window(None, None, Some(argv));
+                if let Some(key) = key {
+                    key.makeKeyAndOrderFront(None);
+                }
+            }
+        }
+    }
+
     fn key_view(&self) -> Option<Retained<TerminalView>> {
         let mtm = MainThreadMarker::from(self);
         let key = NSApplication::sharedApplication(mtm).keyWindow()?;
@@ -155,7 +189,9 @@ impl AppDelegate {
             .map(|(_, v)| v.clone())
     }
 
-    fn open_window(&self, cwd: Option<String>, frame: Option<NSRect>) {
+    /// Open a window in `cwd` (else the configured one) at `frame` (else
+    /// cascaded), running `argv` (else the configured program).
+    fn open_window(&self, cwd: Option<String>, frame: Option<NSRect>, argv: Option<Vec<String>>) {
         let mtm = MainThreadMarker::from(self);
         let config = self.ivars().config.clone();
         let scale = NSScreen::mainScreen(mtm).map(|s| s.backingScaleFactor()).unwrap_or(2.0);
@@ -204,7 +240,7 @@ impl AppDelegate {
         window.setAcceptsMouseMovedEvents(true);
 
         let mut command = Command {
-            argv: config.command.clone(),
+            argv: argv.unwrap_or_else(|| config.command.clone()),
             cwd: cwd.or_else(|| config.cwd.clone()),
             env: config.env.clone().into_iter().collect(),
             shell: None,

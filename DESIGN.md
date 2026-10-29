@@ -56,7 +56,13 @@ an injected runner, so tests use temp dirs. `tests/pipeline.rs` runs real
 programs through `session` with no window; `tests/smoke.rs` drives the real
 app through a test-only control sequence (`ESC ] 7770 ; cmd BEL`, honoured
 only with `DECLINE_TEST_DUMP=<file>` set: `dump`, `resize`, `font`, `tab`,
-`quit`) that writes JSON dumps.
+`quit`) that writes JSON dumps. Under that control the app runs in the
+background (`background.rs`): an accessory app (no Dock icon, not in the
+app switcher) that never activates, with transparent windows ordered
+behind every other window that count as visible, so they still draw; it
+keeps its own key window for keys and menu actions sent with
+`sendEvent`. `DECLINE_TEST_FOREGROUND=1` brings it back to the front, to
+watch a run.
 
 ## Screen storage
 

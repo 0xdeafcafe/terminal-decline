@@ -53,7 +53,9 @@ windows on Alex's Mac. Don't run them on every change: CI runs them on
 every push to main and on `ci/**` branches (push one to check a change).
 Locally they run in occasional test campaigns, a batch at a time, and
 in the background: test windows must not take focus or come to the
-front.
+front. Under the test control the app does this itself (see
+`crates/term-app/src/background.rs`); `DECLINE_TEST_FOREGROUND=1`
+opts out, to watch a run.
 
 ## Agents in worktrees
 

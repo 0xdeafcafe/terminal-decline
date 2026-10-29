@@ -117,11 +117,32 @@ pub fn decode(data: &[u8]) -> Vec<Step> {
     steps
 }
 
+/// Whether the terminal under test handles images (kitty graphics, iTerm2
+/// files, Sixel): on unless `TD_FUZZ_IMAGES=0` is in the environment. This
+/// stands in for the app's hidden `TD_IMAGES=1` switch, which the
+/// process-wide pool reads once and which is off by default: with it off, a
+/// fuzz run would never get past the first byte of an image.
+pub fn images_on() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("TD_FUZZ_IMAGES").is_none_or(|v| v != "0"))
+}
+
+/// The image budget of the terminal under test: small, so images are
+/// evicted all the time.
+pub const IMAGE_BUDGET: usize = 4 << 20;
+
 /// A terminal whose style tables sweep at 8 ids, so sweeps and
 /// renumberings happen every few prints and every holder of a style id is
-/// exercised (§5.2 of the cells design).
+/// exercised (§5.2 of the cells design). With [`images_on`] its image pool
+/// is a small one with images enabled.
 pub fn new_term() -> Term {
-    let mut t = Term::new(80, 24, SCROLLBACK, term_core::ImagePool::process());
+    let pool = if images_on() {
+        term_core::ImagePool::new(IMAGE_BUDGET)
+    } else {
+        term_core::ImagePool::process()
+    };
+    let mut t = Term::new(80, 24, SCROLLBACK, pool);
     t.state.set_sweep_at(Some(8));
     t
 }
@@ -129,7 +150,13 @@ pub fn new_term() -> Term {
 pub fn apply(term: &mut Term, step: &Step) {
     let t = &mut term.state;
     match *step {
-        Step::Bytes(ref b) => term.advance(b),
+        Step::Bytes(ref b) => {
+            term.advance(b);
+            // What the app does after each parse slice. With no host to run
+            // the decode and read jobs, they are dropped.
+            let mut jobs = Vec::new();
+            term.state.take_image_jobs(&mut jobs);
+        }
         Step::Resize(c, l) => t.resize(usize::from(c), usize::from(l)),
         Step::ScrollView(d) => t.scroll_view(isize::from(d)),
         Step::Select(al, ac, hl, hc) => {

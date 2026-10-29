@@ -26,7 +26,7 @@ use objc2_metal::{
     MTLBlendFactor, MTLBlitCommandEncoder, MTLBuffer, MTLClearColor, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue,
     MTLCreateSystemDefaultDevice, MTLDevice, MTLLibrary, MTLLoadAction, MTLOrigin, MTLPixelFormat, MTLPrimitiveType, MTLPurgeableState,
     MTLRegion, MTLRenderCommandEncoder, MTLRenderPassDescriptor, MTLRenderPipelineDescriptor, MTLRenderPipelineState, MTLResource,
-    MTLResourceOptions, MTLScissorRect, MTLSize, MTLStoreAction, MTLTexture, MTLTextureDescriptor, MTLTextureUsage,
+    MTLResourceOptions, MTLScissorRect, MTLSize, MTLStorageMode, MTLStoreAction, MTLTexture, MTLTextureDescriptor, MTLTextureUsage,
 };
 use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
 use term_core::Terminal;
@@ -257,6 +257,16 @@ impl Atlas {
                 0,
                 zero,
             );
+            // A managed texture (the default on macOS) keeps a CPU copy and a
+            // GPU copy. The copy above wrote only the GPU one; glyphs are
+            // then written into the CPU one with replaceRegion, and Metal
+            // leaves it undefined what the GPU sees of a CPU copy that's
+            // stale: on a GPU with its own memory the old glyphs can come
+            // back blank. Bring the CPU copy up to date. On Apple silicon
+            // there's one copy and this costs nothing.
+            if texture.storageMode() == MTLStorageMode::Managed {
+                blit.synchronizeResource(ProtocolObject::from_ref(&*texture));
+            }
         }
         blit.endEncoding();
         cmd.commit();

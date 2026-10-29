@@ -5,7 +5,8 @@ how they run). Each section is a group in
 `tests/conformance/accepted-failures.txt`, which lists the tests one by one.
 Measured on 2026-10-29 against main at 67608bf: vttest 59 menus, 178
 screens, 126 right; esctest2 567 tests, 265 pass, 41 skipped as known xterm
-bugs, 261 fail.
+bugs, 261 fail. With the E.19 fixes (branch `feat/core-replies`): esctest2
+296 pass, 230 fail, and both suites 426 right, 278 accepted failures.
 
 Severity: **high** breaks programs people run; **medium** visible in some
 programs; **low** only test programs or rare ones notice.
@@ -14,68 +15,46 @@ All the to-fix bugs are in term-core except where noted.
 
 ## To fix
 
-### dec-graphics: missing DEC Special Graphics characters (low)
+### osc-reset-default: OSC 110 back to xterm's black (harness)
 
-`ESC ( 0` then `b c d e h i _`. Expected (xterm, VT100): ␉ ␌ ␍ ␊ ␤ ␋ and a
-blank for `_`. Actual: the plain letters and `_`. The line-drawing and other
-characters are right. vttest `charsets-vt100:01`. Fix in
-`dec_line_drawing` in `crates/term-core/src/term.rs`.
+esctest's reset sets the foreground to black with `OSC 10 ; #000 ST`, and
+`ResetSpecialColor_Dynamic` then expects `OSC 110` to give black back:
+xterm's default foreground. Terminal Decline resets to the theme's
+foreground, which is right; the headless terminal the harness runs has
+the default dark theme's. It would pass if the headless terminal used
+xterm's colours (black on white). esctest `ResetSpecialColor_Dynamic`.
 
-### rep: REP repeats after another control sequence (low)
+### Fixed in term-core: replies and colours (E.19)
 
-`+ CSI 1 b CSI 10 b`. Expected: `++`; REP repeats the last character only
-when it comes straight after it, so the second REP does nothing (xterm,
-ECMA-48). Actual: twelve `+`. ncurses sends REP straight after the
-character, so real programs don't hit this. vttest `iso6429-rep:01`.
+All in `crates/term-core/src/term.rs` and `src/term/replies.rs`, with
+tests in `crates/term-core/tests/replies.rs`. These now pass:
 
-### decaln: DECALN leaves the margins and the cursor (low)
-
-`CSI 4;5 r` then `ESC # 8`. Expected: the screen fills with `E`, the
-top/bottom margins reset to the whole screen and the cursor goes home.
-Actual: only the fill; margins stay and the cursor stays where it was.
-esctest `DECALN_ClearsMargins`, `DECALN_MovesCursorHome`.
-
-### decid: no reply to DECID (low)
-
-`ESC Z`. Expected: the same reply as primary DA, `CSI ? 62 ; 22 c`.
-Actual: nothing. esctest `DECID_Basic`.
-
-### decxcpr: no reply to the extended cursor position report (low)
-
-`CSI ? 6 n`. Expected: `CSI ? row ; column ; 1 R`. Actual: nothing (plain
-`CSI 6 n` works). esctest `DECDSR_DECXCPR`.
-
-### decreqtparm: no reply to DECREQTPARM (low)
-
-`CSI 0 x` and `CSI 1 x`. Expected: a parameters report such as
-`CSI 2 ; 1 ; 1 ; 128 ; 128 ; 1 ; 0 x` (3 for `CSI 1 x`). Actual: nothing,
-vttest shows "Bad format". VT100-only; nothing current uses it. vttest
-`reports-decreqtparm:01`.
-
-### decrqss: no DECRQSS replies (low to medium)
-
-`DCS $ q m ST` (SGR), `DCS $ q SP q ST` (cursor style, DECSCUSR) and
-`DCS $ q r ST` (margins, DECSTBM). Expected: `DCS 1 $ r <setting> ST`, for
-example `DCS 1 $ r 0 m ST`. Actual: nothing, DCS strings are ignored. Vim
-asks for the cursor style this way and waits for a reply that never comes
-(it times out and carries on). esctest `DECRQSS_SGR`, `DECRQSS_DECSCUSR`,
-`DECRQSS_DECSTBM`. The other DECRQSS settings are under not planned.
-
-### osc-colors: colour palette changes and queries (medium)
-
-- `OSC 4 ; n ; ? ST` (query palette colour n): expected
-  `OSC 4 ; n ; rgb:rrrr/gggg/bbbb ST`; actual: no reply.
-- `OSC 4 ; n ; #rrggbb ST` (set palette colour n): ignored.
-- `OSC 10 / 11 / 12 ; #rrggbb ST` (set foreground, background, cursor):
-  ignored, so a later `OSC 10 ; ? ST` reports the configured colour, not the
-  one set.
-- `OSC 104`, `OSC 110 / 111 / 112` (reset them), `OSC 5` (special colours):
-  ignored.
-
-Theme scripts (base16-shell and the like) and programs that set their own
-colours do this. 26 esctest tests in `ChangeColor`, `ChangeDynamicColor`,
-`ChangeSpecialColor`, `ResetColor`, `ResetSpecialColor`. The same tests with
-X11-only colour formats (CIE, TekHVC, RGBI) are under not planned.
+- dec-graphics: `ESC ( 0` gives ␉ ␌ ␍ ␊ ␤ ␋ for `b c d e h i` and a blank
+  for `_`; `ESC ( A` (British) gives `£` for `#`. vttest
+  `charsets-vt100:01`.
+- rep: a REP uses the character up, so `+ CSI 1 b CSI 10 b` gives `++`
+  (as xterm; other sequences between the character and REP still leave
+  it to repeat). vttest `iso6429-rep:01`.
+- decaln: `ESC # 8` also resets the top and bottom margins and homes the
+  cursor. esctest `DECALN_ClearsMargins`, `DECALN_MovesCursorHome`.
+- decid: `ESC Z` answers as primary DA. esctest `DECID_Basic`.
+- decxcpr: `CSI ? 6 n` answers `CSI ? row ; column R` (no page: we answer
+  DA as a VT220, and esctest, like xterm, adds the page only from a
+  VT400). esctest `DECDSR_DECXCPR`.
+- decreqtparm: `CSI 0 x` / `CSI 1 x` answer `CSI 2 (or 3) ; 1 ; 1 ; 128 ;
+  128 ; 1 ; 0 x`. vttest `reports-decreqtparm:01` (its screen is now
+  recorded).
+- decrqss: `DCS $ q m ST`, `DCS $ q SP q ST` and `DCS $ q r ST` answer
+  `DCS 1 $ r <setting> ST`; anything else `DCS 0 $ r ST`. esctest
+  `DECRQSS_SGR`, `DECRQSS_DECSCUSR`, `DECRQSS_DECSTBM`.
+- osc-colors: OSC 4 sets, asks for (`?`) and OSC 104 resets palette
+  colours; OSC 5 / 105 and OSC 4 256–260 the special colours; OSC 10–12
+  set and ask for the foreground, background and cursor (one parameter
+  each, in order, as xterm), OSC 110–112 reset them. Colours in `#rgb` to
+  `#rrrrggggbbbb` and `rgb:r/g/b` forms. Replies always end with ST
+  (xterm uses BEL after a BEL query). 25 esctest tests in `ChangeColor`,
+  `ChangeDynamicColor`, `ChangeSpecialColor`, `ResetColor`,
+  `ResetSpecialColor`.
 
 ### Fixed with this harness: Return in newline mode (term-app)
 
@@ -194,9 +173,9 @@ the window. 18 esctest tests.
 
 `CSI 20 t` / `CSI 21 t` (report icon label / window title): no reply, on
 purpose (a program could read back a title another program set). The
-title stack, `CSI 22 t` / `CSI 23 t` (push and pop), isn't supported
-either; esctest can't test it without the report, but Vim uses it to put
-the title back on exit, so it is worth adding (low). 11 esctest tests.
+title stack, `CSI 22 t` / `CSI 23 t` (push and pop), is supported (Vim
+uses it to put the title back on exit), but esctest can't test it
+without the report. 11 esctest tests.
 
 ### xtsave: saving private modes
 

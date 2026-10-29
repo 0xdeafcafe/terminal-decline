@@ -15,6 +15,8 @@
 //! | `FF 'A' w`           | set the ambiguous width to `w % 2 + 1` cells    |
 //! | `FF 'P' n`           | pull `n % 8` history lines back onto the screen |
 //! | `FF 'L' n`           | set the scrollback limit to `n` lines           |
+//! | `FF 'H' l c`         | hover at visible (l, c) and take a snapshot     |
+//! | `FF 'O' l c`         | select the command output at visible (l, c)     |
 //! | `FF` anything else   | a literal 0xFF byte; the next byte is read again |
 //!
 //! A command cut short by the end of the input is dropped. Other bytes are fed
@@ -23,7 +25,7 @@
 
 use std::fmt;
 
-use term_core::{Selection, Term};
+use term_core::{Selection, Snapshot, Term};
 
 /// Longest run of bytes in one `advance` call.
 pub const MAX_CHUNK: usize = 64;
@@ -48,6 +50,11 @@ pub enum Step {
     PullBack(u8),
     /// The scrollback limit in lines.
     Limit(u8),
+    /// The pointer at a visible line and column (wrapped into the grid),
+    /// then a snapshot, which highlights the link there.
+    Hover(u8, u8),
+    /// Select the output of the command at a visible line and column.
+    SelectOutput(u8, u8),
 }
 
 impl fmt::Debug for Step {
@@ -61,6 +68,8 @@ impl fmt::Debug for Step {
             Step::Ambiguous(w) => write!(f, "Ambiguous({w})"),
             Step::PullBack(n) => write!(f, "PullBack({n})"),
             Step::Limit(n) => write!(f, "Limit({n})"),
+            Step::Hover(l, c) => write!(f, "Hover({l}, {c})"),
+            Step::SelectOutput(l, c) => write!(f, "SelectOutput({l}, {c})"),
         }
     }
 }
@@ -89,10 +98,12 @@ pub fn decode(data: &[u8]) -> Vec<Step> {
             [b'S', al, ac, hl, hc, ..] => (Some(Step::Select(*al, *ac, *hl, *hc)), 5),
             [b'C', ..] => (Some(Step::ClearSelection), 1),
             [b'A', w, ..] => (Some(Step::Ambiguous(w % 2 + 1)), 2),
+            [b'H', l, c, ..] => (Some(Step::Hover(*l, *c)), 3),
+            [b'O', l, c, ..] => (Some(Step::SelectOutput(*l, *c)), 3),
             [b'P', n, ..] => (Some(Step::PullBack(n % 8)), 2),
             [b'L', n, ..] => (Some(Step::Limit(*n)), 2),
             // A known command without all its operands: drop it.
-            [b'R' | b'V' | b'S' | b'A' | b'P' | b'L', ..] => break,
+            [b'R' | b'V' | b'S' | b'A' | b'H' | b'O' | b'P' | b'L', ..] => break,
             _ => {
                 run.push(CMD);
                 continue;
@@ -131,6 +142,17 @@ pub fn apply(term: &mut Term, step: &Step) {
         Step::Ambiguous(w) => t.set_ambiguous_width(w),
         Step::PullBack(n) => t.pull_back_for_test(usize::from(n)),
         Step::Limit(n) => t.set_scrollback_limit(usize::from(n)),
+        Step::Hover(l, c) => {
+            let at = t.point_at(usize::from(l) % t.lines(), usize::from(c) % t.cols());
+            t.set_hover(Some(at));
+            let mut snap = Snapshot::default();
+            t.snapshot(&mut snap, |_| false);
+            assert_eq!(snap.rows.len(), t.lines());
+        }
+        Step::SelectOutput(l, c) => {
+            let at = t.point_at(usize::from(l) % t.lines(), usize::from(c) % t.cols());
+            t.select_output(at);
+        }
     }
 }
 
@@ -143,6 +165,14 @@ pub fn read_back(term: &Term) {
         // History rows may be wider or narrower than the screen after a
         // resize (no re-wrap yet), so only check that they can be read.
         let _ = t.visible_row(line);
+        // Links, marks and the prompt and output lookups read every line.
+        let p = t.point_at(line, (line * 7) % t.cols());
+        let _ = t.link_at(p);
+        let _ = t.marks_at(p.line);
+        let _ = (t.previous_prompt(p.line), t.next_prompt(p.line));
+        if let Some((a, b)) = t.command_output(p) {
+            assert!(a <= b, "output from {a:?} to {b:?}");
+        }
     }
     let _ = t.selection_text();
     // Every stored line reads through: sections, text, checkpoints.

@@ -12,7 +12,10 @@ use std::collections::HashMap;
 use term_core::scrollback::Scrollback;
 use term_core::term::GraphemeState;
 
-use term_core::{Attrs, Cell, Color, Content, Row, RowFlags, RowKey, RowRef, ScreenId, Selection, Snapshot, Style, Term, Underline, Width};
+use term_core::{
+    Attrs, Cell, Color, Content, LinkValue, Mark, Row, RowFlags, RowKey, RowRef, ScreenId, Selection, Snapshot, Style, Term, Underline,
+    Width,
+};
 
 fn config() -> Config {
     Config {
@@ -130,6 +133,16 @@ fn osc() -> impl Strategy<Value = Vec<u8>> {
         Just("7;file://host/tmp/a%20b".to_string()),
         Just("7;file://x".to_string()),
         Just("8;;https://example.com".to_string()),
+        Just("8;id=a;https://example.com/a;b".to_string()),
+        Just("8;id=b;file:///tmp".to_string()),
+        Just("8;;".to_string()),
+        Just("133;A".to_string()),
+        Just("133;A;k=s".to_string()),
+        Just("133;B".to_string()),
+        Just("133;C".to_string()),
+        Just("133;D;0".to_string()),
+        Just("133;D;1".to_string()),
+        Just("133;D".to_string()),
         prop::collection::vec(0x20u8..0x7f, 0..20).prop_map(|b| String::from_utf8(b).unwrap()),
     ];
     let end = select(vec!["\x07", "\x1b\\", ""]);
@@ -468,20 +481,40 @@ fn bulk_step() -> impl Strategy<Value = BulkStep> {
     ]
 }
 
-/// Dump, rows cell by cell, cursor (row, col, pending wrap, pen), replies,
-/// scrollback length and grapheme state.
+/// Dump, rows cell by cell, cursor (row, col, pending wrap, pen and its
+/// link), replies, scrollback length, grapheme state and each screen
+/// line's prompt marks.
 type ScreenState = (
     String,
-    Vec<(Vec<CellState>, bool)>,
-    (usize, usize, bool, Style),
+    Vec<(Vec<ValueCell>, bool)>,
+    (usize, usize, bool, Style, Option<LinkValue>),
     Vec<u8>,
     usize,
     GraphemeState,
+    Vec<Vec<Mark>>,
 );
 
 /// One cell as a reader sees it: empty or not, its text (a cluster's
 /// whole), width, style.
 type CellState = (bool, String, Width, Style);
+
+/// A cell by value: link ids differ between terminals (one sweeps more
+/// often), so the style's link id is left out and the link's value put in.
+type ValueCell = (bool, String, Width, Style, Option<LinkValue>);
+
+fn row_value(r: &RowRef) -> (Vec<ValueCell>, bool) {
+    let cells = r
+        .cells()
+        .enumerate()
+        .map(|(col, c)| {
+            let mut text = String::new();
+            c.push_text(&mut text);
+            let style = Style { link: 0, ..c.style() };
+            (c.content() == Content::Empty, text, c.width(), style, r.link(col).cloned())
+        })
+        .collect();
+    (cells, r.wrapped())
+}
 
 fn row_state(r: &RowRef) -> (Vec<CellState>, bool) {
     let cells = r
@@ -497,24 +530,33 @@ fn row_state(r: &RowRef) -> (Vec<CellState>, bool) {
 
 /// Everything about the screen a reader can see, cell by cell.
 fn screen_state(t: &Term) -> ScreenState {
-    let rows = (0..t.state.lines()).map(|l| row_state(&t.state.visible_row(l))).collect();
+    let rows = (0..t.state.lines()).map(|l| row_value(&t.state.visible_row(l))).collect();
     let c = t.state.cursor();
+    let top = t.state.point_at(t.state.display_offset(), 0).line;
+    let marks = (top..top + t.state.lines() as u64).map(|l| t.state.marks_at(l)).collect();
     (
         t.state.dump(),
         rows,
-        (c.row(), c.col(), c.pending_wrap(), c.pen()),
+        (
+            c.row(),
+            c.col(),
+            c.pending_wrap(),
+            Style { link: 0, ..c.pen() },
+            t.state.pen_link().cloned(),
+        ),
         t.state.replies().to_vec(),
         t.state.scrollback_len(),
         t.state.grapheme_state(),
+        marks,
     )
 }
 
 /// Every stored history line, read by scrolling the view through it.
-fn history(t: &mut Term) -> Vec<(Vec<CellState>, bool)> {
+fn history(t: &mut Term) -> Vec<(Vec<ValueCell>, bool)> {
     let mut out = Vec::new();
     t.state.scroll_view(isize::MAX / 2);
     loop {
-        out.push(row_state(&t.state.visible_row(0)));
+        out.push(row_value(&t.state.visible_row(0)));
         if t.state.display_offset() == 0 {
             break;
         }
@@ -801,9 +843,19 @@ fn style_piece() -> impl Strategy<Value = Vec<u8>> {
         "\x1b[4l",
     ])
     .prop_map(|s| s.as_bytes().to_vec());
+    // Links come and go: a few repeat, so pieces share ids, and each new
+    // number makes a new link for the sweep to free.
+    let links = prop_oneof![
+        2 => select(vec!["https://a", "https://b;c", "file:///x"]).prop_map(|u| format!("\x1b]8;;{u}\x1b\\").into_bytes()),
+        1 => (0u16..40).prop_map(|n| format!("\x1b]8;id={n};https://n/{n}\x07").into_bytes()),
+        2 => Just(b"\x1b]8;;\x1b\\".to_vec()),
+        1 => select(vec!["A", "B", "C", "D;0", "D;2"]).prop_map(|k| format!("\x1b]133;{k}\x07").into_bytes()),
+    ];
     prop_oneof![
         6 => sgr_style(),
+        3 => links,
         5 => prop::collection::vec(0x20u8..0x7f, 1..30),
+
         2 => unicode(),
         1 => cluster(),
         4 => holders,

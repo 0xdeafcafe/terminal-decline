@@ -168,6 +168,15 @@ pub struct Config {
     /// Widens or narrows cells: `"1.5"` points or `"10%"` of the advance.
     #[serde(deserialize_with = "cell_width", serialize_with = "cell_width_text")]
     pub cell_width: CellWidth,
+    /// OpenType features turned on or off, Ghostty's and kitty's syntax:
+    /// `["-calt", "-liga", "zero", "ss01=1"]`. Ligatures are on where the
+    /// font has them; `["-calt", "-liga"]` turns them off. Entries that
+    /// aren't features are a notice each and left out, by [`load`].
+    pub font_features: Vec<String>,
+    /// Cells East Asian Ambiguous characters take: 1 (the default) or 2,
+    /// as CJK terminals draw them (cells design §6.3).
+    #[serde(deserialize_with = "ambiguous_width")]
+    pub ambiguous_width: u8,
     /// Space around the text, in points.
     pub padding: f64,
     pub scrollback: usize,
@@ -219,6 +228,8 @@ impl Default for Config {
             font_bold_italic: None,
             line_height: 1.0,
             cell_width: CellWidth::default(),
+            font_features: Vec::new(),
+            ambiguous_width: 1,
             padding: 6.0,
             scrollback: 10_000,
             option_as_meta: OptionAsMeta::None,
@@ -248,6 +259,14 @@ fn line_height<'de, D: Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
         Ok(v)
     } else {
         Err(serde::de::Error::custom(format!("{v} is not above 0")))
+    }
+}
+
+fn ambiguous_width<'de, D: Deserializer<'de>>(d: D) -> Result<u8, D::Error> {
+    let v = i64::deserialize(d)?;
+    match v {
+        1 | 2 => Ok(v as u8),
+        _ => Err(serde::de::Error::custom(format!("{v} is not 1 or 2"))),
     }
 }
 
@@ -345,8 +364,24 @@ pub fn load_replacing(layers: &[&Path], themes_dir: &Path, replace: Option<(usiz
         errors.push(format!("config: {e}"));
         Config::default()
     });
+    check_features(&mut config, &mut errors);
     config.palettes = resolve(config.theme.as_ref(), &config.colors, themes_dir, &mut errors);
     (config, errors)
+}
+
+/// Leaves out the `font_features` entries that aren't features, with a
+/// notice for each, so one typo costs only that entry.
+fn check_features(config: &mut Config, errors: &mut Vec<String>) {
+    config.font_features.retain(|entry| {
+        let ok = term_font::Tag::parse_feature(entry).is_some();
+        if !ok {
+            errors.push(format!(
+                "config: font_features: {entry:?} is not a feature (use \"tag\", \"-tag\" or \"tag=n\", \
+                 with a tag of four letters such as \"liga\"); ignored"
+            ));
+        }
+        ok
+    });
 }
 
 /// The colours for each appearance: theme, then `[colors]`. A theme that
@@ -538,8 +573,15 @@ impl Config {
             bold_italic: self.font_bold_italic.clone(),
             line_height: self.line_height,
             cell_width: self.cell_width,
+            features: self.font_features.iter().filter_map(|f| term_font::Tag::parse_feature(f)).collect(),
             ..FontConfig::new(&self.font_family, size)
         }
+    }
+
+    /// Whether the config names fonts besides the family (fallbacks or
+    /// faces), the only ones `Fonts::missing` can list.
+    pub fn names_fonts(&self) -> bool {
+        !self.font_fallback.is_empty() || self.font_bold.is_some() || self.font_italic.is_some() || self.font_bold_italic.is_some()
     }
 
     /// A notice for each font named in the config that isn't installed
@@ -839,6 +881,54 @@ mod tests {
         assert_eq!(fc.bold_italic.as_deref(), Some("Menlo Bold Italic"));
         assert_eq!(fc.line_height, 1.2);
         assert_eq!(fc.cell_width, CellWidth::Percent(10.0));
+    }
+
+    #[test]
+    fn font_features_are_read_and_bad_entries_noticed() {
+        let t = |s| term_font::Tag::new(s).unwrap();
+        let (mut c, errors) = parse("font_features = ['-calt', '+liga', 'zero', 'ss01=1', 'cv05 = 2', 'toolong', '', 'x=y']");
+        assert!(errors.is_empty(), "{errors:?}");
+        let mut errors = Vec::new();
+        check_features(&mut c, &mut errors);
+        assert_eq!(c.font_features, ["-calt", "+liga", "zero", "ss01=1", "cv05 = 2"]);
+        assert_eq!(errors.len(), 3, "{errors:?}");
+        assert!(
+            errors[0].starts_with("config: font_features: \"toolong\" is not a feature"),
+            "{errors:?}"
+        );
+        assert!(errors.iter().all(|e| e.ends_with("; ignored")), "{errors:?}");
+        assert_eq!(
+            c.font_config(13.0).features,
+            [(t("calt"), 0), (t("liga"), 1), (t("zero"), 1), (t("ss01"), 1), (t("cv05"), 2)]
+        );
+        // Not a list: the whole setting goes, as for any other.
+        let (c, errors) = parse("font_features = 'liga'");
+        assert_eq!(c.font_features, Vec::<String>::new());
+        assert!(errors[0].starts_with("config: font_features: "), "{errors:?}");
+    }
+
+    #[test]
+    fn font_features_load_from_a_file() {
+        let dir = TempDir::new("cfg-features");
+        let user = dir.join("config.toml");
+        std::fs::write(&user, "font_features = ['-calt', 'nope!', '-liga']\n").unwrap();
+        let (c, errors) = load(&[&user], Path::new("/nonexistent"));
+        assert_eq!(c.font_features, ["-calt", "-liga"]);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("\"nope!\""), "{errors:?}");
+    }
+
+    #[test]
+    fn ambiguous_width_is_1_or_2() {
+        assert_eq!(Config::default().ambiguous_width, 1);
+        let (c, errors) = parse("ambiguous_width = 2");
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(c.ambiguous_width, 2);
+        for bad in ["0", "3", "1.5", "'2'"] {
+            let (c, errors) = parse(&format!("ambiguous_width = {bad}"));
+            assert_eq!(c.ambiguous_width, 1, "{bad}");
+            assert!(errors[0].starts_with("config: ambiguous_width: "), "{bad}: {errors:?}");
+        }
     }
 
     #[test]

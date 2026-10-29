@@ -95,8 +95,9 @@ pub struct Highlight {
     pub kind: HighlightKind,
 }
 
-/// Search hits come with search, and the hovered link with the link table;
-/// only the selection is highlighted so far.
+/// What a highlight is. Search hits come with search; the selection and
+/// the hovered link ([`Terminal::set_hover`]) are highlighted now.
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum HighlightKind {
     Selection,
@@ -262,6 +263,9 @@ impl Terminal {
         out.lines = to_u16(self.lines);
 
         let selection = self.selection.map(|s| s.ordered());
+        // The hovered link's id in the screen's table: cells are compared
+        // with it, which is comparing by value within one table.
+        let hovered = self.hover.and_then(|p| self.link_at(p)).and_then(|l| self.styles.links().find(&l));
         let history = self.scrollback.len();
         let first = history - self.display_offset;
         for view_line in 0..self.lines {
@@ -280,9 +284,33 @@ impl Terminal {
                     });
                 }
             }
+            let i = first + view_line;
+            // History rows (v1) hold no links, so only screen rows can
+            // show the hovered one.
+            if let Some(id) = hovered
+                && i >= history
+            {
+                let row = &self.screen[i - history];
+                let mut run: Option<usize> = None;
+                for col in 0..=row.cells.len() {
+                    let on = row.cells.get(col).is_some_and(|c| self.styles.get(c.style_id()).link == id);
+                    match (on, run) {
+                        (true, None) => run = Some(col),
+                        (false, Some(start)) => {
+                            out.highlights.push(Highlight {
+                                cols: to_u16(start)..to_u16(col),
+                                kind: HighlightKind::HoveredLink,
+                            });
+                            run = None;
+                        }
+                        _ => {}
+                    }
+                }
+                // Left to right, the selection's range among them.
+                out.highlights[highlights as usize..].sort_by_key(|h| h.cols.start);
+            }
             let highlights = highlights..out.highlights.len() as u32;
 
-            let i = first + view_line;
             let mut flags = RowFlags::default();
             let start = out.cells.len() as u32;
             let clusters = out.cluster_spans.len() as u32;

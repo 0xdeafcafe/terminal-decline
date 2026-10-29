@@ -1,2 +1,25 @@
 --- screen 01 ---
-!unknown DECREQTPARM (CSI x) gets no reply
+
+Test of the "Request Terminal Parameters" feature, argument 0.
+
+
+Report is: <27> [ 2 ; 1 ; 1 ; 1 2 8 ; 1 2 8 ; 1 ; 0 x  -- OK
+ This means: Parity NONE, 8 bits, xmitspeed 38400, recvspeed 38400. (CLoCk MULti
+plier = 1, STP option flags = 0)
+
+
+Test of the "Request Terminal Parameters" feature, argument 1.
+
+
+Report is: <27> [ 3 ; 1 ; 1 ; 1 2 8 ; 1 2 8 ; 1 ; 0 x  -- OK
+
+
+
+
+
+
+
+
+
+
+Push <RETURN>

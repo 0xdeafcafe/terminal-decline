@@ -6,6 +6,11 @@ font-family = Symbols Nerd Font Mono
 font-family-bold = JetBrains Mono ExtraBold
 font-size = 14.5
 font-thicken = true
+font-feature = -calt
+font-feature = zero, ss01=1
+font-feature = "cv05" 2
+font-feature = nope!
+font-feature = +calt
 adjust-cell-height = 20%
 adjust-cell-width = 5%
 

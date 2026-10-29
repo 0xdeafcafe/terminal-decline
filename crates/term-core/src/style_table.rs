@@ -12,7 +12,8 @@
 use std::collections::VecDeque;
 
 use crate::cell::{Cell, Row};
-use crate::style::Style;
+use crate::links::LinkTable;
+use crate::style::{LinkId, Style};
 
 /// The smallest `sweep_at`, so small screens don't sweep all the time.
 const MIN_SWEEP_AT: u32 = 1024;
@@ -86,6 +87,8 @@ pub(crate) struct StyleTable {
     live_n: usize,
     sweeps: u64,
     renumberings: u64,
+    /// The hyperlinks this table's styles refer to (§5.5), swept with it.
+    links: LinkTable,
 }
 
 /// What the table holds, for tests and measuring.
@@ -100,8 +103,10 @@ pub struct StyleStats {
     pub sweep_at: usize,
     pub sweeps: u64,
     pub renumberings: u64,
-    /// Bytes of heap the table holds.
+    /// Bytes of heap the table holds (its links included).
     pub bytes: usize,
+    /// Links in its link table.
+    pub links: usize,
 }
 
 /// Styles interned since the last call, for a mirror of the table (§9.2).
@@ -160,6 +165,7 @@ impl StyleTable {
             live_n: 1,
             sweeps: 0,
             renumberings: 0,
+            links: LinkTable::new(),
         };
         t.set_cells(cells);
         t
@@ -202,6 +208,17 @@ impl StyleTable {
     #[inline]
     pub fn get(&self, id: u32) -> &Style {
         &self.styles[id as usize]
+    }
+
+    /// The links this table's styles refer to.
+    #[inline]
+    pub fn links(&self) -> &LinkTable {
+        &self.links
+    }
+
+    #[inline]
+    pub fn links_mut(&mut self) -> &mut LinkTable {
+        &mut self.links
     }
 
     #[inline]
@@ -326,8 +343,9 @@ impl StyleTable {
         self.live.iter().map(|w| w.count_ones() as usize).sum()
     }
 
-    /// Free every id that no cell of `rows` and no template uses, and
-    /// with `give_back`, renumber the ids if fewer than a quarter are left
+    /// Free every id that no cell of `rows` and no template uses, then
+    /// every link that no live style and none of `links` (the pen's) uses,
+    /// and with `give_back`, renumber the ids if fewer than a quarter are left
     /// in use and shrink the table to them. The renumbering rewrites `rows`
     /// and `templates`, and takes its epoch from `next_epoch`. Returns
     /// whether it renumbered.
@@ -343,6 +361,7 @@ impl StyleTable {
         templates: &mut [&mut Option<Cell>],
         next_epoch: impl FnOnce() -> u64,
         give_back: bool,
+        links: &[LinkId],
     ) -> bool {
         self.sweeps += 1;
         let words = self.styles.len().div_ceil(64);
@@ -374,6 +393,9 @@ impl StyleTable {
         self.recent = [(Style::DEFAULT, 0); 2];
         let live = &self.live;
         self.new_ids.retain(|&id| bit(live, id));
+        if self.links.live() > 0 {
+            self.sweep_links(links);
+        }
 
         let live = self.styles.len() - self.free.len();
         self.live_n = live;
@@ -384,6 +406,21 @@ impl StyleTable {
         let size = (live * 2).next_power_of_two().max(16);
         self.rebuild_index(size.max(self.index.len()));
         false
+    }
+
+    /// Free the links no live style and none of `holders` refer to.
+    #[cold]
+    fn sweep_links(&mut self, holders: &[LinkId]) {
+        self.links.begin_sweep();
+        for &id in holders {
+            self.links.mark(id);
+        }
+        for (id, s) in self.styles.iter().enumerate() {
+            if s.link != 0 && bit(&self.live, id as u32) {
+                self.links.mark(s.link);
+            }
+        }
+        self.links.end_sweep();
     }
 
     /// Give the live ids the numbers 0..live in their old order, rewrite
@@ -491,7 +528,9 @@ impl StyleTable {
                 + self.index.capacity() * 4
                 + self.free.capacity() * 4
                 + self.new_ids.capacity() * 4
-                + self.marks.capacity() * 8,
+                + self.marks.capacity() * 8
+                + self.links.bytes(),
+            links: self.links.live(),
         }
     }
 
@@ -529,6 +568,9 @@ impl StyleTable {
             if self.probe(s).ok() != Some(id) {
                 return Err(format!("the index doesn't find id {id}"));
             }
+            if s.link != 0 && self.links.get(s.link).is_none() {
+                return Err(format!("id {id} refers to link {}, which isn't held", s.link));
+            }
         }
         for (slot, &e) in self.index.iter().enumerate() {
             let id = e & ID_MASK;
@@ -563,7 +605,7 @@ impl StyleTable {
         if self.send_all && !self.new_ids.is_empty() {
             return Err("new ids kept while the whole table is to be sent".into());
         }
-        Ok(())
+        self.links.check().map_err(|e| format!("links: {e}"))
     }
 }
 
@@ -629,6 +671,7 @@ mod tests {
                 epoch
             },
             false,
+            &[],
         );
         // 4 live of 12: no renumbering.
         assert!(!renumbered);
@@ -651,8 +694,10 @@ mod tests {
                 epoch
             },
             true,
+            &[],
         );
         assert!(renumbered);
+
         assert_eq!(t.epoch(), 2);
         assert_eq!(t.stats().len, 2, "ids are dense");
         assert_eq!(pen.unwrap().style_id(), 1);

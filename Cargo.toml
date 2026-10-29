@@ -46,3 +46,18 @@ panic = "unwind"
 debug = "line-tables-only"
 # A terminal-decline.dSYM next to the binary, kept per release to symbolicate crashes.
 split-debuginfo = "packed"
+
+# The pin stub and the app's launcher (crates/term-pin), built in a cargo
+# run of their own: `cargo build -p term-pin --bins --profile release-stub`.
+# Cargo doesn't allow `panic` in a per-package profile and the release
+# profile unwinds, hence a whole profile. Small, since every pin carries a
+# copy of the stub; a panic in either aborts (neither has windows to
+# keep). The binaries are stripped; their dSYMs (packed, as release) are
+# kept with each release like the library's.
+[profile.release-stub]
+inherits = "release"
+panic = "abort"
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+strip = true

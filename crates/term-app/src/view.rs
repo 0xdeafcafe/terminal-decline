@@ -165,7 +165,26 @@ pub(crate) struct Pane {
     /// The left click that focused it: it goes nowhere else (no
     /// selection, no mouse report) until the button comes up.
     pub(crate) swallow_click: bool,
+    /// Times its frame was built (for the test dumps).
+    builds: u64,
+    /// Building its frame panicked (splits design §7).
+    crash: Option<Crash>,
+    /// The test-only `build-panic`: its next build panics.
+    panic_next: bool,
 }
+
+/// Building a pane's frame panicked: when last, how many times, and
+/// whether it has stopped being built.
+#[derive(Clone, Copy)]
+struct Crash {
+    at: Instant,
+    count: u32,
+    stopped: bool,
+}
+
+/// A second panic building the same pane within this long stops it being
+/// built, so a panic doesn't repeat every frame.
+const CRASH_REPEAT: Duration = Duration::from_secs(10);
 
 pub(crate) struct State {
     pub(crate) win: Win,
@@ -1088,13 +1107,15 @@ impl WindowView {
         }
         let mut clipboard = None;
         let mut blinking = Vec::new();
+        let mut crashed = Vec::new();
         for ((id, frame, t), (_, term)) in ticks.iter_mut().zip(&terms) {
             let (id, frame) = (*id, *frame);
             let p = panes.get_mut(&id).expect("shown pane");
             // A pane built against emptied glyph textures or old fonts is
             // built again before it is drawn, held or not.
             let build = frame == PaneFrame::Build || !win.renderer.is_current(&p.render);
-            if !build {
+            // A pane whose builds kept panicking shows its background only.
+            if !build || p.crash.is_some_and(|c| c.stopped) {
                 continue;
             }
             let t = t.get_or_insert_with(|| crate::session::lock(term));
@@ -1116,11 +1137,43 @@ impl WindowView {
                 focused,
                 preedit: Some(p.marked.as_str()),
             };
-            win.renderer.build_pane(&mut p.render, &mut t.state, &input);
+            p.builds += 1;
+            let panic_now = std::mem::take(&mut p.panic_next);
+            // A panic here stays in this pane (splits design §7). The
+            // terminal's guard is held outside the catch, and a terminal
+            // that may be half-updated is replaced before it is released,
+            // so its reader never parses into it.
+            let built = crate::crash::contain(|| {
+                test_build_panic(panic_now);
+                win.renderer.build_pane(&mut p.render, &mut t.state, &input);
+            });
+            if built.is_err() {
+                crate::session::replace_term(t);
+                p.render.forget();
+                crashed.push(id);
+            }
         }
         // With the terminals still locked: the keys whose output this frame shows.
         let timed = latency::get().map(|l| (l, l.take_for_frame(self.ivars().id, rate)));
         drop(ticks);
+        if !crashed.is_empty() {
+            crash_panes(win, panes, &crashed);
+        }
+        // Panes that stopped being built fill their rectangle with the
+        // background, drawn with the dividers.
+        let stopped: Vec<RectInstance> = shown
+            .iter()
+            .filter_map(|id| panes.get(id))
+            .filter(|p| p.crash.is_some_and(|c| c.stopped))
+            .map(|p| rect_instance(p.rect, win.theme.background))
+            .collect();
+        let lines: Vec<RectInstance>;
+        let dividers = if stopped.is_empty() {
+            dividers
+        } else {
+            lines = [stopped, dividers.to_vec()].concat();
+            &lines
+        };
         let (w, h) = {
             let s = self.ivars().layer.drawableSize();
             (s.width as u32, s.height as u32)
@@ -1300,17 +1353,7 @@ impl WindowView {
                 }
             }
             let colour = st.win.divider;
-            st.dividers = layout
-                .dividers
-                .iter()
-                .map(|d| RectInstance {
-                    x: d.line.x.clamp(0, i16::MAX as i32) as i16,
-                    y: d.line.y.clamp(0, i16::MAX as i32) as i16,
-                    w: d.line.w.clamp(0, u16::MAX as i32) as u16,
-                    h: d.line.h.clamp(0, u16::MAX as i32) as u16,
-                    color: colour,
-                })
-                .collect();
+            st.dividers = layout.dividers.iter().map(|d| rect_instance(d.line, colour)).collect();
             st.grabs = layout.dividers;
             // With several panes the window can't be made smaller than
             // they all fit at their minimum.
@@ -1497,11 +1540,13 @@ impl WindowView {
         match outcome {
             Outcome::Closed => self.close_pane(pane),
             Outcome::Hold => {
-                // The session wrote why into the terminal.
+                // The session wrote why into the terminal. A pane stopped
+                // for a crash while drawing is held already.
                 let testing = self.with_pane(pane, |win, p| {
+                    let crashed = p.crash.is_some();
                     p.held = true;
                     p.session.mark_dirty();
-                    win.test.is_some()
+                    win.test.is_some() && !crashed
                 });
                 self.request_redraw(pane);
                 if testing == Some(true) {
@@ -2278,6 +2323,9 @@ fn spawn_pane(window: usize, config: &Config, theme: &Theme, m: term_font::Metri
         settings: n.settings,
         title: None,
         swallow_click: false,
+        builds: 0,
+        crash: None,
+        panic_next: false,
     })
 }
 
@@ -2335,6 +2383,57 @@ fn geometry_of(config: &Config, m: term_font::Metrics, scale: f64, size: NSSize,
             (3 * m.cell_height + pad.top + pad.bottom) as i32,
         ),
         divider: scale.round().max(1.0) as i32,
+    }
+}
+
+/// Panes whose frame build panicked this frame (their terminals already
+/// replaced): each program is killed and its pane holds with the crash's
+/// message, as a parse panic does; the glyph textures and the fonts'
+/// shaping are forgotten, so every pane is built again; a second panic in
+/// the same pane within [`CRASH_REPEAT`] stops it being built.
+fn crash_panes(win: &mut Win, panes: &mut HashMap<PaneId, Pane>, crashed: &[PaneId]) {
+    win.renderer.forget_glyphs();
+    let now = Instant::now();
+    for id in crashed {
+        let Some(p) = panes.get_mut(id) else { continue };
+        let again = p.crash.is_some_and(|c| now.duration_since(c.at) < CRASH_REPEAT);
+        let count = p.crash.map_or(0, |c| c.count) + 1;
+        p.crash = Some(Crash {
+            at: now,
+            count,
+            stopped: again,
+        });
+        p.held = true;
+        p.session.stop_for_bug();
+        crate::session::write_bug(&mut p.session.lock_term(), crate::crash::take_last_log());
+    }
+    for p in panes.values() {
+        p.session.mark_dirty();
+    }
+    win.link.setPaused(false);
+}
+
+/// With the `test-hooks` feature, the test-only `build-panic` makes a
+/// pane's build panic here.
+#[cfg(feature = "test-hooks")]
+fn test_build_panic(now: bool) {
+    if now {
+        panic!("test-hooks: building this pane's frame was asked to panic");
+    }
+}
+
+#[cfg(not(feature = "test-hooks"))]
+#[inline(always)]
+fn test_build_panic(_now: bool) {}
+
+/// A filled rectangle at `r` (window pixels).
+fn rect_instance(r: PxRect, color: Rgba) -> RectInstance {
+    RectInstance {
+        x: r.x.clamp(0, i16::MAX as i32) as i16,
+        y: r.y.clamp(0, i16::MAX as i32) as i16,
+        w: r.w.clamp(0, u16::MAX as i32) as u16,
+        h: r.h.clamp(0, u16::MAX as i32) as u16,
+        color,
     }
 }
 
@@ -2449,6 +2548,13 @@ impl WindowView {
                 Some(Control::ResizePane(dir)) => self.resize_pane(dir),
                 Some(Control::Equalize) => self.equalize(),
                 Some(Control::Zoom) => self.toggle_zoom(),
+                Some(Control::BuildPanic(n)) => {
+                    let pane = self.with_state(|st| st.tree.ids().get(n).copied()).flatten();
+                    if let Some(pane) = pane {
+                        self.with_pane(pane, |_, p| p.panic_next = true);
+                        self.request_redraw(pane);
+                    }
+                }
                 Some(Control::Save) => {
                     let path = self.with_state(|st| st.win.test.as_ref().map(|t| t.path.clone())).flatten();
                     if let Some(path) = path {
@@ -2609,6 +2715,8 @@ fn write_dump(st: &mut State, window: Window) {
                 lines: t.state.lines(),
                 focused: id == focused,
                 shown: zoomed.is_none_or(|z| z == id),
+                builds: p.builds,
+                crashes: p.crash.map_or(0, |c| c.count),
                 screen: t.state.dump(),
             })
         })

@@ -427,6 +427,33 @@ fn emptying_a_texture_at_its_cap_makes_panes_rebuild() {
     assert!(alone(&mut r1, &a, size) == before, "rebuilt, it draws as before");
 }
 
+/// After a panic while building, the glyphs are forgotten: every pane is
+/// stale, draws its backgrounds only, and once built again draws as before.
+#[test]
+fn forgetting_glyphs_makes_every_pane_rebuild() {
+    if !have_gpu() {
+        return;
+    }
+    let theme = theme();
+    let mut r1 = Renderer::new(Fonts::new("Menlo", 24.0));
+    let m = r1.metrics();
+    let size = (6 * m.cell_width as usize, m.cell_height as usize);
+    let (mut a, mut ta) = built(&mut r1, &theme, 6, 1, "abc\x1b[48;2;0;0;128mxyz");
+    let mut r2 = Renderer::new(Fonts::new("Menlo", 24.0));
+    let (b, _tb) = built(&mut r2, &theme, 6, 1, "abc");
+    let before = alone(&mut r1, &a, size);
+
+    r1.forget_glyphs();
+    assert!(!r1.is_current(&a) && !r2.is_current(&b), "every window's panes are stale");
+    let stale = alone(&mut r1, &a, size);
+    assert_eq!(stale.inked((0, size.0), (0, size.1)), 0, "a stale pane draws no glyphs");
+    assert_eq!(stale.at(4 * m.cell_width as usize, 1), [0x80, 0, 0, 0xFF], "but its backgrounds");
+    let input = input(&r1, &theme);
+    r1.build_pane(&mut a, &mut ta.state, &input);
+    assert!(r1.is_current(&a));
+    assert!(alone(&mut r1, &a, size) == before, "rebuilt, it draws as before");
+}
+
 /// Two windows with their own fonts share the glyph textures: each draws
 /// its own text while the other uploads new glyphs between their frames,
 /// and each frame matches the same frame drawn with the GPU idle.

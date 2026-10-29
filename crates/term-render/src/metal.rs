@@ -1069,6 +1069,16 @@ impl Renderer {
         }
     }
 
+    /// After a panic while building a pane (splits design §7): a glyph
+    /// half put in the textures, or a shaping cached half way, can't be
+    /// trusted. Both textures are emptied (every pane of every window is
+    /// built again before its glyphs are drawn) and this window's fonts
+    /// forget the clusters they shaped.
+    pub fn forget_glyphs(&mut self) {
+        self.shared.glyphs.borrow_mut().clear();
+        self.fonts.clear_shaped_clusters();
+    }
+
     /// Whether `pane` was built against the glyph textures as they are and
     /// this window's fonts. A pane that isn't must be built again before
     /// its glyphs are drawn: until then it draws its backgrounds only.

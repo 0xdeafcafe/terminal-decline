@@ -1584,6 +1584,83 @@ fn smoke_restore_keeps_a_zoom() {
     assert_eq!((again["focused"].clone(), again["zoomed"].clone()), (1.into(), 1.into()), "{again}");
 }
 
+/// A shell loop that dumps (at most 50 times) until a dump has `text`.
+fn until_dumped(dir: &TempDir, text: &str) -> String {
+    format!(
+        "k=0; while [ $k -lt 50 ]; do {dump}grep -qF '{text}' '{file}' && break; sleep 0.1; k=$((k+1)); done; ",
+        dump = dump_and_wait(dir),
+        file = dir.dump_file().display(),
+    )
+}
+
+/// A panic while building one pane's frame stays in that pane: its
+/// program is stopped and it shows where the crash log is, while the
+/// other pane keeps drawing. A second one soon after stops that pane
+/// being built at all.
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_a_crash_while_drawing_stays_in_its_pane() {
+    if !have_metal() {
+        return;
+    }
+    let dir = TempDir::new("build-panic");
+    let d = dir.path().display();
+    let zshrc = format!("PS1='%% '\ntouch '{d}/two-ready'\nsleep 30\n");
+    let script = format!(
+        "{split}{wait_two}{panic}{wait_crash}{dump}echo still here; {dump}\
+         {panic}{wait_twice}{dump}echo and again; {dump}{quit}sleep 20",
+        split = osc("split right"),
+        wait_two = wait_for(&format!("[ -e '{d}/two-ready' ]")),
+        panic = osc("build-panic 1"),
+        // Dumps until the split's crash shows in one (at most 50).
+        wait_crash = until_dumped(&dir, "\"crashes\":1"),
+        wait_twice = until_dumped(&dir, "\"crashes\":2"),
+        dump = dump_and_wait(&dir),
+        quit = osc("quit"),
+    );
+    let mut cmd = Command::new(APP);
+    cmd.args(["-e", "/bin/sh", "-c", &script])
+        .env("XDG_CONFIG_HOME", dir.config_home())
+        .env("DECLINE_TEST_DUMP", dir.dump_file())
+        // The crash logs go under the temp dir, not the user's.
+        .env("HOME", dir.path())
+        .current_dir(dir.path());
+    with_zsh(&mut cmd, &dir, &zshrc);
+    let (status, _) = run(&mut cmd);
+    assert!(status.success(), "{status}");
+    let all = dumps(&dir);
+    let crashes = |d: &Value| panes(d)[1]["crashes"].as_u64().unwrap();
+    let builds = |d: &Value, i: usize| panes(d)[i]["builds"].as_u64().unwrap();
+    let once = all
+        .iter()
+        .position(|d| crashes(d) == 1)
+        .unwrap_or_else(|| panic!("no crash: {all:?}"));
+    let twice = all
+        .iter()
+        .position(|d| crashes(d) == 2)
+        .unwrap_or_else(|| panic!("no second crash: {all:?}"));
+    // The dumps after each: `dump`, `echo`, `dump`.
+    let (first, still, second, again) = (&all[once + 1], &all[once + 2], &all[twice + 1], &all[twice + 2]);
+    for d in [first, still, second, again] {
+        assert_eq!(panes(d).len(), 2, "{d}");
+    }
+    // Long rows wrap, marked with ⏎.
+    let split = pane_screen(&panes(first)[1]).replace("⏎\n", "");
+    assert!(
+        split.contains("hit a bug and stopped this session; details in ~/Library/Logs/terminal-decline/crash-"),
+        "{split}"
+    );
+    let logs = dir.path().join("Library/Logs/terminal-decline");
+    assert!(std::fs::read_dir(&logs).unwrap().count() >= 2, "a log per crash");
+    // The other pane kept drawing.
+    assert!(pane_screen(&panes(still)[0]).contains("still here|"), "{still}");
+    assert!(builds(still, 0) > builds(first, 0), "{first} {still}");
+    assert!(pane_screen(&panes(again)[0]).contains("and again|"), "{again}");
+    assert!(builds(again, 0) > builds(second, 0), "{second} {again}");
+    // After the second crash the split isn't built any more.
+    assert_eq!(builds(again, 1), builds(second, 1), "{second} {again}");
+}
+
 /// The last `two L C` line pane 2's program printed: the size it was
 /// last told.
 fn last_told(p: &Value) -> String {

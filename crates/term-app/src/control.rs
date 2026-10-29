@@ -26,6 +26,9 @@
 //!   one cell, as Cmd+Ctrl+arrows do;
 //! - `equalize`: equal shares (Cmd+Ctrl+=);
 //! - `zoom`: zoom the focused pane, or end the zoom (Cmd+Shift+Enter);
+//! - `build-panic N`: with the `test-hooks` feature, the next build of
+//!   pane N's frame (from 0, in tree order) panics, to test that the
+//!   panic stays in that pane; without it, nothing;
 //! - `save`: write what a restart would save (every window, its tabs and
 //!   panes) to the dump file's path with `.saved` added, as JSON;
 //! - `settings`: Terminal Decline > Settings… (Cmd+,);
@@ -181,6 +184,8 @@ pub enum Control {
     Equalize,
     /// Window > Zoom Pane.
     Zoom,
+    /// The next build of this pane's frame panics (`test-hooks` only).
+    BuildPanic(usize),
     /// Write the windows as a restart saves them.
     Save,
     /// Terminal Decline > Settings….
@@ -243,6 +248,7 @@ impl Control {
             "close-pane" => Control::ClosePane,
             "equalize" => Control::Equalize,
             "zoom" => Control::Zoom,
+            "build-panic" => Control::BuildPanic(words.next()?.parse().ok()?),
             "drag" => Control::Drag {
                 index: words.next()?.parse().ok()?,
                 to: words.next()?.parse().ok()?,
@@ -373,6 +379,9 @@ pub struct PaneDump {
     pub focused: bool,
     /// Shown: not hidden by another pane's zoom.
     pub shown: bool,
+    /// Times its frame was built, and times building it panicked.
+    pub builds: u64,
+    pub crashes: u32,
     /// As [`Dump::screen`].
     pub screen: String,
 }
@@ -488,6 +497,8 @@ mod tests {
             ("equalize", Some(Control::Equalize)),
             ("zoom", Some(Control::Zoom)),
             ("zoom 1", None),
+            ("build-panic 1", Some(Control::BuildPanic(1))),
+            ("build-panic", None),
             ("save", Some(Control::Save)),
             ("split right", Some(Control::Split(Dir::Right))),
             ("split down", Some(Control::Split(Dir::Down))),

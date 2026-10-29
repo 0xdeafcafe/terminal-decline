@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use decline::frame_policy::{self, Decision};
 use decline::keys::{self, KeyAction, KeyInput, KeyModes, flags};
 use decline::session::{Hooks, Outcome, Session};
-use term_core::{ColorKind, Term, Terminal};
+use term_core::{Attrs, ColorKind, Term, Terminal};
 use term_pty::{Command, Size};
 
 /// Upper bound for any single wait.
@@ -223,8 +223,8 @@ impl Harness {
     fn modes(&self) -> KeyModes {
         let t = self.session().term().lock().unwrap();
         KeyModes {
-            app_cursor: t.state.modes.app_cursor,
-            app_keypad: t.state.modes.app_keypad,
+            app_cursor: t.state.modes().app_cursor,
+            app_keypad: t.state.modes().app_keypad,
             kitty_flags: t.state.kitty_keyboard_flags(),
             ..KeyModes::default()
         }
@@ -476,9 +476,10 @@ fn config_errors_show_before_the_output() {
     assert!(lines[1].starts_with("program output"), "{lines:?}");
     {
         let t = h.session().lock_term();
-        let cell = t.state.visible_row(0).get(0);
+        let row = t.state.visible_row(0);
+        let cell = row.cell(0);
         assert!(
-            cell.has(term_core::flags::DIM) && cell.fg.kind() == ColorKind::Indexed(1),
+            cell.style().attrs.contains(Attrs::DIM) && cell.style().fg.kind() == ColorKind::Indexed(1),
             "{cell:?}"
         );
     }
@@ -556,7 +557,7 @@ fn vim_insert_and_quit() {
     h.key(ESCAPE);
     h.wait_term("hello typed", |t| {
         let d = t.dump();
-        (d.starts_with("hello|") && t.cursor.row == 0).then_some(())
+        (d.starts_with("hello|") && t.cursor().row() == 0).then_some(())
     });
     h.type_text(":q!\n");
     let d = h.wait_term("vim to quit", |t| {
@@ -627,7 +628,7 @@ fn python_curses_colours_and_resize() {
     h.wait_for("prompt", |d| prompts(d) == 1);
     h.type_text("python3 -I c.py\n");
     let fg = h.wait_term("curses screen", |t| {
-        (t.alt_screen_active() && t.dump().starts_with("ready 24 80|")).then(|| t.visible_row(0).get(0).fg.kind())
+        (t.alt_screen_active() && t.dump().starts_with("ready 24 80|")).then(|| t.visible_row(0).cell(0).style().fg.kind())
     });
     assert_eq!(fg, ColorKind::Indexed(1), "red text");
     h.resize(100, 30);
@@ -698,8 +699,8 @@ fn queries_round_trip_through_the_pty() {
 fn bracketed_paste_reaches_the_program() {
     let h = Harness::shell("paste");
     h.type_text("printf '\\033[?2004h'; cat -v\n");
-    h.wait_term("bracketed paste on", |t| t.modes.bracketed_paste.then_some(()));
-    let bracketed = h.session().term().lock().unwrap().state.modes.bracketed_paste;
+    h.wait_term("bracketed paste on", |t| t.modes().bracketed_paste.then_some(()));
+    let bracketed = h.session().term().lock().unwrap().state.modes().bracketed_paste;
     h.session().send(keys::paste_bytes("one\ntwo\x1b[201~three", bracketed));
     h.type_text("\n");
     // Each line twice: the terminal's echo, then cat's output (so cat is
@@ -769,7 +770,7 @@ impl FakeLoop {
                 }
                 let dirty = session.take_dirty();
                 let t = session.term().lock().unwrap();
-                let synchronized = t.state.modes.synchronized;
+                let synchronized = t.state.modes().synchronized;
                 let elapsed = if synchronized {
                     sync_since.get_or_insert_with(Instant::now).elapsed()
                 } else {

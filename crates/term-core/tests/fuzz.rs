@@ -92,10 +92,10 @@ fn push_random_bytes(out: &mut Vec<u8>, rng: &mut Rng, n: usize) {
 }
 
 fn check_invariants(t: &Term, cols: usize, lines: usize, limit: usize) {
-    assert!(t.state.cursor.row < lines, "cursor row {} >= {lines}", t.state.cursor.row);
-    assert!(t.state.cursor.col < cols, "cursor col {} >= {cols}", t.state.cursor.col);
+    assert!(t.state.cursor().row() < lines, "cursor row {} >= {lines}", t.state.cursor().row());
+    assert!(t.state.cursor().col() < cols, "cursor col {} >= {cols}", t.state.cursor().col());
     assert!(
-        !t.state.cursor.pending_wrap || t.state.cursor.col == cols - 1,
+        !t.state.cursor().pending_wrap() || t.state.cursor().col() == cols - 1,
         "pending wrap away from the last column"
     );
     assert!(t.state.scrollback_len() <= limit, "scrollback over the limit");
@@ -104,7 +104,7 @@ fn check_invariants(t: &Term, cols: usize, lines: usize, limit: usize) {
     for l in 0..lines {
         let row = t.state.visible_row(l); // must not panic
         if sb - off + l >= sb {
-            assert_eq!(row.cells.len(), cols, "screen row {l} has wrong width");
+            assert_eq!(row.len(), cols, "screen row {l} has wrong width");
         }
     }
 }
@@ -133,11 +133,11 @@ fn run_stream(seed: u64, sizes: &[(usize, usize, usize)], bytes_per_size: usize)
                     t.state.scroll_view(-(rng.below(50) as isize));
                 }
                 2 => {
-                    let a = t.state.visible_point(rng.below(lines.max(1)), rng.below(cols + 2));
-                    let b = t.state.visible_point(rng.below(lines.max(1)), rng.below(cols + 2));
-                    t.state.selection = Some(term_core::Selection { anchor: a, head: b });
+                    let a = t.state.point_at(rng.below(lines.max(1)), rng.below(cols + 2));
+                    let b = t.state.point_at(rng.below(lines.max(1)), rng.below(cols + 2));
+                    t.state.set_selection(Some(term_core::Selection::new(a, b)));
                     let _ = t.state.selection_text();
-                    t.state.selection = None;
+                    t.state.set_selection(None);
                 }
                 _ => {}
             }
@@ -166,14 +166,14 @@ fn random_stream_chunking_is_transparent() {
     }
     assert_eq!(
         (0..6)
-            .map(|l| { whole.state.visible_row(l).cells.iter().map(|c| c.ch()).collect::<String>() })
+            .map(|l| { whole.state.visible_row(l).cells().map(|c| c.ch()).collect::<String>() })
             .collect::<Vec<_>>(),
         (0..6)
-            .map(|l| drip.state.visible_row(l).cells.iter().map(|c| c.ch()).collect::<String>())
+            .map(|l| drip.state.visible_row(l).cells().map(|c| c.ch()).collect::<String>())
             .collect::<Vec<_>>()
     );
     assert_eq!(
-        (whole.state.cursor.row, whole.state.cursor.col, whole.state.scrollback_len()),
-        (drip.state.cursor.row, drip.state.cursor.col, drip.state.scrollback_len())
+        (whole.state.cursor().row(), whole.state.cursor().col(), whole.state.scrollback_len()),
+        (drip.state.cursor().row(), drip.state.cursor().col(), drip.state.scrollback_len())
     );
 }

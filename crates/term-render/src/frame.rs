@@ -1,8 +1,8 @@
 //! Turns terminal state into GPU instances. No Metal here, so it can be
 //! tested and benchmarked on its own.
 
-use term_core::{Cell, ColorKind, CursorShape, Terminal, flags};
-use term_font::{Metrics, Style};
+use term_core::{Attrs, ColorKind, Content, CursorShape, Terminal, Underline, Width};
+use term_font::{Metrics, Style as FontStyle};
 use unicode_width::UnicodeWidthChar;
 
 /// RGBA8 with red in the low byte (matches `unpack_unorm4x8_to_float`).
@@ -86,7 +86,7 @@ pub struct GlyphSlot {
 
 pub trait GlyphSource {
     /// `None` for glyphs that draw nothing (spaces) or are missing.
-    fn glyph(&mut self, codepoint: u32, style: Style) -> Option<GlyphSlot>;
+    fn glyph(&mut self, codepoint: u32, style: FontStyle) -> Option<GlyphSlot>;
 }
 
 #[derive(Clone, Debug)]
@@ -191,17 +191,18 @@ impl Frame {
         self.clear = with_alpha(default_bg, theme.background_opacity);
 
         // Where the cursor is in the view, if it is visible at all.
-        let cursor_line = term.cursor.row + term.display_offset();
-        let show_cursor = term.modes.cursor_visible && cursor_line < term.lines() && (cursor_on || !focused || !term.cursor_blink);
-        let cursor = show_cursor.then_some((cursor_line, term.cursor.col));
-        let block_cursor = focused && term.cursor_shape == CursorShape::Block;
+        let in_view = term.cursor_in_view();
+        let show_cursor = term.modes().cursor_visible && (cursor_on || !focused || !term.cursor_blink());
+        let cursor = in_view.filter(|_| show_cursor);
+        let block_cursor = focused && term.cursor_shape() == CursorShape::Block;
 
-        let selection = term.selection.map(|s| s.ordered());
+        let selection = term.selection().map(|s| s.ordered());
+        // Input-method text is drawn at the cursor, when it is in view.
+        let preedit = preedit.filter(|t| !t.is_empty()).zip(in_view);
         // Cells covered by input-method text don't draw their own glyphs.
-        let preedit_cells = preedit.filter(|t| !t.is_empty()).map(|t| {
-            let line = term.cursor.row + term.display_offset();
+        let preedit_cells = preedit.map(|(t, (line, col))| {
             let width: usize = t.chars().map(char_cells).sum();
-            (line, term.cursor.col..term.cursor.col + width)
+            (line, col..col + width)
         });
 
         for line in 0..term.lines() {
@@ -209,7 +210,7 @@ impl Frame {
             let y = py + line as i32 * ch;
             // Selected columns on this line, as a half-open range.
             let sel = selection.and_then(|(a, b)| {
-                let p = term.visible_point(line, 0).line;
+                let p = term.point_at(line, 0).line;
                 if p < a.line || p > b.line {
                     return None;
                 }
@@ -220,22 +221,34 @@ impl Frame {
 
             let mut run_start = 0usize;
             let mut run_color = default_bg;
+            // Runs of same-styled cells reuse the previous cell's style and
+            // resolved colours: the style is only built when it changes.
+            let mut last_key = None;
+            let mut style = term_core::Style::DEFAULT;
+            let (mut base_fg, mut base_bg) = (theme.foreground, default_bg);
             for col in 0..term.cols() {
-                let cell = row.cells.get(col).copied().unwrap_or(Cell::BLANK);
-                let mut fg = theme.resolve(cell.fg, theme.foreground);
-                let mut bg = theme.resolve(cell.bg, default_bg);
-                if cell.has(flags::INVERSE) {
-                    std::mem::swap(&mut fg, &mut bg);
+                let cell = row.cell(col);
+                let key = cell.style_key();
+                if last_key != Some(key) {
+                    last_key = Some(key);
+                    style = cell.style();
+                    base_fg = theme.resolve(style.fg, theme.foreground);
+                    base_bg = theme.resolve(style.bg, default_bg);
+                    if style.attrs.contains(Attrs::INVERSE) {
+                        std::mem::swap(&mut base_fg, &mut base_bg);
+                    }
                 }
+                let spacer = cell.is_spacer();
+                let (mut fg, mut bg) = (base_fg, base_bg);
                 if sel.as_ref().is_some_and(|r| r.contains(&col)) {
                     bg = theme.selection;
                 }
-                let at_cursor = cursor.is_some_and(|(l, c)| l == line && (c == col || (cell.has(flags::WIDE_SPACER) && c + 1 == col)));
+                let at_cursor = cursor.is_some_and(|(l, c)| l == line && (c == col || (spacer && c + 1 == col)));
                 if at_cursor && block_cursor {
                     bg = theme.cursor;
                     fg = theme.cursor_text;
                 }
-                if cell.has(flags::DIM) {
+                if style.attrs.contains(Attrs::DIM) {
                     fg = with_alpha(fg, 160);
                 }
 
@@ -246,11 +259,15 @@ impl Frame {
                 }
 
                 let x = px + col as i32 * cw;
-                let cp = cell.codepoint();
                 let covered = preedit_cells.as_ref().is_some_and(|(l, r)| *l == line && r.contains(&col));
-                if cp != 0 && cp != ' ' as u32 && !cell.has(flags::WIDE_SPACER) && !cell.has(flags::HIDDEN) && !covered {
-                    let style = Style::new(cell.has(flags::BOLD), cell.has(flags::ITALIC));
-                    if let Some(g) = glyphs.glyph(cp, style) {
+                if let Content::Char(c) = cell.content()
+                    && c != ' '
+                    && !spacer
+                    && !style.attrs.contains(Attrs::HIDDEN)
+                    && !covered
+                {
+                    let face = FontStyle::new(style.attrs.contains(Attrs::BOLD), style.attrs.contains(Attrs::ITALIC));
+                    if let Some(g) = glyphs.glyph(c as u32, face) {
                         self.glyphs.push(GlyphInstance {
                             x: s16(x + g.left as i32),
                             y: s16(y + m.baseline as i32 - g.top as i32),
@@ -263,7 +280,7 @@ impl Frame {
                         });
                     }
                 }
-                if cell.has(flags::UNDERLINE | flags::DOUBLE_UNDERLINE) {
+                if style.underline != Underline::None {
                     let uy = y + (m.baseline + m.underline_offset) as i32;
                     let t = m.underline_thickness as u16;
                     self.decorations.push(RectInstance {
@@ -273,7 +290,7 @@ impl Frame {
                         h: t,
                         color: fg,
                     });
-                    if cell.has(flags::DOUBLE_UNDERLINE) {
+                    if style.underline == Underline::Double {
                         self.decorations.push(RectInstance {
                             x: s16(x),
                             y: s16(uy + 2 * t as i32),
@@ -283,7 +300,7 @@ impl Frame {
                         });
                     }
                 }
-                if cell.has(flags::STRIKE) {
+                if style.attrs.contains(Attrs::STRIKE) {
                     let sy = y + m.baseline as i32 - m.strike_offset as i32;
                     self.decorations.push(RectInstance {
                         x: s16(x),
@@ -301,7 +318,7 @@ impl Frame {
         if let Some((line, col)) = cursor
             && !block_cursor
         {
-            let wide = term.visible_row(line).get(col).has(flags::WIDE);
+            let wide = term.visible_row(line).cell(col).width() == Width::Wide;
             let x = px + col as i32 * cw;
             let y = py + line as i32 * ch;
             let w = cw * if wide { 2 } else { 1 };
@@ -315,7 +332,7 @@ impl Frame {
                 h: h as u16,
                 color: c,
             };
-            let rects: &[RectInstance] = match (focused, term.cursor_shape) {
+            let rects: &[RectInstance] = match (focused, term.cursor_shape()) {
                 (true, CursorShape::Bar) => &[r(x, y, t, h)],
                 (true, CursorShape::Underline) => &[r(x, y + h - t, w, t)],
                 // Unfocused: a hollow box.
@@ -323,18 +340,18 @@ impl Frame {
             };
             self.decorations.extend_from_slice(rects);
         }
-        if let Some(text) = preedit.filter(|t| !t.is_empty()) {
-            self.draw_preedit(text, input, glyphs);
+        if let Some((text, at)) = preedit {
+            self.draw_preedit(text, at, input, glyphs);
         }
         self.rects.extend_from_slice(&self.decorations);
     }
 
-    fn draw_preedit(&mut self, text: &str, input: &FrameInput, glyphs: &mut impl GlyphSource) {
+    /// Input-method text at view row and column `at`.
+    fn draw_preedit(&mut self, text: &str, at: (usize, usize), input: &FrameInput, glyphs: &mut impl GlyphSource) {
         let m = input.metrics;
         let (cw, ch) = (m.cell_width as i32, m.cell_height as i32);
-        let line = input.term.cursor.row + input.term.display_offset();
+        let (line, mut col) = at;
         let y = input.padding.1 as i32 + line as i32 * ch;
-        let mut col = input.term.cursor.col;
         for c in text.chars() {
             let width = char_cells(c);
             if width == 0 {
@@ -360,7 +377,7 @@ impl Frame {
                 h: m.underline_thickness as u16,
                 color: input.theme.foreground,
             });
-            if let Some(g) = glyphs.glyph(c as u32, Style::Regular) {
+            if let Some(g) = glyphs.glyph(c as u32, FontStyle::Regular) {
                 self.glyphs.push(GlyphInstance {
                     x: s16(x + g.left as i32),
                     y: s16(y + m.baseline as i32 - g.top as i32),

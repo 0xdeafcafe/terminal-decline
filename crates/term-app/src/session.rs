@@ -95,12 +95,12 @@ pub fn write_notice(term: &mut Term, text: &str) {
 
 fn write_red(term: &mut Term, line: &str) {
     term.advance(format!("\x1b[0;2;31m{line}\x1b[0m\r\n").as_bytes());
-    term.state.replies.clear();
+    term.state.take_replies();
 }
 
 fn write_dim(term: &mut Term, text: &str) {
     term.advance(format!("\x1b[0;2m{text}\x1b[0m").as_bytes());
-    term.state.replies.clear();
+    term.state.take_replies();
 }
 
 /// The terminal's lock. Panics while parsing are caught with the lock held
@@ -126,7 +126,7 @@ fn parse(term: &Mutex<Term>, bytes: &[u8], on_parsed: Option<&(dyn Fn() + Send)>
         f();
     }
     match parsed {
-        Ok(()) => Ok(std::mem::take(&mut t.state.replies)),
+        Ok(()) => Ok(t.state.take_replies()),
         Err(_) => {
             replace_term(&mut t);
             Err(Bug)
@@ -136,8 +136,8 @@ fn parse(term: &Mutex<Term>, bytes: &[u8], on_parsed: Option<&(dyn Fn() + Send)>
 
 fn replace_term(t: &mut Term) {
     let mut fresh = Term::new(t.state.cols(), t.state.lines(), 0);
-    fresh.state.default_colors = t.state.default_colors;
-    fresh.state.cell_pixels = t.state.cell_pixels;
+    fresh.state.set_default_colors(t.state.default_colors());
+    fresh.state.set_cell_pixels(t.state.cell_pixels());
     *t = fresh;
 }
 
@@ -308,7 +308,7 @@ impl Session {
         {
             let mut t = lock(&self.term);
             t.state.resize(size.cols as usize, size.lines as usize);
-            t.state.cell_pixels = (size.cell_width, size.cell_height);
+            t.state.set_cell_pixels((size.cell_width, size.cell_height));
         }
         self.mark_dirty();
         match &self.pty {

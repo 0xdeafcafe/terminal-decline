@@ -4,7 +4,7 @@
 //! input-method text, padding, position clamping and theme colours.
 
 use proptest::prelude::*;
-use term_core::{Point, Selection, Term, Terminal, flags};
+use term_core::{Attrs, Point, Selection, Term, Terminal};
 use term_font::{Metrics, Style};
 use term_render::{Frame, FrameInput, GlyphInstance, GlyphSlot, GlyphSource, RectInstance, Rgba, Theme, rgb};
 
@@ -126,8 +126,8 @@ fn grid_text(t: &Terminal) -> Vec<String> {
             let row = t.visible_row(line);
             (0..t.cols())
                 .map(|col| {
-                    let c = row.get(col);
-                    if c.has(flags::WIDE_SPACER | flags::HIDDEN) || NO_GLYPH.contains(&c.ch()) {
+                    let c = row.cell(col);
+                    if c.is_spacer() || c.style().attrs.contains(Attrs::HIDDEN) || NO_GLYPH.contains(&c.ch()) {
                         ' '
                     } else {
                         c.ch()
@@ -234,11 +234,9 @@ fn same_colour_cells_merge_into_one_run() {
 #[test]
 fn run_breaks_at_selection() {
     let mut t = term(10, 1, &format!("{NO_CURSOR}\x1b[41mabcdef"));
-    let line = t.state.visible_point(0, 0).line;
-    t.state.selection = Some(Selection {
-        anchor: Point { line, col: 3 },
-        head: Point { line, col: 2 },
-    });
+    let line = t.state.point_at(0, 0).line;
+    t.state
+        .set_selection(Some(Selection::new(Point { line, col: 3 }, Point { line, col: 2 })));
     let theme = Theme::default();
     let f = build(&t.state);
     assert_eq!(
@@ -468,7 +466,7 @@ fn cursor_hidden_when_cursor_visible_off() {
 fn cursor_hidden_in_blink_off_phase_only_when_blinking_and_focused() {
     let theme = Theme::default();
     let blinking = term(10, 2, "ab\x1b[1 q");
-    assert!(blinking.state.cursor_blink);
+    assert!(blinking.state.cursor_blink());
     let off = |t: &Term, focused| {
         build_with(
             &t.state,
@@ -507,7 +505,7 @@ fn cursor_hidden_when_scrolled_out_of_view() {
 fn cursor_on_wide_char_is_two_cells() {
     let theme = Theme::default();
     let t = term(10, 2, "a漢b\x1b[2G");
-    assert_eq!(t.state.cursor.col, 1);
+    assert_eq!(t.state.cursor().col(), 1);
     let f = build(&t.state);
     assert_eq!(f.rects, [rect(1, 0, 2, theme.cursor)], "block covers both halves");
     assert_eq!(glyph_at(&f, 1, 0).unwrap().color, theme.cursor_text);
@@ -546,6 +544,25 @@ fn preedit_suppresses_glyphs_under_it() {
     let bg: Vec<_> = f.rects.iter().filter(|r| r.color == theme.background).collect();
     assert_eq!(bg.len(), 2);
     assert_eq!((bg[0].x, bg[0].y), (CW, CH));
+}
+
+#[test]
+fn preedit_follows_the_cursor_in_view() {
+    let theme = Theme::default();
+    let mut t = term(10, 2, "1\r\n2\r\n3\r\nab");
+    let opts = || Opts {
+        preedit: Some("xy"),
+        ..Opts::default()
+    };
+    assert_eq!(
+        decoded(&build_with(&t.state, &theme, opts()), 10, 2, (0, 0)),
+        ["3         ", "abxy      "]
+    );
+    // Scrolled back by one row, the cursor's row is out of view: no preedit.
+    t.state.scroll_view(1);
+    let f = build_with(&t.state, &theme, opts());
+    assert_eq!(decoded(&f, 10, 2, (0, 0)), ["2         ", "3         "]);
+    assert!(f.rects.iter().all(|r| r.color != theme.background), "no preedit background");
 }
 
 #[test]

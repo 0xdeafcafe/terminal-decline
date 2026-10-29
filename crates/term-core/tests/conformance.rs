@@ -2,7 +2,7 @@
 //! escape sequences real programs use. Expected values were checked against
 //! the xterm sources (cursor.c, charproc.c, screen.c, util.c, ctlseqs).
 
-use term_core::{Color, CursorShape, Selection, Term, flags};
+use term_core::{Attrs, Color, CursorShape, Selection, Style, Term, Underline, Width};
 
 fn new(cols: usize, lines: usize) -> Term {
     Term::new(cols, lines, 1000)
@@ -11,7 +11,7 @@ fn new(cols: usize, lines: usize) -> Term {
 /// Visible row text with trailing blanks trimmed (wide spacers dropped).
 fn text(t: &Term, line: usize) -> String {
     let row = t.state.visible_row(line);
-    let s: String = row.cells.iter().filter(|c| !c.has(flags::WIDE_SPACER)).map(|c| c.ch()).collect();
+    let s: String = row.cells().filter(|c| !c.is_spacer()).map(|c| c.ch()).collect();
     s.trim_end().to_string()
 }
 
@@ -20,7 +20,7 @@ fn screen(t: &Term) -> Vec<String> {
 }
 
 fn pos(t: &Term) -> (usize, usize) {
-    (t.state.cursor.row, t.state.cursor.col)
+    (t.state.cursor().row(), t.state.cursor().col())
 }
 
 /// Text of scrollback row `i` (0 = oldest), via the scroll view.
@@ -37,7 +37,7 @@ fn history_wrapped(t: &mut Term, i: usize) -> bool {
     let sb = t.state.scrollback_len();
     assert!(i < sb);
     t.state.scroll_view(sb as isize);
-    let w = t.state.visible_row(i).wrapped;
+    let w = t.state.visible_row(i).wrapped();
     t.state.scroll_view_to_bottom();
     w
 }
@@ -249,13 +249,14 @@ fn ech_erases_n_chars_and_clamps() {
 fn erase_uses_current_background() {
     let mut t = new(6, 2);
     t.advance(b"\x1b[44m\x1b[2K");
-    let c = t.state.visible_row(0).get(0);
-    assert_eq!(c.bg, Color::indexed(4));
+    let row = t.state.visible_row(0);
+    let c = row.cell(0);
+    assert_eq!(c.style().bg, Color::indexed(4));
     assert_eq!(c.ch(), ' ');
     t.advance(b"\x1b[42m\x1b[J");
-    assert_eq!(t.state.visible_row(1).get(5).bg, Color::indexed(2));
+    assert_eq!(t.state.visible_row(1).cell(5).style().bg, Color::indexed(2));
     t.advance(b"\x1b[49m\x1b[2K");
-    assert_eq!(t.state.visible_row(0).get(0).bg, Color::DEFAULT);
+    assert_eq!(t.state.visible_row(0).cell(0).style().bg, Color::DEFAULT);
 }
 
 #[test]
@@ -264,7 +265,7 @@ fn erase_of_wide_left_half_blanks_both() {
     t.advance("漢x".as_bytes());
     t.advance(b"\x1b[1G\x1b[1X"); // erase the WIDE half
     assert_eq!(text(&t, 0), "  x");
-    assert!(!t.state.visible_row(0).cells[1].has(flags::WIDE_SPACER));
+    assert!(!t.state.visible_row(0).cell(1).is_spacer());
 }
 
 #[test]
@@ -273,7 +274,7 @@ fn erase_of_wide_right_half_blanks_both() {
     t.advance("x漢".as_bytes());
     t.advance(b"\x1b[3G\x1b[0K"); // erase from the spacer half rightwards
     assert_eq!(text(&t, 0), "x");
-    assert!(!t.state.visible_row(0).cells[1].has(flags::WIDE));
+    assert!(t.state.visible_row(0).cell(1).width() != Width::Wide);
 }
 
 // ---------------------------------------------------------------- ich/dch
@@ -314,7 +315,7 @@ fn ich_splitting_wide_char_blanks_it() {
     // xterm ScrnInsertChar clears the damaged wide char before shifting.
     assert_eq!(text(&t, 0), "   b");
     let row = t.state.visible_row(0);
-    assert!(!row.cells[0].has(flags::WIDE), "no half of a wide char survives");
+    assert!(row.cell(0).width() != Width::Wide, "no half of a wide char survives");
 }
 
 #[test]
@@ -325,9 +326,9 @@ fn dch_splitting_wide_char_blanks_it() {
     // xterm ScrnDeleteChar clears the damaged wide char before shifting.
     assert_eq!(text(&t, 0), " a");
     let row = t.state.visible_row(0);
-    for c in 0..row.cells.len() {
-        if row.cells[c].has(flags::WIDE_SPACER) {
-            assert!(c > 0 && row.cells[c - 1].has(flags::WIDE), "dangling spacer at {c}");
+    for c in 0..row.len() {
+        if row.cell(c).is_spacer() {
+            assert!(c > 0 && row.cell(c - 1).width() == Width::Wide, "dangling spacer at {c}");
         }
     }
 }
@@ -483,7 +484,7 @@ fn scrollback_limit_evicts_oldest() {
 fn scroll_uses_current_background() {
     let mut t = new(4, 2);
     t.advance(b"\x1b[41maa\r\nbb\x1b[S");
-    assert_eq!(t.state.visible_row(1).get(0).bg, Color::indexed(1));
+    assert_eq!(t.state.visible_row(1).cell(0).style().bg, Color::indexed(1));
 }
 
 #[test]
@@ -504,15 +505,15 @@ fn last_column_sets_pending_wrap() {
     let mut t = new(5, 3);
     t.advance(b"abcde");
     assert_eq!(pos(&t), (0, 4));
-    assert!(t.state.cursor.pending_wrap);
-    assert!(!t.state.visible_row(0).wrapped, "wrap is deferred");
+    assert!(t.state.cursor().pending_wrap());
+    assert!(!t.state.visible_row(0).wrapped(), "wrap is deferred");
 }
 
 #[test]
 fn pending_wrap_wraps_the_next_char() {
     let mut t = new(5, 3);
     t.advance(b"abcdef");
-    assert!(t.state.visible_row(0).wrapped);
+    assert!(t.state.visible_row(0).wrapped());
     assert_eq!(text(&t, 1), "f");
     assert_eq!(pos(&t), (1, 1));
 }
@@ -521,10 +522,10 @@ fn pending_wrap_wraps_the_next_char() {
 fn pending_wrap_cleared_by_cursor_motion() {
     let mut t = new(5, 3);
     t.advance(b"abcde\x1b[H");
-    assert!(!t.state.cursor.pending_wrap);
+    assert!(!t.state.cursor().pending_wrap());
     t.advance(b"f");
     assert_eq!(text(&t, 0), "fbcde");
-    assert!(!t.state.visible_row(0).wrapped, "no spurious wrap flag");
+    assert!(!t.state.visible_row(0).wrapped(), "no spurious wrap flag");
 }
 
 #[test]
@@ -533,8 +534,8 @@ fn decawm_off_overwrites_last_column() {
     t.advance(b"\x1b[?7labcdefg");
     assert_eq!(text(&t, 0), "abcdg");
     assert_eq!(text(&t, 1), "");
-    assert!(!t.state.cursor.pending_wrap);
-    assert!(!t.state.visible_row(0).wrapped);
+    assert!(!t.state.cursor().pending_wrap());
+    assert!(!t.state.visible_row(0).wrapped());
 }
 
 #[test]
@@ -552,7 +553,7 @@ fn decawm_off_drops_wide_char_at_last_column() {
 fn wide_char_wraps_when_no_room() {
     let mut t = new(5, 2);
     t.advance("abcd漢".as_bytes());
-    assert!(t.state.visible_row(0).wrapped);
+    assert!(t.state.visible_row(0).wrapped());
     assert_eq!(text(&t, 0), "abcd");
     assert_eq!(text(&t, 1), "漢");
 }
@@ -562,10 +563,10 @@ fn wide_char_exact_fit_then_wrap() {
     let mut t = new(4, 2);
     t.advance("ab漢".as_bytes());
     assert_eq!(pos(&t), (0, 3));
-    assert!(t.state.cursor.pending_wrap);
-    assert!(!t.state.visible_row(0).wrapped);
+    assert!(t.state.cursor().pending_wrap());
+    assert!(!t.state.visible_row(0).wrapped());
     t.advance(b"x");
-    assert!(t.state.visible_row(0).wrapped);
+    assert!(t.state.visible_row(0).wrapped());
     assert_eq!(text(&t, 1), "x");
 }
 
@@ -575,7 +576,7 @@ fn overwrite_wide_first_half_blanks_second() {
     t.advance("漢".as_bytes());
     t.advance(b"\x1b[1Gx");
     assert_eq!(text(&t, 0), "x");
-    assert!(!t.state.visible_row(0).cells[1].has(flags::WIDE_SPACER));
+    assert!(!t.state.visible_row(0).cell(1).is_spacer());
 }
 
 #[test]
@@ -584,7 +585,7 @@ fn overwrite_wide_second_half_blanks_first() {
     t.advance("漢".as_bytes());
     t.advance(b"\x1b[2Gx");
     assert_eq!(text(&t, 0), " x");
-    assert!(!t.state.visible_row(0).cells[0].has(flags::WIDE));
+    assert!(t.state.visible_row(0).cell(0).width() != Width::Wide);
 }
 
 // ---------------------------------------------------------------- tabs
@@ -657,17 +658,18 @@ fn decsc_decrc_restore_position() {
 fn decsc_saves_attributes() {
     let mut t = new(10, 1);
     t.advance(b"\x1b[1;31m\x1b7\x1b[0m\x1b8x");
-    let c = t.state.visible_row(0).cells[0];
+    let row = t.state.visible_row(0);
+    let c = row.cell(0);
     assert_eq!(c.ch(), 'x');
-    assert!(c.has(flags::BOLD));
-    assert_eq!(c.fg, Color::indexed(1));
+    assert!(c.style().attrs.contains(Attrs::BOLD));
+    assert_eq!(c.style().fg, Color::indexed(1));
 }
 
 #[test]
 fn decsc_saves_origin_mode_and_charset() {
     let mut t = new(10, 6);
     t.advance(b"\x1b[2;5r\x1b[?6h\x1b(0\x1b7\x1b[?6l\x1b(B\x1b8");
-    assert!(t.state.modes.origin, "origin mode restored");
+    assert!(t.state.modes().origin, "origin mode restored");
     assert_eq!(pos(&t), (1, 0), "cursor restored to region home");
     t.advance(b"q");
     assert_eq!(text(&t, 1), "─", "line-drawing charset restored");
@@ -685,7 +687,7 @@ fn decrc_without_save_goes_home() {
     let mut t = new(10, 4);
     t.advance(b"\x1b[?6h\x1b[2;2H\x1b8");
     assert_eq!(pos(&t), (0, 0));
-    assert!(!t.state.modes.origin);
+    assert!(!t.state.modes().origin);
 }
 
 #[test]
@@ -716,37 +718,38 @@ fn sgr_empty_and_zero_reset() {
     let mut t = new(4, 1);
     t.advance(b"\x1b[1;31mA\x1b[mB\x1b[1mC\x1b[0mD");
     let r = t.state.visible_row(0);
-    assert!(r.cells[0].has(flags::BOLD));
-    assert!(!r.cells[1].has(flags::BOLD));
-    assert_eq!(r.cells[1].fg, Color::DEFAULT);
-    assert!(r.cells[2].has(flags::BOLD));
-    assert!(!r.cells[3].has(flags::BOLD));
+    assert!(r.cell(0).style().attrs.contains(Attrs::BOLD));
+    assert!(!r.cell(1).style().attrs.contains(Attrs::BOLD));
+    assert_eq!(r.cell(1).style().fg, Color::DEFAULT);
+    assert!(r.cell(2).style().attrs.contains(Attrs::BOLD));
+    assert!(!r.cell(3).style().attrs.contains(Attrs::BOLD));
 }
 
 #[test]
 fn sgr_attributes_and_individual_resets() {
     let mut t = new(20, 1);
     t.advance(b"\x1b[1;2;3;4;5;7;8;9mA");
-    let all = t.state.visible_row(0).cells[0].flags();
-    for f in [
-        flags::BOLD,
-        flags::DIM,
-        flags::ITALIC,
-        flags::UNDERLINE,
-        flags::BLINK,
-        flags::INVERSE,
-        flags::HIDDEN,
-        flags::STRIKE,
+    let all = t.state.visible_row(0).cell(0).style();
+    assert_eq!(all.underline, Underline::Single);
+    for a in [
+        Attrs::BOLD,
+        Attrs::DIM,
+        Attrs::ITALIC,
+        Attrs::BLINK,
+        Attrs::INVERSE,
+        Attrs::HIDDEN,
+        Attrs::STRIKE,
     ] {
-        assert!(all & f != 0, "missing flag {f:#x}");
+        assert!(all.attrs.contains(a), "missing {a:?}");
     }
     // Each reset code clears only its own attribute.
     t.advance(b"\x1b[22mB");
-    let c = t.state.visible_row(0).cells[1];
-    assert!(!c.has(flags::BOLD) && !c.has(flags::DIM));
-    assert!(c.has(flags::ITALIC));
+    let row = t.state.visible_row(0);
+    let c = row.cell(1);
+    assert!(!c.style().attrs.contains(Attrs::BOLD) && !c.style().attrs.contains(Attrs::DIM));
+    assert!(c.style().attrs.contains(Attrs::ITALIC));
     t.advance(b"\x1b[23;24;25;27;28;29mC");
-    assert_eq!(t.state.visible_row(0).cells[2].flags(), 0, "all attributes reset");
+    assert_eq!(t.state.visible_row(0).cell(2).style(), Style::DEFAULT, "all attributes reset");
 }
 
 #[test]
@@ -754,10 +757,10 @@ fn sgr_underline_styles() {
     let mut t = new(4, 1);
     t.advance(b"\x1b[4:1mA\x1b[4:2mB\x1b[21mC\x1b[4:0mD");
     let r = t.state.visible_row(0);
-    assert!(r.cells[0].has(flags::UNDERLINE));
-    assert!(r.cells[1].has(flags::DOUBLE_UNDERLINE) && !r.cells[1].has(flags::UNDERLINE));
-    assert!(r.cells[2].has(flags::DOUBLE_UNDERLINE), "SGR 21 is double underline");
-    assert!(!r.cells[3].has(flags::UNDERLINE | flags::DOUBLE_UNDERLINE));
+    assert!(r.cell(0).style().underline == Underline::Single);
+    assert!(r.cell(1).style().underline == Underline::Double);
+    assert!(r.cell(2).style().underline == Underline::Double, "SGR 21 is double underline");
+    assert!(r.cell(3).style().underline == Underline::None);
 }
 
 #[test]
@@ -765,12 +768,12 @@ fn sgr_standard_and_bright_colors() {
     let mut t = new(6, 1);
     t.advance(b"\x1b[31mA\x1b[47mB\x1b[91mC\x1b[102mD\x1b[30mE\x1b[40mF");
     let r = t.state.visible_row(0);
-    assert_eq!(r.cells[0].fg, Color::indexed(1));
-    assert_eq!(r.cells[1].bg, Color::indexed(7));
-    assert_eq!(r.cells[2].fg, Color::indexed(9));
-    assert_eq!(r.cells[3].bg, Color::indexed(10));
-    assert_eq!(r.cells[4].fg, Color::indexed(0));
-    assert_eq!(r.cells[5].bg, Color::indexed(0));
+    assert_eq!(r.cell(0).style().fg, Color::indexed(1));
+    assert_eq!(r.cell(1).style().bg, Color::indexed(7));
+    assert_eq!(r.cell(2).style().fg, Color::indexed(9));
+    assert_eq!(r.cell(3).style().bg, Color::indexed(10));
+    assert_eq!(r.cell(4).style().fg, Color::indexed(0));
+    assert_eq!(r.cell(5).style().bg, Color::indexed(0));
 }
 
 #[test]
@@ -778,10 +781,10 @@ fn sgr_256_color_both_forms() {
     let mut t = new(4, 1);
     t.advance(b"\x1b[38;5;123mA\x1b[38:5:45mB\x1b[48;5;200mC\x1b[48:5:67mD");
     let r = t.state.visible_row(0);
-    assert_eq!(r.cells[0].fg, Color::indexed(123));
-    assert_eq!(r.cells[1].fg, Color::indexed(45));
-    assert_eq!(r.cells[2].bg, Color::indexed(200));
-    assert_eq!(r.cells[3].bg, Color::indexed(67));
+    assert_eq!(r.cell(0).style().fg, Color::indexed(123));
+    assert_eq!(r.cell(1).style().fg, Color::indexed(45));
+    assert_eq!(r.cell(2).style().bg, Color::indexed(200));
+    assert_eq!(r.cell(3).style().bg, Color::indexed(67));
 }
 
 #[test]
@@ -789,10 +792,10 @@ fn sgr_truecolor_both_forms() {
     let mut t = new(4, 1);
     t.advance(b"\x1b[38;2;10;20;30mA\x1b[38:2:40:50:60mB\x1b[38:2:0:70:80:90mC\x1b[48:2:1:2:3mD");
     let r = t.state.visible_row(0);
-    assert_eq!(r.cells[0].fg, Color::rgb(10, 20, 30));
-    assert_eq!(r.cells[1].fg, Color::rgb(40, 50, 60));
-    assert_eq!(r.cells[2].fg, Color::rgb(70, 80, 90), "colour-space id skipped");
-    assert_eq!(r.cells[3].bg, Color::rgb(1, 2, 3));
+    assert_eq!(r.cell(0).style().fg, Color::rgb(10, 20, 30));
+    assert_eq!(r.cell(1).style().fg, Color::rgb(40, 50, 60));
+    assert_eq!(r.cell(2).style().fg, Color::rgb(70, 80, 90), "colour-space id skipped");
+    assert_eq!(r.cell(3).style().bg, Color::rgb(1, 2, 3));
 }
 
 #[test]
@@ -800,18 +803,19 @@ fn sgr_39_49_restore_defaults() {
     let mut t = new(2, 1);
     t.advance(b"\x1b[31;42mA\x1b[39;49mB");
     let r = t.state.visible_row(0);
-    assert_eq!(r.cells[1].fg, Color::DEFAULT);
-    assert_eq!(r.cells[1].bg, Color::DEFAULT);
+    assert_eq!(r.cell(1).style().fg, Color::DEFAULT);
+    assert_eq!(r.cell(1).style().bg, Color::DEFAULT);
 }
 
 #[test]
 fn sgr_combined_sequence() {
     let mut t = new(1, 1);
     t.advance(b"\x1b[1;4;31;42mA");
-    let c = t.state.visible_row(0).cells[0];
-    assert!(c.has(flags::BOLD | flags::UNDERLINE));
-    assert_eq!(c.fg, Color::indexed(1));
-    assert_eq!(c.bg, Color::indexed(2));
+    let row = t.state.visible_row(0);
+    let c = row.cell(0);
+    assert!(c.style().attrs.contains(Attrs::BOLD) && c.style().underline == Underline::Single);
+    assert_eq!(c.style().fg, Color::indexed(1));
+    assert_eq!(c.style().bg, Color::indexed(2));
 }
 
 #[test]
@@ -819,17 +823,17 @@ fn sgr_unknown_codes_ignored_and_58_skipped() {
     let mut t = new(2, 1);
     t.advance(b"\x1b[999;1mA\x1b[58;2;1;2;3;27mB");
     let r = t.state.visible_row(0);
-    assert!(r.cells[0].has(flags::BOLD), "unknown SGR must not reset");
-    assert!(r.cells[1].has(flags::BOLD));
-    assert!(!r.cells[1].has(flags::INVERSE), "27 applies after 58's arguments");
-    assert_eq!(r.cells[1].fg, Color::DEFAULT, "underline colour leaves fg alone");
+    assert!(r.cell(0).style().attrs.contains(Attrs::BOLD), "unknown SGR must not reset");
+    assert!(r.cell(1).style().attrs.contains(Attrs::BOLD));
+    assert!(!r.cell(1).style().attrs.contains(Attrs::INVERSE), "27 applies after 58's arguments");
+    assert_eq!(r.cell(1).style().fg, Color::DEFAULT, "underline colour leaves fg alone");
 }
 
 #[test]
 fn sgr_incomplete_truecolor_leaves_pen() {
     let mut t = new(1, 1);
     t.advance(b"\x1b[31m\x1b[38;2;10mA");
-    assert_eq!(t.state.visible_row(0).cells[0].fg, Color::indexed(1));
+    assert_eq!(t.state.visible_row(0).cell(0).style().fg, Color::indexed(1));
 }
 
 // ---------------------------------------------------------------- alt screen
@@ -895,21 +899,21 @@ fn alt_47_does_not_save_cursor() {
 fn dsr_5_replies_ok() {
     let mut t = new(10, 4);
     t.advance(b"\x1b[5n");
-    assert_eq!(t.state.replies, b"\x1b[0n");
+    assert_eq!(t.state.replies(), b"\x1b[0n");
 }
 
 #[test]
 fn cpr_reports_1_based_position() {
     let mut t = new(10, 4);
     t.advance(b"\x1b[3;5H\x1b[6n");
-    assert_eq!(t.state.replies, b"\x1b[3;5R");
+    assert_eq!(t.state.replies(), b"\x1b[3;5R");
 }
 
 #[test]
 fn cpr_counts_pending_wrap_column() {
     let mut t = new(5, 2);
     t.advance(b"abcde\x1b[6n");
-    assert_eq!(t.state.replies, b"\x1b[1;5R");
+    assert_eq!(t.state.replies(), b"\x1b[1;5R");
 }
 
 #[test]
@@ -917,14 +921,14 @@ fn cpr_in_origin_mode_is_region_relative() {
     let mut t = new(10, 6);
     t.advance(b"\x1b[3;6r\x1b[?6h\x1b[2;4H\x1b[6n");
     assert_eq!(pos(&t), (3, 3));
-    assert_eq!(t.state.replies, b"\x1b[2;4R");
+    assert_eq!(t.state.replies(), b"\x1b[2;4R");
 }
 
 #[test]
 fn da_replies() {
     let mut t = new(10, 4);
     t.advance(b"\x1b[c\x1b[>c");
-    assert_eq!(t.state.replies, b"\x1b[?62;22c\x1b[>1;10;0c");
+    assert_eq!(t.state.replies(), b"\x1b[?62;22c\x1b[>1;10;0c");
 }
 
 // ---------------------------------------------------------------- resize
@@ -943,7 +947,7 @@ fn resize_shrink_width_blanks_wide_at_edge() {
     t.advance("ab漢".as_bytes());
     t.state.resize(3, 1);
     assert_eq!(text(&t, 0), "ab");
-    assert!(!t.state.visible_row(0).cells[2].has(flags::WIDE));
+    assert!(t.state.visible_row(0).cell(2).width() != Width::Wide);
 }
 
 #[test]
@@ -988,7 +992,7 @@ fn resize_grow_width_pads_blanks() {
     t.advance(b"abcde");
     t.state.resize(10, 2);
     assert_eq!(text(&t, 0), "abcde");
-    assert_eq!(t.state.visible_row(0).cells.len(), 10);
+    assert_eq!(t.state.visible_row(0).len(), 10);
     assert_eq!(pos(&t), (0, 4), "cursor stays on the last written column");
 }
 
@@ -1013,24 +1017,24 @@ fn resize_clamps_cursor_and_clears_pending_wrap() {
     t.advance(b"abcde"); // ends at last column: pending wrap... not quite
     t.state.resize(4, 2);
     assert_eq!(pos(&t), (1, 3));
-    assert!(!t.state.cursor.pending_wrap);
+    assert!(!t.state.cursor().pending_wrap());
     // pending wrap on a shrink:
     let mut t = new(5, 2);
     t.advance(b"abcde");
-    assert!(t.state.cursor.pending_wrap);
+    assert!(t.state.cursor().pending_wrap());
     t.state.resize(8, 2);
-    assert!(!t.state.cursor.pending_wrap);
+    assert!(!t.state.cursor().pending_wrap());
 }
 
 #[test]
 fn resize_clears_selection() {
     let mut t = new(10, 2);
     t.advance(b"hello");
-    let a = t.state.visible_point(0, 0);
-    let b = t.state.visible_point(0, 3);
-    t.state.selection = Some(Selection { anchor: a, head: b });
+    let a = t.state.point_at(0, 0);
+    let b = t.state.point_at(0, 3);
+    t.state.set_selection(Some(Selection::new(a, b)));
     t.state.resize(5, 2);
-    assert!(t.state.selection.is_none());
+    assert!(t.state.selection().is_none());
 }
 
 // ---------------------------------------------------------------- rep/charset/reset
@@ -1064,8 +1068,8 @@ fn rep_uses_current_pen_not_original() {
     t.advance(b"a\x1b[31m\x1b[2b");
     let r = t.state.visible_row(0);
     assert_eq!(text(&t, 0), "aaa");
-    assert_eq!(r.cells[0].fg, Color::DEFAULT);
-    assert_eq!(r.cells[1].fg, Color::indexed(1));
+    assert_eq!(r.cell(0).style().fg, Color::DEFAULT);
+    assert_eq!(r.cell(1).style().fg, Color::indexed(1));
 }
 
 #[test]
@@ -1083,11 +1087,12 @@ fn ris_full_reset() {
     t.advance(b"\x1bc");
     assert_eq!(screen(&t), ["", "", ""]);
     assert_eq!(pos(&t), (0, 0));
-    assert!(!t.state.modes.origin && !t.state.modes.insert && t.state.modes.autowrap);
+    assert!(!t.state.modes().origin && !t.state.modes().insert && t.state.modes().autowrap);
     t.advance(b"z");
-    let c = t.state.visible_row(0).cells[0];
-    assert_eq!(c.flags(), 0);
-    assert_eq!(c.fg, Color::DEFAULT);
+    let row = t.state.visible_row(0);
+    let c = row.cell(0);
+    assert_eq!(c.style(), Style::DEFAULT);
+    assert_eq!(c.style().fg, Color::DEFAULT);
     // margins gone: linefeed on the last row scrolls the whole screen
     let before = t.state.scrollback_len();
     t.advance(b"\x1b[3;1H\n");
@@ -1111,13 +1116,14 @@ fn decstr_is_a_soft_reset() {
     t.advance(b"\x1b[!p");
     assert_eq!(screen(&t), ["l2", "l3", "l4"], "DECSTR keeps the screen");
     assert_eq!(t.state.scrollback_len(), 1, "DECSTR keeps scrollback");
-    assert!(!t.state.modes.origin);
-    assert!(!t.state.modes.insert);
-    assert!(t.state.modes.autowrap, "DECSTR restores autowrap on");
+    assert!(!t.state.modes().origin);
+    assert!(!t.state.modes().insert);
+    assert!(t.state.modes().autowrap, "DECSTR restores autowrap on");
     t.advance(b"z"); // lands where the cursor was left
-    let z = t.state.visible_row(1).cells[0];
+    let row = t.state.visible_row(1);
+    let z = row.cell(0);
     assert_eq!(z.ch(), 'z');
-    assert!(!z.has(flags::BOLD), "DECSTR resets attributes");
+    assert!(!z.style().attrs.contains(Attrs::BOLD), "DECSTR resets attributes");
     // margins reset to the full screen
     t.advance(b"\x1b[3;1H\n");
     assert_eq!(t.state.scrollback_len(), 2, "no scroll region after DECSTR");
@@ -1129,9 +1135,9 @@ fn decstr_is_a_soft_reset() {
 fn selection_text_single_line() {
     let mut t = new(10, 1);
     t.advance(b"abcdef");
-    let a = t.state.visible_point(0, 1);
-    let b = t.state.visible_point(0, 3);
-    t.state.selection = Some(Selection { anchor: a, head: b });
+    let a = t.state.point_at(0, 1);
+    let b = t.state.point_at(0, 3);
+    t.state.set_selection(Some(Selection::new(a, b)));
     assert_eq!(t.state.selection_text().unwrap(), "bcd");
 }
 
@@ -1139,9 +1145,9 @@ fn selection_text_single_line() {
 fn selection_text_multiline_uses_newlines() {
     let mut t = new(10, 3);
     t.advance(b"aaa\r\nbbb\r\nccc");
-    let a = t.state.visible_point(0, 1);
-    let b = t.state.visible_point(1, 1);
-    t.state.selection = Some(Selection { anchor: a, head: b });
+    let a = t.state.point_at(0, 1);
+    let b = t.state.point_at(1, 1);
+    t.state.set_selection(Some(Selection::new(a, b)));
     assert_eq!(t.state.selection_text().unwrap(), "aa\nbb");
 }
 
@@ -1149,9 +1155,9 @@ fn selection_text_multiline_uses_newlines() {
 fn selection_text_trims_trailing_blanks() {
     let mut t = new(10, 2);
     t.advance(b"ab\r\ncd");
-    let a = t.state.visible_point(0, 0);
-    let b = t.state.visible_point(0, 9);
-    t.state.selection = Some(Selection { anchor: a, head: b });
+    let a = t.state.point_at(0, 0);
+    let b = t.state.point_at(0, 9);
+    t.state.set_selection(Some(Selection::new(a, b)));
     assert_eq!(t.state.selection_text().unwrap(), "ab");
 }
 
@@ -1159,9 +1165,9 @@ fn selection_text_trims_trailing_blanks() {
 fn selection_text_joins_wrapped_without_newline() {
     let mut t = new(5, 3);
     t.advance(b"abcdefgh");
-    let a = t.state.visible_point(0, 2);
-    let b = t.state.visible_point(1, 1);
-    t.state.selection = Some(Selection { anchor: a, head: b });
+    let a = t.state.point_at(0, 2);
+    let b = t.state.point_at(1, 1);
+    t.state.set_selection(Some(Selection::new(a, b)));
     assert_eq!(t.state.selection_text().unwrap(), "cdefg");
 }
 
@@ -1169,9 +1175,9 @@ fn selection_text_joins_wrapped_without_newline() {
 fn selection_text_reversed_is_ordered() {
     let mut t = new(10, 2);
     t.advance(b"abcdef");
-    let a = t.state.visible_point(0, 1);
-    let b = t.state.visible_point(0, 3);
-    t.state.selection = Some(Selection { anchor: b, head: a });
+    let a = t.state.point_at(0, 1);
+    let b = t.state.point_at(0, 3);
+    t.state.set_selection(Some(Selection::new(b, a)));
     assert_eq!(t.state.selection_text().unwrap(), "bcd");
 }
 
@@ -1179,9 +1185,9 @@ fn selection_text_reversed_is_ordered() {
 fn selection_text_wide_chars_once() {
     let mut t = new(5, 1);
     t.advance("a漢b".as_bytes());
-    let a = t.state.visible_point(0, 0);
-    let b = t.state.visible_point(0, 3);
-    t.state.selection = Some(Selection { anchor: a, head: b });
+    let a = t.state.point_at(0, 0);
+    let b = t.state.point_at(0, 3);
+    t.state.set_selection(Some(Selection::new(a, b)));
     assert_eq!(t.state.selection_text().unwrap(), "a漢b");
 }
 
@@ -1191,10 +1197,10 @@ fn selection_text_spans_scrollback() {
     t.advance(b"aa\r\nbb\r\ncc");
     assert_eq!(t.state.scrollback_len(), 1);
     t.state.scroll_view(1);
-    let a = t.state.visible_point(0, 1); // scrollback "aa", col 1
+    let a = t.state.point_at(0, 1); // scrollback "aa", col 1
     t.state.scroll_view_to_bottom();
-    let b = t.state.visible_point(1, 1); // screen "cc", col 1
-    t.state.selection = Some(Selection { anchor: a, head: b });
+    let b = t.state.point_at(1, 1); // screen "cc", col 1
+    t.state.set_selection(Some(Selection::new(a, b)));
     assert_eq!(t.state.selection_text().unwrap(), "a\nbb\ncc");
 }
 
@@ -1217,12 +1223,14 @@ fn decaln_fills_screen_with_e() {
 fn bell_and_title_flags() {
     let mut t = new(4, 1);
     t.advance(b"\x07");
-    assert!(t.state.bell);
+    assert!(t.state.take_bell());
+    assert!(!t.state.take_bell(), "taken");
     t.advance(b"\x1b]0;my title\x07");
-    assert_eq!(t.state.title.as_deref(), Some("my title"));
-    assert!(t.state.title_changed);
+    assert_eq!(t.state.title(), Some("my title"));
+    assert_eq!(t.state.take_title().as_deref(), Some("my title"));
+    assert_eq!(t.state.take_title(), None, "taken");
     t.advance(b"\x1b]2;other\x1b\\");
-    assert_eq!(t.state.title.as_deref(), Some("other"));
+    assert_eq!(t.state.title(), Some("other"));
 }
 
 #[test]
@@ -1248,30 +1256,30 @@ fn backspace_moves_left_and_stops() {
 fn private_modes_set_and_reset() {
     let mut t = new(10, 4);
     t.advance(b"\x1b[?1h\x1b[?25l\x1b[?2004h\x1b[?1002h\x1b[?1006h\x1b[?2026h\x1b=");
-    assert!(t.state.modes.app_cursor);
-    assert!(!t.state.modes.cursor_visible);
-    assert!(t.state.modes.bracketed_paste);
-    assert_eq!(t.state.modes.mouse, term_core::MouseMode::Drag);
-    assert!(t.state.modes.mouse_sgr);
-    assert!(t.state.modes.synchronized);
-    assert!(t.state.modes.app_keypad);
+    assert!(t.state.modes().app_cursor);
+    assert!(!t.state.modes().cursor_visible);
+    assert!(t.state.modes().bracketed_paste);
+    assert_eq!(t.state.modes().mouse, term_core::MouseMode::Drag);
+    assert!(t.state.modes().mouse_sgr);
+    assert!(t.state.modes().synchronized);
+    assert!(t.state.modes().app_keypad);
     t.advance(b"\x1b[?1l\x1b[?25h\x1b[?2004l\x1b[?1002l\x1b>");
-    assert!(!t.state.modes.app_cursor);
-    assert!(t.state.modes.cursor_visible);
-    assert!(!t.state.modes.bracketed_paste);
-    assert_eq!(t.state.modes.mouse, term_core::MouseMode::Off);
-    assert!(!t.state.modes.app_keypad);
+    assert!(!t.state.modes().app_cursor);
+    assert!(t.state.modes().cursor_visible);
+    assert!(!t.state.modes().bracketed_paste);
+    assert_eq!(t.state.modes().mouse, term_core::MouseMode::Off);
+    assert!(!t.state.modes().app_keypad);
 }
 
 #[test]
 fn decscusr_sets_cursor_shape() {
     let mut t = new(4, 1);
     t.advance(b"\x1b[5 q");
-    assert_eq!(t.state.cursor_shape, CursorShape::Bar);
-    assert!(t.state.cursor_blink);
+    assert_eq!(t.state.cursor_shape(), CursorShape::Bar);
+    assert!(t.state.cursor_blink());
     t.advance(b"\x1b[2 q");
-    assert_eq!(t.state.cursor_shape, CursorShape::Block);
-    assert!(!t.state.cursor_blink);
+    assert_eq!(t.state.cursor_shape(), CursorShape::Block);
+    assert!(!t.state.cursor_blink());
 }
 
 #[test]

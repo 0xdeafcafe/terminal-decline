@@ -103,11 +103,11 @@ pub fn apply(term: &mut Term, step: &Step) {
         Step::ScrollView(d) => t.scroll_view(isize::from(d)),
         Step::Select(al, ac, hl, hc) => {
             let (lines, cols) = (t.lines(), t.cols());
-            let anchor = t.visible_point(usize::from(al) % lines, usize::from(ac) % cols);
-            let head = t.visible_point(usize::from(hl) % lines, usize::from(hc) % cols);
-            t.selection = Some(Selection { anchor, head });
+            let anchor = t.point_at(usize::from(al) % lines, usize::from(ac) % cols);
+            let head = t.point_at(usize::from(hl) % lines, usize::from(hc) % cols);
+            t.set_selection(Some(Selection::new(anchor, head)));
         }
-        Step::ClearSelection => t.selection = None,
+        Step::ClearSelection => t.set_selection(None),
     }
 }
 

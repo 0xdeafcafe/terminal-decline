@@ -1,6 +1,6 @@
 //! Mouse reporting to the program (X10 and SGR encodings, xterm button and
-//! modifier codes) and the word/line spans for double- and triple-click
-//! selection.
+//! modifier codes). Word and line selection live in term-core
+//! (`Terminal::select_word`, `select_line`).
 
 use term_core::MouseMode;
 
@@ -65,36 +65,6 @@ pub fn motion_code(held: Option<u8>, button: Option<u8>, mods: u8) -> u8 {
 pub fn wheel_code(lines: isize, mods: u8) -> u8 {
     let base = if lines > 0 { WHEEL_UP } else { WHEEL_DOWN };
     base + mods
-}
-
-/// Characters that end a word for double-click selection (besides spaces).
-const WORD_BREAKS: &str = "()[]{}<>'\"`|,;";
-
-pub fn is_word_char(c: char) -> bool {
-    !c.is_whitespace() && !WORD_BREAKS.contains(c)
-}
-
-/// The columns (inclusive) of the word under `col` in `row`, or `None` when
-/// `col` isn't on a word (the selection is then just that cell).
-pub fn word_at(row: &[char], col: usize) -> Option<(usize, usize)> {
-    let is_word = |c: usize| row.get(c).copied().is_some_and(is_word_char);
-    if !is_word(col) {
-        return None;
-    }
-    let mut a = col;
-    while a > 0 && is_word(a - 1) {
-        a -= 1;
-    }
-    let mut b = col;
-    while b + 1 < row.len() && is_word(b + 1) {
-        b += 1;
-    }
-    Some((a, b))
-}
-
-/// The columns (inclusive) a triple-click selects: the whole line.
-pub fn line_span(cols: usize) -> (usize, usize) {
-    (0, cols.saturating_sub(1))
 }
 
 #[cfg(test)]
@@ -233,36 +203,5 @@ mod tests {
         for (lines, mods, want) in [(1, 0, 64), (10, 0, 64), (-1, 0, 65), (-4, 16, 81), (2, 4, 68)] {
             assert_eq!(wheel_code(lines, mods), want);
         }
-    }
-
-    #[test]
-    fn double_click_words() {
-        type Row = (&'static str, usize, Option<(usize, usize)>);
-        let rows: &[Row] = &[
-            ("hello world", 0, Some((0, 4))),
-            ("hello world", 4, Some((0, 4))),
-            ("hello world", 5, None),
-            ("hello world", 6, Some((6, 10))),
-            ("hello world", 10, Some((6, 10))),
-            ("hello world", 30, None),
-            ("(foo)", 0, None),
-            ("(foo)", 2, Some((1, 3))),
-            ("a,b;c", 2, Some((2, 2))),
-            ("say \"hi\" `x` 'y' <z> [w] {v} |u|", 6, Some((5, 6))),
-            ("src/main.rs:12:5", 3, Some((0, 15))),
-            ("https://x.y/?a=b&c", 0, Some((0, 17))),
-            ("tab\tsep", 4, Some((4, 6))),
-            ("", 0, None),
-        ];
-        for &(line, col, want) in rows {
-            let chars: Vec<char> = line.chars().collect();
-            assert_eq!(word_at(&chars, col), want, "{line:?} at {col}");
-        }
-    }
-
-    #[test]
-    fn triple_click_line() {
-        assert_eq!(line_span(80), (0, 79));
-        assert_eq!(line_span(2), (0, 1));
     }
 }

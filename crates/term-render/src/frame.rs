@@ -8,6 +8,7 @@ use unicode_width::UnicodeWidthChar;
 use std::collections::HashMap;
 use std::hash::BuildHasherDefault;
 
+use crate::images::{Grid, Images, pieces_of_row};
 use crate::row_cache::{Built, Entry, KeyHasher, MISSING, Mark, RowCache};
 use crate::shape_cache::ShapeCache;
 
@@ -282,6 +283,14 @@ pub(crate) trait CellView {
     /// Neither a cluster nor either half of a two-cell cell: drawn as its
     /// character alone, if any.
     fn is_simple(&self) -> bool;
+    /// A kitty placeholder cell's image row and column.
+    #[inline]
+    fn placeholder(&self) -> Option<(u16, u16)> {
+        match self.content() {
+            Content::Placeholder { row, col } => Some((row, col)),
+            _ => None,
+        }
+    }
 }
 
 impl CellView for CellRef<'_> {
@@ -347,6 +356,10 @@ impl CellView for SnapCell<'_> {
         if self.cell.is_cluster() {
             return Content::Cluster(self.clusters.snap.cluster(self.clusters.row, self.cell.codepoint()));
         }
+        // A placeholder's content bits are its piece, not a character.
+        if let Some((row, col)) = self.cell.placeholder() {
+            return Content::Placeholder { row, col };
+        }
         match self.cell.codepoint() {
             0 => Content::Empty,
             cp => char::from_u32(cp).map_or(Content::Empty, Content::Char),
@@ -364,6 +377,10 @@ impl CellView for SnapCell<'_> {
     #[inline]
     fn is_simple(&self) -> bool {
         !self.cell.is_wide_part() && !self.cell.is_cluster()
+    }
+    #[inline]
+    fn placeholder(&self) -> Option<(u16, u16)> {
+        self.cell.placeholder()
     }
 }
 
@@ -493,6 +510,21 @@ pub struct Frame {
     pieces: Pieces,
     /// The glyph generation the snapshot was taken against.
     snapped_with: u64,
+    /// The images this frame draws (images.md §6.3).
+    pub images: Images,
+    /// Where `rects` splits for the image layers.
+    pub split: RectSplit,
+}
+
+/// How a frame's `rects` interleave with its image layers (images.md
+/// §6.3): `rects[..backgrounds]` are the cell backgrounds, drawn over the
+/// images under the backgrounds and under the images under the text; the
+/// rest (highlights, the block cursor, decorations) over those. `cursor`
+/// is drawn again over the images above the text.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RectSplit {
+    pub backgrounds: usize,
+    pub cursor: std::ops::Range<usize>,
 }
 
 /// Rows whose top is this far down (pixels) are built every frame rather
@@ -545,6 +577,7 @@ impl Frame {
             glyphs: generation,
         });
         self.rows.snapshot(term);
+        self.images.set_pool(term.image_pool(), term.graphics().owner());
         self.snapped_with = generation;
     }
 
@@ -572,6 +605,7 @@ impl Frame {
         if !self.to_build.is_empty() {
             self.shapes.keep_visible(&self.rows.snap);
         }
+        self.images.tell_pool();
         true
     }
 
@@ -666,6 +700,14 @@ impl Frame {
                 clusters: &clusters,
             });
             build_row(&ctx, cells, glyphs, &mut entry, &mut self.pieces);
+            if row.flags.contains(RowFlags::PLACEHOLDERS) {
+                let cells = snap.row_cells(row).unwrap_or(&[]).iter().map(|&cell| SnapCell {
+                    cell,
+                    styles,
+                    clusters: &clusters,
+                });
+                pieces_of_row(cells, cols, &mut entry.pieces);
+            }
             let used = std::mem::replace(self.rows.entry_mut(slot), entry);
             debug_assert!(used.glyphs.is_empty());
         }
@@ -727,14 +769,58 @@ impl Frame {
         for &slot in rows.order.iter().filter(|&&s| s != MISSING) {
             self.rects.extend_from_slice(&rows.entry(slot).backgrounds);
         }
+        self.split.backgrounds = self.rects.len();
+
+        // Images: direct placements, and the pieces placeholder cells show.
+        let pieces = rows
+            .order
+            .iter()
+            .enumerate()
+            .filter(|&(_, &s)| s != MISSING)
+            .filter_map(|(line, &slot)| {
+                let p = &rows.entry(slot).pieces;
+                (!p.is_empty()).then_some((line, p.as_slice()))
+            });
+        let grid = Grid {
+            cw: cw as f32,
+            ch: ch as f32,
+            px: px as f32,
+            py: py as f32,
+            cols: snap.cols,
+            lines: snap.lines,
+        };
+        if snap.placements.is_empty() && snap.virtual_placements.is_empty() {
+            self.images.clear();
+        } else {
+            self.images.build(snap, pieces, grid);
+        }
+        let images = &self.images;
+        // A highlight over image cells is a tint, so the image shows.
+        let highlight = |rects: &mut Vec<RectInstance>, line: usize, a: usize, b: usize, color: Rgba| {
+            let mut at = a;
+            for c in images.covered_on(line) {
+                let (c0, c1) = ((c.start as usize).max(at), (c.end as usize).min(b));
+                if c0 >= c1 {
+                    continue;
+                }
+                if at < c0 {
+                    rects.push(full(line, at..c0, color));
+                }
+                rects.push(full(line, c0..c1, with_alpha(color, ((color >> 24) / 2) as u8)));
+                at = c1;
+            }
+            if at < b {
+                rects.push(full(line, at..b, color));
+            }
+        };
         // Highlights (search hits under the selection), then the block
         // cursor over them.
         for (line, row) in snap.rows.iter().enumerate() {
             for h in snap.row_highlights(row) {
                 let (a, b) = (h.cols.start as usize, (h.cols.end as usize).min(cols));
                 match h.kind {
-                    HighlightKind::SearchHit if a < b => self.rects.push(full(line, a..b, theme.search_hit)),
-                    HighlightKind::CurrentSearchHit if a < b => self.rects.push(full(line, a..b, theme.search_current)),
+                    HighlightKind::SearchHit if a < b => highlight(&mut self.rects, line, a, b, theme.search_hit),
+                    HighlightKind::CurrentSearchHit if a < b => highlight(&mut self.rects, line, a, b, theme.search_current),
                     _ => {}
                 }
             }
@@ -744,7 +830,7 @@ impl Frame {
                 let (a, b) = (h.cols.start as usize, (h.cols.end as usize).min(cols));
                 match h.kind {
                     _ if a >= b => {}
-                    HighlightKind::Selection => self.rects.push(full(line, a..b, theme.selection)),
+                    HighlightKind::Selection => highlight(&mut self.rects, line, a, b, theme.selection),
                     // Underlined in the text colour, over the backgrounds.
                     HighlightKind::HoveredLink => self.decorations.push(RectInstance {
                         y: s16(row_y(line) + (m.baseline + m.underline_offset) as i32),
@@ -814,11 +900,14 @@ impl Frame {
             }
         }
 
+        let before = self.decorations.len();
         if let Some(c) = &cursor
             && block.is_none()
         {
             self.cursor_rects(c, input);
         }
+        let base = self.rects.len();
+        self.split.cursor = base + before..base + self.decorations.len();
         if let Some((text, at)) = preedit {
             self.draw_preedit(text, at, cols, input, glyphs);
         }
@@ -912,6 +1001,12 @@ impl Frame {
             self.draw_preedit(text, at, cols, input, glyphs);
         }
         self.rects.extend_from_slice(&self.decorations);
+        // The reference path draws no images.
+        self.images.clear();
+        self.split = RectSplit {
+            backgrounds: self.rects.len(),
+            cursor: 0..0,
+        };
     }
 
     /// A cursor other than a focused block: a bar, an underline or (when

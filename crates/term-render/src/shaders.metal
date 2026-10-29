@@ -80,3 +80,49 @@ fragment float4 glyph_fragment(GlyphOut in [[stage_in]],
     float a = mask.sample(s, in.uv).r * in.color.a;
     return float4(in.color.rgb * a, a);
 }
+
+// Pieces of images (images.md §6.3): `ImageInstance` in images.rs.
+struct Image {
+    short2 pos;
+    short2 size;
+    packed_float4 uv;    // texels at the left, top, right, bottom edges
+    packed_float4 clamp; // samples stay inside these texels
+    float scale;  // texels per pixel
+    uint pad;
+};
+
+struct ImageOut {
+    float4 pos [[position]];
+    float2 uv;
+    float4 clamp [[flat]];
+    float2 step [[flat]];
+};
+
+vertex ImageOut image_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
+                             constant Image *images [[buffer(0)]],
+                             constant Uniforms &u [[buffer(1)]]) {
+    Image im = images[iid];
+    float2 corner = float2(vid & 1, vid >> 1);
+    ImageOut o;
+    o.pos = to_clip(u.origin + float2(im.pos) + corner * float2(im.size), u.viewport);
+    o.uv = mix(im.uv.xy, im.uv.zw, corner);
+    o.clamp = im.clamp;
+    // A quarter of a pixel's footprint in texels, for the 2x2 box when the
+    // image is drawn at less than half size; 0 otherwise.
+    float2 texels = abs(im.uv.zw - im.uv.xy) / max(float2(im.size), float2(1.0));
+    o.step = im.scale > 2.0 ? texels * 0.25 : float2(0.0);
+    return o;
+}
+
+fragment float4 image_fragment(ImageOut in [[stage_in]], texture2d<float> image [[texture(0)]]) {
+    constexpr sampler s(coord::pixel, filter::linear, address::clamp_to_edge);
+    float2 lo = in.clamp.xy, hi = in.clamp.zw;
+    if (in.step.x == 0.0 && in.step.y == 0.0) {
+        return image.sample(s, clamp(in.uv, lo, hi)); // premultiplied BGRA
+    }
+    float4 c = image.sample(s, clamp(in.uv + float2(-in.step.x, -in.step.y), lo, hi));
+    c += image.sample(s, clamp(in.uv + float2(in.step.x, -in.step.y), lo, hi));
+    c += image.sample(s, clamp(in.uv + float2(-in.step.x, in.step.y), lo, hi));
+    c += image.sample(s, clamp(in.uv + float2(in.step.x, in.step.y), lo, hi));
+    return c * 0.25;
+}

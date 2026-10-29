@@ -212,6 +212,10 @@ pub struct Config {
     /// `[keybind]`: shortcuts remapped, unbound, or sending text; see
     /// [`crate::keybind`].
     pub keybind: KeybindConfig,
+    /// Check for updates once a day and install them when the app quits
+    /// (docs/design/updater.md). Only Terminal Decline.app's own process
+    /// reads it; pins never update themselves.
+    pub update: bool,
     /// Set in a pin's config: the app bundle it belongs to.
     #[allow(dead_code)]
     pub pin_app: Option<String>,
@@ -248,6 +252,7 @@ impl Default for Config {
             colors: Colors::default(),
             palettes: Palettes::default(),
             keybind: KeybindConfig::default(),
+            update: true,
             pin_app: None,
         }
     }
@@ -1025,6 +1030,15 @@ mod tests {
         assert!(!c.copy_on_select);
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert!(errors[0].starts_with("config: copy_on_select: "), "{errors:?}");
+    }
+
+    #[test]
+    fn update_is_on_unless_turned_off() {
+        assert!(Config::default().update);
+        assert!(!parse("update = false").0.update);
+        let (c, errors) = parse("update = 'no'");
+        assert!(c.update);
+        assert!(errors[0].starts_with("config: update: "), "{errors:?}");
     }
 
     #[test]

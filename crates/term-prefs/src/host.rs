@@ -160,6 +160,7 @@ opacity = 1.0
 blur = false
 copy_on_select = false
 confirm_close = false
+update = true
 columns = 100
 lines = 30
 command = []

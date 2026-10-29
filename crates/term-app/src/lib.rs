@@ -38,6 +38,7 @@ pub mod session;
 #[cfg(test)]
 mod testutil;
 pub mod theme;
+pub mod update;
 mod view;
 pub mod watch;
 

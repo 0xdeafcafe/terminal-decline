@@ -7,8 +7,10 @@ any command as its own Dock app.
 ## Goals
 
 - **Idle costs nothing.** No timers, no redraws, no wakeups while nothing
-  changes. Cursor blink (when an app asks for it) is the only timer, and it
-  stops when the window is hidden or unfocused.
+  changes. Cursor blink (when an app asks for it) is the only timer of our
+  own, and it stops when the window is hidden or unfocused. Sparkle keeps
+  one daily wall-clock timer for the update check (docs/design/updater.md
+  §4).
 - **Small memory.** Measured as macOS *physical footprint* (what Activity
   Monitor shows; RSS misses GPU surfaces), compared at the same window pixel
   size. The two window drawables are unavoidable (~6.6 MB each at

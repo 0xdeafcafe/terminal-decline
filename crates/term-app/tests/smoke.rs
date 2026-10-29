@@ -143,6 +143,40 @@ fn check_dump(d: &Value) {
     assert!(num(d, "cell_width") > 0.0 && num(d, "cell_height") > 0.0, "{d}");
 }
 
+/// The bare binary never runs the updater: `update-check` does nothing,
+/// and the dump says why it is off (docs/design/updater.md §2).
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_updater_is_off_outside_the_app() {
+    if !have_metal() {
+        return;
+    }
+    let dir = TempDir::new("update");
+    let script = format!("{}{}{}sleep 20", osc("update-check"), osc("dump"), osc("quit"));
+    let (status, _) = decline(&dir, &script, true);
+    assert!(status.success(), "{status}");
+    let d = dumps(&dir);
+    assert_eq!(d.len(), 1, "{d:?}");
+    assert_eq!(d[0]["update"], "off: not Terminal Decline.app (the bare binary)", "{}", d[0]);
+}
+
+/// A pin never loads Sparkle: its dump says the updater is off as a pin.
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_updater_is_off_in_a_pin() {
+    if !have_metal() {
+        return;
+    }
+    let dir = TempDir::new("update-pin");
+    let unique = format!("{}", std::process::id());
+    let script = format!("echo pin; sleep 0.3; {}{}{}sleep 20", osc("update-check"), osc("dump"), osc("quit"));
+    let app = temp_bundle(&dir, &format!("Terminal Decline Update {unique}"), &script);
+    let d = launch_bundle(&dir, &app);
+    assert_eq!(d.len(), 1, "{d:?}");
+    let update = d[0]["update"].as_str().unwrap_or_default();
+    assert!(update.starts_with("off: "), "{}", d[0]);
+}
+
 #[test]
 #[ignore = "opens a window; run with --run-ignored"]
 fn smoke_program_output_is_drawn() {

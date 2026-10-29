@@ -71,6 +71,8 @@ pub struct AppIvars {
     /// The errors of the config in effect, so a reload writes only new
     /// ones into the windows.
     errors: RefCell<Vec<String>>,
+    /// How this process started: only the app runs the updater.
+    role: crate::entry::Role,
 }
 
 define_class!(
@@ -99,6 +101,13 @@ define_class!(
             unsafe { NSApplication::sharedApplication(mtm).setServicesProvider(Some(self)) };
             self.watch_for_new_build();
             self.watch_config();
+            // The updater (docs/design/updater.md): off in pins, dogfood,
+            // nightly and ad-hoc builds; on, the app menu gains Check for
+            // Updates….
+            if crate::update::sparkle::start(&self.ivars().role, self.ivars().config.borrow().update) {
+                let menus = build_menus(mtm, &self.ivars().app_name, &self.ivars().config.borrow().keybinds());
+                NSApplication::sharedApplication(mtm).setMainMenu(Some(&menus));
+            }
             crate::latency::listen(|cmd| {
                 let delegate = DELEGATE.with(|d| d.borrow().as_ref().and_then(|w| w.load()));
                 if let Some(delegate) = delegate {
@@ -209,6 +218,12 @@ define_class!(
             self.new_tab_in_front();
         }
 
+        /// Terminal Decline > Check for Updates….
+        #[unsafe(method(checkForUpdates:))]
+        fn check_for_updates(&self, _sender: Option<&AnyObject>) {
+            crate::update::sparkle::check_now();
+        }
+
         /// Terminal Decline > Settings… (Cmd+,).
         #[unsafe(method(showSettings:))]
         fn show_settings_item(&self, _sender: Option<&AnyObject>) {
@@ -297,6 +312,7 @@ impl AppDelegate {
         restore: Vec<crate::reload::SavedWindow>,
         origin: crate::config::Source,
         app_name: &str,
+        role: crate::entry::Role,
     ) -> Retained<AppDelegate> {
         // A choice made before the rename, under the old bundle id. The
         // main bundle is this process's: the app's, or in a pin the pin's
@@ -315,6 +331,7 @@ impl AppDelegate {
             quit_without_asking: Cell::new(false),
             settings: RefCell::new(None),
             errors: RefCell::new(notices.clone()),
+            role,
             notices: RefCell::new(notices.into()),
             fonts_checked: std::cell::Cell::new(false),
             windows: RefCell::new(Vec::new()),
@@ -371,7 +388,8 @@ impl AppDelegate {
         }
         let settings_open = self.ivars().settings.borrow().is_some();
         shown.retain(|n| !settings_open && !before.contains(n));
-        if old.keybind != config.keybind {
+        crate::update::sparkle::set_setting(config.update);
+        if old.keybind != config.keybind || old.update != config.update {
             let mtm = MainThreadMarker::from(self);
             let menus = build_menus(mtm, &self.ivars().app_name, &config.keybinds());
             NSApplication::sharedApplication(mtm).setMainMenu(Some(&menus));
@@ -904,6 +922,23 @@ pub(crate) fn secure_input_held() -> bool {
     delegate.is_some_and(|d| d.ivars().secure.borrow().held())
 }
 
+/// The programs running in every window, as quitting would end them.
+pub(crate) fn running_programs() -> Vec<String> {
+    let delegate = DELEGATE.with(|d| d.borrow().as_ref().and_then(|w| w.load()));
+    let Some(delegate) = delegate else { return Vec::new() };
+    let views: Vec<_> = delegate.ivars().windows.borrow().iter().map(|(_, v)| v.clone()).collect();
+    views.iter().flat_map(|v| v.running_programs()).collect()
+}
+
+/// The next quit doesn't ask, whatever `confirm_close` says: Quit and
+/// Install already asked.
+pub(crate) fn allow_quit_without_asking() {
+    let delegate = DELEGATE.with(|d| d.borrow().as_ref().and_then(|w| w.load()));
+    if let Some(delegate) = delegate {
+        delegate.ivars().quit_without_asking.set(true);
+    }
+}
+
 /// Quit without asking (the test-only `quit` control command).
 pub(crate) fn quit_now() {
     let delegate = DELEGATE.with(|d| d.borrow().as_ref().and_then(|w| w.load()));
@@ -1055,6 +1090,15 @@ pub fn build_menus(mtm: MainThreadMarker, app_name: &str, binds: &Keybinds) -> R
         &bar,
         app_name,
         &[
+            // Only while the updater runs (docs/design/updater.md §3.4).
+            match crate::update::sparkle::menu_shown() {
+                true => [
+                    b(MenuAction::CheckForUpdates.label(), MenuAction::CheckForUpdates),
+                    vec![NSMenuItem::separatorItem(mtm)],
+                ]
+                .concat(),
+                false => Vec::new(),
+            },
             b(MenuAction::Settings.label(), MenuAction::Settings),
             vec![
                 item(mtm, "Edit config.toml", Some(sel!(editConfig:)), ""),
@@ -1164,13 +1208,20 @@ thread_local! {
     static DELEGATE: RefCell<Option<objc2::rc::Weak<AppDelegate>>> = const { RefCell::new(None) };
 }
 
-pub fn run(config: Config, notices: Vec<String>, app_name: &str, restore: Vec<crate::reload::SavedWindow>, origin: crate::config::Source) {
+pub fn run(
+    config: Config,
+    notices: Vec<String>,
+    app_name: &str,
+    restore: Vec<crate::reload::SavedWindow>,
+    origin: crate::config::Source,
+    role: crate::entry::Role,
+) {
     let mtm = MainThreadMarker::new().expect("must run on the main thread");
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
     crate::notify::on_click(crate::view::bring_to_front);
     let menus = build_menus(mtm, app_name, &config.keybinds());
-    let delegate = AppDelegate::new(mtm, config, notices, restore, origin, app_name);
+    let delegate = AppDelegate::new(mtm, config, notices, restore, origin, app_name, role);
     app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
     app.setMainMenu(Some(&menus));
     app.run();

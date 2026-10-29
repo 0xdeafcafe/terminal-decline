@@ -418,6 +418,13 @@ pub const SETTINGS: &[Setting] = &[
             "the program's own",
         )
     }),
+    setting(
+        "update",
+        "Check for updates",
+        Advanced,
+        Editor::Toggle,
+        "Check for updates once a day and install them when the app quits (the app only, never pins)",
+    ),
     Setting {
         hidden: true,
         ..setting(
@@ -556,6 +563,7 @@ mod tests {
                 "cwd",
                 "env",
                 "title",
+                "update",
                 "pin_app",
             ]
         );

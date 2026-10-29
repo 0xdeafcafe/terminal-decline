@@ -53,6 +53,8 @@
 //! - `find TEXT`: put TEXT in the focused pane's find bar (Cmd+F opens
 //!   it, as `menu find` does) and search, as typing it does once the
 //!   field's delay runs out;
+//! - `update-check`: a background update check now, as the daily one is
+//!   (nothing while the updater is off; see [`crate::update`]);
 //! - `quit`: quit the app, without asking.
 //!
 //! While this is on, the window draws even when covered by other windows,
@@ -246,6 +248,8 @@ pub enum Control {
     /// Put this text in the focused pane's find bar and search, as typing
     /// it does once the field's delay runs out.
     Find(String),
+    /// A background update check.
+    UpdateCheck,
     Quit,
 }
 
@@ -294,6 +298,7 @@ impl Control {
         let c = match words.next()? {
             "dump" => Control::Dump,
             "quit" => Control::Quit,
+            "update-check" => Control::UpdateCheck,
             "tab" => Control::Tab,
             "front" => Control::Front,
             "close" => Control::Close,
@@ -411,6 +416,10 @@ pub struct Dump {
     /// Settings tab. For the whole app, like `notifications`.
     pub settings_ready: bool,
     pub settings_recording: bool,
+    /// The updater's state ([`crate::update::status`]): `off: <why>`,
+    /// `on`, `checking`, `found`, `none`, `ready` (installs on quit) or
+    /// `error: …`. For the whole app.
+    pub update: String,
     /// `Terminal::dump()` of the focused pane: the visible rows and a
     /// status line.
     pub screen: String,
@@ -604,6 +613,8 @@ mod tests {
             ("drop ", None),
             ("drop", None),
             ("settings", Some(Control::Settings)),
+            ("update-check", Some(Control::UpdateCheck)),
+            ("update-check now", None),
             (
                 "key 45 cmd+shift",
                 Some(Control::Key {

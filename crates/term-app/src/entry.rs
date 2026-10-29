@@ -158,7 +158,7 @@ pub fn run(role: Role, args: Vec<String>) -> i32 {
     }
     let name = app_name(&role, &paths);
     // Shown in each window too: an app started from the Dock has no stderr.
-    app::run(config, errors, &name, restore, from);
+    app::run(config, errors, &name, restore, from, role);
     0
 }
 

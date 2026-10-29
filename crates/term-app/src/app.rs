@@ -167,6 +167,12 @@ impl AppDelegate {
                 }
                 crate::latency::post_key(keycode);
             }
+            C::Type(bytes) => {
+                let view = self.ivars().windows.borrow().first().map(|(_, v)| v.clone());
+                if let Some(view) = view {
+                    view.latency_type(bytes);
+                }
+            }
             C::Open(argv) => {
                 // Behind the window being typed in, which stays key.
                 let key = NSApplication::sharedApplication(mtm).keyWindow();

@@ -53,6 +53,9 @@ EXTRA_ENV = {}
 
 # macOS virtual key codes (ANSI layout).
 KEY_A, KEY_X, KEY_N, KEY_SLASH, KEY_DELETE = 0, 7, 45, 44, 51
+# With --type: the bytes each key sends, typed in without the window server.
+TYPED = {KEY_A: b"a", KEY_X: b"x", KEY_SLASH: b"/", KEY_DELETE: b"\x7f"}
+TYPE = False
 
 STAGES = [
     ("total", "t0", "t3", "key event → on glass"),
@@ -253,7 +256,7 @@ def run_inapp(bundle, scenario, hz, n_keys, out_dir):
         def press(code):
             """Send a key; whether it was logged within a second."""
             want = line_count(log) + 1
-            ctl.write(f"key {code}\n")
+            ctl.write(f"type {TYPED[code].hex()}\n" if TYPE else f"key {code}\n")
             deadline = time.monotonic() + 1.0
             while line_count(log) < want:
                 if time.monotonic() > deadline:
@@ -365,9 +368,16 @@ def main():
     ap.add_argument("--external", default="", help="terminals to measure from outside: decline,ghostty")
     ap.add_argument("--out", default=str(ROOT / "target/latency"))
     ap.add_argument("--env", action="append", default=[], metavar="NAME=VALUE", help="set for decline; repeatable")
+    ap.add_argument(
+        "--type",
+        action="store_true",
+        help="in-app: type the keys' bytes straight into the first window instead of posting key events (no focus needed; t0 is then keyDown)",
+    )
     ap.add_argument("--tag", default="", help="suffix for the summary keys, to keep variants apart")
     args = ap.parse_args()
     EXTRA_ENV.update(e.split("=", 1) for e in args.env)
+    global TYPE
+    TYPE = args.type
     out_dir = Path(args.out).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     summary_file = out_dir / "summary.json"

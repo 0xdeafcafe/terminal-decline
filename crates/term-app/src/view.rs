@@ -39,6 +39,8 @@ use crate::mouse;
 use crate::session::{Hooks, Outcome, Session};
 
 const BLINK_INTERVAL: Duration = Duration::from_millis(530);
+/// How long a tick waits for the echo of input before drawing without it.
+const ECHO_WAIT: Duration = Duration::from_millis(8);
 
 struct State {
     session: Session,
@@ -72,6 +74,9 @@ struct State {
     /// Only with `DECLINE_LATENCY_LOG` set: the key event being handled,
     /// its timestamp and when `keyDown` got it (see [`crate::latency`]).
     key_t0: Option<(f64, f64)>,
+    /// When input was last sent and its echo not yet drawn: the first
+    /// output after it is drawn at once, not on the next tick.
+    awaiting_echo: Option<Instant>,
 }
 
 /// Test-only control commands waiting to run, and the dump in progress.
@@ -111,7 +116,7 @@ fn with_view(id: usize, f: impl FnOnce(&TerminalView)) {
 
 /// Wake the main thread to draw (called from any thread).
 fn wake(id: usize) {
-    DispatchQueue::main().exec_async(move || with_view(id, |v| v.unpause()));
+    DispatchQueue::main().exec_async(move || with_view(id, |v| v.output_arrived()));
 }
 
 define_class!(
@@ -299,10 +304,12 @@ define_class!(
         fn insert_text(&self, string: &AnyObject, _range: NSRange) {
             let text = string_of(string);
             self.with_state(|st| st.marked.clear());
-            if !text.is_empty() {
+            if text.is_empty() {
+                self.request_redraw();
+            } else {
+                // Drawn with the echo (see `send_input`).
                 self.send_input(text.into_bytes());
             }
-            self.request_redraw();
         }
 
         #[unsafe(method(doCommandBySelector:))]
@@ -473,6 +480,7 @@ impl TerminalView {
             held: false,
             test,
             key_t0: None,
+            awaiting_echo: None,
         });
         self.resize();
         Ok(())
@@ -519,6 +527,21 @@ impl TerminalView {
         }
     }
 
+    /// The program wrote something (the dirty flag was clear). If it may be
+    /// the echo of input, draw now rather than on the next tick.
+    fn output_arrived(&self) {
+        let echo = self.with_state(|st| st.awaiting_echo.take().is_some());
+        if echo == Some(true) {
+            self.with_state(|st| {
+                st.idle_ticks = 0;
+                st.link.setPaused(false);
+            });
+            self.draw();
+        } else {
+            self.unpause();
+        }
+    }
+
     fn request_redraw(&self) {
         self.with_state(|st| st.session.mark_dirty());
         self.unpause();
@@ -539,7 +562,18 @@ impl TerminalView {
         // dump never waits forever for a frame.
         let visible = visible || st.test.is_some();
         let term = st.session.term().clone();
-        let dirty = st.session.take_dirty();
+        let mut dirty = st.session.take_dirty();
+        if let Some(sent) = st.awaiting_echo {
+            if sent.elapsed() >= ECHO_WAIT {
+                // No echo: draw what the input changed (cursor, scroll).
+                st.awaiting_echo = None;
+                dirty = true;
+            } else if !dirty {
+                // Keep ticking until the echo comes or the wait is over.
+                st.idle_ticks = 0;
+                return;
+            }
+        }
         // Only a frame that may be drawn needs the terminal's lock.
         let mut t = (dirty && visible).then(|| crate::session::lock(&term));
         let synchronized = t.as_ref().is_some_and(|t| t.state.modes().synchronized);
@@ -815,7 +849,24 @@ impl TerminalView {
             lat.key_sent(self.ivars().id, t0, key_down, len);
         }
         self.send_raw(bytes);
-        self.request_redraw();
+        // Don't draw yet: the echo is usually well under a millisecond away.
+        // A frame now would take the free drawable and clear the dirty flag,
+        // so the echo would wait for the next tick. Instead the first output
+        // after this is drawn as soon as it's parsed (`output_arrived`);
+        // with none, a tick draws after `ECHO_WAIT`.
+        self.with_state(|st| {
+            st.awaiting_echo = Some(Instant::now());
+            st.idle_ticks = 0;
+            st.link.setPaused(false);
+        });
+    }
+
+    /// Bytes typed for the latency harness (its `type` command).
+    pub fn latency_type(&self, bytes: Vec<u8>) {
+        let t = latency::now();
+        self.with_state(|st| st.key_t0 = Some((t, t)));
+        self.send_input(bytes);
+        self.with_state(|st| st.key_t0 = None);
     }
 
     fn send_raw(&self, bytes: Vec<u8>) {

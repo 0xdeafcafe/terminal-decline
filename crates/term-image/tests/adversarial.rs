@@ -141,3 +141,62 @@ fn large_gif_averages_without_overflow() {
     assert_eq!(r, Ok(true));
     assert_eq!(t.pixel(0, 0), WHITE);
 }
+
+/// A matrix/TRC ICC profile whose `rXYZ`, `gXYZ` and `bXYZ` are all
+/// 5.5 × the D50 white, with a linear `rTRC` (a `curv` of no entries):
+/// the conversion to Display P3 then has about 5.5 in every entry, under
+/// the sanity check's 8, and 5.5 in Q12 times linear white overflowed
+/// the matrix's 32-bit sums.
+fn bright_profile() -> Vec<u8> {
+    let mut p = vec![0u8; 128];
+    p[16..20].copy_from_slice(b"RGB ");
+    p[20..24].copy_from_slice(b"XYZ ");
+    p[36..40].copy_from_slice(b"acsp");
+    let tags: [&[u8; 4]; 4] = [b"rXYZ", b"gXYZ", b"bXYZ", b"rTRC"];
+    p.extend_from_slice(&(tags.len() as u32).to_be_bytes());
+    let data_at = p.len() + tags.len() * 12;
+    let fixed = |v: f64| ((v * 65536.0).round() as i32).to_be_bytes();
+    let mut data = Vec::new();
+    for (n, sig) in tags.iter().enumerate() {
+        let at = data_at + data.len();
+        let start = data.len();
+        if n < 3 {
+            data.extend_from_slice(b"XYZ \0\0\0\0");
+            for v in [0.9642, 1.0, 0.8249] {
+                data.extend_from_slice(&fixed(5.5 * v));
+            }
+        } else {
+            data.extend_from_slice(b"curv\0\0\0\0\0\0\0\0");
+        }
+        p.extend_from_slice(*sig);
+        p.extend_from_slice(&(at as u32).to_be_bytes());
+        p.extend_from_slice(&((data.len() - start) as u32).to_be_bytes());
+    }
+    p.extend(data);
+    p
+}
+
+#[test]
+fn bright_profile_converts_without_overflow() {
+    let _g = lock();
+    let t = term_image::color::ToP3::from_icc(&bright_profile()).unwrap();
+    assert_eq!(t.rgb([255, 255, 255]), [255, 255, 255]);
+    assert_eq!(t.rgb([0, 0, 0]), [0, 0, 0]);
+}
+
+/// The same through decode(): a 1 × 1 white PNG carrying the profile.
+#[test]
+fn bright_profile_in_a_png_decodes_without_overflow() {
+    let _g = lock();
+    let zlib = |data: &[u8]| miniz_oxide::deflate::compress_to_vec_zlib(data, 6);
+    let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+    chunk(&mut png, b"IHDR", &[0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0]);
+    let mut iccp = b"bright\0\0".to_vec();
+    iccp.extend(zlib(&bright_profile()));
+    chunk(&mut png, b"iCCP", &iccp);
+    chunk(&mut png, b"IDAT", &zlib(&[0, 255, 255, 255]));
+    chunk(&mut png, b"IEND", &[]);
+    let (r, t, _) = decode_counted(&png, (1, 1), &Options::default());
+    assert_eq!(r, Ok(true));
+    assert_eq!(t.pixel(0, 0), WHITE);
+}

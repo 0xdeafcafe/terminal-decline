@@ -7,6 +7,7 @@
 
 pub mod cell;
 pub mod clusters;
+mod links;
 pub mod rows;
 pub mod scrollback;
 pub mod style;
@@ -15,7 +16,8 @@ pub mod term;
 pub mod unicode;
 pub mod word;
 
-pub use cell::{Cell, Color, ColorKind, Row};
+pub use cell::{Cell, Color, ColorKind, Mark, MarkKind, Row};
+
 pub use rows::{CellRef, Content, RowRef, StyleKey, Width};
 pub use style::{Attrs, LinkId, Style, Underline};
 pub use style_table::StyleStats;

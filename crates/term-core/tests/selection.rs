@@ -398,13 +398,6 @@ fn view_top_names_the_first_row_shown() {
 }
 
 #[test]
-fn no_links_yet() {
-    let mut t = Term::new(20, 2, 100);
-    t.advance(b"\x1b]8;;https://example.com\x1b\\link\x1b]8;;\x1b\\");
-    assert_eq!(t.state.link_at(t.state.point_at(0, 1)), None);
-}
-
-#[test]
 fn reset_keeps_pending_replies() {
     let mut t = Term::new(10, 2, 0);
     t.advance(b"\x1b[5n\x1b[2;2H\x1bc\x1b[6n");

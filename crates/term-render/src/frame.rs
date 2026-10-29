@@ -2,10 +2,13 @@
 //! tested and benchmarked on its own.
 
 use term_core::{Attrs, Cell, CellRef, ColorKind, Content, CursorShape, HighlightKind, RowFlags, StyleKey, Terminal, Underline, Width};
-use term_font::{Fonts, GlyphKey, Metrics, ShapedGlyph, Style as FontStyle};
+use term_font::{Features, Fonts, GlyphKey, Metrics, RunText, SPRITE_FONT, ShapedGlyph, SpriteId, Style as FontStyle};
 use unicode_width::UnicodeWidthChar;
 
-use crate::row_cache::{Built, Entry, MISSING, Mark, RowCache};
+use std::collections::HashMap;
+use std::hash::BuildHasherDefault;
+
+use crate::row_cache::{Built, Entry, KeyHasher, MISSING, Mark, RowCache};
 use crate::shape_cache::ShapeCache;
 
 /// RGBA8 with red in the low byte (matches `unpack_unorm4x8_to_float`).
@@ -66,6 +69,9 @@ impl GlyphInstance {
     pub const COLOR: u32 = 1;
     /// The cell is dim (its text colour has a lower alpha).
     const DIM: u32 = 1 << 1;
+    /// Keeps its colour under the block cursor: an underline pattern in
+    /// the underline colour the style sets, as its rectangles would.
+    const FIXED: u32 = 1 << 2;
     const COL_SHIFT: u32 = 16;
 
     /// `is_color` for a glyph from `slot` in column `col`.
@@ -120,9 +126,12 @@ pub trait GlyphSource {
         0
     }
 
-    /// The slot for a shaped glyph's key: ligatures, contextual
-    /// alternates and the other glyphs of cells shaped with them. `None`
-    /// as for [`glyph`](GlyphSource::glyph).
+    /// The slot for a glyph's key: the glyphs of cluster cells, ligatures,
+    /// contextual alternates and the other glyphs of cells shaped with
+    /// them, sprites across two cells (ambiguous code-drawn characters)
+    /// and underline patterns. `None` as for
+    /// [`glyph`](GlyphSource::glyph), and when there is no room for it in
+    /// the texture yet.
     fn glyph_key(&mut self, key: GlyphKey) -> Option<GlyphSlot> {
         let _ = key;
         None
@@ -201,11 +210,6 @@ impl Theme {
     }
 }
 
-/// Steps in a curly underline's wave per cell, and each step's offset from
-/// the underline in thicknesses (a coarse sine: up, back, down, back).
-const CURLY_SEGMENTS: i32 = 8;
-const CURLY_WAVE: [i32; CURLY_SEGMENTS as usize] = [0, -1, -1, 0, 0, 1, 1, 0];
-
 /// What a row needs from the frame around it.
 struct RowCtx<'a> {
     theme: &'a Theme,
@@ -236,12 +240,17 @@ struct Ink {
     drawn: bool,
 }
 
-/// Buffers for rows with substitutions, kept between rows.
+/// Buffers kept between rows: for rows with substitutions, and for
+/// shaping cluster cells.
 #[derive(Default)]
 struct Pieces {
     inks: Vec<Ink>,
     /// Columns whose own glyph a substitution replaces.
     replaced: Vec<bool>,
+    /// A cluster cell's text, and the glyphs it shaped into.
+    run: RunText,
+    shaped: Vec<ShapedGlyph>,
+    clusters: Clusters,
 }
 
 /// A cell as frame building reads it: `CellRef`, a snapshot's cells, and
@@ -253,6 +262,11 @@ pub(crate) trait CellView {
     fn style(&self) -> term_core::Style;
     fn content(&self) -> Content<'_>;
     fn is_spacer(&self) -> bool;
+    /// The left half of a two-cell character or cluster.
+    fn is_wide(&self) -> bool;
+    /// Neither a cluster nor either half of a two-cell cell: drawn as its
+    /// character alone, if any.
+    fn is_simple(&self) -> bool;
 }
 
 impl CellView for CellRef<'_> {
@@ -272,6 +286,14 @@ impl CellView for CellRef<'_> {
     #[inline]
     fn is_spacer(&self) -> bool {
         CellRef::is_spacer(self)
+    }
+    #[inline]
+    fn is_wide(&self) -> bool {
+        self.width() == Width::Wide
+    }
+    #[inline]
+    fn is_simple(&self) -> bool {
+        self.width() == Width::Narrow && !matches!(CellRef::content(self), Content::Cluster(_))
     }
 }
 
@@ -318,6 +340,15 @@ impl CellView for SnapCell<'_> {
     #[inline]
     fn is_spacer(&self) -> bool {
         self.cell.is_spacer()
+    }
+    #[inline]
+    fn is_wide(&self) -> bool {
+        self.cell.is_wide()
+    }
+    /// Two bit tests of one word, which compile to one.
+    #[inline]
+    fn is_simple(&self) -> bool {
+        !self.cell.is_wide_part() && !self.cell.is_cluster()
     }
 }
 
@@ -742,7 +773,7 @@ impl Frame {
                         continue;
                     }
                     let color = match () {
-                        _ if !on.contains(&col) => g.color,
+                        _ if !on.contains(&col) || g.is_color & GlyphInstance::FIXED != 0 => g.color,
                         _ if g.is_color & GlyphInstance::DIM != 0 => with_alpha(theme.cursor_text, 160),
                         _ => theme.cursor_text,
                     };
@@ -1035,21 +1066,65 @@ fn row_cells<const OVERLAY: bool, const LIG: bool, C: CellView, S: RowSink>(
                 drawn: !pen.attrs.contains(Attrs::HIDDEN) && !(OVERLAY && ctx.covered.contains(&col)),
             });
         }
-        // A cluster draws its first character until clusters are shaped
-        // (F3.2).
-        let c = match cell.content() {
-            Content::Char(c) => Some(c),
-            Content::Cluster(s) => s.chars().next(),
-            Content::Empty | Content::Placeholder { .. } => None,
-        };
-        if let Some(c) = c
-            && c != ' '
-            && !spacer
-            && !pen.attrs.contains(Attrs::HIDDEN)
-            && !(OVERLAY && ctx.covered.contains(&col))
-            && !(LIG && pieces.replaced[col])
-            && let Some(g) = glyphs.glyph(c as u32, pen.face())
-        {
+        let covered = OVERLAY && ctx.covered.contains(&col);
+        if cell.is_simple() {
+            // The common case, kept to one test of the cell: a character
+            // (or nothing) in one cell.
+            if let Content::Char(c) = cell.content()
+                && c != ' '
+                && !pen.attrs.contains(Attrs::HIDDEN)
+                && !covered
+                && !(LIG && pieces.replaced[col])
+                && let Some(g) = glyphs.glyph(c as u32, pen.face())
+            {
+                out.glyph(GlyphInstance {
+                    x: s16(x + g.left as i32),
+                    y: s16(y + m.baseline as i32 - g.top as i32),
+                    w: g.w,
+                    h: g.h,
+                    u: g.u,
+                    v: g.v,
+                    color: fg,
+                    is_color: GlyphInstance::flags(&g, col, pen.attrs.contains(Attrs::DIM)),
+                });
+            }
+        } else if !spacer && !pen.attrs.contains(Attrs::HIDDEN) && !covered && !(LIG && pieces.replaced[col]) {
+            let wide = cell.is_wide();
+            let dim = pen.attrs.contains(Attrs::DIM);
+            other_cell(cell.content(), wide, pen.face(), (col, x, y), fg, dim, m, glyphs, out, pieces);
+        }
+        if pen.decorated {
+            decorate(out, glyphs, pen, theme, fg, x, y, m, pen.mark(col), covered);
+        }
+        end = col + 1;
+    }
+    pad_row(out, ctx, end, run_start, run_color);
+}
+
+/// A cell that isn't a character in one cell: a wide character, a
+/// cluster, or a one-cell character in two cells.
+#[allow(clippy::too_many_arguments)]
+#[inline(never)]
+fn other_cell(
+    content: Content,
+    wide: bool,
+    face: FontStyle,
+    (col, x, y): (usize, i32, i32),
+    fg: Rgba,
+    dim: bool,
+    m: Metrics,
+    glyphs: &mut impl GlyphSource,
+    out: &mut impl RowSink,
+    pieces: &mut Pieces,
+) {
+    match content {
+        Content::Char(c) if c != ' ' => {
+            let Some(mut g) = glyphs.glyph(c as u32, face) else { return };
+            // A character wider than itself: an ambiguous-width one drawn
+            // at two cells.
+            if wide && char_cells(c) == 1 {
+                g = wide_narrow(c, g, m.cell_width as i32, glyphs);
+            }
             out.glyph(GlyphInstance {
                 x: s16(x + g.left as i32),
                 y: s16(y + m.baseline as i32 - g.top as i32),
@@ -1058,15 +1133,149 @@ fn row_cells<const OVERLAY: bool, const LIG: bool, C: CellView, S: RowSink>(
                 u: g.u,
                 v: g.v,
                 color: fg,
-                is_color: GlyphInstance::flags(&g, col, pen.attrs.contains(Attrs::DIM)),
+                is_color: GlyphInstance::flags(&g, col, dim),
             });
         }
-        if pen.decorated {
-            decorate(out, pen, theme, fg, x, y, m, pen.mark(col));
-        }
-        end = col + 1;
+        Content::Cluster(text) => draw_cluster(text, wide, face, (col, x, y), fg, dim, m, glyphs, out, pieces),
+        _ => {}
     }
-    pad_row(out, ctx, end, run_start, run_color);
+}
+
+/// The glyph of a one-cell character in a two-cell cell (an ambiguous-width
+/// character with `ambiguous_width = 2`, cells design §6.3), from `slot`,
+/// its glyph alone: a code-drawn one is the sprite across both cells, a
+/// font glyph is centred in them (at its font's size), a colour glyph is
+/// already fitted to two cells.
+fn wide_narrow(c: char, mut slot: GlyphSlot, cw: i32, glyphs: &mut impl GlyphSource) -> GlyphSlot {
+    if let Some(id) = SpriteId::for_char(c) {
+        return glyphs.glyph_key(GlyphKey::sprite(id, 2)).unwrap_or(slot);
+    }
+    if !slot.color {
+        slot.left += (cw / 2) as i16;
+    }
+    slot
+}
+
+/// A cluster cell (cells design §6.5): its text shaped alone through
+/// term-font's shaped-cluster cache (once: [`Clusters`] keeps what it
+/// drew), and each glyph drawn at the cell's
+/// origin plus its offset (combining marks). A cluster in two cells whose
+/// first character is one cell wide (an ambiguous character and its
+/// marks at `ambiguous_width = 2`) has its font glyphs centred, as
+/// [`wide_narrow`] does; emoji are colour glyphs already fitted to both.
+/// Without fonts (test sources) it draws its first character, where the
+/// cell starts.
+#[allow(clippy::too_many_arguments)]
+fn draw_cluster(
+    text: &str,
+    wide: bool,
+    face: FontStyle,
+    (col, x, y): (usize, i32, i32),
+    fg: Rgba,
+    dim: bool,
+    m: Metrics,
+    glyphs: &mut impl GlyphSource,
+    out: &mut impl RowSink,
+    pieces: &mut Pieces,
+) {
+    let Some(first) = text.chars().next() else { return };
+    let centre = wide && char_cells(first) == 1;
+    let place = |out: &mut _, slot: GlyphSlot, dx: i16, dy: i16, centred: bool| {
+        let shift = if centred { m.cell_width as i32 / 2 } else { 0 };
+        RowSink::glyph(
+            out,
+            GlyphInstance {
+                x: s16(x + shift + dx as i32 + slot.left as i32),
+                y: s16(y + m.baseline as i32 + dy as i32 - slot.top as i32),
+                w: slot.w,
+                h: slot.h,
+                u: slot.u,
+                v: slot.v,
+                color: fg,
+                is_color: GlyphInstance::flags(&slot, col, dim),
+            },
+        )
+    };
+    if glyphs.fonts().is_none() {
+        if let Some(slot) = glyphs.glyph(first as u32, face) {
+            place(out, slot, 0, 0, false);
+        }
+        return;
+    }
+    let Pieces { run, shaped, clusters, .. } = pieces;
+    let now = (glyphs.generation(), glyphs.fonts_key());
+    if clusters.against != now || clusters.map.len() >= CLUSTERS {
+        clusters.map.clear();
+        clusters.placed.clear();
+        clusters.against = now;
+    }
+    clusters.key.clear();
+    clusters.key.push(face as u8 | (wide as u8) << 2);
+    clusters.key.extend_from_slice(text.as_bytes());
+    if let Some(&(start, len)) = clusters.map.get(&clusters.key[..]) {
+        for p in &clusters.placed[start as usize..start as usize + len as usize] {
+            place(out, p.slot, p.dx, p.dy, p.centred);
+        }
+        return;
+    }
+    shaped.clear();
+    run.clear();
+    run.push(text, if wide { 2 } else { 1 });
+    if let Some(fonts) = glyphs.fonts() {
+        fonts.shape(run, face, Features::default(), shaped);
+    }
+    let start = clusters.placed.len();
+    let mut complete = true;
+    for g in shaped.iter() {
+        let Some(slot) = glyphs.glyph_key(g.key) else {
+            // No ink, or no room in the texture yet: not kept, as the
+            // glyph may be there when the row is built again.
+            complete = false;
+            continue;
+        };
+        let centred = centre && !slot.color && g.key.font != SPRITE_FONT;
+        place(out, slot, g.dx, g.dy, centred);
+        clusters.placed.push(Placed {
+            slot,
+            dx: g.dx,
+            dy: g.dy,
+            centred,
+        });
+    }
+    let len = clusters.placed.len() - start;
+    if complete && len <= u16::MAX as usize {
+        clusters.map.insert(clusters.key[..].into(), (start as u32, len as u16));
+    } else {
+        clusters.placed.truncate(start);
+    }
+}
+
+/// Clusters kept by [`Clusters`] before it is emptied: more different
+/// clusters than a 300×100 screen of them holds.
+const CLUSTERS: usize = 4096;
+
+/// Cluster cells' glyphs as drawn, by face, width and text, so a cluster
+/// drawn before costs one lookup rather than term-font's cache and a
+/// texture lookup per glyph (which made a screen of clusters 3× slower to
+/// build). Emptied when the glyph textures' generation or the fonts
+/// change, and when full; clusters with a glyph that wasn't found aren't
+/// kept.
+#[derive(Default)]
+struct Clusters {
+    /// (face | width, text) to a range of `placed`.
+    map: HashMap<Box<[u8]>, (u32, u16), BuildHasherDefault<KeyHasher>>,
+    placed: Vec<Placed>,
+    /// The glyph source's generation and fonts the slots came from.
+    against: (u64, u64),
+    key: Vec<u8>,
+}
+
+#[derive(Clone, Copy)]
+struct Placed {
+    slot: GlyphSlot,
+    dx: i16,
+    dy: i16,
+    centred: bool,
 }
 
 /// The substitutions of a row, after its cells: each glyph at its cell's
@@ -1149,17 +1358,33 @@ fn pad_row(out: &mut impl RowSink, ctx: &RowCtx, from: usize, mut run_start: usi
 /// Underline, overline and strike for one cell whose top-left corner is
 /// (`x`, `y`). `fg` is the text colour as drawn (after inverse, the block
 /// cursor and dim). Underlines take the style's underline colour when it
-/// has one (§10.5).
+/// has one (§10.5). Single and double underlines, overline and strike are
+/// rectangles; curly, dotted and dashed underlines are term-font's pattern
+/// sprites, one glyph per cell, left out under input-method text (which
+/// hides glyphs, where rectangles are drawn over).
 #[allow(clippy::too_many_arguments)]
-fn decorate(out: &mut impl RowSink, pen: Pen, theme: &Theme, fg: Rgba, x: i32, y: i32, m: Metrics, mark: Mark) {
+#[inline(never)]
+fn decorate(
+    out: &mut impl RowSink,
+    glyphs: &mut impl GlyphSource,
+    pen: Pen,
+    theme: &Theme,
+    fg: Rgba,
+    x: i32,
+    y: i32,
+    m: Metrics,
+    mark: Mark,
+    covered: bool,
+) {
     let cw = m.cell_width as i32;
     let t = m.underline_thickness.max(1) as i32;
     let text = Mark {
         flags: mark.flags | Mark::TEXT_COLOUR,
         ..mark
     };
-    let mut rect = |x: i32, y: i32, w: i32, color: Rgba, mark: Mark| {
-        out.decoration(
+    let rect = |out: &mut _, x: i32, y: i32, w: i32, color: Rgba, mark: Mark| {
+        RowSink::decoration(
+            out,
             RectInstance {
                 x: s16(x),
                 y: s16(y),
@@ -1176,49 +1401,48 @@ fn decorate(out: &mut impl RowSink, pen: Pen, theme: &Theme, fg: Rgba, x: i32, y
             ColorKind::Default => (fg, text),
             _ => (theme.resolve(pen.underline_color, fg), mark),
         };
-        let mut rect = |x, y, w| rect(x, y, w, color, mark);
-        // Curly, dotted and dashed are drawn from rectangles until
-        // term-font's pattern sprites land (F2.3, §10.5). Then each of
-        // them becomes one sprite quad per cell, pushed here.
-        match pen.underline {
-            Underline::None => {}
-            Underline::Single => rect(x, uy, cw),
+        let pattern = match pen.underline {
+            Underline::None => None,
+            Underline::Single => {
+                rect(out, x, uy, cw, color, mark);
+                None
+            }
             Underline::Double => {
-                rect(x, uy, cw);
-                rect(x, uy + 2 * t, cw);
+                rect(out, x, uy, cw, color, mark);
+                rect(out, x, uy + 2 * t, cw, color, mark);
+                None
             }
-            Underline::Dotted => {
-                // Square dots a thickness wide, a thickness apart.
-                let mut dx = 0;
-                while dx < cw {
-                    rect(x + dx, uy, t.min(cw - dx));
-                    dx += 2 * t;
-                }
-            }
-            Underline::Dashed => {
-                // One dash per cell, centred so the gaps line up across
-                // cells: three quarters of the cell, then a gap.
-                let gap = (cw / 4).max(1);
-                rect(x + gap / 2, uy, cw - gap);
-            }
-            Underline::Curly => {
-                // One period of a wave per cell, in steps a thickness
-                // above and below the underline.
-                for (i, dy) in CURLY_WAVE.iter().enumerate() {
-                    let x0 = i as i32 * cw / CURLY_SEGMENTS;
-                    let x1 = (i as i32 + 1) * cw / CURLY_SEGMENTS;
-                    if x1 > x0 {
-                        rect(x + x0, uy + dy * t, x1 - x0);
-                    }
-                }
-            }
+            Underline::Dotted => Some(SpriteId::UNDERLINE_DOTTED),
+            Underline::Dashed => Some(SpriteId::UNDERLINE_DASHED),
+            Underline::Curly => Some(SpriteId::UNDERLINE_CURLY),
+        };
+        if let Some(id) = pattern
+            && !covered
+            && let Some(g) = glyphs.glyph_key(GlyphKey::sprite(id, 1))
+        {
+            // In its own colour: kept under the block cursor.
+            let fixed = if mark.flags & Mark::TEXT_COLOUR == 0 {
+                GlyphInstance::FIXED
+            } else {
+                0
+            };
+            out.glyph(GlyphInstance {
+                x: s16(x + g.left as i32),
+                y: s16(y + m.baseline as i32 - g.top as i32),
+                w: g.w,
+                h: g.h,
+                u: g.u,
+                v: g.v,
+                color,
+                is_color: GlyphInstance::flags(&g, mark.col as usize, mark.flags & Mark::DIM != 0) | fixed,
+            });
         }
     }
     if pen.attrs.contains(Attrs::OVERLINE) {
-        rect(x, y, cw, fg, text);
+        rect(out, x, y, cw, fg, text);
     }
     if pen.attrs.contains(Attrs::STRIKE) {
-        rect(x, y + m.baseline as i32 - m.strike_offset as i32, cw, fg, text);
+        rect(out, x, y + m.baseline as i32 - m.strike_offset as i32, cw, fg, text);
     }
 }
 
@@ -1274,17 +1498,43 @@ mod tests {
         fn is_spacer(&self) -> bool {
             false
         }
+        fn is_wide(&self) -> bool {
+            false
+        }
+        fn is_simple(&self) -> bool {
+            true
+        }
     }
 
+    /// No character glyphs; sprites by key, as term-font draws underline
+    /// patterns: the cells' width, a thickness tall, at the underline
+    /// (`top` negative), with the sprite id in `u` and its cells in `v`.
     struct NoGlyphs;
     impl GlyphSource for NoGlyphs {
         fn glyph(&mut self, _: u32, _: FontStyle) -> Option<GlyphSlot> {
             None
         }
+        fn glyph_key(&mut self, key: GlyphKey) -> Option<GlyphSlot> {
+            let id = key.sprite_id()?;
+            Some(GlyphSlot {
+                u: id.0,
+                v: key.cells as u16,
+                w: M.cell_width as u16 * key.cells as u16,
+                h: T,
+                left: 0,
+                top: -(M.underline_offset as i16),
+                color: false,
+            })
+        }
     }
 
     /// The decorations of one row of `cells` at the top-left of the grid.
     fn decorations(theme: &Theme, cells: &[TestCell]) -> Vec<RectInstance> {
+        row(theme, cells).decorations
+    }
+
+    /// One row of `cells` at the top-left of the grid.
+    fn row(theme: &Theme, cells: &[TestCell]) -> Entry {
         let ctx = RowCtx {
             theme,
             m: M,
@@ -1298,7 +1548,7 @@ mod tests {
         };
         let mut e = Entry::default();
         build_row(&ctx, cells.iter().copied(), &mut NoGlyphs, &mut e, &mut Pieces::default());
-        e.decorations
+        e
     }
 
     fn styled(f: impl FnOnce(&mut Style)) -> Style {
@@ -1364,67 +1614,49 @@ mod tests {
     }
 
     #[test]
-    fn dotted_underline_is_square_dots_a_thickness_apart() {
+    fn patterned_underlines_are_one_sprite_per_cell() {
         let theme = Theme::default();
-        let s = styled(|s| s.underline = Underline::Dotted);
         let fg = theme.foreground;
-        // 16 pixels, dots 2 wide every 4: at 0, 4, 8 and 12.
-        let want: Vec<_> = (0..4).map(|i| line(i * 4, UY, T, fg)).collect();
-        assert_eq!(decorations(&theme, &[TestCell('a', s)]), want);
+        for (underline, id) in [
+            (Underline::Curly, SpriteId::UNDERLINE_CURLY),
+            (Underline::Dotted, SpriteId::UNDERLINE_DOTTED),
+            (Underline::Dashed, SpriteId::UNDERLINE_DASHED),
+        ] {
+            let s = styled(|s| s.underline = underline);
+            let e = row(&theme, &[TestCell('a', s), TestCell(' ', s)]);
+            assert_eq!(e.decorations, [], "{underline:?}");
+            let got: Vec<_> = e.glyphs.iter().map(|g| (g.x, g.y, g.w, g.h, g.u, g.v, g.color, g.col())).collect();
+            // At the underline, the sprite across one cell, in each cell.
+            let at = |col: i16| (col * 16, UY, 16, T, id.0, 1, fg, col as usize);
+            assert_eq!(got, [at(0), at(1)], "{underline:?}");
+            assert!(e.glyphs.iter().all(|g| g.is_color & GlyphInstance::FIXED == 0));
+        }
     }
 
     #[test]
-    fn dashed_underline_is_one_centred_dash_per_cell() {
+    fn patterned_underlines_in_their_own_colour_keep_it_under_the_cursor() {
         let theme = Theme::default();
-        let s = styled(|s| s.underline = Underline::Dashed);
-        let fg = theme.foreground;
-        assert_eq!(
-            decorations(&theme, &[TestCell('a', s), TestCell('b', s)]),
-            [line(2, UY, 12, fg), line(18, UY, 12, fg)]
-        );
-    }
-
-    #[test]
-    fn curly_underline_is_a_wave_across_the_cell() {
-        let theme = Theme::default();
-        let blue = Color::rgb(0, 0, 255);
-        let s = styled(|s| {
+        let blue = styled(|s| {
             s.underline = Underline::Curly;
-            s.underline_color = blue;
+            s.underline_color = Color::rgb(0, 0, 255);
         });
-        let d = decorations(&theme, &[TestCell('a', s)]);
-        // Eight steps of 2 pixels, edge to edge, in the underline colour.
-        assert_eq!(d.len(), 8);
-        assert!(d.iter().all(|r| r.w == 2 && r.h == T && r.color == rgb(0x0000ff)));
-        let xs: Vec<_> = d.iter().map(|r| r.x).collect();
-        assert_eq!(xs, [0, 2, 4, 6, 8, 10, 12, 14]);
-        // Up a thickness, back, down a thickness, back; inside the cell.
-        let ys: Vec<_> = d.iter().map(|r| r.y - UY).collect();
-        let t = T as i16;
-        assert_eq!(ys, [0, -t, -t, 0, 0, t, t, 0]);
-        assert!(d.iter().all(|r| r.y >= 0 && r.y + r.h as i16 <= M.cell_height as i16));
-    }
-
-    #[test]
-    fn curly_underline_on_narrow_cells_skips_empty_steps() {
-        let theme = Theme::default();
-        let m = Metrics { cell_width: 5, ..M };
-        let s = styled(|s| s.underline = Underline::Curly);
-        let ctx = RowCtx {
-            theme: &theme,
-            m,
-            px: 0,
-            y: 0,
-            cols: 1,
-            sel: 0..0,
-            block_cursor: 0..0,
-            covered: 0..0,
-            subs: &[],
-        };
-        let mut e = Entry::default();
-        build_row(&ctx, [TestCell('a', s)].into_iter(), &mut NoGlyphs, &mut e, &mut Pieces::default());
-        assert!(e.decorations.iter().all(|r| r.w > 0));
-        assert_eq!(e.decorations.iter().map(|r| r.w).sum::<u16>(), 5);
+        let dim = styled(|s| {
+            s.underline = Underline::Dotted;
+            s.attrs = Attrs::DIM;
+        });
+        let e = row(&theme, &[TestCell('a', blue), TestCell('b', dim)]);
+        let got: Vec<_> = e
+            .glyphs
+            .iter()
+            .map(|g| (g.color, g.is_color & (GlyphInstance::FIXED | GlyphInstance::DIM)))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (rgb(0x0000ff), GlyphInstance::FIXED),
+                (with_alpha(theme.foreground, 160), GlyphInstance::DIM)
+            ]
+        );
     }
 
     #[test]

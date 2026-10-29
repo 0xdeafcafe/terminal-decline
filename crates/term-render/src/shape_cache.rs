@@ -218,7 +218,9 @@ impl ShapeCache {
                 let a = cell.style().attrs;
                 face = FontStyle::new(a.contains(term_core::Attrs::BOLD), a.contains(term_core::Attrs::ITALIC));
             }
-            let (kind, ch) = if !lig[face as usize] || cell.is_spacer() {
+            // Two-cell cells end a stretch even when their character is one
+            // cell wide (ambiguous characters at `ambiguous_width = 2`).
+            let (kind, ch) = if !lig[face as usize] || cell.is_spacer() || cell.is_wide() {
                 (Kind::Edge, ' ')
             } else {
                 match cell.content() {
@@ -396,6 +398,12 @@ mod tests {
         }
         fn is_spacer(&self) -> bool {
             false
+        }
+        fn is_wide(&self) -> bool {
+            false
+        }
+        fn is_simple(&self) -> bool {
+            true
         }
     }
 

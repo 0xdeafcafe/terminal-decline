@@ -1077,6 +1077,80 @@ per-process shaped-cluster cache. Single scalars use the cached direct
 lookup when the font has no ligatures. Between the clusters PR and F3.2, a
 cluster cell draws at least its first character (§17.5).
 
+**Landed (F3.2).** What was built (`term-render/src/frame.rs`,
+`shape_cache.rs`; nothing changed in term-font or term-core), and where
+it differs from §6.3, §6.5 and §10:
+
+- **Cluster cells draw whole.** A cluster's text goes through
+  `Fonts::shape` alone (ligatures off: term-font's shaped-cluster cache),
+  each glyph looked up by `GlyphKey` in the shared glyph textures and
+  drawn at the cell's origin plus its offset. So ZWJ sequences, flags,
+  keycaps and skin tones are one Apple Color Emoji glyph across their two
+  cells, and `e` + U+0301 is Menlo's é. A source with no fonts (the frame
+  tests' fake) still draws the first character.
+- **A cache in front of it, per pane** (in the `Frame`): what each cluster
+  drew, by face, width and text, as slots and offsets, up to 4096
+  clusters, emptied when full and when the glyph textures' generation or
+  the fonts change. Without it a full screen of clusters took 3× as long
+  to build (term-font's cache plus a texture lookup per glyph, ~95 ns a
+  cluster); with it a cluster seen before is one lookup. A cluster with
+  a glyph not found (no ink, or no room in the texture yet) isn't kept,
+  so a row built again after the texture grows gets it.
+- **Ambiguous characters at two cells** (a one-cell character in a wide
+  cell): code-drawn ones use the sprite across two cells
+  (`GlyphKey::sprite(id, 2)`), font glyphs keep their one-cell key and
+  are moved right by half a cell, colour glyphs are already fitted to two
+  cells. The same holds for a cluster whose first character is one cell
+  wide (§ + U+0301 at width 2), for its font glyphs only, so ❤️ and 1️⃣
+  aren't moved. Wide cells end a ligature stretch (B1.2), as wide
+  characters did.
+- **Curly, dotted and dashed underlines are F2.3's sprites,** one glyph
+  per cell keyed `GlyphKey::sprite(UNDERLINE_*, 1)`, replacing the
+  rectangles drawn since F3.1 (the coarse eight-step wave among them).
+  They are glyphs, so the block cursor recolours them like text, except
+  that one in its own underline colour keeps it (a new `FIXED` bit in the
+  glyph's spare bits, as rectangles have `TEXT_COLOUR`), and they are
+  left out under input-method text. Single and double underlines,
+  overline and strike stay rectangles (§10.5).
+- **Runs (§10.1)** are what B1.2 built: Menlo-like faces shape every
+  cell alone, ligature faces shape stretches. F3.2 adds nothing there.
+- **Not done:** input-method text still draws character by character.
+- **Tests:** `tests/clusters.rs` draws on the GPU with Menlo the family
+  emoji, a flag, 👍🏽 and the keycap (one colour glyph across both cells,
+  not what the first character draws), `e` + U+0301 (the same pixels as
+  é) and `x` + U+0301 (two glyphs in one cell), ①, §, ± and § + U+0301 at
+  width 2 (moved by half a cell, centred in the two), ─ at width 2 (ink in
+  every column of both cells) and the three underline patterns; every
+  frame from the snapshot and the live terminal, compared. The GPU
+  snapshot test gains clusters and patterned underlines under the block
+  cursor and input-method text; unit tests check one sprite per cell
+  with the right colour and `FIXED`.
+- **The cell loop keeps one test for the common case:** a cell that is
+  neither a cluster nor half of a wide cell (one test of the cell's
+  word) is drawn inline as before; everything else goes through one
+  out-of-line function. Testing width inline made plain frames 15%
+  slower.
+- **Measured** (`cargo bench -p term-render --bench frame`, `main`'s
+  binary and this one interleaved, 5 rounds, best, load 7–14; the two
+  Menlo cases are new and were run against `main` too):
+
+  | case | main | F3.2 |
+  |---|---|---|
+  | 80×24 plain | 8.6 µs | 8.5 µs |
+  | 300×100 plain | 127.8 µs | 126.8 µs |
+  | 300×100 coloured | 144.9 µs | 144.2 µs |
+  | 300×100 unicode, fake glyphs (no fonts) | 118.5 µs | 140.6 µs |
+  | 80×24 unicode, Menlo | 8.2 µs | 16.9 µs |
+  | 300×100 unicode, Menlo | 120.7 µs | 253.2 µs |
+  | 300×100 unicode, Menlo, nothing changed | 14.2 µs | 14.5 µs |
+
+  The unicode screen has ~4,300 clusters at 300×100; `main` drew each
+  one's first character from a source that answers characters without a
+  lookup, so the extra ~30 ns a cluster is the cache lookup (with real
+  glyph textures `main` paid a hash lookup per character too). Wide
+  characters now take the out-of-line path, which is the fake-glyph
+  unicode case's +19%. Frames where rows are kept are unchanged.
+
 ### 6.6 Tests for clusters
 
 - incremental segmentation = `unicode_segmentation::graphemes(true)` for
@@ -1850,10 +1924,10 @@ box drawing and blocks, 0x100–0x1FF braille, 0x200–0x21F Powerline,
 aren't characters. Still to come for this design:
 
 - caching sprites under `GlyphKey { font: SPRITE_FONT, glyph: id, cells }`
-  in the same mask texture as text (F3.2). The key exists since F2.1
-  (`GlyphKey::sprite(id, cells)`, and `glyph_key` returns it for code-drawn
-  characters); today the renderer still reaches sprites through the
-  per-character path.
+  in the same mask texture as text (F3.2). Done: one-cell sprites come
+  through the per-character lookup, which hands out their `GlyphKey`
+  since F2.1, and since F3.2 two-cell ones (ambiguous characters) and the
+  underline patterns are looked up by key (§6.5, Landed (F3.2)).
 
 **Landed in F2.3:** the underline patterns, `SpriteId::UNDERLINE_CURLY`
 (0x1000), `UNDERLINE_DOTTED` (0x1001) and `UNDERLINE_DASHED` (0x1002),
@@ -3047,7 +3121,7 @@ go in order, and the font and render agents run alongside.
 | F2.2 | font | CTLine shaping of runs (`shape()`) and the shaped-cluster cache; clusters now, ligatures in B.1. **Landed** (§10.2) | M | F2.1 |
 | F2.3 | font | underline pattern sprites (curly, dotted, dashed) from id 0x1000; box/block/Powerline/braille shapes are done (F.6, `c4033dd`). **Landed** (§10.4) | S | F2.1 |
 | F3.1 | render | resolve through `Style`: underline colour, double underline, overline, strike | S | 1 |
-| F3.2 | render | glyph cache keyed by `GlyphKey` (sprites included); runs (§10.1); cluster cells via F2.2; curly/dotted/dashed via F2.3; ambiguous characters at two cells | M | 6, F2.2, F2.3 |
+| F3.2 | render | glyph cache keyed by `GlyphKey` (sprites included); runs (§10.1); cluster cells via F2.2; curly/dotted/dashed via F2.3; ambiguous characters at two cells. **Landed**; what changed from the design is at the end of §6.5 | M | 6, F2.2, F2.3 |
 | F3.3 | render | build frames from the snapshot with overlays (§9.3), still under the lock (R.1 moves it out). **Landed**; what changed from the design is at the end of §9.3 | M | 8 |
 
 PR 13 as a whole is L, so it is split as above. E.7 (our find bar, §13.9, in
@@ -3223,7 +3297,7 @@ in that app:
 - **Between PR 6 and F3.2,** cluster cells draw at least their first
   character (the renderer draws the base scalar). Widths and cursor
   positions are already right, so text lines up; only the joined glyph is
-  missing.
+  missing. Closed by F3.2.
 
 ---
 

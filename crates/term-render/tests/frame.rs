@@ -537,8 +537,9 @@ fn wide_glyph_emitted_once() {
 }
 
 #[test]
-fn cluster_cells_draw_their_first_character() {
-    // Until clusters are shaped (F3.2), a cluster draws its base.
+fn cluster_cells_without_fonts_draw_their_first_character() {
+    // The fake source has no fonts to shape with: a cluster draws its
+    // base (clusters shaped with real fonts are tested in clusters.rs).
     let mut t = term(10, 1, "e\u{301}❤\u{FE0F}🇬🇧x");
     let f = build(&mut t.state);
     assert_eq!(decoded(&f, 10, 1, (0, 0)), ["e❤ 🇬 x    "]);

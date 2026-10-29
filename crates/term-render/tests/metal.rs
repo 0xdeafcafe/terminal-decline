@@ -184,7 +184,7 @@ fn snapshot_frames_draw_like_the_live_terminal() {
     let mut renderer = Renderer::new(Fonts::new("Menlo", 24.0));
     let theme = Theme::default();
     let mut t = Term::new(12, 4, 100);
-    let steps: [(&str, Option<&str>, bool); 7] = [
+    let steps: [(&str, Option<&str>, bool); 9] = [
         ("\x1b[41mred\x1b[0m \x1b[4;2munder\x1b[0m\r\n\x1b[1mbold\x1b[7m inv", None, true),
         // The cursor moves onto a dim underlined cell: rows unchanged.
         ("\x1b[1;6H", None, true),
@@ -195,6 +195,14 @@ fn snapshot_frames_draw_like_the_live_terminal() {
         ("\r\n\r\n\r\nmore", None, false),
         ("\x1b[?1049h\x1b[44mfull screen\x1b[6 q", None, true),
         ("\x1b[?1049l\x1b[2 q", None, true),
+        // Clusters and patterned underlines (one in its own colour) with
+        // the block cursor on them, then input-method text over them.
+        (
+            "\x1b[2J\x1b[H\x1b[4:3;58:2::255:0:0me\u{301}x\x1b[4:4;59m\u{1F1EC}\u{1F1E7}\x1b[0m 1\u{FE0F}\u{20E3}\x1b[1;1H",
+            None,
+            true,
+        ),
+        ("\x1b[1;2H", Some("\u{3042}"), true),
     ];
     for (i, (bytes, preedit, focused)) in steps.into_iter().enumerate() {
         t.advance(bytes.as_bytes());

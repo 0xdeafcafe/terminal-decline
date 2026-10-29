@@ -284,7 +284,7 @@ proptest! {
 /// hidden by the limit partway through a block.
 #[test]
 fn row_counts_agree_across_blocks() {
-    let mut t = Term::new(20, 3, 12_000);
+    let mut t = Term::new(20, 3, 12_000, term_core::ImagePool::process());
     let mut out = String::new();
     for i in 0..10_000 {
         match i % 7 {

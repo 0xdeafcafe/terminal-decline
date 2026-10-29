@@ -3,8 +3,8 @@
 //! - `terminal-decline import ghostty [PATH]` reads Ghostty's config (default
 //!   `~/.config/ghostty/config`) and gives the Terminal Decline config for it:
 //!   theme, palette and colours, fonts, opacity and blur, option-as-meta,
-//!   copy-on-select, padding, window size and keybinds, where Terminal Decline has
-//!   the setting.
+//!   copy-on-select, padding, window size, split colours and opacity, and
+//!   keybinds, where Terminal Decline has the setting.
 //! - `terminal-decline import iterm FILE.itermcolors` turns an iTerm2 colour preset
 //!   into a theme file, `themes/<name>.toml`.
 //!
@@ -160,6 +160,7 @@ struct ColorSet {
     background: Option<String>,
     cursor: Option<String>,
     selection: Option<String>,
+    split_divider: Option<String>,
     palette: BTreeMap<usize, String>,
 }
 
@@ -175,6 +176,7 @@ impl ColorSet {
             ("background", &self.background),
             ("cursor", &self.cursor),
             ("selection", &self.selection),
+            ("split_divider", &self.split_divider),
         ] {
             if let Some(v) = v {
                 let _ = writeln!(out, "{k} = {}", quote(v));
@@ -209,6 +211,7 @@ fn ghostty_colour(key: &str, value: &str, colors: &mut ColorSet) -> Option<Resul
         "background" => &mut colors.background,
         "cursor-color" => &mut colors.cursor,
         "selection-background" => &mut colors.selection,
+        "split-divider-color" => &mut colors.split_divider,
         "palette" => {
             let Some((n, c)) = value.split_once('=') else {
                 return Some(Err("not N=COLOUR".into()));
@@ -394,7 +397,9 @@ fn ghostty_action(action: &str) -> Option<String> {
     let menu = match name {
         "new_window" => "new_window",
         "new_tab" => "new_tab",
-        "close_surface" | "close_tab" | "close_window" => "close",
+        "close_surface" => "close",
+        "close_tab" => "close_tab",
+        "close_window" => "close_window",
         "copy_to_clipboard" => "copy",
         "paste_from_clipboard" => "paste",
         "select_all" => "select_all",
@@ -406,6 +411,31 @@ fn ghostty_action(action: &str) -> Option<String> {
         "next_tab" => "next_tab",
         "previous_tab" => "previous_tab",
         "start_search" => "find",
+        "new_split" => match arg {
+            "right" => "split_right",
+            "down" => "split_down",
+            _ => return None,
+        },
+        "goto_split" => match arg {
+            "left" => "focus_pane_left",
+            "right" => "focus_pane_right",
+            "up" | "top" => "focus_pane_up",
+            "down" | "bottom" => "focus_pane_down",
+            "next" => "focus_pane_next",
+            "previous" => "focus_pane_previous",
+            _ => return None,
+        },
+        // `resize_split:left,10`: Ghostty's amount is in points; Terminal
+        // Decline's keys move a divider one cell.
+        "resize_split" => match arg.split_once(',').map_or(arg, |(d, _)| d) {
+            "left" => "resize_pane_left",
+            "right" => "resize_pane_right",
+            "up" => "resize_pane_up",
+            "down" => "resize_pane_down",
+            _ => return None,
+        },
+        "equalize_splits" => "equalize_panes",
+        "toggle_split_zoom" => "toggle_pane_zoom",
         "unbind" => "none",
         "text" => return Some(format!("{{ text = {} }}", quote(&unescape(arg)?))),
         "csi" => return Some(format!("{{ text = {} }}", quote(&format!("\x1b[{}", unescape(arg)?)))),
@@ -530,6 +560,11 @@ pub fn ghostty(text: &str, path: &Path, theme_dirs: &[PathBuf]) -> GhosttyImport
                     skip("Terminal Decline has one padding for all sides (window-padding-x is used)");
                 }
             }
+            "unfocused-split-opacity" => match number {
+                // Ghostty's own range.
+                Some(n) => set("unfocused_pane_opacity", n.clamp(0.15, 1.0).to_string(), &mut top),
+                None => skip("not a number"),
+            },
             "window-width" => match value.parse::<u16>() {
                 Ok(n) if n > 0 => set("columns", n.to_string(), &mut top),
                 _ => skip("not a number of columns"),
@@ -574,7 +609,7 @@ pub fn ghostty(text: &str, path: &Path, theme_dirs: &[PathBuf]) -> GhosttyImport
     }
 
     let mut out = format!("# Imported from {} by `terminal-decline import ghostty`.\n", path.display());
-    const ORDER: [&str; 17] = [
+    const ORDER: [&str; 18] = [
         "theme",
         "font_family",
         "font_fallback",
@@ -587,6 +622,7 @@ pub fn ghostty(text: &str, path: &Path, theme_dirs: &[PathBuf]) -> GhosttyImport
         "padding",
         "opacity",
         "blur",
+        "unfocused_pane_opacity",
         "option_as_meta",
         "copy_on_select",
         "columns",
@@ -944,6 +980,21 @@ mod tests {
         assert_eq!(get("alt+left"), Some(Bound::Text("\x1bb".into())));
         assert_eq!(get("cmd+d"), None, "unbind");
         assert_eq!(get("cmd+t"), Some(Bound::Menu(MenuAction::NewTab)));
+        // Splits.
+        for (chord, action) in [
+            ("cmd+shift+enter", MenuAction::TogglePaneZoom),
+            ("cmd+shift+d", MenuAction::SplitDown),
+            ("cmd+alt+left", MenuAction::FocusPaneLeft),
+            ("cmd+]", MenuAction::FocusPaneNext),
+            ("cmd+ctrl+up", MenuAction::ResizePaneUp),
+            ("cmd+ctrl+=", MenuAction::EqualizePanes),
+            ("cmd+shift+w", MenuAction::CloseWindow),
+        ] {
+            assert_eq!(get(chord), Some(Bound::Menu(action)), "{chord}");
+        }
+        assert_eq!(get("cmd+ctrl+d"), None, "no new pane to the left");
+        assert_eq!(p.divider(), 0x44475a);
+        assert_eq!(c.unfocused_pane_opacity, 0.7);
         // What doesn't map is listed.
         let notes = &out[out.find("# Not imported:").expect(out)..];
         for k in [
@@ -954,7 +1005,7 @@ mod tests {
             "command = /opt/homebrew/bin/fish",
             "keybind = ctrl+a>n=next_tab",
             "keybind = global:ctrl+grave_accent=toggle_quick_terminal",
-            "keybind = super+shift+enter=toggle_split_zoom",
+            "keybind = super+ctrl+d=new_split:left",
         ] {
             assert!(notes.contains(&format!("# {k}  (")), "{k} missing:\n{notes}");
         }
@@ -1005,6 +1056,23 @@ mod tests {
         assert_eq!(unescape(r"\q"), None);
         assert_eq!(ghostty_action("csi:A").as_deref(), Some("{ text = \"\\u001B[A\" }"));
         assert_eq!(ghostty_action("goto_tab:1"), None);
+        for (ghostty, ours) in [
+            ("new_split:right", Some("split_right")),
+            ("new_split:down", Some("split_down")),
+            ("new_split:auto", None),
+            ("goto_split:previous", Some("focus_pane_previous")),
+            ("goto_split:top", Some("focus_pane_up")),
+            ("goto_split:bottom", Some("focus_pane_down")),
+            ("resize_split:right,20", Some("resize_pane_right")),
+            ("resize_split:down", Some("resize_pane_down")),
+            ("resize_split:sideways,3", None),
+            ("equalize_splits", Some("equalize_panes")),
+            ("toggle_split_zoom", Some("toggle_pane_zoom")),
+            ("close_surface", Some("close")),
+            ("close_tab", Some("close_tab")),
+        ] {
+            assert_eq!(ghostty_action(ghostty), ours.map(quote), "{ghostty}");
+        }
     }
 
     #[test]

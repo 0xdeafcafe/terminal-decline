@@ -28,7 +28,10 @@ use serde::{Deserialize, Deserializer};
 
 use crate::keys::{KeyEventType, KeyInput, flags};
 
-/// The app's actions that can be bound: its menu items.
+/// The app's actions that can be bound: its menu items. The pane actions
+/// (splits, focus, resize, zoom, `close_tab`, `close_window`) have
+/// defaults but no menu items or handlers yet; until they do, their keys
+/// do what they did before.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum MenuAction {
     NewWindow,
@@ -47,10 +50,34 @@ pub enum MenuAction {
     /// Edit > Find…: a placeholder until the find bar exists (its menu
     /// item stays disabled).
     Find,
+    /// A new pane right of the focused one, or below it.
+    SplitRight,
+    SplitDown,
+    /// This tab and its panes.
+    CloseTab,
+    /// The whole window, every tab.
+    CloseWindow,
+    /// Focus the pane next to the focused one, by where they are.
+    FocusPaneLeft,
+    FocusPaneRight,
+    FocusPaneUp,
+    FocusPaneDown,
+    /// Focus the next or previous pane in order, wrapping.
+    FocusPaneNext,
+    FocusPanePrevious,
+    /// Move the nearest divider one cell that way.
+    ResizePaneLeft,
+    ResizePaneRight,
+    ResizePaneUp,
+    ResizePaneDown,
+    /// Give the panes equal shares.
+    EqualizePanes,
+    /// The focused pane fills the window, or no longer does.
+    TogglePaneZoom,
 }
 
 impl MenuAction {
-    pub const ALL: [MenuAction; 14] = [
+    pub const ALL: [MenuAction; 30] = [
         MenuAction::NewWindow,
         MenuAction::NewTab,
         MenuAction::Close,
@@ -65,6 +92,22 @@ impl MenuAction {
         MenuAction::NextTab,
         MenuAction::PreviousTab,
         MenuAction::Find,
+        MenuAction::SplitRight,
+        MenuAction::SplitDown,
+        MenuAction::CloseTab,
+        MenuAction::CloseWindow,
+        MenuAction::FocusPaneLeft,
+        MenuAction::FocusPaneRight,
+        MenuAction::FocusPaneUp,
+        MenuAction::FocusPaneDown,
+        MenuAction::FocusPaneNext,
+        MenuAction::FocusPanePrevious,
+        MenuAction::ResizePaneLeft,
+        MenuAction::ResizePaneRight,
+        MenuAction::ResizePaneUp,
+        MenuAction::ResizePaneDown,
+        MenuAction::EqualizePanes,
+        MenuAction::TogglePaneZoom,
     ];
 
     /// The name in the config.
@@ -84,10 +127,28 @@ impl MenuAction {
             MenuAction::NextTab => "next_tab",
             MenuAction::PreviousTab => "previous_tab",
             MenuAction::Find => "find",
+            MenuAction::SplitRight => "split_right",
+            MenuAction::SplitDown => "split_down",
+            MenuAction::CloseTab => "close_tab",
+            MenuAction::CloseWindow => "close_window",
+            MenuAction::FocusPaneLeft => "focus_pane_left",
+            MenuAction::FocusPaneRight => "focus_pane_right",
+            MenuAction::FocusPaneUp => "focus_pane_up",
+            MenuAction::FocusPaneDown => "focus_pane_down",
+            MenuAction::FocusPaneNext => "focus_pane_next",
+            MenuAction::FocusPanePrevious => "focus_pane_previous",
+            MenuAction::ResizePaneLeft => "resize_pane_left",
+            MenuAction::ResizePaneRight => "resize_pane_right",
+            MenuAction::ResizePaneUp => "resize_pane_up",
+            MenuAction::ResizePaneDown => "resize_pane_down",
+            MenuAction::EqualizePanes => "equalize_panes",
+            MenuAction::TogglePaneZoom => "toggle_pane_zoom",
         }
     }
 
-    /// The menu item's action, sent up the responder chain.
+    /// The menu item's action, sent up the responder chain. (`close`
+    /// stays `performClose:`, closing the tab, until panes can close on
+    /// their own.)
     pub fn selector(self) -> &'static CStr {
         match self {
             MenuAction::NewWindow => c"newWindow:",
@@ -104,6 +165,22 @@ impl MenuAction {
             MenuAction::NextTab => c"selectNextTab:",
             MenuAction::PreviousTab => c"selectPreviousTab:",
             MenuAction::Find => c"declineFind:",
+            MenuAction::SplitRight => c"splitRight:",
+            MenuAction::SplitDown => c"splitDown:",
+            MenuAction::CloseTab => c"performClose:",
+            MenuAction::CloseWindow => c"closeWindow:",
+            MenuAction::FocusPaneLeft => c"selectPaneLeft:",
+            MenuAction::FocusPaneRight => c"selectPaneRight:",
+            MenuAction::FocusPaneUp => c"selectPaneUp:",
+            MenuAction::FocusPaneDown => c"selectPaneDown:",
+            MenuAction::FocusPaneNext => c"selectNextPane:",
+            MenuAction::FocusPanePrevious => c"selectPreviousPane:",
+            MenuAction::ResizePaneLeft => c"resizePaneLeft:",
+            MenuAction::ResizePaneRight => c"resizePaneRight:",
+            MenuAction::ResizePaneUp => c"resizePaneUp:",
+            MenuAction::ResizePaneDown => c"resizePaneDown:",
+            MenuAction::EqualizePanes => c"equalizePanes:",
+            MenuAction::TogglePaneZoom => c"togglePaneZoom:",
         }
     }
 
@@ -112,8 +189,9 @@ impl MenuAction {
     }
 }
 
-/// The menus' shortcuts with no config.
-pub const DEFAULTS: [(&str, MenuAction); 13] = [
+/// The menus' shortcuts with no config. The pane ones are iTerm2's and
+/// Ghostty's.
+pub const DEFAULTS: [(&str, MenuAction); 28] = [
     ("cmd+n", MenuAction::NewWindow),
     ("cmd+t", MenuAction::NewTab),
     ("cmd+w", MenuAction::Close),
@@ -127,6 +205,21 @@ pub const DEFAULTS: [(&str, MenuAction); 13] = [
     ("ctrl+cmd+f", MenuAction::ToggleFullScreen),
     ("cmd+}", MenuAction::NextTab),
     ("cmd+{", MenuAction::PreviousTab),
+    ("cmd+d", MenuAction::SplitRight),
+    ("shift+cmd+d", MenuAction::SplitDown),
+    ("shift+cmd+w", MenuAction::CloseWindow),
+    ("alt+cmd+left", MenuAction::FocusPaneLeft),
+    ("alt+cmd+right", MenuAction::FocusPaneRight),
+    ("alt+cmd+up", MenuAction::FocusPaneUp),
+    ("alt+cmd+down", MenuAction::FocusPaneDown),
+    ("cmd+]", MenuAction::FocusPaneNext),
+    ("cmd+[", MenuAction::FocusPanePrevious),
+    ("ctrl+cmd+left", MenuAction::ResizePaneLeft),
+    ("ctrl+cmd+right", MenuAction::ResizePaneRight),
+    ("ctrl+cmd+up", MenuAction::ResizePaneUp),
+    ("ctrl+cmd+down", MenuAction::ResizePaneDown),
+    ("ctrl+cmd+=", MenuAction::EqualizePanes),
+    ("shift+cmd+enter", MenuAction::TogglePaneZoom),
 ];
 
 /// Keys known by name rather than by the character they type.
@@ -661,6 +754,42 @@ mod tests {
         assert_eq!(chord("cmd+enter").key_equivalent(), ("\r".into(), COMMAND));
         assert_eq!(chord("shift+cmd+up").key_equivalent(), ("\u{F700}".into(), COMMAND | SHIFT));
         assert_eq!(chord("alt+f12").key_equivalent(), ("\u{F70F}".into(), OPTION));
+    }
+
+    #[test]
+    fn pane_actions_have_their_defaults() {
+        let b = Keybinds::default();
+        for (c, a) in [
+            ("cmd+d", MenuAction::SplitRight),
+            ("cmd+shift+d", MenuAction::SplitDown),
+            ("cmd+shift+w", MenuAction::CloseWindow),
+            ("cmd+alt+left", MenuAction::FocusPaneLeft),
+            ("cmd+alt+down", MenuAction::FocusPaneDown),
+            ("cmd+]", MenuAction::FocusPaneNext),
+            ("cmd+[", MenuAction::FocusPanePrevious),
+            ("cmd+ctrl+right", MenuAction::ResizePaneRight),
+            ("cmd+ctrl+up", MenuAction::ResizePaneUp),
+            ("cmd+ctrl+=", MenuAction::EqualizePanes),
+            ("cmd+shift+enter", MenuAction::TogglePaneZoom),
+        ] {
+            assert_eq!(b.get(&chord(c)), Some(&Bound::Menu(a)), "{c}");
+        }
+        assert!(b.chords(MenuAction::CloseTab).is_empty(), "the close button and Close");
+        // Cmd+[ and Cmd+] stay apart from the tab keys, Cmd+Shift+[ and ].
+        let bracket = |c: &str, flags| KeyInput {
+            chars_unshifted: "]".into(),
+            ..key(c, flags)
+        };
+        assert_eq!(b.resolve(&bracket("]", COMMAND)), Some(&Bound::Menu(MenuAction::FocusPaneNext)));
+        assert_eq!(b.resolve(&bracket("}", COMMAND | SHIFT)), Some(&Bound::Menu(MenuAction::NextTab)));
+        // One action per default chord, and names and selectors are distinct
+        // (Close and CloseTab share `performClose:` for now).
+        let chords: BTreeSet<Chord> = DEFAULTS.iter().map(|(c, _)| chord(c)).collect();
+        assert_eq!(chords.len(), DEFAULTS.len());
+        let names: BTreeSet<&str> = MenuAction::ALL.iter().map(|a| a.name()).collect();
+        assert_eq!(names.len(), MenuAction::ALL.len());
+        let selectors: BTreeSet<&CStr> = MenuAction::ALL.iter().map(|a| a.selector()).collect();
+        assert_eq!(selectors.len(), MenuAction::ALL.len() - 1);
     }
 
     #[test]

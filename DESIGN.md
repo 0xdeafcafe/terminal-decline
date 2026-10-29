@@ -304,6 +304,17 @@ build from before the rename to Terminal Decline, removed by the dogfood
 script), it restarts into `Terminal Decline.app` in the same folder
 (`reload::relaunch_target`).
 
+Splits (docs/design/splits.md) are being built. In place so far, with no
+AppKit yet: the pane tree (`panes`: layout in whole device pixels with a
+1 pt divider and a minimum pane size, focus by direction and in order,
+zoom, close, equalize, divider drags and keyboard resizes, all property
+tested), the per-pane and per-window frame decisions
+(`frame_policy::pane` / `combine`; `decide` is now the one-pane case), the
+pane actions and their keys, and `reload::SavedPanes`, the tree with each
+pane's directory, which `SavedWindow` carries (absent in older files: one
+pane). `unfocused_pane_opacity` (default 1.0: not dimmed) is read but not
+yet drawn.
+
 ## Files, folders and Services
 
 What the app does with files and folders from the rest of macOS
@@ -455,6 +466,7 @@ else the built-in theme of that name; `theme = { light = "x", dark = "y" }`
 picks by each window's macOS appearance and switches when it changes
 (`viewDidChangeEffectiveAppearance`, a notification, no polling). A theme
 file has the keys of `[colors]` (foreground, background, cursor, selection,
+split_divider (unset: the background mixed 25% towards the foreground),
 `palette` of up to 16; unset ones are the defaults'), and any `[colors]` in
 the config override the theme's, one by one (`""` in `palette` keeps the
 theme's entry). Colours must be `#rrggbb`; a bad one, a bad theme file or a
@@ -476,8 +488,12 @@ foreground/background/cursor/selection colours, font-family (the first is
 `font_family`, the rest `font_fallback`), the bold/italic faces,
 font-size, adjust-cell-height/width percentages, background-opacity,
 background-blur, macos-option-as-alt, copy-on-select, window-padding-x,
-window-width/height and keybinds (actions with a Terminal Decline equivalent,
-text:/csi:/esc:, unbind; not sequences or global ones). `terminal-decline import
+window-width/height, split-divider-color (`[colors] split_divider`),
+unfocused-split-opacity (`unfocused_pane_opacity`) and keybinds (actions
+with a Terminal Decline equivalent, new_split right/down, goto_split,
+resize_split (its amount dropped: our keys move a divider one cell),
+equalize_splits and toggle_split_zoom included; text:/csi:/esc:, unbind;
+not sequences or global ones). `terminal-decline import
 iterm FILE.itermcolors [--name NAME]` turns an iTerm2 preset (XML, or
 binary through `plutil`) into `themes/<name>.toml`, converting calibrated
 and P3 colours to sRGB with AppKit. Both print the TOML; `--write` writes
@@ -518,7 +534,13 @@ Shortcuts (`[keybind]`, `keybind`): a chord (`"cmd+k"`, `"ctrl+shift+t"`,
 set to a menu action (new_window, new_tab, close, copy, paste, select_all,
 clear_scrollback, font_bigger, font_smaller, font_reset,
 toggle_full_screen, next_tab, previous_tab, and find, a placeholder whose
-Edit > Find… item stays disabled until the find bar exists), `"none"`, or
+Edit > Find… item stays disabled until the find bar exists; and the pane
+actions of docs/design/splits.md §5, split_right/down, close_tab,
+close_window, focus_pane_left/right/up/down/next/previous,
+resize_pane_left/right/up/down, equalize_panes and toggle_pane_zoom, which
+have their defaults (Cmd+D, Cmd+Opt+arrows, …) but no menu items or
+handlers until panes are wired in, so their keys do what they did),
+`"none"`, or
 `{ text = "…" }`. The menus' own shortcuts are the defaults and each entry
 replaces or removes one chord; the menus are built from the result, so
 they show what works (an action's first chord shows, any others work

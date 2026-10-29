@@ -1156,6 +1156,20 @@ images sized per point, as iTerm2; 9 the window stays untagged (text keeps today
 converted from its own colour space (sRGB if none) to Display P3 once, when
 it is decoded (built in I.1, §6.1).
 
+Also decided 29 Oct 2026: WebP is decoded too (`image-webp`, +196 KB,
+§6.1); JPEG XL only if it adds under about 300 KB. **Measured, and left
+out**: `jxl-oxide` 0.12.6 (pure Rust, rayon off, no colour management
+features) adds 1,614,368 bytes, **+1.54 MB** stripped (thin LTO, the
+same before/after release binary as the other decoders; it brings eleven
+`jxl-*` crates and `brotli-decompressor`), five times the limit. Decoding
+a 1600 × 1200 photo (the JPEG fixture's image as lossy VarDCT at
+distance 1.0, 31 KB) to 8-bit RGB took 70 ms on one thread (M-series
+Mac, median of 15), against 20 ms for the same photo as WebP and 16 ms
+as JPEG, with no scaled decoding to help when drawn small. A JPEG XL
+image from a program is refused at sniffing, as before. Worth measuring
+again if a smaller pure-Rust decoder appears (libjxl's `jxl-rs` is the
+one to watch).
+
 1. **Budget on large screens.** One full-screen image is about 59 MB on a
    5K display and 31 MB on a 16" MacBook Pro, and the kitty protocol asks
    for room for "a few full screen images". Keep 32 MB (kitty images

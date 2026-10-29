@@ -853,8 +853,11 @@ dependencies = [
 name = "term-prefs"
 version = "0.0.1"
 dependencies = [
+ "libc",
  "proptest",
+ "term-core",
  "toml_edit",
+ "unicode-width",
 ]
 
 [[package]]

@@ -8,6 +8,9 @@ repository.workspace = true
 
 [dependencies]
 toml_edit = { version = "0.25.17", default-features = false, features = ["parse", "display"] }
+libc.workspace = true
+unicode-width.workspace = true
 
 [dev-dependencies]
+term-core.workspace = true
 proptest = { version = "1.12", default-features = false, features = ["std"] }

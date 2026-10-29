@@ -41,8 +41,10 @@ After merging changes to `main` that affect the app, run
 `scripts/dogfood.sh`: the running copy restarts into the new build and
 reopens its windows in the same folders and places. The bundle is the
 launcher, `Frameworks/libterminal_decline.dylib` and the pin stub in
-`Helpers/`; the restart watches the library. Until P-5 lands, `pin` and
-`pin --update` refuse to run from this bundle (existing pins keep working).
+`Helpers/`; the restart watches the library. It then runs `pin --repair`,
+which rebuilds clone pins as stub pins (asking first, since macOS resets a
+rebuilt pin's permissions). Test pins go in a temp dir with a temp `HOME`,
+never in `~/Applications`.
 
 ## Agents in worktrees
 

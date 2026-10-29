@@ -49,9 +49,11 @@ never in `~/Applications`.
 ## Smoke tests open real windows
 
 The app smoke tests (`--run-ignored only`, `binary(smoke)`) open real
-windows on Alex's screen. Don't run them locally: CI runs them on every
-push to main and on `ci/**` branches (push one to check a change). Run a
-single smoke test locally only when debugging it, and say so.
+windows on Alex's Mac. Don't run them on every change: CI runs them on
+every push to main and on `ci/**` branches (push one to check a change).
+Locally they run in occasional test campaigns, a batch at a time, and
+in the background: test windows must not take focus or come to the
+front.
 
 ## Agents in worktrees
 

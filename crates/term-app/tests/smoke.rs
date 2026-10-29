@@ -396,6 +396,42 @@ fn notify_from_a_background_tab(dir: &TempDir) -> String {
     )
 }
 
+/// Secure Keyboard Entry saved as on in the app's user defaults (a temp
+/// bundle has a domain of its own): held while the app is active.
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_secure_keyboard_entry_from_user_defaults() {
+    if !have_metal() {
+        return;
+    }
+    let dir = TempDir::new("secure");
+    let unique = format!("{}", std::process::id());
+    let id = format!("{}decline-secure-{unique}", decline::pin::ID_PREFIX);
+    /// Removes the temp bundle's defaults domain, even if the test fails.
+    struct Domain(String);
+    impl Drop for Domain {
+        fn drop(&mut self) {
+            let _ = Command::new("/usr/bin/defaults").args(["delete", &self.0]).status();
+        }
+    }
+    let status = Command::new("/usr/bin/defaults")
+        .args(["write", &id, "SecureKeyboardEntry", "-bool", "true"])
+        .status()
+        .unwrap();
+    let _domain = Domain(id.clone());
+    assert!(status.success());
+    let script = format!("echo secure; sleep 0.3; {}{}sleep 20", osc("dump"), osc("quit"));
+    let app = temp_bundle(&dir, &format!("Decline Secure {unique}"), &script);
+    let d = launch_bundle(&dir, &app);
+    assert_eq!(d.len(), 1, "{d:?}");
+    // macOS may refuse to activate an app started while someone types in
+    // another; then it must not hold secure input.
+    assert_eq!(d[0]["secure_input"], d[0]["active"], "{}", d[0]);
+    if d[0]["active"] == false {
+        eprintln!("the app wasn't activated: only checked that it doesn't hold secure input");
+    }
+}
+
 /// A pin bundle for `script` in `dir`'s Applications, made by the pin
 /// module the way `decline pin` does (the Dock is never touched).
 fn temp_bundle(dir: &TempDir, name: &str, script: &str) -> PathBuf {

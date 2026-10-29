@@ -18,6 +18,7 @@ pub mod notify;
 pub mod paths;
 pub mod pin;
 pub mod reload;
+pub mod secure_input;
 pub mod session;
 #[cfg(test)]
 mod testutil;

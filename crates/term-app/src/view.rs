@@ -1320,6 +1320,8 @@ impl TerminalView {
                         .dockTile()
                         .badgeLabel()
                         .map(|b| b.to_string()),
+                    active: objc2_app_kit::NSApplication::sharedApplication(MainThreadMarker::from(self)).isActive(),
+                    secure_input: crate::app::secure_input_held(),
                 };
                 self.with_state(|st| write_dump(st, window));
                 self.run_controls();
@@ -1336,6 +1338,8 @@ struct Window {
     visible: bool,
     top_inset: f64,
     badge: Option<String>,
+    active: bool,
+    secure_input: bool,
 }
 
 fn write_dump(st: &mut State, window: Window) {
@@ -1360,6 +1364,8 @@ fn write_dump(st: &mut State, window: Window) {
         pad_top,
         notifications: crate::notify::stats(),
         badge: window.badge,
+        active: window.active,
+        secure_input: window.secure_input,
         screen,
         cols,
         lines,

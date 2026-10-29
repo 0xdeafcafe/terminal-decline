@@ -202,6 +202,13 @@ tables and landing pads: 1.34 → 1.50 MB) and no measurable parse speed.
   tab and Cmd+9 the last, Cmd+W close, Cmd+Q quit, Cmd+K clear scrollback,
   Cmd+= / Cmd+- font size, Ctrl+Cmd+F full screen. Pins may disable or
   remap these in their config.
+- Secure Keyboard Entry (decline menu, with a checkmark; kept in user
+  defaults as `SecureKeyboardEntry`): `EnableSecureEventInput` so no other
+  process sees the keys typed, as in Terminal.app. macOS has one switch
+  for the whole session, so decline holds it only while it is the active
+  app (other apps' hot keys and input tools keep working while it is in
+  the background) and gives it back when it quits (`secure_input`). Pins
+  have their own bundle id, so their own setting.
 - Mouse: drag to select (word on double-click, line on triple-click; words
   and lines are logical, so a word split by a soft wrap is selected whole,
   and dragging after a double- or triple-click grows by words or lines), wheel

@@ -150,6 +150,10 @@ pub struct Dump {
     pub notifications: crate::notify::Stats,
     /// The Dock icon's badge (progress).
     pub badge: Option<String>,
+    /// Whether the app is active, and whether it holds Secure Keyboard
+    /// Entry (only while active, when turned on).
+    pub active: bool,
+    pub secure_input: bool,
     /// `Terminal::dump()`: the visible rows and a status line.
     pub screen: String,
     pub cols: usize,

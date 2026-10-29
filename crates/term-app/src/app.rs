@@ -17,6 +17,7 @@ use term_pty::Command;
 
 use crate::config::Config;
 use crate::reload::SavedWindow;
+use crate::secure_input::{self, SecureInput};
 use crate::view::{Launch, TerminalView, content_size, delegate_of};
 
 /// Every decline window shares this, so any two can be tabs of one window.
@@ -39,6 +40,8 @@ pub struct AppIvars {
     /// Config errors, shown at the top of each window.
     notices: Rc<[String]>,
     windows: RefCell<Vec<(Retained<NSWindow>, Retained<TerminalView>)>>,
+    /// Secure Keyboard Entry (decline menu).
+    secure: RefCell<SecureInput>,
 }
 
 define_class!(
@@ -83,6 +86,21 @@ define_class!(
         fn should_terminate_after_last_window_closed(&self, _app: &NSApplication) -> bool {
             true
         }
+
+        #[unsafe(method(applicationDidBecomeActive:))]
+        fn did_become_active(&self, _n: &NSNotification) {
+            secure_input::apply(self.ivars().secure.borrow_mut().set_active(true));
+        }
+
+        #[unsafe(method(applicationDidResignActive:))]
+        fn did_resign_active(&self, _n: &NSNotification) {
+            secure_input::apply(self.ivars().secure.borrow_mut().set_active(false));
+        }
+
+        #[unsafe(method(applicationWillTerminate:))]
+        fn will_terminate(&self, _n: &NSNotification) {
+            secure_input::apply(self.ivars().secure.borrow_mut().quit());
+        }
     }
 
     impl AppDelegate {
@@ -97,6 +115,28 @@ define_class!(
         #[unsafe(method(newTab:))]
         fn new_tab(&self, _sender: Option<&AnyObject>) {
             self.new_tab_in_front();
+        }
+
+        /// decline > Secure Keyboard Entry: on or off, kept in user defaults.
+        #[unsafe(method(toggleSecureKeyboardEntry:))]
+        fn toggle_secure_keyboard_entry(&self, _sender: Option<&AnyObject>) {
+            let (call, on) = {
+                let mut secure = self.ivars().secure.borrow_mut();
+                (secure.toggle(), secure.wanted())
+            };
+            secure_input::apply(call);
+            objc2_foundation::NSUserDefaults::standardUserDefaults()
+                .setBool_forKey(on, &NSString::from_str(secure_input::DEFAULTS_KEY));
+        }
+
+        /// Checkmarks: Secure Keyboard Entry shows whether it is on.
+        #[unsafe(method(validateMenuItem:))]
+        fn validate_menu_item(&self, item: &NSMenuItem) -> bool {
+            if item.action() == Some(sel!(toggleSecureKeyboardEntry:)) {
+                let on = self.ivars().secure.borrow().wanted();
+                item.setState(if on { objc2_app_kit::NSControlStateValueOn } else { objc2_app_kit::NSControlStateValueOff });
+            }
+            true
         }
 
         /// The tab bar's "+" button, which shows because this answers it.
@@ -137,6 +177,9 @@ impl AppDelegate {
             restore: RefCell::new(restore),
             notices: notices.into(),
             windows: RefCell::new(Vec::new()),
+            secure: RefCell::new(SecureInput::new(
+                objc2_foundation::NSUserDefaults::standardUserDefaults().boolForKey(&NSString::from_str(secure_input::DEFAULTS_KEY)),
+            )),
         });
         let delegate: Retained<AppDelegate> = unsafe { msg_send![super(this), init] };
         DELEGATE.with(|d| *d.borrow_mut() = Some(objc2::rc::Weak::from_retained(&delegate)));
@@ -434,6 +477,12 @@ fn tab_index(tag: isize, tabs: usize) -> Option<usize> {
     }
 }
 
+/// Whether the app holds secure keyboard input (for the test dumps).
+pub(crate) fn secure_input_held() -> bool {
+    let delegate = DELEGATE.with(|d| d.borrow().as_ref().and_then(|w| w.load()));
+    delegate.is_some_and(|d| d.ivars().secure.borrow().held())
+}
+
 /// A new tab beside `window` (the test-only `tab` control command).
 pub(crate) fn open_tab_beside(window: &NSWindow) {
     let delegate = DELEGATE.with(|d| d.borrow().as_ref().and_then(|w| w.load()));
@@ -479,6 +528,8 @@ pub fn build_menus(mtm: MainThreadMarker, app_name: &str) -> Retained<NSMenu> {
         &bar,
         app_name,
         &[
+            item(mtm, "Secure Keyboard Entry", Some(sel!(toggleSecureKeyboardEntry:)), ""),
+            NSMenuItem::separatorItem(mtm),
             item(mtm, &format!("Hide {app_name}"), Some(sel!(hide:)), "h"),
             hide_others,
             NSMenuItem::separatorItem(mtm),

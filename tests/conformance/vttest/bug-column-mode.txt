@@ -1,0 +1,7 @@
+--- screen 01 ---
+!unknown needs 132-column mode (DECCOLM), which decline doesn't have
+--- screen 02 ---
+Test VT100 'Toggle origin mode, forget rest' bug, part 2.
+
+The screen should be in non-reverse, 80 column mode.
+Push <RETURN>

@@ -1,0 +1,2 @@
+--- screen 01 ---
+!unknown 96-character sets (ESC - A, Latin-1 in G1) aren't supported

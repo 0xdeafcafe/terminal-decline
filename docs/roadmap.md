@@ -84,7 +84,7 @@ Design: docs/design/pins.md.
 | E.9 | Config: reload on change (FSEvents), list of live settings, `theme =` + a small built-in theme set + themes dir, `terminal-decline import ghostty` / `import iterm`, deprecation policy for renamed keys | M |
 | E.10 | macOS: drag files in → escaped paths; folder on Dock icon / `open -a` → window there; Services "New Terminal Decline Window/Tab at Folder"; right-click menu when mouse reporting is off; confirm before closing a running program (config off) | M |
 | E.11 | Secure Keyboard Entry (menu) | S |
-| E.13 | vttest (named menus) and esctest2 (checked-in list of accepted failures) | M |
+| E.19 | Conformance fixes: the `to-fix` entries in docs/conformance-failures.md (OSC 4/10/11 colours, DECRQSS, DEC graphics glyphs, REP, DECALN, DECID, DECXCPR) | M |
 | E.14 | Small bugs: VS16 with autowrap off; CSI M on the top row | S |
 | E.18 | Preferences: Cmd+, opens a tab running the built-in settings TUI (hand-rolled, its own process; sectioned list, live preview, keeps comments in config.toml), with the change to the reload's notices and chord recording through the app; the Pins section after P.2; design in docs/design/preferences.md | M |
 | E.16 | Release: make repo + tap public, **then** tag `0.1.0`; changelog (git-cliff); cask caveats + `zap`; smoke on macOS 14 | S |

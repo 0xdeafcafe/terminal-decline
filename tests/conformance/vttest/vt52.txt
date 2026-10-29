@@ -1,0 +1,6 @@
+--- screen 01 ---
+!unknown VT52 mode (CSI ? 2 l) isn't supported: its sequences print as text
+--- screen 02 ---
+!unknown VT52 mode (CSI ? 2 l) isn't supported: its sequences print as text
+--- screen 03 ---
+!unknown VT52 mode (CSI ? 2 l) isn't supported: its sequences print as text

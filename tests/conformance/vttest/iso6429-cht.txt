@@ -1,0 +1,24 @@
+--- screen 01 ---
+CHT with param == 1:
+        *       *       *       *       *       *       *       *       *      *
+
+CHT with param != 1:
+        +       +       +       +       +       +       +       +       +      +
+
+Normal tabs:
+        *       *       *       *       *       *       *       *       *      *
+
+
+
+
+
+
+
+
+
+
+
+----+----1----+----2----+----3----+----4----+----5----+----6----+----7----+----8
+Test Cursor-Horizontal-Index (CHT)
+The lines with *'s above should look the same (they wrap once)
+Push <RETURN>

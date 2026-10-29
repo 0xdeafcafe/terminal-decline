@@ -107,6 +107,8 @@ pub struct KeyModes {
     pub app_cursor: bool,
     /// DECKPAM: the keypad sends SS3 sequences.
     pub app_keypad: bool,
+    /// LNM (`CSI 20 h`): Return sends CR LF instead of CR.
+    pub newline: bool,
     /// Kitty keyboard protocol flags (0 = legacy); see [`kitty`].
     pub kitty_flags: u8,
     pub option_as_meta: OptionAsMeta,
@@ -256,7 +258,11 @@ fn key_action(input: &KeyInput, modes: KeyModes) -> KeyAction {
         {
             return KeyAction::Send(b.to_vec());
         }
-        return KeyAction::Send(encode_key(key, mods, modes.app_cursor));
+        let mut bytes = encode_key(key, mods, modes.app_cursor);
+        if key == Key::Enter && modes.newline && bytes.ends_with(b"\r") {
+            bytes.push(b'\n');
+        }
+        return KeyAction::Send(bytes);
     }
     let keypad = input.numpad && !(0x7B..=0x7E).contains(&code);
     if keypad
@@ -869,6 +875,19 @@ mod tests {
             app_cursor,
             ..KeyModes::default()
         }
+    }
+
+    #[test]
+    fn enter_sends_cr_lf_in_newline_mode() {
+        let lnm = KeyModes {
+            newline: true,
+            ..KeyModes::default()
+        };
+        assert_eq!(translate(&key(0x24, 0), lnm), send(b"\r\n"));
+        assert_eq!(translate(&key(0x4C, 0), lnm), send(b"\r\n"));
+        assert_eq!(translate(&key(0x24, 0), KeyModes::default()), send(b"\r"));
+        // Other keys are unchanged.
+        assert_eq!(translate(&key(0x30, 0), lnm), send(b"\t"));
     }
 
     fn send(b: &[u8]) -> KeyAction {
@@ -1815,6 +1834,7 @@ mod tests {
         let all = KeyModes {
             app_cursor: true,
             app_keypad: true,
+            newline: true,
             kitty_flags: 1,
             option_as_meta: OptionAsMeta::Both,
             composing: false,

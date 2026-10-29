@@ -1,0 +1,24 @@
+--- screen 01 ---
+Testing Secondary Device Attributes (Firmware version)
+
+          <27> [ > 1 ; 1 0 ; 0 c
+         Pp=1 (VT220)
+         Pv=10, firmware version 1.0
+         Pc=0, ROM cartridge registration number ok
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Push <RETURN>

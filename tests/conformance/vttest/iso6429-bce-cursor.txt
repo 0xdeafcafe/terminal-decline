@@ -1,0 +1,41 @@
+--- screen 01 ---
+********************************************************************************
+*++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++*
+*+                                                                            +*
+*+                                                                            +*
+*+                                                                            +*
+*+                                                                            +*
+*+                                                                            +*
+*+                                                                            +*
+*+        EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE        +*
+*+        E                                                          E        +*
+*+        E The screen should be cleared,  and have an unbroken bor- E        +*
+*+        E der of *'s and +'s around the edge,   and exactly in the E        +*
+*+        E middle  there should be a frame of E's around this  text E        +*
+*+        E with  one (1) free position around it.    Push <RETURN>  E        +*
+*+        E                                                          E        +*
+*+        EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE        +*
+*+                                                                            +*
+*+                                                                            +*
+*+                                                                            +*
+*+                                                                            +*
+*+                                                                            +*
+*+                                                                            +*
+*++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++*
+********************************************************************************
+--- screen 02 ---
+!unknown needs 132-column mode (DECCOLM), which decline doesn't have
+--- screen 03 ---
+!unknown needs 132-column mode (DECCOLM), which decline doesn't have
+--- screen 04 ---
+!unknown needs 132-column mode (DECCOLM), which decline doesn't have
+--- screen 05 ---
+Test of cursor-control characters inside ESC sequences.
+Below should be four identical lines:
+
+A B C D E F G H I
+A B C D E F G H I
+A B C D E F G H I
+A B C D E F G H I
+
+Push <RETURN>

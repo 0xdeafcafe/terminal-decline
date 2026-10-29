@@ -1,0 +1,8 @@
+--- screen 01 ---
+The cursor should be invisible
+Push <RETURN>
+--- screen 02 ---
+The cursor should be invisible
+Push <RETURN>
+The cursor should be visible again
+Push <RETURN>

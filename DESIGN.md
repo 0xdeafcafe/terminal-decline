@@ -590,6 +590,16 @@ stay.
 - Profile with `samply` and Instruments (`xctrace` Time Profiler + Metal
   System Trace). Compare against Ghostty on the same machine.
 
+## Conformance (vttest, esctest2)
+
+`scripts/conformance/run.py` runs vttest's named menus and esctest2 against
+term-core on a real PTY with no window (`crates/term-pty/examples/headless.rs`),
+nightly in CI when main changed. Known failures are checked in
+(`tests/conformance/accepted-failures.txt`, each `to-fix` or `not-planned`)
+and explained in `docs/conformance-failures.md`; how to run and update it is
+in `docs/conformance.md`. The harness answers DECRQCRA itself, from the
+screen, because esctest reads the screen back through it.
+
 ## Measured (M-series Mac, macOS 27, release build)
 
 | | Terminal Decline | Ghostty 1.x |

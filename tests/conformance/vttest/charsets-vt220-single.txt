@@ -1,0 +1,4 @@
+--- screen 01 ---
+!unknown single shifts (SS2, SS3) aren't supported
+--- screen 02 ---
+!unknown single shifts (SS2, SS3) aren't supported

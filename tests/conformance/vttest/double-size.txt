@@ -1,0 +1,145 @@
+--- screen 01 ---
+ 80 column mode
+
+
+
+  v------- left margin
+
+  This is a normal-sized line
+
+ This is a Double-width line
+
+ This is a Double-width-and-height line
+ This is a Double-width-and-height line
+
+ This is another such line
+ This is another such line
+
+  ^------- left margin
+
+
+
+This is not a double-width line
+
+Push <RETURN>
+--- screen 02 ---
+ 80 column mode
+
+
+
+  v------- left margin
+
+  This is a normal-sized line
+
+ This is a Double-width line
+
+ This is a Double-width-and-height line
+ This is a Double-width-and-height line
+
+ This is another such line
+ This is another such line
+
+  ^------- left margin
+
+
+
+This **is** a double-width line
+
+Push <RETURN>
+--- screen 03 ---
+132 column mode
+
+
+
+                            v------- left margin
+
+                            This is a normal-sized line
+
+              This is a Double-width line
+
+              This is a Double-width-and-height line
+              This is a Double-width-and-height line
+
+              This is another such line
+              This is another such line
+
+                            ^------- left margin
+
+
+
+This is not a double-width line
+
+Push <RETURN>
+--- screen 04 ---
+132 column mode
+
+
+
+                            v------- left margin
+
+                            This is a normal-sized line
+
+              This is a Double-width line
+
+              This is a Double-width-and-height line
+              This is a Double-width-and-height line
+
+              This is another such line
+              This is another such line
+
+                            ^------- left margin
+
+
+
+This **is** a double-width line
+
+Push <RETURN>
+--- screen 05 ---
+
+
+
+
+
+
+
+┌──────────────────────────────────────┐
+┌──────────────────────────────────────┐
+│                                      │
+│                                      │
+│ * The mad programmer strikes again * │
+│ * The mad programmer strikes again * │
+│                                      │
+│                                      │
+└──────────────────────────────────────┘
+└──────────────────────────────────────┘
+
+
+
+
+Another test pattern...  a frame with blinking bold text,
+all in double-height double-width size. Push <RETURN>
+--- screen 06 ---
+Exactly half of the box should remain. Push <RETURN>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+┌──────────────────────────────────────┐
+┌──────────────────────────────────────┐
+│                                      │
+│                                      │
+│ * The mad programmer strikes again * │

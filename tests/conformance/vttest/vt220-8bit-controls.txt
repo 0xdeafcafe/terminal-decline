@@ -1,0 +1,2 @@
+--- screen 01 ---
+!unknown S8C1T isn't supported: replies stay 7-bit

@@ -1,0 +1,72 @@
+--- screen 01 ---
+                   Extended/Graphic rendition test pattern:
+
+
+vanilla                                bold
+
+     underline                              bold underline
+
+blink                                  bold blink
+
+     underline blink                        bold underline blink
+
+negative                               bold negative
+
+     underline negative                     bold underline negative
+
+blink negative                         bold blink negative
+
+     underline blink negative               bold underline blink negative
+
+     original foreground                    original background
+
+concealed                              concealed negative <- concealed text
+Dark background. Push <RETURN>
+--- screen 02 ---
+                   Extended/Graphic rendition test pattern:
+
+
+vanilla                                bold
+
+     underline                              bold underline
+
+blink                                  bold blink
+
+     underline blink                        bold underline blink
+
+negative                               bold negative
+
+     underline negative                     bold underline negative
+
+blink negative                         bold blink negative
+
+     underline blink negative               bold underline blink negative
+
+     original foreground                    original background
+
+concealed                              concealed negative <- concealed text
+Light background. Push <RETURN>
+--- screen 03 ---
+                   Extended/Graphic rendition test pattern:
+
+
+vanilla                                bold
+
+     underline                              bold underline
+
+blink                                  bold blink
+
+     underline blink                        bold underline blink
+
+negative                               bold negative
+
+     underline negative                     bold underline negative
+
+blink negative                         bold blink negative
+
+     underline blink negative               bold underline blink negative
+
+     original foreground                    original background
+
+concealed                              concealed negative <- concealed text
+Dark background. Push <RETURN>

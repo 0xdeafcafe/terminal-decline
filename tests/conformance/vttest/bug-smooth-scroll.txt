@@ -1,0 +1,289 @@
+--- screen 01 ---
+
+
+
+
+
+
+
+
+
+This is a test of the VT100 'Scroll while toggle softscroll'
+bug.  The cursor may disappear, or move UP the screen, or
+multiple copies of some lines may appear.
+Push <RETURN>
+--- screen 02 ---
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Softscroll bug test, line 1.  Push <RETURN>
+--- screen 03 ---
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Softscroll bug test, line 1.  Push <RETURN>
+Softscroll bug test, line 2.  Push <RETURN>
+--- screen 04 ---
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Softscroll bug test, line 1.  Push <RETURN>
+Softscroll bug test, line 2.  Push <RETURN>
+Softscroll bug test, line 3.  Push <RETURN>
+--- screen 05 ---
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Softscroll bug test, line 1.  Push <RETURN>
+Softscroll bug test, line 2.  Push <RETURN>
+Softscroll bug test, line 3.  Push <RETURN>
+Softscroll bug test, line 4.  Push <RETURN>
+--- screen 06 ---
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Softscroll bug test, line 1.  Push <RETURN>
+Softscroll bug test, line 2.  Push <RETURN>
+Softscroll bug test, line 3.  Push <RETURN>
+Softscroll bug test, line 4.  Push <RETURN>
+Softscroll bug test, line 5.  Push <RETURN>
+--- screen 07 ---
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Softscroll bug test, line 1.  Push <RETURN>
+Softscroll bug test, line 2.  Push <RETURN>
+Softscroll bug test, line 3.  Push <RETURN>
+Softscroll bug test, line 4.  Push <RETURN>
+Softscroll bug test, line 5.  Push <RETURN>
+Softscroll bug test, line 6.  Push <RETURN>
+--- screen 08 ---
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Softscroll bug test, line 1.  Push <RETURN>
+Softscroll bug test, line 2.  Push <RETURN>
+Softscroll bug test, line 3.  Push <RETURN>
+Softscroll bug test, line 4.  Push <RETURN>
+Softscroll bug test, line 5.  Push <RETURN>
+Softscroll bug test, line 6.  Push <RETURN>
+Softscroll bug test, line 7.  Push <RETURN>
+--- screen 09 ---
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Softscroll bug test, line 1.  Push <RETURN>
+Softscroll bug test, line 2.  Push <RETURN>
+Softscroll bug test, line 3.  Push <RETURN>
+Softscroll bug test, line 4.  Push <RETURN>
+Softscroll bug test, line 5.  Push <RETURN>
+Softscroll bug test, line 6.  Push <RETURN>
+Softscroll bug test, line 7.  Push <RETURN>
+Softscroll bug test, line 8.  Push <RETURN>
+--- screen 10 ---
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Softscroll bug test, line 1.  Push <RETURN>
+Softscroll bug test, line 2.  Push <RETURN>
+Softscroll bug test, line 3.  Push <RETURN>
+Softscroll bug test, line 4.  Push <RETURN>
+Softscroll bug test, line 5.  Push <RETURN>
+Softscroll bug test, line 6.  Push <RETURN>
+Softscroll bug test, line 7.  Push <RETURN>
+Softscroll bug test, line 8.  Push <RETURN>
+Softscroll bug test, line 9.  Push <RETURN>
+--- screen 11 ---
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Softscroll bug test, line 1.  Push <RETURN>
+Softscroll bug test, line 2.  Push <RETURN>
+Softscroll bug test, line 3.  Push <RETURN>
+Softscroll bug test, line 4.  Push <RETURN>
+Softscroll bug test, line 5.  Push <RETURN>
+Softscroll bug test, line 6.  Push <RETURN>
+Softscroll bug test, line 7.  Push <RETURN>
+Softscroll bug test, line 8.  Push <RETURN>
+Softscroll bug test, line 9.  Push <RETURN>
+Softscroll bug test, line 10.  Push <RETURN>
+--- screen 12 ---
+
+
+
+
+
+
+
+
+
+
+
+
+Softscroll bug test, line 1.  Push <RETURN>
+Softscroll bug test, line 2.  Push <RETURN>
+Softscroll bug test, line 3.  Push <RETURN>
+Softscroll bug test, line 4.  Push <RETURN>
+Softscroll bug test, line 5.  Push <RETURN>
+Softscroll bug test, line 6.  Push <RETURN>
+Softscroll bug test, line 7.  Push <RETURN>
+Softscroll bug test, line 8.  Push <RETURN>
+Softscroll bug test, line 9.  Push <RETURN>
+Softscroll bug test, line 10.  Push <RETURN>
+That should have been enough to show the bug, if present.
+Push <RETURN>

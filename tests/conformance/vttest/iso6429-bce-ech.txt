@@ -1,0 +1,48 @@
+--- screen 01 ---
+
+
+
+
+
+
+                 *********************************************
+                 * The screen background should be blue,     *
+                 * with a box made of asterisks and this     *
+                 * caption, in orange (non-bold yellow).     *
+                 * There should be no cells with the         *
+                 * default foreground or background.         *
+                 *                                           *
+                 *                                           *
+                 *                                           *
+                 *                                           *
+                 *********************************************
+
+
+
+
+
+Push <RETURN>
+--- screen 02 ---
+
+
+
+
+
+
+                 *********************************************
+                 * The screen background should be black,    *
+                 * with a box made of asterisks and this     *
+                 * caption, in white (actually gray - it     *
+                 * is not bold).  Only the asterisk box      *
+                 * should be in color.                       *
+                 *                                           *
+                 *                                           *
+                 *                                           *
+                 *                                           *
+                 *********************************************
+
+
+
+
+
+Push <RETURN>

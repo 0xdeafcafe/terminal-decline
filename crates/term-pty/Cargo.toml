@@ -6,3 +6,7 @@ license.workspace = true
 
 [dependencies]
 libc.workspace = true
+
+[dev-dependencies]
+# For the headless terminal example (examples/headless.rs).
+term-core.workspace = true

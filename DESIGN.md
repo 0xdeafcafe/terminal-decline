@@ -19,9 +19,11 @@ any command as its own Dock app.
   that: target ≥ 2× the PTY limit.
 - **Zero UI.** The window is the terminal surface only: transparent, full-size
   content title bar with no title text, no tab bar of our own (tabs are
-  macOS's native window tabs), no settings screen, no status bar. Config is
-  a file. Menus exist only because macOS requires a menu bar (Quit, Copy,
-  Paste, New Window, New Tab); they are standard AppKit menus.
+  macOS's native window tabs), no settings window, no status bar. Config is
+  a file; Settings… (Cmd+,) is a program the app's own binary runs in a
+  terminal tab, editing that file (`docs/design/preferences.md`). Menus
+  exist only because macOS requires a menu bar (Quit, Copy, Paste, New
+  Window, New Tab); they are standard AppKit menus.
 - **Dock pins.** `decline pin` turns any command into its own macOS app.
 
 ## Modules (Cargo workspace)
@@ -144,8 +146,9 @@ a fresh one saying "decline hit a bug and stopped this session; details in
 …", its program is killed, and other windows keep running. A panic on the
 main thread (AppKit) aborts once it has been logged. Each release keeps
 its `decline.dSYM` (`split-debuginfo = "packed"`) as a release download,
-for symbolicating crash logs. Unwinding costs 157 KB of binary (unwind
-tables and landing pads: 1.34 → 1.50 MB) and no measurable parse speed.
+for symbolicating crash logs. Unwinding costs binary size (unwind tables
+and landing pads: 157 KB when it was added, 1.34 → 1.50 MB; 261 KB on 29
+Oct 2026, 1.90 → 2.16 MB) and no measurable parse speed.
 
 ## Rendering (Metal)
 
@@ -530,7 +533,7 @@ stay.
 | `cat` 100 MB coloured text | 1.44–1.53 s | 1.90 s |
 | CPU time during that `cat` | 1.6 s | 4.4 s |
 | Footprint after it (10k lines scrollback) | 59 MB | 145–177 MB |
-| Binary size | 1.5 MB (unwinding; 1.3 MB aborting) | — |
+| Binary size | 2.16 MB (unwinding; 1.90 MB aborting; 29 Oct 2026) | — |
 | Parse, plain text (1 KB pieces) | 423 MB/s | — |
 | Parse, coloured / TUI / `seq` / Unicode | 172 / 289 / 110 / 131 MB/s | — |
 

@@ -258,6 +258,9 @@ struct OpenBlock {
     /// whenever the screen's table may have reused ids (a sweep, another
     /// table).
     cache: [(u32, u32); CACHE],
+    /// Entries are tagged `id | gen << 24` (style ids are below 2^24):
+    /// dropping the cache is a new generation, not a 2 KB memset.
+    cache_gen: u32,
 }
 
 const NO_ENTRY: (u32, u32) = (u32::MAX, 0);
@@ -350,6 +353,7 @@ impl OpenBlock {
             link_index: HashMap::new(),
             link_bytes: 0,
             cache: [NO_ENTRY; CACHE],
+            cache_gen: 1,
         }
     }
 
@@ -385,7 +389,11 @@ impl OpenBlock {
     }
 
     fn reset_cache(&mut self) {
-        self.cache = [NO_ENTRY; CACHE];
+        self.cache_gen += 1;
+        if self.cache_gen == 256 {
+            self.cache = [NO_ENTRY; CACHE];
+            self.cache_gen = 1;
+        }
     }
 
     /// Turn it into a sealed block, leaving an empty one starting where it
@@ -428,7 +436,7 @@ impl OpenBlock {
             return 0;
         }
         let e = self.cache[(id as usize) & (CACHE - 1)];
-        if e.0 == id {
+        if e.0 == id | self.cache_gen << 24 && id < (1 << 24) - 1 {
             return e.1;
         }
         self.slot_slow(id, styles, links)
@@ -458,7 +466,9 @@ impl OpenBlock {
                 }
             }
         };
-        self.cache[(id as usize) & (CACHE - 1)] = (id, slot);
+        if id < (1 << 24) - 1 {
+            self.cache[(id as usize) & (CACHE - 1)] = (id | self.cache_gen << 24, slot);
+        }
         slot
     }
 
@@ -618,7 +628,7 @@ impl OpenBlock {
                 };
                 push_utf8(&mut self.text, ch);
                 if ch != last.0 {
-                    last = (ch, single_width(ch, amb));
+                    last = (ch, scratch.memo.width(ch, amb));
                 }
                 predicted = last.1;
                 scalars += 1;
@@ -744,6 +754,32 @@ struct Scratch {
     widths: Vec<(u32, u8)>,
     /// (cells, slot) per run.
     runs: Vec<(u32, u32)>,
+    memo: WidthMemo,
+}
+
+/// The widths of the last scalars looked up, direct-mapped by scalar:
+/// lines that scroll by repeat their characters (box drawing, Cyrillic,
+/// symbols), so the store looks most of them up in the table once.
+#[derive(Debug)]
+struct WidthMemo([(u32, u8); 64]);
+
+impl Default for WidthMemo {
+    fn default() -> Self {
+        WidthMemo([(0, 1); 64])
+    }
+}
+
+impl WidthMemo {
+    #[inline]
+    fn width(&mut self, c: char, ambiguous: u8) -> u8 {
+        // The setting is part of the key, so a change needs no reset.
+        let key = c as u32 | (ambiguous as u32) << 22;
+        let e = &mut self.0[(c as usize) & 63];
+        if e.0 != key {
+            *e = (key, single_width(c, ambiguous));
+        }
+        e.1
+    }
 }
 
 /// Make room for `add` more elements, growing by doubling but never past
@@ -1045,7 +1081,11 @@ impl<'a> View<'a> {
                 place(row, bytes.len(), Cell::BLANK.with_width(Width::EdgeSpacer));
             }
         } else {
-            let col = self.decode_text(meta, &mut pos, flags, text, row);
+            let col = if flags & (flag::CLUSTERS | flag::WIDTHS) == 0 {
+                self.decode_scalars(text, row)
+            } else {
+                self.decode_text(meta, &mut pos, flags, text, row)
+            };
             if flags & flag::EDGE != 0 {
                 place(row, col, Cell::BLANK.with_width(Width::EdgeSpacer));
             }
@@ -1062,8 +1102,34 @@ impl<'a> View<'a> {
         next
     }
 
-    /// The text of a line with clusters, width exceptions or non-ASCII
-    /// characters, into cells (filling in those the runs laid down).
+    /// The text of a line of single scalars with no width exceptions (CJK,
+    /// accents, box drawing): each scalar is a cell at the table's width.
+    /// Returns the column after it.
+    #[inline(never)]
+    fn decode_scalars(&self, text: &[u8], row: &mut Row) -> usize {
+        let amb = self.ambiguous;
+        let (mut i, mut col) = (0, 0);
+        let mut last = ('\0', 1);
+        while i < text.len() {
+            let (c, n) = utf8_at(text, i);
+            i += n;
+            if c != last.0 {
+                last = (c, single_width(c, amb));
+            }
+            let cell = if c == ' ' { Cell::BLANK } else { Cell::BLANK.with_char(c) };
+            if last.1 == 2 {
+                place(row, col, cell.with_width(Width::Wide));
+                place(row, col + 1, Cell::BLANK.with_width(Width::Spacer));
+                col += 2;
+            } else {
+                place(row, col, cell);
+                col += 1;
+            }
+        }
+        col
+    }
+
+    /// The text of a line with clusters or width exceptions, into cells (filling in those the runs laid down).
     /// Returns the column after it.
     #[inline(never)]
     fn decode_text(&self, meta: &[u8], pos: &mut usize, flags: u8, text: &[u8], row: &mut Row) -> usize {

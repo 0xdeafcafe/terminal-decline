@@ -204,8 +204,21 @@ tables and landing pads: 1.34 → 1.50 MB) and no measurable parse speed.
   changes, which a distributed notification announces).
 - Option-as-Meta configurable, **off by default** (like Terminal.app and
   Ghostty) so Option still types `@ [ ] { } | \ ~` on European layouts.
-- Kitty keyboard protocol, "disambiguate" level: Shift+Enter, Ctrl+Enter,
-  Ctrl+Tab, Esc vs Alt (Claude Code, Neovim, Helix rely on these).
+- Kitty keyboard protocol, all five flags, following the spec's tables
+  (`keys`; table tests from the spec's examples). Flag 1 (disambiguate):
+  Shift+Enter, Ctrl+Enter, Ctrl+Tab, Esc vs Alt, keypad keys by their own
+  codes (Claude Code, Neovim, Helix rely on these). Flag 2: repeats and
+  releases, so the view translates `keyUp` too, and sends a release only
+  for a key whose press went to the program. Flag 4: the shifted key and
+  the base layout key (the ASCII-capable layout's, so Ctrl+С on a Russian
+  layout carries `c`). Flag 8: every key as an escape code, modifier keys
+  too (`flagsChanged`); text keys still go through the input method, and
+  what it types is encoded as that key (`keys::committed_text`), so IMEs
+  and dead keys keep working; composed text with no key of its own is a
+  key-0 text event under flag 16 and plain UTF-8 without it. Flag 16: the
+  text inside the escape code. Cmd stays with the menus and the Cmd
+  line-editing keys whatever the flags. term-core keeps the flags stack
+  (`kitty_keyboard_flags()`).
 - Cmd+← / Cmd+→ / Cmd+⌫ send start-of-line / end-of-line / delete-line.
 - Cmd shortcuts are handled by the app, never sent to the program:
   Cmd+C copy (selection), Cmd+V paste (bracketed paste when on), Cmd+N new

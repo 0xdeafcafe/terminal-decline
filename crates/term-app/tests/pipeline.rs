@@ -237,6 +237,7 @@ impl Harness {
             KeyAction::Send(b) => self.session().send(b),
             KeyAction::ToTextInput => self.session().send(input.chars.into_bytes()),
             KeyAction::ToMenu => panic!("{input:?} went to the menus"),
+            KeyAction::Ignore => {}
         }
     }
 

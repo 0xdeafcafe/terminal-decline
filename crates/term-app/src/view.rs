@@ -33,7 +33,7 @@ use term_render::{FrameInput, Renderer, Theme};
 use crate::config::Config;
 use crate::control::{self, Control, Dump};
 use crate::frame_policy::{self, Decision};
-use crate::keys::{KeyAction, KeyInput, KeyModes, Mods, encode_key, paste_bytes};
+use crate::keys::{KeyAction, KeyEventType, KeyInput, KeyModes, KeysDown, Mods, encode_key, paste_bytes};
 use crate::latency::{self, FrameKeys, Latency};
 use crate::layout::{self, CellSize, Padding};
 use crate::mouse;
@@ -81,6 +81,12 @@ struct State {
     /// The session has ended, but the window stays open to show why; a key
     /// closes it.
     held: bool,
+    /// The key event being handed to the input method, and the modes it
+    /// was translated with, so text it types can be encoded as that key
+    /// (`keys::committed_text`).
+    text_key: Option<(KeyInput, KeyModes)>,
+    /// Keys whose press went to the program, for release events.
+    keys_down: KeysDown,
     /// Only with `DECLINE_TEST_DUMP` set: see [`crate::control`].
     test: Option<TestControl>,
     /// Only with `DECLINE_LATENCY_LOG` set: the key event being handled,
@@ -251,6 +257,16 @@ define_class!(
             self.handle_key(event);
         }
 
+        #[unsafe(method(keyUp:))]
+        fn key_up(&self, event: &NSEvent) {
+            self.handle_key_up(event);
+        }
+
+        #[unsafe(method(flagsChanged:))]
+        fn flags_changed(&self, event: &NSEvent) {
+            self.handle_flags_changed(event);
+        }
+
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) {
             self.mouse_button_event(event, 0, true);
@@ -378,12 +394,22 @@ define_class!(
         #[unsafe(method(insertText:replacementRange:))]
         fn insert_text(&self, string: &AnyObject, _range: NSRange) {
             let text = string_of(string);
-            self.with_state(|st| st.marked.clear());
+            // The key being handled, unless the text ends a composition.
+            let key = self.with_state(|st| {
+                let composed = !st.marked.is_empty();
+                st.marked.clear();
+                st.text_key.take().filter(|_| !composed)
+            });
             if text.is_empty() {
                 self.request_redraw();
             } else {
+                let modes = match &key {
+                    Some(Some((_, modes))) => *modes,
+                    _ => self.key_modes().unwrap_or_default(),
+                };
+                let input = key.flatten().map(|(input, _)| input);
                 // Drawn with the echo (see `send_input`).
-                self.send_input(text.into_bytes());
+                self.send_input(crate::keys::committed_text(input.as_ref(), modes, &text));
             }
         }
 
@@ -561,6 +587,8 @@ impl TerminalView {
             autoscroll: None,
             autoscroll_scheduled: false,
             held: false,
+            text_key: None,
+            keys_down: KeysDown::default(),
             test,
             key_t0: None,
             awaiting_echo: None,
@@ -1050,7 +1078,32 @@ impl TerminalView {
             self.close_window();
             return;
         }
-        let modes = self.with_state(|st| {
+        let Some(modes) = self.key_modes() else { return };
+        let action = crate::keys::translate(&input, modes);
+        if input.flags & crate::keys::flags::COMMAND == 0 {
+            NSCursor::setHiddenUntilMouseMoves(true);
+        }
+        let went_to_program = matches!(action, KeyAction::Send(_)) || (action == KeyAction::ToTextInput && !modes.composing);
+        if went_to_program {
+            self.with_state(|st| st.keys_down.press(input.keycode));
+        }
+        match action {
+            KeyAction::Send(bytes) => self.send_input(bytes),
+            KeyAction::ToMenu | KeyAction::Ignore => {}
+            KeyAction::ToTextInput => {
+                // Text, dead keys and input methods.
+                let key = (!modes.composing).then_some((input, modes));
+                self.with_state(|st| st.text_key = key);
+                let events = NSArray::from_slice(&[event]);
+                self.interpretKeyEvents(&events);
+                self.with_state(|st| st.text_key = None);
+            }
+        }
+    }
+
+    /// How keys are encoded right now.
+    fn key_modes(&self) -> Option<KeyModes> {
+        self.with_state(|st| {
             let t = st.session.lock_term();
             KeyModes {
                 app_cursor: t.state.modes().app_cursor,
@@ -1059,20 +1112,42 @@ impl TerminalView {
                 option_as_meta: st.config.option_as_meta,
                 composing: !st.marked.is_empty(),
             }
-        });
-        let Some(modes) = modes else { return };
-        let action = crate::keys::translate(&input, modes);
-        if input.flags & crate::keys::flags::COMMAND == 0 {
-            NSCursor::setHiddenUntilMouseMoves(true);
+        })
+    }
+
+    /// A key came up: a release event if the program asked for them
+    /// (kitty flag 2) and the press went to it.
+    fn handle_key_up(&self, event: &NSEvent) {
+        let Some(modes) = self.key_modes() else { return };
+        let input = KeyInput {
+            event: KeyEventType::Release,
+            ..key_input(event)
+        };
+        let was_down = self.with_state(|st| st.keys_down.release(input.keycode)).unwrap_or(false);
+        if modes.kitty_flags & crate::keys::kitty::EVENT_TYPES == 0 || !was_down {
+            return;
         }
-        match action {
-            KeyAction::Send(bytes) => self.send_input(bytes),
-            KeyAction::ToMenu => {}
-            KeyAction::ToTextInput => {
-                // Text, dead keys and input methods.
-                let events = NSArray::from_slice(&[event]);
-                self.interpretKeyEvents(&events);
-            }
+        if let KeyAction::Send(bytes) = crate::keys::translate(&input, modes) {
+            // Not typing: the view stays where it is.
+            self.send_raw(bytes);
+        }
+    }
+
+    /// A modifier key went down or up: reported only when the program
+    /// asked for every key (kitty flag 8).
+    fn handle_flags_changed(&self, event: &NSEvent) {
+        let Some(modes) = self.key_modes() else { return };
+        if modes.kitty_flags & crate::keys::kitty::ALL_KEYS == 0 {
+            return;
+        }
+        // `flagsChanged` events have no characters.
+        let input = KeyInput {
+            keycode: event.keyCode(),
+            flags: event.modifierFlags().0,
+            ..KeyInput::default()
+        };
+        if let KeyAction::Send(bytes) = crate::keys::translate(&input, modes) {
+            self.send_raw(bytes);
         }
     }
 
@@ -1423,6 +1498,15 @@ fn key_input(event: &NSEvent) -> KeyInput {
     KeyInput {
         keycode: event.keyCode(),
         chars: event.characters().map(|s| s.to_string()).unwrap_or_default(),
+        chars_unshifted: event
+            .charactersByApplyingModifiers(NSEventModifierFlags::empty())
+            .map(|s| s.to_string())
+            .unwrap_or_default(),
+        event: if event.isARepeat() {
+            KeyEventType::Repeat
+        } else {
+            KeyEventType::Press
+        },
         chars_shift_only: event
             .charactersByApplyingModifiers(shifted)
             .map(|s| s.to_string())

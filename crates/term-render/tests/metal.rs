@@ -1,7 +1,8 @@
 //! Real GPU render: a 4×2-cell grid drawn into an offscreen BGRA8 texture
 //! and read back. Checks the background colour's byte order, premultiplied
 //! blending of a half-transparent background over a half-transparent window,
-//! and that a glyph draws something. Without a Metal device the test is
+//! that a glyph draws something, and that frames built from snapshots look
+//! like frames built from the live terminal. Without a Metal device the test is
 //! skipped locally and fails on CI (the `CI` env var is set).
 
 use std::ffi::c_void;
@@ -69,7 +70,6 @@ fn offscreen_render_reads_back() {
     t.advance(b"\x1b[?25l\x1b[41m \x1b[48;2;17;34;51m \x1b[0m\r\nM");
 
     let input = FrameInput {
-        term: &t.state,
         theme: &theme,
         metrics: m,
         padding: (0, 0),
@@ -77,7 +77,7 @@ fn offscreen_render_reads_back() {
         focused: true,
         preedit: None,
     };
-    renderer.prepare(&input);
+    renderer.prepare(&mut t.state, &input);
     assert_eq!(renderer.frame.glyphs.len(), 1);
 
     let desc = unsafe {
@@ -128,20 +128,24 @@ fn offscreen_render_reads_back() {
 }
 
 /// Draw `t` with `renderer` into an offscreen texture and read it back.
-fn render(renderer: &mut Renderer, t: &Term, theme: &Theme) -> Pixels {
-    let m = renderer.metrics();
-    let (cw, ch) = (m.cell_width as usize, m.cell_height as usize);
-    let (width, height) = (t.state.cols() * cw, t.state.lines() * ch);
+fn render(renderer: &mut Renderer, t: &mut Term, theme: &Theme) -> Pixels {
     let input = FrameInput {
-        term: &t.state,
         theme,
-        metrics: m,
+        metrics: renderer.metrics(),
         padding: (0, 0),
         cursor_on: true,
         focused: true,
         preedit: None,
     };
-    renderer.prepare(&input);
+    renderer.prepare(&mut t.state, &input);
+    draw(renderer, t)
+}
+
+/// Draw the frame `renderer` has prepared for `t` and read it back.
+fn draw(renderer: &mut Renderer, t: &Term) -> Pixels {
+    let m = renderer.metrics();
+    let (cw, ch) = (m.cell_width as usize, m.cell_height as usize);
+    let (width, height) = (t.state.cols() * cw, t.state.lines() * ch);
     let desc = unsafe {
         MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(MTLPixelFormat::BGRA8Unorm, width, height, false)
     };
@@ -166,6 +170,64 @@ fn render(renderer: &mut Renderer, t: &Term, theme: &Theme) -> Pixels {
     }
 }
 
+/// Frames built from snapshots, with rows reused from the row cache and the
+/// cursor, selection and input-method text drawn over them, look exactly
+/// like frames built from the live terminal (the path they replaced), on
+/// the GPU with real glyphs, frame after frame.
+#[test]
+fn snapshot_frames_draw_like_the_live_terminal() {
+    if MTLCreateSystemDefaultDevice().is_none() {
+        assert!(std::env::var_os("CI").is_none(), "no Metal device on CI");
+        eprintln!("skipping: no Metal device");
+        return;
+    }
+    let mut renderer = Renderer::new(Fonts::new("Menlo", 24.0));
+    let theme = Theme::default();
+    let mut t = Term::new(12, 4, 100);
+    let steps: [(&str, Option<&str>, bool); 7] = [
+        ("\x1b[41mred\x1b[0m \x1b[4;2munder\x1b[0m\r\n\x1b[1mbold\x1b[7m inv", None, true),
+        // The cursor moves onto a dim underlined cell: rows unchanged.
+        ("\x1b[1;6H", None, true),
+        // A wide character under the cursor, then one line changes.
+        ("\x1b[3;1H漢字\x1b[3;1H", None, true),
+        ("\x1b[4;1Hspinner |\x1b[4;9H", Some("あい"), true),
+        // Scrolled: every row moves, none changes.
+        ("\r\n\r\n\r\nmore", None, false),
+        ("\x1b[?1049h\x1b[44mfull screen\x1b[6 q", None, true),
+        ("\x1b[?1049l\x1b[2 q", None, true),
+    ];
+    for (i, (bytes, preedit, focused)) in steps.into_iter().enumerate() {
+        t.advance(bytes.as_bytes());
+        if i == 2 {
+            let line = t.state.point_at(1, 0).line;
+            t.state.set_selection(Some(term_core::Selection::new(
+                term_core::Point { line, col: 2 },
+                term_core::Point { line: line + 1, col: 3 },
+            )));
+        }
+        let input = FrameInput {
+            theme: &theme,
+            metrics: renderer.metrics(),
+            padding: (0, 0),
+            cursor_on: true,
+            focused,
+            preedit,
+        };
+        renderer.prepare(&mut t.state, &input);
+        let from_snapshot = draw(&mut renderer, &t);
+        let Renderer { frame, glyphs, .. } = &mut renderer;
+        frame.build_live(&t.state, &input, glyphs);
+        let live = draw(&mut renderer, &t);
+        let differ = from_snapshot
+            .data
+            .chunks(4)
+            .zip(live.data.chunks(4))
+            .filter(|(a, b)| a != b)
+            .count();
+        assert_eq!(differ, 0, "step {i}: {differ} pixels differ\n{}", t.state.dump());
+    }
+}
+
 /// A tmux-style border of code-drawn glyphs through the real glyph cache
 /// and GPU: every border line runs unbroken across cell edges, at several
 /// font sizes.
@@ -183,7 +245,7 @@ fn border_has_no_gaps_between_cells() {
         let mut renderer = Renderer::new(Fonts::new("Menlo", size));
         let mut t = Term::new(7, 4, 0);
         t.advance("\x1b[?25l╭──┬──╮\r\n│ab│cd│\r\n├──┼──┤\r\n╰──┴──╯".as_bytes());
-        let px = render(&mut renderer, &t, &theme);
+        let px = render(&mut renderer, &mut t, &theme);
         let (cw, ch) = px.cell;
         // Horizontal lines on border lines 0, 2 and 3: the rows inked in the
         // middle of column 1 are inked from column 1 to the start of column 6.

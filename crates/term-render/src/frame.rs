@@ -1,9 +1,11 @@
 //! Turns terminal state into GPU instances. No Metal here, so it can be
 //! tested and benchmarked on its own.
 
-use term_core::{Attrs, CellRef, ColorKind, Content, CursorShape, StyleKey, Terminal, Underline, Width};
+use term_core::{Attrs, Cell, CellRef, ColorKind, Content, CursorShape, HighlightKind, RowFlags, StyleKey, Terminal, Underline, Width};
 use term_font::{Metrics, Style as FontStyle};
 use unicode_width::UnicodeWidthChar;
+
+use crate::row_cache::{Built, Entry, MISSING, Mark, RowCache};
 
 /// RGBA8 with red in the low byte (matches `unpack_unorm4x8_to_float`).
 pub type Rgba = u32;
@@ -87,9 +89,16 @@ pub struct GlyphSlot {
 pub trait GlyphSource {
     /// `None` for glyphs that draw nothing (spaces) or are missing.
     fn glyph(&mut self, codepoint: u32, style: FontStyle) -> Option<GlyphSlot>;
+
+    /// Changes whenever slots handed out before may have moved (a glyph
+    /// texture emptied or replaced, the fonts changed): frame building
+    /// then drops the rows it cached.
+    fn generation(&self) -> u64 {
+        0
+    }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Theme {
     pub foreground: Rgba,
     pub background: Rgba,
@@ -162,17 +171,18 @@ struct RowCtx<'a> {
     /// The row's top, pixels.
     y: i32,
     cols: usize,
-    /// Selected columns, half-open; empty when none are.
+    /// Selected columns, half-open; empty when none are. Only the
+    /// reference path (`build_live`) draws highlights into rows.
     sel: std::ops::Range<usize>,
-    /// The block cursor's column, when it is drawn on this row. Other
-    /// cursors are drawn on top of the frame, not in the row.
-    block_cursor: Option<usize>,
+    /// The columns under a block cursor, on this row; empty when it isn't
+    /// on it. Only the reference path draws the cursor into rows.
+    block_cursor: std::ops::Range<usize>,
     /// Columns covered by input-method text, which draw no glyphs.
     covered: std::ops::Range<usize>,
 }
 
-/// A cell as frame building reads it: `CellRef`, and in tests cells built
-/// from any `Style`.
+/// A cell as frame building reads it: `CellRef`, a snapshot's cells, and
+/// in tests cells built from any `Style`.
 trait CellView {
     /// Equal keys mean equal styles.
     type Key: Copy + PartialEq;
@@ -199,6 +209,86 @@ impl CellView for CellRef<'_> {
     #[inline]
     fn is_spacer(&self) -> bool {
         CellRef::is_spacer(self)
+    }
+}
+
+/// A cell copied into a snapshot, with the styles its id indexes (the
+/// screen's mirror, or the snapshot's history styles).
+#[derive(Clone, Copy)]
+struct SnapCell<'a> {
+    cell: Cell,
+    styles: &'a [term_core::Style],
+}
+
+impl CellView for SnapCell<'_> {
+    type Key = u32;
+    #[inline]
+    fn key(&self) -> u32 {
+        self.cell.style_id()
+    }
+    #[inline]
+    fn style(&self) -> term_core::Style {
+        self.styles.get(self.cell.style_id() as usize).copied().unwrap_or_default()
+    }
+    /// As `CellRef::content` reads it. Cluster cells come with the
+    /// snapshot's cluster text (cells design PR 6).
+    #[inline]
+    fn content(&self) -> Content<'_> {
+        match self.cell.codepoint() {
+            0 => Content::Empty,
+            cp => char::from_u32(cp).map_or(Content::Empty, Content::Char),
+        }
+    }
+    #[inline]
+    fn is_spacer(&self) -> bool {
+        self.cell.is_spacer()
+    }
+}
+
+/// Where a row's instances go: the frame itself (the reference path) or a
+/// row cache entry, which also records each one's cell.
+trait RowSink {
+    fn background(&mut self, r: RectInstance);
+    fn glyph(&mut self, g: GlyphInstance, mark: Mark);
+    fn decoration(&mut self, r: RectInstance, mark: Mark);
+}
+
+/// The frame's own vectors, for `build_live`.
+struct Direct<'a> {
+    rects: &'a mut Vec<RectInstance>,
+    glyphs: &'a mut Vec<GlyphInstance>,
+    decorations: &'a mut Vec<RectInstance>,
+}
+
+impl RowSink for Direct<'_> {
+    #[inline]
+    fn background(&mut self, r: RectInstance) {
+        self.rects.push(r);
+    }
+    #[inline]
+    fn glyph(&mut self, g: GlyphInstance, _: Mark) {
+        self.glyphs.push(g);
+    }
+    #[inline]
+    fn decoration(&mut self, r: RectInstance, _: Mark) {
+        self.decorations.push(r);
+    }
+}
+
+impl RowSink for Entry {
+    #[inline]
+    fn background(&mut self, r: RectInstance) {
+        self.backgrounds.push(r);
+    }
+    #[inline]
+    fn glyph(&mut self, g: GlyphInstance, mark: Mark) {
+        self.glyphs.push(g);
+        self.glyph_marks.push(mark);
+    }
+    #[inline]
+    fn decoration(&mut self, r: RectInstance, mark: Mark) {
+        self.decorations.push(r);
+        self.decoration_marks.push(mark);
     }
 }
 
@@ -241,10 +331,19 @@ impl Pen {
     fn face(&self) -> FontStyle {
         FontStyle::new(self.attrs.contains(Attrs::BOLD), self.attrs.contains(Attrs::ITALIC))
     }
+
+    /// The flags of a [`Mark`] for this pen's cells.
+    #[inline]
+    fn mark(&self, col: usize) -> Mark {
+        Mark {
+            col: col.min(u16::MAX as usize) as u16,
+            flags: if self.attrs.contains(Attrs::DIM) { Mark::DIM } else { 0 },
+        }
+    }
 }
 
+/// How a frame is drawn, apart from the terminal.
 pub struct FrameInput<'a> {
-    pub term: &'a Terminal,
     pub theme: &'a Theme,
     pub metrics: Metrics,
     /// Padding around the grid, pixels.
@@ -256,6 +355,8 @@ pub struct FrameInput<'a> {
     pub preedit: Option<&'a str>,
 }
 
+/// One frame's instances, and what building them keeps between frames
+/// (the row cache, cells design §9.3).
 #[derive(Default)]
 pub struct Frame {
     pub clear: Rgba,
@@ -263,15 +364,107 @@ pub struct Frame {
     pub glyphs: Vec<GlyphInstance>,
     /// Underlines, strikethrough and cursor; appended after the backgrounds.
     decorations: Vec<RectInstance>,
+    rows: RowCache,
+    /// Indexes into the snapshot's rows of the rows to build this frame.
+    to_build: Vec<usize>,
+}
+
+/// Rows whose top is this far down (pixels) are built every frame rather
+/// than kept: positions are clamped to the i16 range, so their instances
+/// may not move exactly. Only grids over ~30k pixels tall reach it.
+const FAR: i32 = i16::MAX as i32 / 2;
+
+/// The cursor as this frame draws it.
+struct CursorDraw {
+    /// View row and column.
+    at: (usize, usize),
+    shape: CursorShape,
+    wide: bool,
 }
 
 impl Frame {
-    pub fn build(&mut self, input: &FrameInput, glyphs: &mut impl GlyphSource) {
+    /// Build this frame from a snapshot of `term` (cells design §9): rows
+    /// whose change counter the row cache has are reused, the others are
+    /// copied and built, and the cursor, selection and input-method text
+    /// are drawn over them. Holds `term` (the lock) for all of it until R.1
+    /// moves building out.
+    pub fn build(&mut self, term: &mut Terminal, input: &FrameInput, glyphs: &mut impl GlyphSource) {
+        let m = input.metrics;
+        self.rows.check(&Built {
+            theme: input.theme.clone(),
+            metrics: [
+                m.cell_width,
+                m.cell_height,
+                m.baseline,
+                m.underline_offset,
+                m.underline_thickness,
+                m.strike_offset,
+            ],
+            padding_x: input.padding.0,
+            glyphs: glyphs.generation(),
+        });
+        self.rows.snapshot(term);
+        self.rows.take(&mut self.to_build);
+        self.build_rows(input, glyphs);
+        self.rows.place();
+        let (py, ch) = (input.padding.1 as i32, m.cell_height as i32);
+        self.rows.move_rows(|line| py + line as i32 * ch);
+        self.assemble(input, glyphs);
+        self.rows.drop_far(FAR);
+    }
+
+    /// Drop every cached row: the next frame copies and builds them all.
+    #[doc(hidden)]
+    pub fn forget_rows(&mut self) {
+        self.rows.forget_rows();
+    }
+
+    /// Rows in the row cache. Test aid.
+    #[doc(hidden)]
+    pub fn cached_rows(&self) -> usize {
+        self.rows.len()
+    }
+
+    /// Build the rows the snapshot copied into the row cache, where they
+    /// are drawn this frame.
+    fn build_rows(&mut self, input: &FrameInput, glyphs: &mut impl GlyphSource) {
+        let cols = self.rows.snap.cols as usize;
+        let (py, ch) = (input.padding.1 as i32, input.metrics.cell_height as i32);
+        for &i in &self.to_build {
+            let row = &self.rows.snap.rows[i];
+            let key = row.key;
+            let slot = self.rows.entry_for(key);
+            let ctx = RowCtx {
+                theme: input.theme,
+                m: input.metrics,
+                px: input.padding.0 as i32,
+                y: py + i as i32 * ch,
+                cols,
+                sel: 0..0,
+                block_cursor: 0..0,
+                covered: 0..0,
+            };
+            // The entry is taken out while it's built, as its cells and
+            // styles are borrowed from the cache.
+            let mut entry = std::mem::take(self.rows.entry_mut(slot));
+            entry.y = ctx.y;
+            let row = &self.rows.snap.rows[i];
+            let styles = self.rows.styles_for(row.flags.contains(RowFlags::HISTORY));
+            let cells = self.rows.snap.row_cells(row).unwrap_or(&[]);
+            build_row(&ctx, cells.iter().map(|&cell| SnapCell { cell, styles }), glyphs, &mut entry);
+            let used = std::mem::replace(self.rows.entry_mut(slot), entry);
+            debug_assert!(used.glyphs.is_empty());
+        }
+    }
+
+    /// The frame from the cached rows, with the overlays on top: rows'
+    /// backgrounds, highlights, the block cursor, rows' decorations, rows'
+    /// glyphs, other cursors and input-method text.
+    fn assemble(&mut self, input: &FrameInput, glyphs: &mut impl GlyphSource) {
         self.rects.clear();
         self.glyphs.clear();
         self.decorations.clear();
         let FrameInput {
-            term,
             theme,
             metrics: m,
             padding,
@@ -281,13 +474,156 @@ impl Frame {
         } = *input;
         let (cw, ch) = (m.cell_width as i32, m.cell_height as i32);
         let (px, py) = (padding.0 as i32, padding.1 as i32);
-        let default_bg = theme.background;
-        self.clear = with_alpha(default_bg, theme.background_opacity);
+        self.clear = with_alpha(theme.background, theme.background_opacity);
+        let rows = &self.rows;
+        let snap = &rows.snap;
+        let cols = snap.cols as usize;
+        let row_y = |line: usize| py + line as i32 * ch;
+        let full = |line: usize, cells: std::ops::Range<usize>, color: Rgba| RectInstance {
+            x: s16(px + cells.start as i32 * cw),
+            y: s16(row_y(line)),
+            w: ((cells.end - cells.start) as i32 * cw) as u16,
+            h: ch as u16,
+            color,
+        };
+
+        let c = snap.cursor;
+        let in_view = c.at.map(|(l, c)| (l as usize, c as usize));
+        let show = c.visible && (cursor_on || !focused || !c.blinking);
+        let cursor = in_view.filter(|_| show).map(|at| CursorDraw {
+            at,
+            shape: c.shape,
+            wide: c.wide,
+        });
+        // The focused block cursor recolours the text in its cells.
+        let block = cursor
+            .as_ref()
+            .filter(|c| focused && c.shape == CursorShape::Block)
+            .map(|c| (c.at.0, c.at.1..c.at.1 + if c.wide { 2 } else { 1 }));
+        let preedit = preedit.filter(|t| !t.is_empty()).zip(in_view);
+        let covered = preedit.map(|(t, (line, col))| {
+            let width: usize = t.chars().map(char_cells).sum();
+            (line, col..col + width)
+        });
+        let cells_on = |o: &Option<(usize, std::ops::Range<usize>)>, line: usize| {
+            o.as_ref().filter(|(l, _)| *l == line).map(|(_, r)| r.clone()).unwrap_or(0..0)
+        };
+
+        // Backgrounds.
+        for &slot in rows.order.iter().filter(|&&s| s != MISSING) {
+            self.rects.extend_from_slice(&rows.entry(slot).backgrounds);
+        }
+        // Highlights, then the block cursor over them.
+        for (line, row) in snap.rows.iter().enumerate() {
+            for h in snap.row_highlights(row) {
+                let color = match h.kind {
+                    HighlightKind::Selection => theme.selection,
+                    // Drawn once search (E.7) and links (PR 9) set them.
+                    HighlightKind::SearchHit | HighlightKind::CurrentSearchHit | HighlightKind::HoveredLink => continue,
+                };
+                let (a, b) = (h.cols.start as usize, (h.cols.end as usize).min(cols));
+                if a < b {
+                    self.rects.push(full(line, a..b, color));
+                }
+            }
+        }
+        if let Some((line, cells)) = &block
+            && cells.start < cols
+        {
+            self.rects.push(full(*line, cells.start..cells.end.min(cols), theme.cursor));
+        }
+
+        // Decorations and glyphs, recoloured under the block cursor and
+        // hidden under input-method text.
+        let under_cursor = |mark: Mark| {
+            if mark.flags & Mark::DIM != 0 {
+                with_alpha(theme.cursor_text, 160)
+            } else {
+                theme.cursor_text
+            }
+        };
+        for (line, &slot) in rows.order.iter().enumerate() {
+            if slot == MISSING {
+                continue;
+            }
+            let e = rows.entry(slot);
+            let on = cells_on(&block, line);
+            if on.is_empty() {
+                self.decorations.extend_from_slice(&e.decorations);
+            } else {
+                self.decorations
+                    .extend(e.decorations.iter().zip(&e.decoration_marks).map(|(r, mark)| {
+                        let recolour = mark.flags & Mark::TEXT_COLOUR != 0 && on.contains(&(mark.col as usize));
+                        RectInstance {
+                            color: if recolour { under_cursor(*mark) } else { r.color },
+                            ..*r
+                        }
+                    }));
+            }
+        }
+        for (line, &slot) in rows.order.iter().enumerate() {
+            if slot == MISSING {
+                continue;
+            }
+            let e = rows.entry(slot);
+            let on = cells_on(&block, line);
+            let hidden = cells_on(&covered, line);
+            if on.is_empty() && hidden.is_empty() {
+                self.glyphs.extend_from_slice(&e.glyphs);
+            } else {
+                for (g, mark) in e.glyphs.iter().zip(&e.glyph_marks) {
+                    let col = mark.col as usize;
+                    if hidden.contains(&col) {
+                        continue;
+                    }
+                    self.glyphs.push(GlyphInstance {
+                        color: if on.contains(&col) { under_cursor(*mark) } else { g.color },
+                        ..*g
+                    });
+                }
+            }
+        }
+
+        if let Some(c) = &cursor
+            && block.is_none()
+        {
+            self.cursor_rects(c, input);
+        }
+        if let Some((text, at)) = preedit {
+            self.draw_preedit(text, at, cols, input, glyphs);
+        }
+        self.rects.extend_from_slice(&self.decorations);
+    }
+
+    /// The reference path: the frame read straight from the live terminal,
+    /// with the cursor, selection and input-method text drawn into the
+    /// rows, as before frames were built from snapshots. Kept for one PR
+    /// so the tests can check that both give the same picture (§17.4).
+    #[doc(hidden)]
+    pub fn build_live(&mut self, term: &Terminal, input: &FrameInput, glyphs: &mut impl GlyphSource) {
+        self.rects.clear();
+        self.glyphs.clear();
+        self.decorations.clear();
+        let FrameInput {
+            theme,
+            metrics: m,
+            padding,
+            cursor_on,
+            focused,
+            preedit,
+        } = *input;
+        let ch = m.cell_height as i32;
+        let (px, py) = (padding.0 as i32, padding.1 as i32);
+        self.clear = with_alpha(theme.background, theme.background_opacity);
 
         // Where the cursor is in the view, if it is visible at all.
         let in_view = term.cursor_in_view();
         let show_cursor = term.modes().cursor_visible && (cursor_on || !focused || !term.cursor_blink());
-        let cursor = in_view.filter(|_| show_cursor);
+        let cursor = in_view.filter(|_| show_cursor).map(|at| CursorDraw {
+            at,
+            shape: term.cursor_shape(),
+            wide: term.visible_row(at.0).cell(at.1).width() == Width::Wide,
+        });
         let block_cursor = focused && term.cursor_shape() == CursorShape::Block;
 
         let selection = term.selection().map(|s| s.ordered());
@@ -321,218 +657,66 @@ impl Frame {
                 y: py + line as i32 * ch,
                 cols,
                 sel,
-                block_cursor: cursor.and_then(|(l, c)| (block_cursor && l == line).then_some(c)),
+                block_cursor: cursor
+                    .as_ref()
+                    .filter(|c| block_cursor && c.at.0 == line)
+                    .map(|c| c.at.1..c.at.1 + if c.wide { 2 } else { 1 })
+                    .unwrap_or(0..0),
                 covered: preedit_cells
                     .as_ref()
                     .and_then(|(l, r)| (*l == line).then(|| r.clone()))
                     .unwrap_or(0..0),
             };
-            self.build_row(&ctx, row.cells(), glyphs);
+            let mut sink = Direct {
+                rects: &mut self.rects,
+                glyphs: &mut self.glyphs,
+                decorations: &mut self.decorations,
+            };
+            build_row(&ctx, row.cells(), glyphs, &mut sink);
         }
 
         // Cursors other than a focused block are drawn on top as rectangles.
-        if let Some((line, col)) = cursor
+        if let Some(c) = &cursor
             && !block_cursor
         {
-            let wide = term.visible_row(line).cell(col).width() == Width::Wide;
-            let x = px + col as i32 * cw;
-            let y = py + line as i32 * ch;
-            let w = cw * if wide { 2 } else { 1 };
-            let h = ch;
-            let c = theme.cursor;
-            let t = (m.cell_width as i32 / 8).max(2);
-            let r = |x: i32, y: i32, w: i32, h: i32| RectInstance {
-                x: s16(x),
-                y: s16(y),
-                w: w as u16,
-                h: h as u16,
-                color: c,
-            };
-            let rects: &[RectInstance] = match (focused, term.cursor_shape()) {
-                (true, CursorShape::Bar) => &[r(x, y, t, h)],
-                (true, CursorShape::Underline) => &[r(x, y + h - t, w, t)],
-                // Unfocused: a hollow box.
-                _ => &[r(x, y, w, 1), r(x, y + h - 1, w, 1), r(x, y, 1, h), r(x + w - 1, y, 1, h)],
-            };
-            self.decorations.extend_from_slice(rects);
+            self.cursor_rects(c, input);
         }
         if let Some((text, at)) = preedit {
-            self.draw_preedit(text, at, input, glyphs);
+            self.draw_preedit(text, at, cols, input, glyphs);
         }
         self.rects.extend_from_slice(&self.decorations);
     }
 
-    /// One row of cells, left to right from column 0.
-    #[inline]
-    fn build_row<C: CellView>(&mut self, ctx: &RowCtx, cells: impl Iterator<Item = C>, glyphs: &mut impl GlyphSource) {
-        // Most rows have no selection, block cursor or input-method text:
-        // they get a loop without those checks.
-        if ctx.sel.is_empty() && ctx.block_cursor.is_none() && ctx.covered.is_empty() {
-            self.row_cells::<false, C>(ctx, cells, glyphs)
-        } else {
-            self.row_cells::<true, C>(ctx, cells, glyphs)
-        }
-    }
-
-    /// `build_row`, with `OVERLAY` false when the row has no selection,
-    /// block cursor or input-method text.
-    #[inline(always)]
-    fn row_cells<const OVERLAY: bool, C: CellView>(&mut self, ctx: &RowCtx, cells: impl Iterator<Item = C>, glyphs: &mut impl GlyphSource) {
-        let RowCtx { theme, m, px, y, .. } = *ctx;
+    /// A cursor other than a focused block: a bar, an underline or (when
+    /// unfocused) a hollow box.
+    fn cursor_rects(&mut self, c: &CursorDraw, input: &FrameInput) {
+        let m = input.metrics;
         let (cw, ch) = (m.cell_width as i32, m.cell_height as i32);
-        let default_bg = theme.background;
-        let mut run_start = 0usize;
-        let mut run_color = default_bg;
-        // Runs of same-styled cells reuse the previous cell's pen: the style
-        // is only read and resolved when it changes.
-        let mut last_key = None;
-        let mut pen = Pen::new(&term_core::Style::DEFAULT, theme);
-        let mut end = 0;
-        // Zipped with the columns rather than `take`n: a slice iterator
-        // zipped with a range compiles to an indexed loop.
-        for (cell, col) in cells.zip(0..ctx.cols) {
-            let key = cell.key();
-            if last_key != Some(key) {
-                last_key = Some(key);
-                pen = Pen::new(&cell.style(), theme);
-            }
-            let spacer = cell.is_spacer();
-            let (mut fg, mut bg) = (pen.fg, pen.bg);
-            if OVERLAY && ctx.sel.contains(&col) {
-                bg = theme.selection;
-            }
-            if OVERLAY && ctx.block_cursor.is_some_and(|c| c == col || (spacer && c + 1 == col)) {
-                bg = theme.cursor;
-                fg = theme.cursor_text;
-            }
-            if pen.attrs.contains(Attrs::DIM) {
-                fg = with_alpha(fg, 160);
-            }
-
-            if bg != run_color {
-                self.push_run(run_color, default_bg, run_start, col, px, y, cw, ch);
-                run_start = col;
-                run_color = bg;
-            }
-
-            let x = px + col as i32 * cw;
-            if let Content::Char(c) = cell.content()
-                && c != ' '
-                && !spacer
-                && !pen.attrs.contains(Attrs::HIDDEN)
-                && !(OVERLAY && ctx.covered.contains(&col))
-                && let Some(g) = glyphs.glyph(c as u32, pen.face())
-            {
-                self.glyphs.push(GlyphInstance {
-                    x: s16(x + g.left as i32),
-                    y: s16(y + m.baseline as i32 - g.top as i32),
-                    w: g.w,
-                    h: g.h,
-                    u: g.u,
-                    v: g.v,
-                    color: fg,
-                    is_color: g.color as u32,
-                });
-            }
-            if pen.decorated {
-                self.decorate(pen, theme, fg, x, y, m);
-            }
-            end = col + 1;
-        }
-        self.pad_row(ctx, end, run_start, run_color);
-    }
-
-    /// Ends a row whose cells stopped at column `from`, with the background
-    /// run so far. History rows can be shorter than the screen is wide: the
-    /// rest is blank, which only shows a background where it is selected or
-    /// under a block cursor.
-    fn pad_row(&mut self, ctx: &RowCtx, from: usize, mut run_start: usize, mut run_color: Rgba) {
-        let RowCtx { theme, m, px, y, .. } = *ctx;
-        let (cw, ch) = (m.cell_width as i32, m.cell_height as i32);
-        let default_bg = theme.background;
-        for col in from..ctx.cols {
-            let bg = if ctx.block_cursor == Some(col) {
-                theme.cursor
-            } else if ctx.sel.contains(&col) {
-                theme.selection
-            } else {
-                default_bg
-            };
-            if bg != run_color {
-                self.push_run(run_color, default_bg, run_start, col, px, y, cw, ch);
-                run_start = col;
-                run_color = bg;
-            }
-        }
-        self.push_run(run_color, default_bg, run_start, ctx.cols, px, y, cw, ch);
-    }
-
-    /// Underline, overline and strike for one cell whose top-left corner is
-    /// (`x`, `y`). `fg` is the text colour as drawn (after inverse, the
-    /// block cursor and dim). Underlines take the style's underline colour
-    /// when it has one (§10.5).
-    fn decorate(&mut self, pen: Pen, theme: &Theme, fg: Rgba, x: i32, y: i32, m: Metrics) {
-        let cw = m.cell_width as i32;
-        let t = m.underline_thickness.max(1) as i32;
-        let mut rect = |x: i32, y: i32, w: i32, color: Rgba| {
-            self.decorations.push(RectInstance {
-                x: s16(x),
-                y: s16(y),
-                w: w as u16,
-                h: t as u16,
-                color,
-            })
+        let (line, col) = c.at;
+        let x = input.padding.0 as i32 + col as i32 * cw;
+        let y = input.padding.1 as i32 + line as i32 * ch;
+        let w = cw * if c.wide { 2 } else { 1 };
+        let h = ch;
+        let color = input.theme.cursor;
+        let t = (m.cell_width as i32 / 8).max(2);
+        let r = |x: i32, y: i32, w: i32, h: i32| RectInstance {
+            x: s16(x),
+            y: s16(y),
+            w: w as u16,
+            h: h as u16,
+            color,
         };
-        if pen.underline != Underline::None {
-            let uy = y + (m.baseline + m.underline_offset) as i32;
-            let color = theme.resolve(pen.underline_color, fg);
-            // Curly, dotted and dashed are drawn from rectangles until
-            // term-font's pattern sprites land (F2.3, §10.5). Then each of
-            // them becomes one sprite quad per cell, pushed here.
-            match pen.underline {
-                Underline::None => {}
-                Underline::Single => rect(x, uy, cw, color),
-                Underline::Double => {
-                    rect(x, uy, cw, color);
-                    rect(x, uy + 2 * t, cw, color);
-                }
-                Underline::Dotted => {
-                    // Square dots a thickness wide, a thickness apart.
-                    let mut dx = 0;
-                    while dx < cw {
-                        rect(x + dx, uy, t.min(cw - dx), color);
-                        dx += 2 * t;
-                    }
-                }
-                Underline::Dashed => {
-                    // One dash per cell, centred so the gaps line up across
-                    // cells: three quarters of the cell, then a gap.
-                    let gap = (cw / 4).max(1);
-                    rect(x + gap / 2, uy, cw - gap, color);
-                }
-                Underline::Curly => {
-                    // One period of a wave per cell, in steps a thickness
-                    // above and below the underline.
-                    for (i, dy) in CURLY_WAVE.iter().enumerate() {
-                        let x0 = i as i32 * cw / CURLY_SEGMENTS;
-                        let x1 = (i as i32 + 1) * cw / CURLY_SEGMENTS;
-                        if x1 > x0 {
-                            rect(x + x0, uy + dy * t, x1 - x0, color);
-                        }
-                    }
-                }
-            }
-        }
-        if pen.attrs.contains(Attrs::OVERLINE) {
-            rect(x, y, cw, fg);
-        }
-        if pen.attrs.contains(Attrs::STRIKE) {
-            rect(x, y + m.baseline as i32 - m.strike_offset as i32, cw, fg);
-        }
+        let rects: &[RectInstance] = match (input.focused, c.shape) {
+            (true, CursorShape::Bar) => &[r(x, y, t, h)],
+            (true, CursorShape::Underline) => &[r(x, y + h - t, w, t)],
+            // Unfocused: a hollow box.
+            _ => &[r(x, y, w, 1), r(x, y + h - 1, w, 1), r(x, y, 1, h), r(x + w - 1, y, 1, h)],
+        };
+        self.decorations.extend_from_slice(rects);
     }
 
     /// Input-method text at view row and column `at`.
-    fn draw_preedit(&mut self, text: &str, at: (usize, usize), input: &FrameInput, glyphs: &mut impl GlyphSource) {
+    fn draw_preedit(&mut self, text: &str, at: (usize, usize), cols: usize, input: &FrameInput, glyphs: &mut impl GlyphSource) {
         let m = input.metrics;
         let (cw, ch) = (m.cell_width as i32, m.cell_height as i32);
         let (line, mut col) = at;
@@ -542,7 +726,7 @@ impl Frame {
             if width == 0 {
                 continue;
             }
-            if col + width > input.term.cols() {
+            if col + width > cols {
                 break;
             }
             let x = input.padding.0 as i32 + col as i32 * cw;
@@ -577,21 +761,218 @@ impl Frame {
             col += width;
         }
     }
+}
 
-    #[allow(clippy::too_many_arguments)]
-    #[inline]
-    fn push_run(&mut self, color: Rgba, default_bg: Rgba, start: usize, end: usize, px: i32, y: i32, cw: i32, ch: i32) {
-        if color == default_bg || end <= start {
-            return;
-        }
-        self.rects.push(RectInstance {
-            x: s16(px + start as i32 * cw),
-            y: s16(y),
-            w: ((end - start) as i32 * cw) as u16,
-            h: ch as u16,
-            color,
-        });
+/// One row of cells, left to right from column 0.
+#[inline]
+fn build_row<C: CellView, S: RowSink>(ctx: &RowCtx, cells: impl Iterator<Item = C>, glyphs: &mut impl GlyphSource, out: &mut S) {
+    // Most rows have no selection, block cursor or input-method text (and
+    // rows built for the cache never do): they get a loop without those
+    // checks.
+    if ctx.sel.is_empty() && ctx.block_cursor.is_empty() && ctx.covered.is_empty() {
+        row_cells::<false, C, S>(ctx, cells, glyphs, out)
+    } else {
+        row_cells::<true, C, S>(ctx, cells, glyphs, out)
     }
+}
+
+/// `build_row`, with `OVERLAY` false when the row has no selection, block
+/// cursor or input-method text.
+#[inline(always)]
+fn row_cells<const OVERLAY: bool, C: CellView, S: RowSink>(
+    ctx: &RowCtx,
+    cells: impl Iterator<Item = C>,
+    glyphs: &mut impl GlyphSource,
+    out: &mut S,
+) {
+    let RowCtx { theme, m, px, y, .. } = *ctx;
+    let (cw, ch) = (m.cell_width as i32, m.cell_height as i32);
+    let default_bg = theme.background;
+    let mut run_start = 0usize;
+    let mut run_color = default_bg;
+    // Runs of same-styled cells reuse the previous cell's pen: the style
+    // is only read and resolved when it changes.
+    let mut last_key = None;
+    let mut pen = Pen::new(&term_core::Style::DEFAULT, theme);
+    let mut end = 0;
+    // Zipped with the columns rather than `take`n: a slice iterator
+    // zipped with a range compiles to an indexed loop.
+    for (cell, col) in cells.zip(0..ctx.cols) {
+        let key = cell.key();
+        if last_key != Some(key) {
+            last_key = Some(key);
+            pen = Pen::new(&cell.style(), theme);
+        }
+        let spacer = cell.is_spacer();
+        let (mut fg, mut bg) = (pen.fg, pen.bg);
+        if OVERLAY && ctx.sel.contains(&col) {
+            bg = theme.selection;
+        }
+        if OVERLAY && ctx.block_cursor.contains(&col) {
+            bg = theme.cursor;
+            fg = theme.cursor_text;
+        }
+        if pen.attrs.contains(Attrs::DIM) {
+            fg = with_alpha(fg, 160);
+        }
+
+        if bg != run_color {
+            push_run(out, run_color, default_bg, run_start, col, px, y, cw, ch);
+            run_start = col;
+            run_color = bg;
+        }
+
+        let x = px + col as i32 * cw;
+        if let Content::Char(c) = cell.content()
+            && c != ' '
+            && !spacer
+            && !pen.attrs.contains(Attrs::HIDDEN)
+            && !(OVERLAY && ctx.covered.contains(&col))
+            && let Some(g) = glyphs.glyph(c as u32, pen.face())
+        {
+            out.glyph(
+                GlyphInstance {
+                    x: s16(x + g.left as i32),
+                    y: s16(y + m.baseline as i32 - g.top as i32),
+                    w: g.w,
+                    h: g.h,
+                    u: g.u,
+                    v: g.v,
+                    color: fg,
+                    is_color: g.color as u32,
+                },
+                pen.mark(col),
+            );
+        }
+        if pen.decorated {
+            decorate(out, pen, theme, fg, x, y, m, pen.mark(col));
+        }
+        end = col + 1;
+    }
+    pad_row(out, ctx, end, run_start, run_color);
+}
+
+/// Ends a row whose cells stopped at column `from`, with the background
+/// run so far. History rows can be shorter than the screen is wide: the
+/// rest is blank, which only shows a background where it is selected or
+/// under a block cursor.
+fn pad_row(out: &mut impl RowSink, ctx: &RowCtx, from: usize, mut run_start: usize, mut run_color: Rgba) {
+    let RowCtx { theme, m, px, y, .. } = *ctx;
+    let (cw, ch) = (m.cell_width as i32, m.cell_height as i32);
+    let default_bg = theme.background;
+    if ctx.sel.is_empty() && ctx.block_cursor.is_empty() {
+        // Nothing but the default background past `from`.
+        if run_color != default_bg {
+            push_run(out, run_color, default_bg, run_start, from, px, y, cw, ch);
+        }
+        return;
+    }
+    for col in from..ctx.cols {
+        let bg = if ctx.block_cursor.contains(&col) {
+            theme.cursor
+        } else if ctx.sel.contains(&col) {
+            theme.selection
+        } else {
+            default_bg
+        };
+        if bg != run_color {
+            push_run(out, run_color, default_bg, run_start, col, px, y, cw, ch);
+            run_start = col;
+            run_color = bg;
+        }
+    }
+    push_run(out, run_color, default_bg, run_start, ctx.cols, px, y, cw, ch);
+}
+
+/// Underline, overline and strike for one cell whose top-left corner is
+/// (`x`, `y`). `fg` is the text colour as drawn (after inverse, the block
+/// cursor and dim). Underlines take the style's underline colour when it
+/// has one (§10.5).
+#[allow(clippy::too_many_arguments)]
+fn decorate(out: &mut impl RowSink, pen: Pen, theme: &Theme, fg: Rgba, x: i32, y: i32, m: Metrics, mark: Mark) {
+    let cw = m.cell_width as i32;
+    let t = m.underline_thickness.max(1) as i32;
+    let text = Mark {
+        flags: mark.flags | Mark::TEXT_COLOUR,
+        ..mark
+    };
+    let mut rect = |x: i32, y: i32, w: i32, color: Rgba, mark: Mark| {
+        out.decoration(
+            RectInstance {
+                x: s16(x),
+                y: s16(y),
+                w: w as u16,
+                h: t as u16,
+                color,
+            },
+            mark,
+        )
+    };
+    if pen.underline != Underline::None {
+        let uy = y + (m.baseline + m.underline_offset) as i32;
+        let (color, mark) = match pen.underline_color.kind() {
+            ColorKind::Default => (fg, text),
+            _ => (theme.resolve(pen.underline_color, fg), mark),
+        };
+        let mut rect = |x, y, w| rect(x, y, w, color, mark);
+        // Curly, dotted and dashed are drawn from rectangles until
+        // term-font's pattern sprites land (F2.3, §10.5). Then each of
+        // them becomes one sprite quad per cell, pushed here.
+        match pen.underline {
+            Underline::None => {}
+            Underline::Single => rect(x, uy, cw),
+            Underline::Double => {
+                rect(x, uy, cw);
+                rect(x, uy + 2 * t, cw);
+            }
+            Underline::Dotted => {
+                // Square dots a thickness wide, a thickness apart.
+                let mut dx = 0;
+                while dx < cw {
+                    rect(x + dx, uy, t.min(cw - dx));
+                    dx += 2 * t;
+                }
+            }
+            Underline::Dashed => {
+                // One dash per cell, centred so the gaps line up across
+                // cells: three quarters of the cell, then a gap.
+                let gap = (cw / 4).max(1);
+                rect(x + gap / 2, uy, cw - gap);
+            }
+            Underline::Curly => {
+                // One period of a wave per cell, in steps a thickness
+                // above and below the underline.
+                for (i, dy) in CURLY_WAVE.iter().enumerate() {
+                    let x0 = i as i32 * cw / CURLY_SEGMENTS;
+                    let x1 = (i as i32 + 1) * cw / CURLY_SEGMENTS;
+                    if x1 > x0 {
+                        rect(x + x0, uy + dy * t, x1 - x0);
+                    }
+                }
+            }
+        }
+    }
+    if pen.attrs.contains(Attrs::OVERLINE) {
+        rect(x, y, cw, fg, text);
+    }
+    if pen.attrs.contains(Attrs::STRIKE) {
+        rect(x, y + m.baseline as i32 - m.strike_offset as i32, cw, fg, text);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline]
+fn push_run(out: &mut impl RowSink, color: Rgba, default_bg: Rgba, start: usize, end: usize, px: i32, y: i32, cw: i32, ch: i32) {
+    if color == default_bg || end <= start {
+        return;
+    }
+    out.background(RectInstance {
+        x: s16(px + start as i32 * cw),
+        y: s16(y),
+        w: ((end - start) as i32 * cw) as u16,
+        h: ch as u16,
+        color,
+    });
 }
 
 /// Rows built from `Style`s directly, for what term-core can't set yet
@@ -649,12 +1030,12 @@ mod tests {
             y: 0,
             cols: cells.len(),
             sel: 0..0,
-            block_cursor: None,
+            block_cursor: 0..0,
             covered: 0..0,
         };
-        let mut f = Frame::default();
-        f.build_row(&ctx, cells.iter().copied(), &mut NoGlyphs);
-        f.decorations
+        let mut e = Entry::default();
+        build_row(&ctx, cells.iter().copied(), &mut NoGlyphs, &mut e);
+        e.decorations
     }
 
     fn styled(f: impl FnOnce(&mut Style)) -> Style {
@@ -773,13 +1154,13 @@ mod tests {
             y: 0,
             cols: 1,
             sel: 0..0,
-            block_cursor: None,
+            block_cursor: 0..0,
             covered: 0..0,
         };
-        let mut f = Frame::default();
-        f.build_row(&ctx, [TestCell('a', s)].into_iter(), &mut NoGlyphs);
-        assert!(f.decorations.iter().all(|r| r.w > 0));
-        assert_eq!(f.decorations.iter().map(|r| r.w).sum::<u16>(), 5);
+        let mut e = Entry::default();
+        build_row(&ctx, [TestCell('a', s)].into_iter(), &mut NoGlyphs, &mut e);
+        assert!(e.decorations.iter().all(|r| r.w > 0));
+        assert_eq!(e.decorations.iter().map(|r| r.w).sum::<u16>(), 5);
     }
 
     #[test]

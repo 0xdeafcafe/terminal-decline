@@ -952,7 +952,6 @@ impl TerminalView {
             clipboard = t.state.take_clipboard();
             blink = t.state.cursor_blink();
             let input = FrameInput {
-                term: &t.state,
                 theme: &st.theme,
                 metrics: st.renderer.metrics(),
                 padding: (pad.x, pad.top),
@@ -960,7 +959,7 @@ impl TerminalView {
                 focused: st.focused,
                 preedit: Some(st.marked.as_str()),
             };
-            st.renderer.prepare(&input);
+            st.renderer.prepare(&mut t.state, &input);
         }
         // With the terminal still locked: the keys whose output this frame shows.
         let timed = latency::get().map(|l| (l, l.take_for_frame(self.ivars().id, rate)));

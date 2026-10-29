@@ -18,6 +18,7 @@ use objc2_metal::{
     MTLSize, MTLStoreAction, MTLTexture, MTLTextureDescriptor, MTLTextureUsage,
 };
 use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
+use term_core::Terminal;
 use term_font::{Fonts, Style};
 
 use crate::frame::{Frame, FrameInput, GlyphSlot, GlyphSource};
@@ -114,6 +115,9 @@ pub struct GlyphCache {
     ascii: Box<[Option<Option<GlyphSlot>>; 128 * 4]>,
     other: HashMap<(u32, Style), Option<GlyphSlot>>,
     in_flight: Arc<(Mutex<usize>, Condvar)>,
+    /// Bumped whenever glyphs are forgotten, so slots handed out before
+    /// may be wrong (see [`GlyphSource::generation`]).
+    generation: u64,
 }
 
 impl GlyphCache {
@@ -125,6 +129,7 @@ impl GlyphCache {
             ascii: Box::new([None; 512]),
             other: HashMap::new(),
             in_flight,
+            generation: 0,
         };
         for c in 0x21..0x7F {
             cache.glyph(c, Style::Regular);
@@ -168,6 +173,7 @@ impl GlyphCache {
     }
 
     fn forget(&mut self, drop: impl Fn(Option<GlyphSlot>) -> bool) {
+        self.generation += 1;
         for entry in self.ascii.iter_mut() {
             if entry.is_some_and(&drop) {
                 *entry = None;
@@ -219,6 +225,10 @@ impl GlyphSource for GlyphCache {
         let slot = self.rasterize(cp, style)?;
         self.other.insert((cp, style), slot);
         slot
+    }
+
+    fn generation(&self) -> u64 {
+        self.generation
     }
 }
 
@@ -380,17 +390,20 @@ impl Renderer {
         self.glyphs.clear();
     }
 
-    /// Build this frame's instances. Call with the terminal locked; it only
-    /// reads the terminal and touches no GPU state except new glyphs.
-    pub fn prepare(&mut self, input: &FrameInput) {
-        self.frame.build(input, &mut self.glyphs);
+    /// Build this frame's instances from a snapshot of `term` (cells design
+    /// §9). Call with the terminal locked; it takes a snapshot of the
+    /// terminal and touches no GPU state except new glyphs.
+    pub fn prepare(&mut self, term: &mut Terminal, input: &FrameInput) {
+        self.frame.build(term, input, &mut self.glyphs);
         // Out of glyph texture space: empty the texture that filled up,
         // growing it, and build again. This ends: each pass either grows a
         // texture (a few doublings to the cap) or, at the cap, empties it once
         // and draws what fits.
         while self.glyphs.needs_room() {
+            // Emptying a texture forgets its glyphs, so the cached rows are
+            // dropped and this snapshot copies every row again.
             let grew = self.glyphs.make_room(&self.device);
-            self.frame.build(input, &mut self.glyphs);
+            self.frame.build(term, input, &mut self.glyphs);
             if !grew {
                 break;
             }

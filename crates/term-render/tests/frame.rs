@@ -2,9 +2,16 @@
 //! term-core's public API, turned into instances with a fake glyph source,
 //! and checked for text, background runs, styles, decorations, cursor,
 //! input-method text, padding, position clamping and theme colours.
+//!
+//! Every frame is built twice: from a snapshot (`Frame::build`, what the
+//! app draws) and from the live terminal (`Frame::build_live`, the path it
+//! replaced, kept as a reference for one PR). Both must give the same
+//! picture, drawn here on the CPU, and the same instances when nothing is
+//! drawn over the rows (cells design §17.3, invariant 7). A property test
+//! keeps one frame across many changes, so its row cache is exercised.
 
 use proptest::prelude::*;
-use term_core::{Attrs, Point, Selection, Term, Terminal};
+use term_core::{Attrs, CursorShape, Point, Selection, Term, Terminal};
 use term_font::{Metrics, Style};
 use term_render::{Frame, FrameInput, GlyphInstance, GlyphSlot, GlyphSource, RectInstance, Rgba, Theme, rgb};
 
@@ -72,23 +79,116 @@ impl Default for Opts<'_> {
     }
 }
 
-fn build_with(t: &Terminal, theme: &Theme, o: Opts) -> Frame {
-    let input = FrameInput {
-        term: t,
+fn input<'a>(theme: &'a Theme, o: &Opts<'a>) -> FrameInput<'a> {
+    FrameInput {
         theme,
         metrics: o.metrics,
         padding: o.padding,
         cursor_on: o.cursor_on,
         focused: o.focused,
         preedit: o.preedit,
+    }
+}
+
+/// Something is drawn over the rows: the frame's instances differ from the
+/// reference path's, though the picture must not.
+fn has_overlay(t: &Terminal, o: &Opts) -> bool {
+    t.selection().is_some()
+        || o.preedit.is_some_and(|p| !p.is_empty())
+        || (o.focused && t.cursor_shape() == CursorShape::Block && t.modes().cursor_visible && t.cursor_in_view().is_some())
+}
+
+/// Build `t`'s frame with `frame` (whose row cache may hold earlier
+/// frames' rows), and check it against the reference path.
+fn build_into(frame: &mut Frame, t: &mut Terminal, theme: &Theme, o: &Opts) {
+    let input = input(theme, o);
+    frame.build(t, &input, &mut Fake);
+    let mut live = Frame::default();
+    live.build_live(t, &input, &mut Fake);
+    let size = (t.cols(), t.lines());
+    let pixels = size.0 * size.1 * (o.metrics.cell_width * o.metrics.cell_height) as usize;
+    // Huge grids (the clamping test) are compared by instances only.
+    let (a, b) = if pixels <= 1 << 22 {
+        (picture(frame, size, o), picture(&live, size, o))
+    } else {
+        assert!(!has_overlay(t, o), "too big to draw");
+        (vec![], vec![])
     };
+    if let Some(i) = a.iter().zip(&b).position(|(a, b)| a != b) {
+        let w = size.0 * o.metrics.cell_width as usize + 2 * o.padding.0 as usize;
+        panic!(
+            "snapshot and live frames differ at pixel ({}, {}): {:?} vs {:?}\n{}\nrects {:?}\nlive {:?}",
+            i % w,
+            i / w,
+            a[i],
+            b[i],
+            t.dump(),
+            frame.rects,
+            live.rects,
+        );
+    }
+    if !has_overlay(t, o) {
+        assert_eq!(frame.rects, live.rects, "rects\n{}", t.dump());
+        assert_eq!(frame.glyphs, live.glyphs, "glyphs\n{}", t.dump());
+    }
+    assert_eq!(frame.clear, live.clear);
+    assert!(frame.cached_rows() <= t.lines(), "{} rows cached", frame.cached_rows());
+}
+
+fn build_with(t: &mut Terminal, theme: &Theme, o: Opts) -> Frame {
     let mut f = Frame::default();
-    f.build(&input, &mut Fake);
+    build_into(&mut f, t, theme, &o);
     f
 }
 
-fn build(t: &Terminal) -> Frame {
+fn build(t: &mut Terminal) -> Frame {
     build_with(t, &Theme::default(), Opts::default())
+}
+
+/// What a pixel shows: its background after every rect, and the glyph on
+/// top (texture position and colour), if any.
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct Px {
+    bg: [u8; 4],
+    glyph: Option<(u16, u16, Rgba)>,
+}
+
+/// The frame drawn on the CPU as Metal draws it: the clear colour, rects
+/// in order blended "over", then glyphs in order on top (the fake glyphs
+/// are solid, so the last one wins).
+fn picture(f: &Frame, (cols, lines): (usize, usize), o: &Opts) -> Vec<Px> {
+    let (cw, ch) = (o.metrics.cell_width as usize, o.metrics.cell_height as usize);
+    let w = cols * cw + 2 * o.padding.0 as usize;
+    let h = lines * ch + 2 * o.padding.1 as usize;
+    let clear = Px {
+        bg: f.clear.to_le_bytes(),
+        glyph: None,
+    };
+    let mut px = vec![clear; w * h];
+    let span = |at: i16, len: u16, max: usize| {
+        let end = (at as i32 + len as i32).clamp(0, max as i32) as usize;
+        (at.max(0) as usize).min(end)..end
+    };
+    for r in &f.rects {
+        let src = r.color.to_le_bytes();
+        let a = src[3] as u32;
+        for y in span(r.y, r.h, h) {
+            for x in span(r.x, r.w, w) {
+                let d = &mut px[y * w + x].bg;
+                for i in 0..4 {
+                    d[i] = ((src[i] as u32 * a + d[i] as u32 * (255 - a) + 127) / 255) as u8;
+                }
+            }
+        }
+    }
+    for g in &f.glyphs {
+        for y in span(g.y, g.h, h) {
+            for x in span(g.x, g.w, w) {
+                px[y * w + x].glyph = Some((g.u, g.v, g.color));
+            }
+        }
+    }
+    px
 }
 
 /// Hide the cursor so it doesn't add rects of its own.
@@ -192,17 +292,128 @@ proptest! {
         let mut t = term(cols, lines, &input.concat());
         t.state.scroll_view(scroll);
         let theme = Theme::default();
-        let f = build_with(&t.state, &theme, Opts { focused, ..Opts::default() });
+        let f = build_with(&mut t.state, &theme, Opts { focused, ..Opts::default() });
         // term-core may round tiny sizes up.
         let (cols, lines) = (t.state.cols(), t.state.lines());
         prop_assert_eq!(decoded(&f, cols, lines, (0, 0)), grid_text(&t.state));
     }
 }
 
+/// Everything that changes rows, moves them or changes what is drawn over
+/// them, for the row cache.
+fn change() -> impl Strategy<Value = &'static str> {
+    prop::sample::select(vec![
+        "x",
+        "漢",
+        "\x1b[?1049h",
+        "\x1b[?1049l",
+        "\x1b[2;3r",
+        "\x1b[r",
+        "\x1b[S",
+        "\x1b[T",
+        "\x1bc",
+        "\x1b[3J",
+        "\x1b[2 q",
+        "\x1b[4 q",
+        "\x1b[6 q",
+        "\x1b[1 q",
+        "\x1b[?25l",
+        "\x1b[?25h",
+        "\x1b[4:3;58;5;3m",
+        "\x1b[53;21m",
+        "\x1b[4;2m",
+        "\x1b[7;44m",
+        "\x1b[3;1H",
+        "\x1b[1;1H\x1b[2K",
+        "\x1b#8",
+    ])
+}
+
+#[derive(Debug, Clone)]
+struct Step {
+    bytes: Vec<&'static str>,
+    scroll: isize,
+    /// View rows and columns of the selection's ends.
+    selection: Option<((usize, usize), (usize, usize))>,
+    resize: Option<(usize, usize)>,
+    focused: bool,
+    cursor_on: bool,
+    preedit: Option<&'static str>,
+    padding: (u32, u32),
+}
+
+fn step() -> impl Strategy<Value = Step> {
+    (
+        prop::collection::vec(prop_oneof![3 => token(), 1 => change()], 0..40),
+        -3isize..4,
+        prop::option::weighted(0.3, ((0usize..8, 0usize..30), (0usize..8, 0usize..30))),
+        prop::option::weighted(0.1, (1usize..30, 1usize..8)),
+        prop::bool::weighted(0.8),
+        prop::bool::weighted(0.8),
+        prop::option::weighted(0.2, prop::sample::select(vec!["q", "漢字", "→x"])),
+        prop::sample::select(vec![(0, 0), (0, 0), (0, 7), (3, 0)]),
+    )
+        .prop_map(|(bytes, scroll, selection, resize, focused, cursor_on, preedit, padding)| Step {
+            bytes,
+            scroll,
+            selection,
+            resize,
+            focused,
+            cursor_on,
+            preedit,
+            padding,
+        })
+}
+
+proptest! {
+    /// One frame kept across many frames, as the app keeps it: rows reused
+    /// from its cache, rows copied, scrolled history, the alternate screen,
+    /// resets, resizes, style table sweeps, selection, cursor and
+    /// input-method text. Each frame must draw what the live terminal
+    /// shows (`build_into` compares them).
+    #[test]
+    fn frames_kept_across_changes_match_the_live_terminal(
+        cols in 1usize..30,
+        lines in 1usize..8,
+        steps in prop::collection::vec(step(), 1..12),
+    ) {
+        let mut t = Term::new(cols, lines, 20);
+        t.state.set_sweep_at(Some(8));
+        let theme = Theme::default();
+        let mut frame = Frame::default();
+        for s in steps {
+            t.advance(s.bytes.concat().as_bytes());
+            if let Some((cols, lines)) = s.resize {
+                t.state.resize(cols, lines);
+            }
+            t.state.scroll_view(s.scroll);
+            let (cols, lines) = (t.state.cols(), t.state.lines());
+            let at = |(l, c): (usize, usize)| {
+                let mut p = t.state.point_at(l.min(lines - 1), 0);
+                p.col = c.min(cols - 1);
+                p
+            };
+            let selection = s.selection.map(|(a, b)| Selection::new(at(a), at(b)));
+            t.state.set_selection(selection);
+            let o = Opts {
+                focused: s.focused,
+                cursor_on: s.cursor_on,
+                preedit: s.preedit,
+                padding: s.padding,
+                ..Opts::default()
+            };
+            build_into(&mut frame, &mut t.state, &theme, &o);
+            if s.preedit.is_none() {
+                prop_assert_eq!(decoded(&frame, cols, lines, s.padding), grid_text(&t.state));
+            }
+        }
+    }
+}
+
 #[test]
 fn glyph_text_matches_simple_screen() {
-    let t = term(6, 2, "ab cd\r\n漢x·y");
-    let f = build(&t.state);
+    let mut t = term(6, 2, "ab cd\r\n漢x·y");
+    let f = build(&mut t.state);
     assert_eq!(decoded(&f, 6, 2, (0, 0)), ["ab cd ", "漢 x y "]);
 }
 
@@ -210,17 +421,17 @@ fn glyph_text_matches_simple_screen() {
 
 #[test]
 fn default_background_emits_nothing() {
-    let t = term(10, 3, &format!("{NO_CURSOR}hello\r\n\x1b[1mworld"));
-    let f = build(&t.state);
+    let mut t = term(10, 3, &format!("{NO_CURSOR}hello\r\n\x1b[1mworld"));
+    let f = build(&mut t.state);
     assert!(f.rects.is_empty(), "{:?}", f.rects);
     assert_eq!(f.clear, Theme::default().background);
 }
 
 #[test]
 fn same_colour_cells_merge_into_one_run() {
-    let t = term(10, 2, &format!("{NO_CURSOR}\x1b[41mabc\x1b[0m  \x1b[42mde\x1b[0m\r\n\x1b[41mx"));
+    let mut t = term(10, 2, &format!("{NO_CURSOR}\x1b[41mabc\x1b[0m  \x1b[42mde\x1b[0m\r\n\x1b[41mx"));
     let theme = Theme::default();
-    let f = build(&t.state);
+    let f = build(&mut t.state);
     assert_eq!(
         f.rects,
         [
@@ -231,22 +442,17 @@ fn same_colour_cells_merge_into_one_run() {
     );
 }
 
+/// The selection is drawn over the rows' backgrounds, which don't change
+/// with it (cells design §9.3).
 #[test]
-fn run_breaks_at_selection() {
+fn selection_is_drawn_over_the_run() {
     let mut t = term(10, 1, &format!("{NO_CURSOR}\x1b[41mabcdef"));
     let line = t.state.point_at(0, 0).line;
     t.state
         .set_selection(Some(Selection::new(Point { line, col: 3 }, Point { line, col: 2 })));
     let theme = Theme::default();
-    let f = build(&t.state);
-    assert_eq!(
-        f.rects,
-        [
-            rect(0, 0, 2, theme.palette[1]),
-            rect(2, 0, 2, theme.selection),
-            rect(4, 0, 2, theme.palette[1])
-        ]
-    );
+    let f = build(&mut t.state);
+    assert_eq!(f.rects, [rect(0, 0, 6, theme.palette[1]), rect(2, 0, 2, theme.selection)]);
 }
 
 #[test]
@@ -260,16 +466,16 @@ fn selection_covers_short_history_rows_to_the_edge() {
     t.state
         .set_selection(Some(Selection::new(Point { line, col: 1 }, Point { line, col: 9 })));
     let theme = Theme::default();
-    let f = build(&t.state);
+    let f = build(&mut t.state);
     assert_eq!(f.rects, [rect(1, 0, 9, theme.selection)]);
     assert_eq!(decoded(&f, 10, 2, (0, 0)), ["ab        ", "cd        "]);
 }
 
 #[test]
 fn run_breaks_at_inverse() {
-    let t = term(10, 1, &format!("{NO_CURSOR}\x1b[41mab\x1b[7mcd\x1b[27mef"));
+    let mut t = term(10, 1, &format!("{NO_CURSOR}\x1b[41mab\x1b[7mcd\x1b[27mef"));
     let theme = Theme::default();
-    let f = build(&t.state);
+    let f = build(&mut t.state);
     assert_eq!(
         f.rects,
         [
@@ -281,18 +487,11 @@ fn run_breaks_at_inverse() {
 }
 
 #[test]
-fn run_breaks_at_cursor() {
-    let t = term(10, 1, "\x1b[41mabcdef\x1b[4G");
+fn block_cursor_is_drawn_over_the_run() {
+    let mut t = term(10, 1, "\x1b[41mabcdef\x1b[4G");
     let theme = Theme::default();
-    let f = build(&t.state);
-    assert_eq!(
-        f.rects,
-        [
-            rect(0, 0, 3, theme.palette[1]),
-            rect(3, 0, 1, theme.cursor),
-            rect(4, 0, 2, theme.palette[1])
-        ]
-    );
+    let f = build(&mut t.state);
+    assert_eq!(f.rects, [rect(0, 0, 6, theme.palette[1]), rect(3, 0, 1, theme.cursor)]);
 }
 
 // ---- styles --------------------------------------------------------------
@@ -303,9 +502,9 @@ fn glyph_at(f: &Frame, col: i16, line: i16) -> Option<&GlyphInstance> {
 
 #[test]
 fn inverse_swaps_colours() {
-    let t = term(10, 1, &format!("{NO_CURSOR}\x1b[7ma\x1b[0m\x1b[31;42;7mb"));
+    let mut t = term(10, 1, &format!("{NO_CURSOR}\x1b[7ma\x1b[0m\x1b[31;42;7mb"));
     let theme = Theme::default();
-    let f = build(&t.state);
+    let f = build(&mut t.state);
     assert_eq!(glyph_at(&f, 0, 0).unwrap().color, theme.background);
     assert_eq!(glyph_at(&f, 1, 0).unwrap().color, theme.palette[2]);
     assert_eq!(f.rects, [rect(0, 0, 1, theme.foreground), rect(1, 0, 1, theme.palette[1])]);
@@ -313,9 +512,9 @@ fn inverse_swaps_colours() {
 
 #[test]
 fn dim_lowers_alpha() {
-    let t = term(10, 1, "a\x1b[2mb");
+    let mut t = term(10, 1, "a\x1b[2mb");
     let theme = Theme::default();
-    let f = build(&t.state);
+    let f = build(&mut t.state);
     let (a, b) = (glyph_at(&f, 0, 0).unwrap().color, glyph_at(&f, 1, 0).unwrap().color);
     assert_eq!(a, theme.foreground);
     assert_eq!(b & 0x00FF_FFFF, theme.foreground & 0x00FF_FFFF, "same colour");
@@ -324,15 +523,15 @@ fn dim_lowers_alpha() {
 
 #[test]
 fn hidden_emits_no_glyph() {
-    let t = term(10, 1, "a\x1b[8mbc\x1b[28md");
-    let f = build(&t.state);
+    let mut t = term(10, 1, "a\x1b[8mbc\x1b[28md");
+    let f = build(&mut t.state);
     assert_eq!(decoded(&f, 10, 1, (0, 0)), ["a  d      "]);
 }
 
 #[test]
 fn wide_glyph_emitted_once() {
-    let t = term(10, 1, "漢字😀");
-    let f = build(&t.state);
+    let mut t = term(10, 1, "漢字😀");
+    let f = build(&mut t.state);
     assert_eq!(f.glyphs.len(), 3);
     assert_eq!(decoded(&f, 10, 1, (0, 0)), ["漢 字 😀     "]);
 }
@@ -341,9 +540,9 @@ fn wide_glyph_emitted_once() {
 
 #[test]
 fn underline_positions_from_metrics() {
-    let t = term(10, 2, &format!("{NO_CURSOR}\r\n\x1b[4ma\x1b[24;21mb\x1b[24;9mc"));
+    let mut t = term(10, 2, &format!("{NO_CURSOR}\r\n\x1b[4ma\x1b[24;21mb\x1b[24;9mc"));
     let fg = Theme::default().foreground;
-    let f = build(&t.state);
+    let f = build(&mut t.state);
     let uy = CH + (M.baseline + M.underline_offset) as i16;
     let line = |col: i16, y: i16| RectInstance {
         x: col * CW,
@@ -362,9 +561,9 @@ fn decorations_take_the_text_colour_as_drawn() {
     // Red underline; inverse strike (the text colour is the background);
     // a dim underline (the text colour's alpha). Underline colours set
     // with SGR 58 are tested in frame.rs until term-core keeps them.
-    let t = term(10, 1, &format!("{NO_CURSOR}\x1b[31;4ma\x1b[0;7;9mb\x1b[0;2;4mc"));
+    let mut t = term(10, 1, &format!("{NO_CURSOR}\x1b[31;4ma\x1b[0;7;9mb\x1b[0;2;4mc"));
     let theme = Theme::default();
-    let f = build(&t.state);
+    let f = build(&mut t.state);
     let thin: Vec<_> = f
         .rects
         .iter()
@@ -382,10 +581,10 @@ fn decorations_follow_thicker_metrics() {
         underline_offset: 4,
         ..M
     };
-    let t = term(4, 1, &format!("{NO_CURSOR}\x1b[21ma"));
+    let mut t = term(4, 1, &format!("{NO_CURSOR}\x1b[21ma"));
     let theme = Theme::default();
     let f = build_with(
-        &t.state,
+        &mut t.state,
         &theme,
         Opts {
             metrics: m,
@@ -404,9 +603,9 @@ fn cursor_rects(f: &Frame, theme: &Theme) -> Vec<RectInstance> {
 
 #[test]
 fn block_cursor_swaps_cell_colours() {
-    let t = term(10, 2, "ab\x1b[1G");
+    let mut t = term(10, 2, "ab\x1b[1G");
     let theme = Theme::default();
-    let f = build(&t.state);
+    let f = build(&mut t.state);
     assert_eq!(f.rects, [rect(0, 0, 1, theme.cursor)]);
     assert_eq!(glyph_at(&f, 0, 0).unwrap().color, theme.cursor_text);
     assert_eq!(glyph_at(&f, 1, 0).unwrap().color, theme.foreground);
@@ -414,9 +613,9 @@ fn block_cursor_swaps_cell_colours() {
 
 #[test]
 fn bar_cursor() {
-    let t = term(10, 2, "ab\x1b[6 q");
+    let mut t = term(10, 2, "ab\x1b[6 q");
     let theme = Theme::default();
-    let f = build(&t.state);
+    let f = build(&mut t.state);
     let t_px = (M.cell_width as i16 / 8).max(2);
     assert_eq!(
         cursor_rects(&f, &theme),
@@ -433,9 +632,9 @@ fn bar_cursor() {
 
 #[test]
 fn underline_cursor() {
-    let t = term(10, 2, "\r\nab\x1b[4 q");
+    let mut t = term(10, 2, "\r\nab\x1b[4 q");
     let theme = Theme::default();
-    let f = build(&t.state);
+    let f = build(&mut t.state);
     let t_px = (M.cell_width as i16 / 8).max(2);
     assert_eq!(
         cursor_rects(&f, &theme),
@@ -465,9 +664,9 @@ fn hollow_box(col: i16, line: i16, cells: i16, color: Rgba) -> Vec<RectInstance>
 fn unfocused_cursor_is_a_hollow_box() {
     let theme = Theme::default();
     for shape in ["\x1b[2 q", "\x1b[4 q", "\x1b[6 q"] {
-        let t = term(10, 2, &format!("ab{shape}"));
+        let mut t = term(10, 2, &format!("ab{shape}"));
         let f = build_with(
-            &t.state,
+            &mut t.state,
             &theme,
             Opts {
                 focused: false,
@@ -482,10 +681,10 @@ fn unfocused_cursor_is_a_hollow_box() {
 #[test]
 fn cursor_hidden_when_cursor_visible_off() {
     let theme = Theme::default();
-    let t = term(10, 2, "ab\x1b[?25l");
+    let mut t = term(10, 2, "ab\x1b[?25l");
     for focused in [true, false] {
         let f = build_with(
-            &t.state,
+            &mut t.state,
             &theme,
             Opts {
                 focused,
@@ -499,11 +698,11 @@ fn cursor_hidden_when_cursor_visible_off() {
 #[test]
 fn cursor_hidden_in_blink_off_phase_only_when_blinking_and_focused() {
     let theme = Theme::default();
-    let blinking = term(10, 2, "ab\x1b[1 q");
+    let mut blinking = term(10, 2, "ab\x1b[1 q");
     assert!(blinking.state.cursor_blink());
-    let off = |t: &Term, focused| {
+    let off = |t: &mut Term, focused| {
         build_with(
-            &t.state,
+            &mut t.state,
             &theme,
             Opts {
                 cursor_on: false,
@@ -512,11 +711,11 @@ fn cursor_hidden_in_blink_off_phase_only_when_blinking_and_focused() {
             },
         )
     };
-    assert!(off(&blinking, true).rects.is_empty(), "blink phase off hides it");
-    assert_eq!(cursor_rects(&off(&blinking, false), &theme).len(), 4, "unfocused doesn't blink");
-    let steady = term(10, 2, "ab\x1b[2 q");
+    assert!(off(&mut blinking, true).rects.is_empty(), "blink phase off hides it");
+    assert_eq!(cursor_rects(&off(&mut blinking, false), &theme).len(), 4, "unfocused doesn't blink");
+    let mut steady = term(10, 2, "ab\x1b[2 q");
     assert_eq!(
-        off(&steady, true).rects,
+        off(&mut steady, true).rects,
         [rect(2, 0, 1, theme.cursor)],
         "steady cursor ignores the phase"
     );
@@ -526,26 +725,26 @@ fn cursor_hidden_in_blink_off_phase_only_when_blinking_and_focused() {
 fn cursor_hidden_when_scrolled_out_of_view() {
     let theme = Theme::default();
     let mut t = term(10, 3, "1\r\n2\r\n3\r\n4\r\n5\r\n6\r\n7");
-    let f = build(&t.state);
+    let f = build(&mut t.state);
     assert_eq!(cursor_rects(&f, &theme), [rect(1, 2, 1, theme.cursor)]);
     t.state.scroll_view(1);
-    let f = build(&t.state);
+    let f = build(&mut t.state);
     assert!(cursor_rects(&f, &theme).is_empty(), "cursor line pushed below the view");
     t.state.scroll_view(-1);
-    assert_eq!(cursor_rects(&build(&t.state), &theme).len(), 1);
+    assert_eq!(cursor_rects(&build(&mut t.state), &theme).len(), 1);
 }
 
 #[test]
 fn cursor_on_wide_char_is_two_cells() {
     let theme = Theme::default();
-    let t = term(10, 2, "a漢b\x1b[2G");
+    let mut t = term(10, 2, "a漢b\x1b[2G");
     assert_eq!(t.state.cursor().col(), 1);
-    let f = build(&t.state);
+    let f = build(&mut t.state);
     assert_eq!(f.rects, [rect(1, 0, 2, theme.cursor)], "block covers both halves");
     assert_eq!(glyph_at(&f, 1, 0).unwrap().color, theme.cursor_text);
 
     let f = build_with(
-        &t.state,
+        &mut t.state,
         &theme,
         Opts {
             focused: false,
@@ -554,8 +753,8 @@ fn cursor_on_wide_char_is_two_cells() {
     );
     assert_eq!(cursor_rects(&f, &theme), hollow_box(1, 0, 2, theme.cursor));
 
-    let t = term(10, 2, "a漢b\x1b[2G\x1b[4 q");
-    let f = build(&t.state);
+    let mut t = term(10, 2, "a漢b\x1b[2G\x1b[4 q");
+    let f = build(&mut t.state);
     assert_eq!(cursor_rects(&f, &theme)[0].w, 2 * CW as u16);
 }
 
@@ -564,9 +763,9 @@ fn cursor_on_wide_char_is_two_cells() {
 #[test]
 fn preedit_suppresses_glyphs_under_it() {
     let theme = Theme::default();
-    let t = term(10, 2, "\r\nabcdef\x1b[2G");
+    let mut t = term(10, 2, "\r\nabcdef\x1b[2G");
     let f = build_with(
-        &t.state,
+        &mut t.state,
         &theme,
         Opts {
             preedit: Some("xy"),
@@ -589,22 +788,22 @@ fn preedit_follows_the_cursor_in_view() {
         ..Opts::default()
     };
     assert_eq!(
-        decoded(&build_with(&t.state, &theme, opts()), 10, 2, (0, 0)),
+        decoded(&build_with(&mut t.state, &theme, opts()), 10, 2, (0, 0)),
         ["3         ", "abxy      "]
     );
     // Scrolled back by one row, the cursor's row is out of view: no preedit.
     t.state.scroll_view(1);
-    let f = build_with(&t.state, &theme, opts());
+    let f = build_with(&mut t.state, &theme, opts());
     assert_eq!(decoded(&f, 10, 2, (0, 0)), ["2         ", "3         "]);
     assert!(f.rects.iter().all(|r| r.color != theme.background), "no preedit background");
 }
 
 #[test]
 fn preedit_clipped_at_right_edge() {
-    let t = term(5, 1, "abc");
+    let mut t = term(5, 1, "abc");
     let theme = Theme::default();
     let f = build_with(
-        &t.state,
+        &mut t.state,
         &theme,
         Opts {
             preedit: Some("xyz"),
@@ -613,9 +812,9 @@ fn preedit_clipped_at_right_edge() {
     );
     assert_eq!(decoded(&f, 5, 1, (0, 0)), ["abcxy"]);
     // A wide character that doesn't fit is dropped whole.
-    let t = term(5, 1, "abcd");
+    let mut t = term(5, 1, "abcd");
     let f = build_with(
-        &t.state,
+        &mut t.state,
         &theme,
         Opts {
             preedit: Some("漢"),
@@ -630,9 +829,9 @@ fn preedit_clipped_at_right_edge() {
 #[test]
 fn preedit_width_matches_term_core() {
     let theme = Theme::default();
-    let t = term(8, 1, "abcdefg\x1b[1G");
+    let mut t = term(8, 1, "abcdefg\x1b[1G");
     let f = build_with(
-        &t.state,
+        &mut t.state,
         &theme,
         Opts {
             preedit: Some("→漢x"),
@@ -652,10 +851,10 @@ fn preedit_width_matches_term_core() {
 fn padding_offsets_everything() {
     let theme = Theme::default();
     let screen = "\x1b[41mab\x1b[0m \x1b[4mcd\x1b[0m\r\n漢\x1b[9mz\x1b[0m";
-    let t = term(8, 3, screen);
+    let mut t = term(8, 3, screen);
     let pad = (7u32, 9u32);
     let plain = build_with(
-        &t.state,
+        &mut t.state,
         &theme,
         Opts {
             preedit: Some("q"),
@@ -663,7 +862,7 @@ fn padding_offsets_everything() {
         },
     );
     let padded = build_with(
-        &t.state,
+        &mut t.state,
         &theme,
         Opts {
             preedit: Some("q"),
@@ -710,10 +909,10 @@ fn positions_clamp_on_huge_grids() {
             text.push_str("\r\n");
         }
     }
-    let t = term(cols, lines, &text);
+    let mut t = term(cols, lines, &text);
     let theme = Theme::default();
     let f = build_with(
-        &t.state,
+        &mut t.state,
         &theme,
         Opts {
             metrics: m,
@@ -730,6 +929,18 @@ fn positions_clamp_on_huge_grids() {
     assert!(f.glyphs.iter().all(|g| g.x >= 0 && g.y >= 0));
     let last = f.glyphs.last().unwrap();
     assert_eq!((last.x, last.y), (i16::MAX, i16::MAX));
+
+    // Scrolled by a line and drawn again from the row cache: rows moved
+    // up from past the clamp come out where the live terminal puts them.
+    let mut f = f;
+    for line in ["\r\nb", "\r\nc\x1b[3;1Hd"] {
+        t.advance(line.as_bytes());
+        let o = Opts {
+            metrics: m,
+            ..Opts::default()
+        };
+        build_into(&mut f, &mut t.state, &theme, &o);
+    }
 }
 
 // ---- theme ---------------------------------------------------------------
@@ -765,13 +976,13 @@ fn palette_cube_and_grey_ramp_match_xterm() {
 
 #[test]
 fn indexed_and_truecolour_cells_resolve_exactly() {
-    let t = term(
+    let mut t = term(
         10,
         1,
         &format!("{NO_CURSOR}\x1b[38;2;1;2;3;48;2;250;128;7ma\x1b[38;5;67;48;5;244mb"),
     );
     let theme = Theme::default();
-    let f = build(&t.state);
+    let f = build(&mut t.state);
     assert_eq!(glyph_at(&f, 0, 0).unwrap().color, 0xFF03_0201);
     assert_eq!(glyph_at(&f, 1, 0).unwrap().color, rgb(0x5f87af));
     assert_eq!(f.rects, [rect(0, 0, 1, rgb(0xfa8007)), rect(1, 0, 1, theme.palette[244])]);
@@ -783,7 +994,7 @@ fn background_opacity_sets_clear_alpha() {
         background_opacity: 128,
         ..Theme::default()
     };
-    let t = term(4, 1, "");
-    let f = build_with(&t.state, &theme, Opts::default());
+    let mut t = term(4, 1, "");
+    let f = build_with(&mut t.state, &theme, Opts::default());
     assert_eq!(f.clear, (theme.background & 0x00FF_FFFF) | 128 << 24);
 }

@@ -2193,6 +2193,39 @@ impl Scrollback {
         self.search_popped.take()
     }
 
+    /// The blocks holding history lines `lo..hi` (0 = oldest visible), in
+    /// order: each one's part of that range and the width every line in it
+    /// was written at (0 if mixed).
+    pub(crate) fn widths(&self, lo: usize, hi: usize, mut f: impl FnMut(usize, usize, u16) -> bool) {
+        let hi = hi.min(self.len());
+        let mut i = lo;
+        while i < hi {
+            let line = self.start + i as u64;
+            let (end, width) = if line >= self.open.first {
+                (self.end, if self.open.width == u16::MAX { 0 } else { self.open.width })
+            } else {
+                let b = &self.blocks[self.blocks.partition_point(|b| b.data.first <= line) - 1];
+                (b.data.first + b.len as u64, b.data.width)
+            };
+            let to = ((end - self.start) as usize).min(hi);
+            if !f(i, to, width) {
+                return;
+            }
+            i = to;
+        }
+    }
+
+    /// Whether every one of history lines `lo..hi` was written `cols`
+    /// wide, by the widths of the blocks holding them.
+    pub(crate) fn all_at_width(&self, lo: usize, hi: usize, cols: usize) -> bool {
+        let mut all = true;
+        self.widths(lo, hi, |_, _, w| {
+            all = w as usize == cols;
+            all
+        });
+        all
+    }
+
     /// Test aid: seal the open block now, so tests get block boundaries
     /// without 64 KB of output.
     #[doc(hidden)]

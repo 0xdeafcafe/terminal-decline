@@ -59,6 +59,46 @@ fn bench(c: &mut Criterion) {
         });
     }
     g.finish();
+
+    // Scrolling history after a width change (§12.3): 100k lines of 400
+    // characters written at 300 columns (two stored lines each), read at
+    // 300 (a row per stored line) and at 200 (laid out again). Each
+    // iteration scrolls a page back or forward and takes a snapshot of
+    // the whole view, nothing cached by the renderer.
+    let mut g = c.benchmark_group("history_at_width");
+    g.sample_size(20);
+    let mut t = Term::new(COLS, LINES, HISTORY);
+    let mut out = Vec::new();
+    for i in 0..HISTORY / 2 {
+        out.extend_from_slice(format!("{i:06} ").as_bytes());
+        for _ in 0..9 {
+            out.extend_from_slice(b"the quick brown fox jumps over the lazy dog ");
+        }
+        out.extend_from_slice(b"\r\n");
+    }
+    t.advance(&out);
+    for cols in [COLS, 200] {
+        t.state.resize(cols, LINES);
+        t.state.scroll_view(HISTORY as isize / 2);
+        let mut snap = term_core::Snapshot::default();
+        let mut back = true;
+        let mut n = 0;
+        g.bench_function(format!("scroll_page_at_{cols}"), |b| {
+            b.iter(|| {
+                n += 1;
+                if n % 50 == 0 {
+                    back = !back;
+                }
+                t.state.scroll_view(if back { LINES as isize } else { -(LINES as isize) });
+                t.state.snapshot(&mut snap, |_| false);
+                black_box(snap.rows.len());
+            })
+        });
+        g.bench_function(format!("display_offset_at_{cols}"), |b| {
+            b.iter(|| black_box(t.state.display_offset()))
+        });
+    }
+    g.finish();
 }
 
 criterion_group!(benches, bench);

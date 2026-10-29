@@ -2596,6 +2596,56 @@ resize(cols, lines), primary screen (style sweeps blocked throughout, §5.2):
   works the count out from the block caches. VoiceOver's line numbers use
   the same counts (§13.10).
 
+**Landed (PR 12).** What was built (`term/history.rs`, with hooks in
+`term.rs`, `reflow.rs`, `snapshot.rs` and `term/search.rs`), and where it
+differs from the above:
+
+- **Units.** History is read a logical line at a time, except that a
+  stored line whose number is a multiple of 256 starts a new piece, so a
+  very long line is laid out 256 stored lines at a time (a short row shows
+  where pieces meet, as where history meets the screen). Where pieces start
+  depends on neither the width nor what else is stored.
+- **Counting rows.** A unit whose blocks were all written at the current
+  width takes a row per stored line, with no decoding. Any other is
+  decoded and split again with the screen reflow's own helpers, so wide
+  characters, clusters, marks and `FILL` tails behave as in §12.2. Not
+  built yet: the ASCII count from the text length, and the per-block
+  `rows_at` cache. Laid-out units (up to 512) and the view's rows are kept
+  between reads until the width, history's ends or its epoch change.
+- **The view** is the Point of its first cell (`view: Option<Point>`),
+  replacing `display_offset`. Output arriving underneath changes nothing;
+  a width change rounds it down to the start of its row at the new width.
+  `ViewTop::At`'s `offset` is in its unit (rows × columns for a unit
+  shown a row per line). `display_offset()` counts rows at the current
+  width from the view to the screen, a block at a time where a block was
+  written at that width.
+- **Points** stay stored-line Points. `point_at`, `view_position`,
+  `cursor_in_view`, the new `selected_cols(view_line)` (which term-render's
+  frame building now uses) and the snapshot's highlights (selection,
+  hovered links and URLs, search hits) map through the unit's layout: a
+  view row is made of pieces of stored lines. A history row's key is
+  `RowKey::History { line, col }`, the stored line and column it starts
+  at. A row whose line goes on in a stored line not yet written is always
+  copied, since it can still grow.
+- **Not changed:** term-app still does line arithmetic with
+  `display_offset()` in `prompts.rs` (prompt jumps) and `search.rs`
+  (`scroll_to`, `each_logical_line`), which is right only while history is
+  at the current width.
+- **Tests:** `tests/history.rs` (a line at half the width, Points and
+  selection, the view across width changes, output underneath, `FILL`,
+  wide characters, links, snapshot keys and highlights) and a property
+  test, `history_reads_the_same_at_any_width`, that reads every row
+  through the view at random widths and checks the text, the row count and
+  scrolling there and back. `resizing_keeps_the_text` now reads history
+  through the view too.
+- **Measured** (`cargo bench -p term-core --bench resize -- history_at_width`,
+  one pass: 300×100, 100k stored lines from 50k lines of 403 characters
+  written at 300 columns; a page scrolled and a full snapshot taken):
+  48 µs a page at 300 columns, 132 µs at 200, where each line is laid out
+  again. `display_offset()` takes 7.1 ms at 300 and 122 ms at 200, every
+  call: the per-block cache this section asks for is what would make the
+  second once per width.
+
 ### 12.4 The 120 Hz, 100k-line budget
 
 Per resize event at 300×100 with 100k lines of history:

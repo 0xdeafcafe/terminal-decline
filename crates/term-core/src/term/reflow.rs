@@ -17,14 +17,14 @@ use crate::style::Style;
 /// padded its rows. Cluster cells hold an index into `texts` instead of a
 /// slot in a row's store.
 #[derive(Default)]
-struct Flat {
-    cells: Vec<Cell>,
+pub(super) struct Flat {
+    pub(super) cells: Vec<Cell>,
     texts: Vec<String>,
     /// OSC 133 marks, by offset in the line.
     marks: Vec<(usize, Mark)>,
     /// What the last row is padded with: the style of an erased tail that
     /// shows (a `FILL` line), or the blank.
-    fill: Cell,
+    pub(super) fill: Cell,
 }
 
 /// Where a logical line was, and where it is now.
@@ -56,7 +56,7 @@ struct TextCursor {
 
 impl Flat {
     /// Append `row` (the next row of the line) at `self.cells.len()`.
-    fn push_row(&mut self, row: &Row) -> usize {
+    pub(super) fn push_row(&mut self, row: &Row) -> usize {
         let start = self.cells.len();
         let mut n = row.cells.len();
         if row.wrapped && n > 0 && row.cells[n - 1].width() == Width::EdgeSpacer {
@@ -84,7 +84,7 @@ impl Flat {
 
     /// The cells kept: trailing cells that look like the padding are
     /// dropped, but none before `keep`.
-    fn trimmed_len(&self, keep: usize) -> usize {
+    pub(super) fn trimmed_len(&self, keep: usize) -> usize {
         let fill = self.fill;
         let mut len = self.cells.len();
         while len > keep {
@@ -114,7 +114,7 @@ fn fill_of(row: &Row) -> Cell {
 /// The offsets at which rows `cols` wide start, for the first `len` cells:
 /// a wide character that doesn't fit in a row's last column goes to the
 /// next row whole.
-fn split(cells: &[Cell], len: usize, cols: usize) -> Vec<usize> {
+pub(super) fn split(cells: &[Cell], len: usize, cols: usize) -> Vec<usize> {
     let mut starts = vec![0];
     let (mut pos, mut col) = (0, 0);
     while pos < len {
@@ -134,50 +134,56 @@ fn split(cells: &[Cell], len: usize, cols: usize) -> Vec<usize> {
 }
 
 /// The row and column of offset `off` in a line split at `starts`.
-fn locate(starts: &[usize], off: usize, cols: usize) -> (usize, usize) {
+pub(super) fn locate(starts: &[usize], off: usize, cols: usize) -> (usize, usize) {
     let r = starts.partition_point(|&s| s <= off).max(1) - 1;
     (r, (off - starts[r]).min(cols - 1))
 }
 
 /// The rows of `flat`'s first `len` cells, split at `starts`.
 fn emit(flat: &Flat, len: usize, starts: &[usize], cols: usize, out: &mut Vec<Row>) {
-    for (r, &from) in starts.iter().enumerate() {
-        let last = r + 1 == starts.len();
-        let end = if last { len } else { starts[r + 1] };
-        let mut row = Row::new(cols, if last { flat.fill } else { Cell::BLANK });
-        // Cells past the end of the old line (kept for the cursor) stay as
-        // the padding.
-        let to = end.min(from + cols).min(flat.cells.len().max(from));
-        for (col, &c) in flat.cells[from..to].iter().enumerate() {
-            if c.is_cluster() {
-                row.cells[col] = Cell::from_bits(c.bits() & !(Cell::CONTENT | Cell::KIND));
-                row.set_cluster(col, &flat.texts[c.codepoint() as usize]);
-            } else {
-                row.cells[col] = c;
-            }
-        }
-        if !last {
-            row.wrapped = true;
-            if end - from < cols {
-                row.cells[cols - 1] = Cell::BLANK.with_width(Width::EdgeSpacer);
-            }
-        }
-        // A wide character cut off by `len` (it can't be, unless the line
-        // was broken) loses its other half.
-        if row.cells.last().is_some_and(|c| c.is_wide()) {
-            row.free_clusters(cols - 1..cols);
-            row.cells[cols - 1] = Cell::BLANK;
-        }
-        for &(off, m) in &flat.marks {
-            if locate(starts, off, cols).0 == r {
-                row.set_mark(Mark {
-                    col: (off - from).min(cols - 1) as u16,
-                    ..m
-                });
-            }
-        }
-        out.push(row);
+    for r in 0..starts.len() {
+        out.push(emit_row(flat, len, starts, cols, r));
     }
+}
+
+/// Row `r` of `flat`'s first `len` cells, split at `starts`.
+pub(super) fn emit_row(flat: &Flat, len: usize, starts: &[usize], cols: usize, r: usize) -> Row {
+    let from = starts[r];
+    let last = r + 1 == starts.len();
+    let end = if last { len } else { starts[r + 1] };
+    let mut row = Row::new(cols, if last { flat.fill } else { Cell::BLANK });
+    // Cells past the end of the old line (kept for the cursor) stay as
+    // the padding.
+    let to = end.min(from + cols).min(flat.cells.len().max(from));
+    for (col, &c) in flat.cells[from..to].iter().enumerate() {
+        if c.is_cluster() {
+            row.cells[col] = Cell::from_bits(c.bits() & !(Cell::CONTENT | Cell::KIND));
+            row.set_cluster(col, &flat.texts[c.codepoint() as usize]);
+        } else {
+            row.cells[col] = c;
+        }
+    }
+    if !last {
+        row.wrapped = true;
+        if end - from < cols {
+            row.cells[cols - 1] = Cell::BLANK.with_width(Width::EdgeSpacer);
+        }
+    }
+    // A wide character cut off by `len` (it can't be, unless the line
+    // was broken) loses its other half.
+    if row.cells.last().is_some_and(|c| c.is_wide()) {
+        row.free_clusters(cols - 1..cols);
+        row.cells[cols - 1] = Cell::BLANK;
+    }
+    for &(off, m) in &flat.marks {
+        if locate(starts, off, cols).0 == r {
+            row.set_mark(Mark {
+                col: (off - from).min(cols - 1) as u16,
+                ..m
+            });
+        }
+    }
+    row
 }
 
 fn is_blank_row(row: &Row) -> bool {
@@ -275,7 +281,7 @@ impl Terminal {
             pulled.reverse();
         }
         let first_line = self.top_line - pulled.len() as u64;
-        let view = (self.display_offset > 0).then(|| self.top_line - self.display_offset as u64);
+        let view = self.view_point();
 
         // 2. Group the old rows into logical lines.
         let screen: Vec<Row> = std::mem::take(&mut self.screen).into();
@@ -465,12 +471,11 @@ impl Terminal {
             sel.head = remap(sel.head);
         }
         self.hover = self.hover.map(remap);
-        self.display_offset = match view {
-            None => 0,
-            Some(v) => {
-                let v = remap(Point { line: v, col: 0 }).line;
-                (self.top_line.saturating_sub(v) as usize).min(self.scrollback.len())
-            }
-        };
+        // The view's first cell, on its row at the new width (§12.3); on the
+        // screen now, the view follows output.
+        // (`Terminal::resize` puts it at its row's start once the width is
+        // set; reads round it down to that meanwhile.)
+        self.drop_layouts();
+        self.view = view.map(remap).filter(|p| p.line < self.top_line);
     }
 }

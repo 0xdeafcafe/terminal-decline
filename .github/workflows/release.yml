@@ -40,6 +40,11 @@ jobs:
     runs-on: macos-latest
     outputs:
       version: ${{ steps.meta.outputs.version }}
+      build: ${{ steps.meta.outputs.build }}
+      # What the sign job needs to know before publishing updates
+      # (docs/design/updater.md §6.1); it checks the app itself too.
+      signing: ${{ steps.cert.outputs.identity != '' && 'developer-id' || 'ad-hoc' }}
+      notarized: ${{ steps.notarize.outcome == 'success' }}
       zip: ${{ steps.package.outputs.zip }}
       sha256: ${{ steps.package.outputs.sha256 }}
     env:
@@ -115,6 +120,7 @@ jobs:
             dist "${{ steps.meta.outputs.version }}" "${{ steps.meta.outputs.build }}"
 
       - name: Notarize and staple
+        id: notarize
         if: steps.cert.outputs.identity != '' && env.APPLE_ID != '' && env.APPLE_APP_PASSWORD != ''
         run: |
           ditto -c -k --keepParent "dist/Terminal Decline.app" dist/notarize.zip
@@ -189,8 +195,195 @@ jobs:
             --title "Nightly (${{ needs.build.outputs.version }})" \
             --notes "Automated nightly build of ${GITHUB_SHA}. Ad-hoc or Developer ID signed depending on repository secrets. Not for production use."
 
-  release:
+  sign:
+    # Signs the update and writes the appcast (docs/design/updater.md
+    # §6.1). A job of its own, in the `release` environment, so the
+    # EdDSA key is never in the build job's environment (cargo build runs
+    # every dependency's build script). Sparkle trusts the EdDSA key
+    # alone, so updates are published only for notarized Developer ID
+    # builds: without them this job says why in the summary and the
+    # release goes out without an appcast, until updates have started;
+    # from then on it fails, since a release without an appcast would
+    # become `latest` and stop every installed copy updating.
     needs: build
+    if: github.ref_type == 'tag'
+    runs-on: macos-latest
+    timeout-minutes: 15
+    environment: release
+    permissions:
+      contents: read
+    outputs:
+      publish: ${{ steps.decide.outputs.publish }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      VERSION: ${{ needs.build.outputs.version }}
+      ZIP: dist/${{ needs.build.outputs.zip }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: terminal-decline-macos-arm64
+          path: dist
+
+      - name: Fetch Sparkle
+        run: scripts/sparkle.sh
+
+      # Every tag, whether or not updates are published: our bundle id and
+      # the tag's version, the committed public key, the release feed, and
+      # none of the test-build switches.
+      - name: Check it is a release build
+        run: python3 scripts/appcast.py check-release "$ZIP" --public-key packaging/sparkle-public-key --version "$VERSION"
+
+      - name: Fetch the current appcast
+        id: previous
+        run: |
+          mkdir -p previous
+          # Only "no release yet" counts as no appcast: any other error
+          # fails here, rather than being taken for the first release.
+          if ! view=$(gh release view --json tagName,assets 2>&1); then
+            if [[ "$view" != *"release not found"* ]]; then
+              echo "::error::gh release view: $view"
+              exit 1
+            fi
+            view='{"tagName": "", "assets": []}'
+          fi
+          latest=$(jq -r .tagName <<< "$view")
+          if jq -e '.assets | any(.name == "appcast.xml")' <<< "$view" > /dev/null; then
+            gh release download "$latest" --pattern appcast.xml --dir previous
+            echo "started=true" >> "$GITHUB_OUTPUT"
+            newest=$(python3 scripts/appcast.py newest previous/appcast.xml)
+            echo "current appcast ($latest): $newest"
+            # The key users actually have: the newest published app's.
+            url=$(jq -r .url <<< "$newest")
+            prefix="https://github.com/$GH_REPO/releases/download/"
+            if [[ "$url" != "$prefix"* ]]; then
+              echo "::error::the current appcast's newest item points at $url"
+              exit 1
+            fi
+            path=${url#"$prefix"}
+            gh release download "${path%%/*}" --pattern "${path#*/}" --dir previous
+            theirs=$(python3 scripts/appcast.py public-key "previous/${path#*/}")
+            ours=$(tr -d '[:space:]' < packaging/sparkle-public-key)
+            if [[ "$theirs" != "$ours" ]]; then
+              echo "::error::SUPublicEDKey of the latest release ($theirs) differs from packaging/sparkle-public-key ($ours); installed copies would refuse this update"
+              exit 1
+            fi
+          else
+            echo "started=false" >> "$GITHUB_OUTPUT"
+            echo "no appcast in the latest release (${latest:-none}): this is the first one"
+          fi
+
+      - name: Decide whether to publish updates
+        id: decide
+        env:
+          SIGNING: ${{ needs.build.outputs.signing }}
+          NOTARIZED: ${{ needs.build.outputs.notarized }}
+          HAS_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY != '' }}
+          STARTED: ${{ steps.previous.outputs.started }}
+        run: |
+          reasons=()
+          [[ "$SIGNING" == developer-id ]] \
+            || reasons+=("the app is ad-hoc signed (the APPLE_CERT_P12 and APPLE_CERT_PASSWORD secrets aren't set)")
+          [[ "$NOTARIZED" == true ]] \
+            || reasons+=("the app isn't notarized (needs the Developer ID certificate and the APPLE_ID and APPLE_APP_PASSWORD secrets)")
+          [[ "$HAS_KEY" == true ]] \
+            || reasons+=("the SPARKLE_ED_PRIVATE_KEY secret isn't set")
+          if [[ ${#reasons[@]} -eq 0 ]]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "publish=false" >> "$GITHUB_OUTPUT"
+          {
+            echo "### No update published for $VERSION"
+            echo
+            echo "Installed copies won't be offered this release, because:"
+            printf -- '- %s\n' "${reasons[@]}"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$STARTED" == true ]]; then
+            echo "Updates have started (the latest release has an appcast), so this release must publish one too." >> "$GITHUB_STEP_SUMMARY"
+            for r in "${reasons[@]}"; do echo "::error::$r"; done
+            exit 1
+          fi
+          for r in "${reasons[@]}"; do echo "::warning::no update published: $r"; done
+
+      - name: Check the team and notarization
+        if: steps.decide.outputs.publish == 'true'
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          mkdir -p unpacked
+          ditto -x -k "$ZIP" unpacked
+          app="unpacked/Terminal Decline.app"
+          codesign --verify --strict --deep "$app"
+          for code in "$app" "$app/Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate"; do
+            team=$(codesign -dv --verbose=2 "$code" 2>&1 | sed -n 's/^TeamIdentifier=//p')
+            if [[ -z "$APPLE_TEAM_ID" || "$team" != "$APPLE_TEAM_ID" ]]; then
+              echo "::error::$code is signed by team '${team}', not APPLE_TEAM_ID"
+              exit 1
+            fi
+          done
+          spctl --assess --type exec -vv "$app" 2>&1 | tee spctl.txt
+          grep -q "source=Notarized Developer ID" spctl.txt
+          xcrun stapler validate "$app"
+
+      # The key on stdin, never on disk, and only in the two steps that
+      # sign.
+      - name: Sign the update
+        id: sign
+        if: steps.decide.outputs.publish == 'true'
+        env:
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+        run: |
+          sparkle=$(scripts/sparkle.sh --print-dir)
+          sig=$(printf '%s\n' "$SPARKLE_ED_PRIVATE_KEY" | "$sparkle/bin/sign_update" --ed-key-file - -p "$ZIP")
+          echo "signature=$sig" >> "$GITHUB_OUTPUT"
+
+      # sign_update --verify checks against the key it was given, so it
+      # can't tell that the secret is the wrong key; this checks against
+      # the committed public key, which the app carries (checked above)
+      # and the latest release carries (checked when fetching the
+      # appcast).
+      - name: Check the signature with the committed public key
+        if: steps.decide.outputs.publish == 'true'
+        env:
+          SIGNATURE: ${{ steps.sign.outputs.signature }}
+        run: python3 scripts/appcast.py verify "$ZIP" --public-key packaging/sparkle-public-key --signature "$SIGNATURE"
+
+      # Fails unless the build number is above every published one.
+      - name: Write the appcast
+        if: steps.decide.outputs.publish == 'true'
+        env:
+          SIGNATURE: ${{ steps.sign.outputs.signature }}
+        run: |
+          mkdir -p appcast
+          python3 scripts/appcast.py write --zip "$ZIP" --signature "$SIGNATURE" --previous previous/appcast.xml --out appcast/appcast.xml
+
+      - name: Sign the appcast
+        if: steps.decide.outputs.publish == 'true'
+        env:
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+        run: |
+          sparkle=$(scripts/sparkle.sh --print-dir)
+          printf '%s\n' "$SPARKLE_ED_PRIVATE_KEY" | "$sparkle/bin/sign_update" --ed-key-file - appcast/appcast.xml
+          python3 scripts/appcast.py verify-feed appcast/appcast.xml --public-key packaging/sparkle-public-key
+          {
+            echo "### Update published for $VERSION"
+            echo
+            echo '```xml'
+            cat appcast/appcast.xml
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: steps.decide.outputs.publish == 'true'
+        with:
+          name: appcast
+          path: appcast/appcast.xml
+          if-no-files-found: error
+
+  release:
+    needs: [build, sign]
     if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     permissions:
@@ -206,6 +399,17 @@ jobs:
         with:
           name: terminal-decline-macos-arm64
           path: dist
+      # The appcast goes up as an asset of this release, which becomes
+      # `latest`: releases/latest/download/appcast.xml is the feed every
+      # installed copy reads (SUFeedURL).
+      - uses: actions/download-artifact@v4
+        if: needs.sign.outputs.publish == 'true'
+        with:
+          name: appcast
+          path: dist
+      - name: Check the appcast is there
+        if: needs.sign.outputs.publish == 'true'
+        run: test -s dist/appcast.xml
       - name: Create GitHub release
         run: |
           gh release create "$GITHUB_REF_NAME" dist/* \

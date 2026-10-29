@@ -38,6 +38,7 @@ jobs:
         run: |
           python3 scripts/bench-gate.py --self-test
           python3 scripts/fuzz-signature.py --self-test
+          python3 scripts/appcast.py --self-test
       - name: Seed corpus is up to date
         run: python3 scripts/fuzz-seed.py --check
 

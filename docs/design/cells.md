@@ -2021,6 +2021,9 @@ behind accessors in PR 1.
 
 ### 13.3 Search: what it has to do
 
+VoiceOver (E.12) is not in 1.0 (29 Oct): skip §13.10 and the UTF-16 piece
+API unless search needs them.
+
 Alex's decisions: search (Cmd+F, E.7) and VoiceOver (E.12) cover **all of
 history**, search shows what is in view first, and searching history must be
 fast. Cmd+F uses our own native-style find bar (§13.9). The engine below

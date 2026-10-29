@@ -75,7 +75,7 @@ keys, resize).
 - The schema is the single source of truth: term-app's `Config` is
   generated from or checked against it (a test asserts every `Config`
   field has a schema entry and vice versa), and the generated config
-  reference doc (E.9/Z.3) comes from it too.
+  reference doc comes from it too.
 - term-app: `prefs` subcommand → `term_prefs::run(path)`; Cmd+, opens the
   tab with that command; the font family picker needs the installed
   monospace font list (Core Text) — passed in via a small trait so

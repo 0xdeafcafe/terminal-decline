@@ -81,10 +81,8 @@ set, not only perf work: shaping, images and the updater each cost something.
 | E.9 | Config: reload on change (FSEvents), list of live settings, `theme =` + a small built-in theme set + themes dir, `decline import ghostty` / `import iterm`, deprecation policy for renamed keys | M |
 | E.10 | macOS: drag files in → escaped paths; folder on Dock icon / `open -a` → window there; Services "New decline Window/Tab at Folder"; right-click menu when mouse reporting is off; confirm before closing a running program (config off) | M |
 | E.11 | Secure Keyboard Entry (menu) | S |
-| E.12 | Accessibility: one element per pane, VoiceOver line/word navigation, Zoom follows cursor | L |
 | E.13 | vttest (named menus) and esctest2 (checked-in list of accepted failures) | M |
 | E.14 | Small bugs: VS16 with autowrap off; CSI M on the top row | S |
-| E.15 | Privacy statement: no telemetry; only network call is the update check; crash reports local; "Report a problem" opens a pre-filled issue | S |
 | E.17 | Rename to Terminal Decline everywhere (app, bundle id, command with `decline` alias, config dir with migration, pins, cask) | S |
 | E.18 | Preferences: Cmd+, opens a tab running the built-in settings TUI (sectioned list, live preview, keeps comments in config.toml); design in docs/design/preferences.md | M |
 | E.16 | Release: make repo + tap public, **then** tag `0.1.0`; changelog (git-cliff); cask caveats + `zap`; smoke on macOS 14 | S |
@@ -116,10 +114,6 @@ set, not only perf work: shaping, images and the updater each cost something.
 
 | # | Work | Done when |
 |---|---|---|
-| Z.1 | 2–4 weeks across beta users against the checklist | no open crash or data-loss bugs |
-| Z.2 | Fuzz clean 14 nights; property tests clean at 50k cases | — |
-| Z.3 | Docs: README, config/keyboard references, pins guide, man page, CONTRIBUTING | every config key documented (generated) |
-| Z.4 | Fair comparison report vs Ghostty published (script in repo) | thresholds met |
 | Z.5 | Tag `1.0.0`; consider submitting to homebrew/cask | — |
 
 ## Decisions (28 Oct 2026)
@@ -131,6 +125,10 @@ set, not only perf work: shaping, images and the updater each cost something.
    no formula (a formula builds the bare binary: no pin launcher,
    notifications or updater).
 5. 1.0 includes tabs, splits, ligatures, inline images and an in-app updater.
+6. Not in 1.0 (29 Oct): VoiceOver/accessibility, a privacy statement, and
+   the pre-1.0 gates (beta period, 14 clean fuzz nights, written docs, a
+   published Ghostty comparison). 1.0 is tagged when the remaining work is
+   done and the thresholds are met.
 
 ## How the work runs
 

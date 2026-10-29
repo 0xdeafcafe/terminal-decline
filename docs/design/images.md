@@ -1295,6 +1295,39 @@ and where it differs from §3 and §4:
   80×24, rows cached, on a loaded machine): no images 2.9 µs, ten
   placements 4.7 µs, a 40×20 placeholder image (20 pieces) 3.3 µs.
 
+**Landed (I.5a, part).** The host and its plumbing, in term-app
+(`images.rs`, `images/host.rs`, `images/queue.rs`); where it differs
+from §3.4, §4.2 and §5.5:
+- **`AppHost`** allocates `MetalPixels` through `PixelAlloc::system_default`
+  and decodes with `term_image::decode` (Display P3 on), not ImageIO;
+  term-core's `run_job` runs each job. The media rules are §3.4's, with
+  a temporary file opened by `openat` with `O_NOFOLLOW` in its checked
+  directory and removed there with `unlinkat`; relative paths are
+  refused; what is read must fit the budget's limit (term-core reserves
+  the bytes). No Metal device: every image is refused.
+- **The queue** is one thread per process at utility QoS (a thread, not
+  a dispatch queue); jobs and their completions run inside
+  `catch_unwind`. Each session has its side (`SessionImages`), keyed by
+  its own number rather than the terminal's id, which changes when a
+  terminal is replaced after a panic; closing the session drops its
+  waiting jobs, and a completion for a gone session does nothing.
+- **Off-lock header reads**: with images on, the session sets the host
+  and `set_reads_off_lock`, and its reader parses with
+  `advance_until_head`, letting the lock go around each `read_head`.
+- **Jobs** are taken after each parse slice (reader thread) and after
+  each snapshot (main thread). **Hold-back**: before each PTY read, the
+  reader waits while its queued encoded bytes pass a quarter of the
+  budget, at most 2 s at a time, so a stuck decode can't stop output for
+  good.
+- **Hide and show**: `set_shown(false)` right after the renderer's `hide`
+  (frames waited for, textures dropped), `set_shown(true)` right after
+  its `show`, before the frame is built; once per change.
+- **The budget** follows the largest window's drawable (`budget_for`),
+  set on each layout and when a window closes.
+- Not yet: the `image_memory` and `image_file_transfer` settings (media
+  is on, the budget follows windows only), the dump's `images` section,
+  and the `MNT_LOCAL` refusal tested against a real non-local volume.
+
 V.1 and I.1 can start now. After I.0: I.2 (core), I.4 (render) at once,
 then I.5a (app) once I.4's `MetalPixels` is in; I.3 follows I.2. B.3 is
 done with I.2 + I.4 + I.5 (+ the iTerm2 half of I.3); B.5 with the Sixel

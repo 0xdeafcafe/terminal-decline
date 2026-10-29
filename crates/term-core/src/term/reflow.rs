@@ -411,10 +411,11 @@ impl Terminal {
         self.screen = all;
         self.top_line = new_first + pushed as u64;
 
-        // 6. Tracked positions back to Points.
-        let remap = |p: Point| -> Point {
+        // 6. Tracked positions back to Points. None: in a blank row below
+        // the cursor that was dropped.
+        let find = |p: Point| -> Option<Point> {
             if p.line < first_line {
-                return p;
+                return Some(p);
             }
             let k = lines_meta.partition_point(|l| l.old_line <= p.line).max(1) - 1;
             let l = &lines_meta[k];
@@ -426,18 +427,25 @@ impl Terminal {
             let (nr, nc) = locate(&l.starts, off, cols);
             let row = l.first_row + nr;
             if row >= total_rows {
-                // A blank row below the cursor that was dropped: the end
-                // of the last row left.
-                return Point {
-                    line: new_first + total_rows.max(1) as u64 - 1,
-                    col: cols - 1,
-                };
+                return None;
             }
-            Point {
+            Some(Point {
                 line: new_first + row as u64,
                 col: nc,
-            }
+            })
         };
+        // A position in a dropped row goes to the end of the last row left.
+        let remap = |p: Point| -> Point {
+            find(p).unwrap_or(Point {
+                line: new_first + total_rows.max(1) as u64 - 1,
+                col: cols - 1,
+            })
+        };
+        // kitty placements keep their size in cells and move with their
+        // top-left cell; one whose cell was dropped goes.
+        self.graphics.remap_placements(first_line, |line, col| {
+            find(Point { line, col: col as usize }).map(|p| (p.line, p.col.min(u16::MAX as usize) as u16))
+        });
         let (row, col, pending) = (cur_row, cur_col, cur_pending);
         if row < pushed {
             // The cursor's row went into history: it stays at the top.

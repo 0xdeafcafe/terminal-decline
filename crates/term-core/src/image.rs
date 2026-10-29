@@ -6,6 +6,7 @@
 //! graphics is I.2, iTerm2 and Sixel I.3), and images stay behind the
 //! hidden switch ([`images_switch`]) until drawing and the host land.
 
+pub mod placeholder;
 mod pool;
 
 use std::collections::{BTreeMap, HashMap};
@@ -389,6 +390,37 @@ impl Graphics {
             .collect();
         for k in gone {
             self.unplace(k);
+        }
+    }
+
+    /// Move the placements whose top line is `from` or later to where `f`
+    /// says their top-left cell went (reflow, §12.2), or drop them when it
+    /// says None.
+    pub fn remap_placements(&mut self, from: u64, mut f: impl FnMut(u64, u16) -> Option<(u64, u16)>) {
+        let keys: Vec<(u64, u64)> = self.placements.range((from, 0)..).map(|(k, _)| *k).collect();
+        for old in keys {
+            let p = &self.placements[&old];
+            match f(p.line, p.col) {
+                Some((line, col)) if (line, col) == (p.line, p.col) => {}
+                Some((line, col)) => {
+                    let mut p = self.placements.remove(&old).expect("placement");
+                    p.line = line;
+                    p.col = col;
+                    let new = (line, old.1);
+                    if p.id != 0 {
+                        self.by_id.insert((p.image, p.id), new);
+                    }
+                    if let Some(v) = self.by_image.get_mut(&p.image) {
+                        for k in v.iter_mut().filter(|k| **k == old) {
+                            *k = new;
+                        }
+                    }
+                    self.placements.insert(new, p);
+                }
+                None => {
+                    self.unplace(old);
+                }
+            }
         }
     }
 

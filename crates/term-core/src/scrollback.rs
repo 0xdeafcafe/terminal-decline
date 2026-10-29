@@ -94,9 +94,11 @@ mod flag {
     pub const EXTRA: u8 = 1 << 7;
 }
 
-/// Bits of a stored line's `extra` byte. Bit 0 is placeholders (PR 10),
-/// bits 1–2 double width and height (later).
+/// Bits of a stored line's `extra` byte. Bits 1–2 are double width and
+/// height (later).
 mod extra {
+    /// A placeholder list follows the marks (§11.3).
+    pub const PLACEHOLDERS: u8 = 1 << 0;
     /// An unwrapped line's text length follows too, as for wrapped lines:
     /// written for text of [`super::LONG_TEXT`] bytes or more, so walking
     /// from a checkpoint past long lines (a gradient's 480 bytes) needs no
@@ -619,7 +621,9 @@ impl OpenBlock {
         let (mut scalars, mut cluster_end, mut entry, mut width_next) = (0u32, 0u32, 0u32, 0u32);
         // The last scalar looked up in the Unicode table and its width.
         let mut last = ('\0', 1);
-        for &c in &cells[..text_end] {
+        scratch.placeholders.clear();
+        for cell in &cells[..text_end] {
+            let c = *cell;
             if c.is_spacer() {
                 continue;
             }
@@ -655,6 +659,17 @@ impl OpenBlock {
                     }
                     scalars += n;
                 }
+            } else if c.is_placeholder() {
+                // 0x00 in the text (never matches a search, copied as a
+                // space); the piece goes in the line's placeholder list.
+                buf[at] = 0;
+                at += 1;
+                scalars += 1;
+                predicted = 1;
+                // Its column, from where it is (no counter in the loop for
+                // the rare case).
+                let x = (std::ptr::from_ref(cell).addr() - cells.as_ptr().addr()) / std::mem::size_of::<Cell>();
+                add_placeholder(&mut scratch.placeholders, x as u32, c);
             } else {
                 let ch = match c.codepoint() {
                     0 => ' ',
@@ -723,14 +738,21 @@ impl OpenBlock {
         flags |= if fill && !scratch.runs.is_empty() { flag::FILL } else { 0 };
         flags |= if row.has_marks() { flag::MARKS } else { 0 };
         let long = !wrapped && tlen >= LONG_TEXT;
-        flags |= if long { flag::EXTRA } else { 0 };
+        let extra_bits = if long { extra::TLEN } else { 0 } | if scratch.placeholders.is_empty() { 0 } else { extra::PLACEHOLDERS };
+        flags |= if extra_bits != 0 { flag::EXTRA } else { 0 };
         room(
             &mut self.meta,
-            6 + 6 + scratch.runs.len() * 8 + scratch.clusters.len() * 10 + scratch.widths.len() * 6 + 4 * 12,
+            6 + 6
+                + scratch.runs.len() * 8
+                + scratch.clusters.len() * 10
+                + scratch.widths.len() * 6
+                + 4 * 12
+                + 3
+                + scratch.placeholders.len() * 9,
         );
         self.meta.push(flags);
-        if long {
-            self.meta.push(extra::TLEN);
+        if extra_bits != 0 {
+            self.meta.push(extra_bits);
         }
         if wrapped || long {
             put_varint(&mut self.meta, tlen as u32);
@@ -774,6 +796,19 @@ impl OpenBlock {
                 }
             }
         }
+        if !scratch.placeholders.is_empty() {
+            // count, then per stretch: gap (cells since the last one
+            // ended), cells, row, first column.
+            put_varint(&mut self.meta, scratch.placeholders.len() as u32);
+            let mut end = 0;
+            for &(start, n, r, col) in &scratch.placeholders {
+                put_varint(&mut self.meta, start - end);
+                put_varint(&mut self.meta, n);
+                put_varint(&mut self.meta, r as u32);
+                put_varint(&mut self.meta, col as u32);
+                end = start + n;
+            }
+        }
     }
 
     /// Drop the newest line.
@@ -789,6 +824,17 @@ impl OpenBlock {
     }
 }
 
+/// Add the placeholder `c` at column `x` to a line's stretches.
+#[cold]
+#[inline(never)]
+fn add_placeholder(stretches: &mut Vec<(u32, u32, u16, u16)>, x: u32, c: Cell) {
+    let Some((r, col)) = c.placeholder() else { return };
+    match stretches.last_mut() {
+        Some((start, n, pr, pc)) if *start + *n == x && *pr == r && *pc as u32 + *n == col as u32 => *n += 1,
+        _ => stretches.push((x, 1, r, col)),
+    }
+}
+
 /// Buffers the encoder reuses, so storing a line allocates nothing.
 #[derive(Debug, Default)]
 struct Scratch {
@@ -798,6 +844,9 @@ struct Scratch {
     widths: Vec<(u32, u8)>,
     /// (cells, slot) per run.
     runs: Vec<(u32, u32)>,
+    /// (first column, cells, image row, first image column) per stretch
+    /// of placeholders.
+    placeholders: Vec<(u32, u32, u16, u16)>,
     memo: WidthMemo,
     /// Every single-scalar cell has the width the Unicode table gives at
     /// the open block's setting ([`Scrollback::set_widths_as_written`]),
@@ -909,8 +958,9 @@ fn stored_len(cells: &[Cell]) -> usize {
 /// content other than a space, or a wide one (and its spacer).
 pub(crate) fn text_end(cells: &[Cell]) -> usize {
     // An empty wide cell keeps its width only through the text.
-    let has_text =
-        |c: &Cell| c.is_wide() || c.bits() & (Cell::CONTENT | Cell::KIND) != 0 && (c.is_cluster() || c.codepoint() != ' ' as u32);
+    let has_text = |c: &Cell| {
+        c.is_wide() || c.bits() & (Cell::CONTENT | Cell::KIND) != 0 && (c.bits() & Cell::KIND != 0 || c.codepoint() != ' ' as u32)
+    };
     match cells.iter().rposition(has_text) {
         Some(i) if cells[i].is_wide() => (i + 2).min(cells.len()),
         Some(i) => i + 1,
@@ -954,6 +1004,48 @@ fn marks_at(meta: &[u8], flags: u8, mut pos: usize) -> usize {
         }
     }
     pos
+}
+
+/// Where a line's placeholder list starts: after its marks, which start
+/// at `pos`.
+fn placeholders_at(meta: &[u8], flags: u8, mut pos: usize) -> usize {
+    if flags & flag::MARKS != 0 {
+        let count = meta.get(pos).copied().unwrap_or(0);
+        pos += 1;
+        for _ in 0..count {
+            let k = meta.get(pos).copied().unwrap_or(0);
+            pos += 1;
+            get_varint(meta, &mut pos);
+            if k & 0x80 != 0 {
+                get_varint(meta, &mut pos);
+            }
+        }
+    }
+    pos
+}
+
+/// Whether a line's meta has a placeholder list.
+#[inline]
+fn has_placeholders(meta: &[u8]) -> bool {
+    meta[0] & flag::EXTRA != 0 && meta.get(1).is_some_and(|x| x & extra::PLACEHOLDERS != 0)
+}
+
+/// Make the cells a line's placeholder list names placeholders again
+/// (their text was 0x00, so they were decoded as blanks in their style).
+fn read_placeholders(meta: &[u8], mut pos: usize, row: &mut Row) {
+    let mut x = 0usize;
+    for _ in 0..get_varint(meta, &mut pos) {
+        x += get_varint(meta, &mut pos) as usize;
+        let n = get_varint(meta, &mut pos) as usize;
+        let r = get_varint(meta, &mut pos) as u16;
+        let col = get_varint(meta, &mut pos) as u16;
+        for k in 0..n {
+            if let Some(c) = row.cells.get_mut(x + k) {
+                *c = c.with_placeholder(r, col + k as u16);
+            }
+        }
+        x += n;
+    }
 }
 
 /// A line's marks, from where they start in its meta.
@@ -1142,6 +1234,9 @@ impl<'a> View<'a> {
         if flags & flag::MARKS != 0 {
             read_marks(meta, marks_at(meta, flags, runs_at), |m| row.set_mark(m));
         }
+        if has_placeholders(meta) {
+            read_placeholders(meta, placeholders_at(meta, flags, marks_at(meta, flags, runs_at)), row);
+        }
         next
     }
 
@@ -1290,8 +1385,8 @@ impl<'a> View<'a> {
     fn check_line(&self, n: usize, meta_end: usize) -> Result<(), String> {
         let meta = &self.meta[self.starts[n] as usize..meta_end];
         let flags = *meta.first().ok_or("empty meta")?;
-        if flags & flag::EXTRA != 0 && meta.get(1) != Some(&extra::TLEN) {
-            return Err(format!("extra byte {:?}: only TLEN is written yet", meta.get(1)));
+        if flags & flag::EXTRA != 0 && !matches!(meta.get(1), Some(&x) if x != 0 && x & !(extra::TLEN | extra::PLACEHOLDERS) == 0) {
+            return Err(format!("extra byte {:?}: only TLEN and PLACEHOLDERS are written yet", meta.get(1)));
         }
         let (at, len) = self.text_span(n);
         let text = std::str::from_utf8(self.text.get(at..at + len).ok_or("text past the end")?).map_err(|e| e.to_string())?;
@@ -1365,6 +1460,27 @@ impl<'a> View<'a> {
                 if k & 0x80 != 0 {
                     get_varint(meta, &mut pos);
                 }
+            }
+        }
+        if has_placeholders(meta) {
+            let count = get_varint(meta, &mut pos);
+            if count == 0 {
+                return Err("PLACEHOLDERS with no stretches".into());
+            }
+            let zeros = text.bytes().filter(|&b| b == 0).count() as u64;
+            let mut cells = 0u64;
+            for _ in 0..count {
+                let gap = get_varint(meta, &mut pos);
+                let n = get_varint(meta, &mut pos);
+                let r = get_varint(meta, &mut pos);
+                let col = get_varint(meta, &mut pos);
+                if n == 0 || r >= crate::image::placeholder::VALUES as u32 || col + n > 512 {
+                    return Err(format!("placeholder stretch gap {gap} n {n} row {r} col {col}"));
+                }
+                cells += n as u64;
+            }
+            if cells != zeros {
+                return Err(format!("{cells} placeholders for {zeros} 0x00 bytes of text"));
             }
         }
         if pos != meta.len() {
@@ -1631,7 +1747,7 @@ impl Scrollback {
             return Ok(());
         }
         for (col, &c) in row.cells.iter().enumerate() {
-            if c.is_cluster() || c.is_spacer() || c.codepoint() == 0 {
+            if c.bits() & Cell::KIND != 0 || c.is_spacer() || c.codepoint() == 0 {
                 continue;
             }
             let ch = char::from_u32(c.codepoint()).unwrap_or(' ');
@@ -1852,6 +1968,11 @@ impl Scrollback {
     }
 
     /// Whether line `i` has marks, from its flags.
+    /// Whether stored line `i` has kitty placeholder cells.
+    pub fn has_placeholders(&self, i: usize) -> bool {
+        self.locate(i).is_some_and(|(v, n)| has_placeholders(v.meta_of(n)))
+    }
+
     pub fn has_marks(&self, i: usize) -> bool {
         self.locate(i).is_some_and(|(v, n)| v.flags(n) & flag::MARKS != 0)
     }

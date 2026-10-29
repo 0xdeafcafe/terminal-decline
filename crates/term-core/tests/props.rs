@@ -206,6 +206,13 @@ fn cluster() -> impl Strategy<Value = Vec<u8>> {
         "\x1b[?2027l",
         "\x1b[?2027h",
         "\x1b[?2027$p",
+        // kitty placeholders (images are on in
+        // `invariants_hold_under_random_input`).
+        "\u{10EEEE}\u{305}\u{30D}",
+        "\u{10EEEE}\u{10EEEE}",
+        "\u{10EEEE}\u{30E}\u{301}\u{305}\u{1D244}\u{310}",
+        "\x1b[38;2;0;0;7m\u{10EEEE}\u{30E}\u{305}\u{310}\u{10EEEE}",
+        "\x1b[38;5;9;58;5;3m\u{10EEEE}\u{1D244}\u{10EEEE}",
     ])
     .prop_map(|s| s.as_bytes().to_vec())
 }
@@ -343,7 +350,8 @@ proptest! {
         limit in select(vec![0usize, 1, 2, 10, 1000]),
         steps in prop::collection::vec(step(), 1..40),
     ) {
-        let mut t = Term::new(cols, lines, limit, term_core::ImagePool::process());
+        // Images on, so placeholders are cells.
+        let mut t = Term::new(cols, lines, limit, term_core::ImagePool::new(32 << 20));
         for step in &steps {
             apply(&mut t, step);
             check(&t)?;

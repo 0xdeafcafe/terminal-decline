@@ -60,6 +60,9 @@ impl RowFlags {
     /// full-width background, §11.3): its cells already carry it to the
     /// screen's width.
     pub const FILL: RowFlags = RowFlags(1 << 2);
+    /// The row has kitty placeholder cells (cells §7): the renderer draws
+    /// their pieces of images, and they break shaping runs.
+    pub const PLACEHOLDERS: RowFlags = RowFlags(1 << 3);
 
     #[inline]
     pub const fn contains(self, other: RowFlags) -> bool {
@@ -384,6 +387,10 @@ impl Terminal {
                 flags.set(RowFlags::HISTORY, true);
                 flags.set(RowFlags::WRAPPED, self.scrollback.wrapped(i));
                 flags.set(RowFlags::FILL, self.scrollback.fill(i));
+                flags.set(
+                    RowFlags::PLACEHOLDERS,
+                    self.placeholders_written && self.scrollback.has_placeholders(i),
+                );
                 let kept = same_history && popped.is_none_or(|p| line < p) && have(key);
                 let copied = !kept
                     && self
@@ -407,6 +414,10 @@ impl Terminal {
                 let row = &self.screen[i - history];
                 let key = RowKey::Screen(row.seq);
                 flags.set(RowFlags::WRAPPED, row.wrapped);
+                flags.set(
+                    RowFlags::PLACEHOLDERS,
+                    self.placeholders_written && row.cells.iter().any(|c| c.is_placeholder()),
+                );
                 let copied = !(same_terminal && have(key));
                 if copied {
                     out.cells.extend_from_slice(&row.cells);

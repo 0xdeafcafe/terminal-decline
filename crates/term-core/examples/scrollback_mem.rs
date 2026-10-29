@@ -2,13 +2,14 @@
 //!
 //! The first figure counts everything history holds for 10k lines (the
 //! open block's spare capacity included); the sealed one only the sealed
-//! blocks, as §11.4 of the cells design counts. (A placeholder image row
-//! joins with kitty placeholders, PR 10.)
+//! blocks, as §11.4 of the cells design counts.
 
 use term_core::Term;
+use term_core::image::placeholder::{PLACEHOLDER, diacritic};
 
 fn measure(name: &str, line: impl Fn(usize) -> String) {
-    let mut t = Term::new(160, 50, 10_000, term_core::ImagePool::process());
+    // Images on, so kitty placeholders are cells.
+    let mut t = Term::new(160, 50, 10_000, term_core::ImagePool::new(32 << 20));
     for i in 0..20_000 {
         t.advance(line(i).as_bytes());
         t.advance(b"\r\n");
@@ -37,6 +38,19 @@ fn main() {
         format!(
             "{i:05} \u{2705} done \u{1f44d}\u{1f3fd} ship \u{1f1ec}\u{1f1e7} \u{2764}\u{fe0f} \u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467} ok"
         )
+    });
+    measure("placeholder image row", |i| {
+        // 40 cells of one image row, as yazi or `kitten icat --unicode-placeholder`
+        // send them: the row and column diacritics on the first cell only.
+        let mut s = String::from("\x1b[38;2;0;0;42m");
+        s.push(PLACEHOLDER);
+        s.push(diacritic((i % 297) as u16).unwrap());
+        s.push(diacritic(0).unwrap());
+        for _ in 1..40 {
+            s.push(PLACEHOLDER);
+        }
+        s.push_str("\x1b[0m");
+        s
     });
     measure("gradient 160 cells", |i| {
         let mut s = String::new();

@@ -1116,3 +1116,65 @@ fn blocks_list_own_images_once_and_give_them_back_when_freed() {
     sb.take_freed_images(&mut freed);
     assert_eq!(freed, vec![ImageKey::Own(1), ImageKey::Own(2)]);
 }
+
+/// §11.4's placeholder row: 40 cells of image row 3 in style slot 1.
+#[test]
+fn a_placeholder_row_is_stored_as_section_11_4_says() {
+    let styles = [
+        Style::DEFAULT,
+        Style {
+            fg: Color::rgb(0, 0, 42),
+            ..Style::DEFAULT
+        },
+    ];
+    let mut row = Row::new(80, Cell::BLANK);
+    for col in 0..40 {
+        row.cells[col] = template(&styles, 1).with_placeholder(3, col as u16);
+    }
+    let mut sb = Scrollback::new(100);
+    sb.push(&row, &styles);
+    let (meta, text) = stored(&sb);
+    assert_eq!(meta, [0x84, 0x01, 0x01, 0xC1, 0x02, 0x01, 0x00, 0x28, 0x03, 0x00]);
+    let mut want = vec![0; 40];
+    want.push(0x0A);
+    assert_eq!(text, want);
+    assert_eq!(meta.len() + text.len() + 2, 53);
+    sb.check_all().unwrap();
+    assert!(sb.has_placeholders(0));
+    let (back, back_styles) = sb.get(0).unwrap();
+    assert_eq!(back.cells[..], row.cells[..40]);
+    assert_eq!(back_styles[1], styles[1]);
+}
+
+/// Stretches break where the row or the run of columns does, and mixed
+/// with text, clusters and wide cells they come back exactly.
+#[test]
+fn placeholders_round_trip_among_other_cells() {
+    let styles = [
+        Style::DEFAULT,
+        Style {
+            fg: Color::rgb(0, 0, 42),
+            image_id_high: 7,
+            ..Style::DEFAULT
+        },
+    ];
+    let mut row = Row::new(30, Cell::BLANK);
+    let t = template(&styles, 1);
+    let mut col = put(&mut row, &styles, 0, 0, "ab");
+    for (r, c) in [(0, 0), (0, 1), (0, 5), (1, 6), (32, 0), (0, 511)] {
+        row.cells[col] = t.with_placeholder(r, c);
+        col += 1;
+    }
+    col = put(&mut row, &styles, col, 0, "漢");
+    col = put_cluster(&mut row, &styles, col, 0, "e\u{301}", false);
+    row.cells[col] = t.with_placeholder(296, 2);
+    for wrapped in [false, true] {
+        row.wrapped = wrapped;
+        let mut sb = Scrollback::new(100);
+        sb.push(&row, &styles);
+        sb.check_all().unwrap();
+        let (back, _) = sb.get(0).unwrap();
+        let n = if wrapped { 30 } else { col + 1 };
+        assert_eq!(&back.cells[..n], &row.cells[..n], "wrapped {wrapped}");
+    }
+}

@@ -234,11 +234,9 @@ fn same_colour_cells_merge_into_one_run() {
 #[test]
 fn run_breaks_at_selection() {
     let mut t = term(10, 1, &format!("{NO_CURSOR}\x1b[41mabcdef"));
-    let line = t.state.visible_point(0, 0).line;
-    t.state.set_selection(Some(Selection {
-        anchor: Point { line, col: 3 },
-        head: Point { line, col: 2 },
-    }));
+    let line = t.state.point_at(0, 0).line;
+    t.state
+        .set_selection(Some(Selection::new(Point { line, col: 3 }, Point { line, col: 2 })));
     let theme = Theme::default();
     let f = build(&t.state);
     assert_eq!(
@@ -546,6 +544,25 @@ fn preedit_suppresses_glyphs_under_it() {
     let bg: Vec<_> = f.rects.iter().filter(|r| r.color == theme.background).collect();
     assert_eq!(bg.len(), 2);
     assert_eq!((bg[0].x, bg[0].y), (CW, CH));
+}
+
+#[test]
+fn preedit_follows_the_cursor_in_view() {
+    let theme = Theme::default();
+    let mut t = term(10, 2, "1\r\n2\r\n3\r\nab");
+    let opts = || Opts {
+        preedit: Some("xy"),
+        ..Opts::default()
+    };
+    assert_eq!(
+        decoded(&build_with(&t.state, &theme, opts()), 10, 2, (0, 0)),
+        ["3         ", "abxy      "]
+    );
+    // Scrolled back by one row, the cursor's row is out of view: no preedit.
+    t.state.scroll_view(1);
+    let f = build_with(&t.state, &theme, opts());
+    assert_eq!(decoded(&f, 10, 2, (0, 0)), ["2         ", "3         "]);
+    assert!(f.rects.iter().all(|r| r.color != theme.background), "no preedit background");
 }
 
 #[test]

@@ -40,7 +40,7 @@ AppKit code (`app`, `view`) only turns events into the inputs of plain
 modules, each tested on its own: `session` (the program, its PTY, the
 reader and writer threads, the shared terminal and the dirty flag),
 `keys::translate` (a key press → bytes, input method or menu), `mouse`
-(reporting encodings, selection spans), `layout` (padding, grid size, cell
+(reporting encodings), `layout` (padding, grid size, cell
 under a point), `frame_policy::decide` (draw, skip, pause, hold or hide on
 each display tick), `config` and `pin`. Paths (config dir, apps dir, the
 executable) are passed in from `main`, and pins run other programs through
@@ -74,7 +74,11 @@ only with `DECLINE_TEST_DUMP=<file>` set) that writes JSON dumps.
   How cells are stored is term-core's own business
   (`docs/design/cells.md`).
 - Points in the buffer use an ever-increasing line number so a selection stays
-  attached to its text while output scrolls.
+  attached to its text while output scrolls. The app and the renderer do no
+  line arithmetic of their own: term-core gives them `point_at` (view row
+  and column to a Point), `cursor_in_view`, `view_top`/`set_view_top`, the
+  selection gestures (`select_word`, `select_line`, `select_all`,
+  `extend_selection`) and the word rule (`term_core::word`).
 - Parsing: `vte` is vendored (`vendor/vte`, through `[patch.crates-io]`)
   with `Perform::print_ascii`, which hands over each run of printable ASCII
   whole; the end of a run is found 8 bytes at a time. `Terminal::write_ascii`
@@ -190,7 +194,9 @@ tables and landing pads: 1.34 → 1.50 MB) and no measurable parse speed.
   Cmd+C copy (selection), Cmd+V paste (bracketed paste when on), Cmd+N new
   window, Cmd+W close, Cmd+Q quit, Cmd+K clear scrollback, Cmd+= / Cmd+-
   font size. Pins may disable or remap these in their config.
-- Mouse: drag to select (word on double-click, line on triple-click), wheel
+- Mouse: drag to select (word on double-click, line on triple-click; words
+  and lines are logical, so a word split by a soft wrap is selected whole,
+  and dragging after a double- or triple-click grows by words or lines), wheel
   scrolls scrollback, or when the program asks for mouse reporting (1000/1002/
   1003 + SGR 1006) events go to the program; Shift overrides to select.
 

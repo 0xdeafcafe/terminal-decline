@@ -10,8 +10,9 @@ pub mod rows;
 pub mod scrollback;
 pub mod style;
 pub mod term;
+pub mod word;
 
 pub use cell::{Cell, Color, ColorKind, Row, flags};
 pub use rows::{CellRef, Content, RowRef, Width};
 pub use style::{Attrs, LinkId, Style, Underline};
-pub use term::{Cursor, CursorShape, Modes, MouseMode, Point, Selection, Term, Terminal};
+pub use term::{Cursor, CursorShape, LinkValue, Modes, MouseMode, Point, Selection, SelectionKind, Term, Terminal, ViewTop};

@@ -22,7 +22,7 @@ use objc2_foundation::{
     NSRunLoopCommonModes, NSSize, NSString,
 };
 use objc2_quartz_core::{CADisplayLink, CALayer, CAMetalLayer};
-use term_core::{Point, Selection, Term};
+use term_core::{Selection, Term};
 use term_font::Fonts;
 use term_pty::{Command, Size};
 use term_render::{FrameInput, Renderer, Theme};
@@ -227,13 +227,7 @@ define_class!(
 
         #[unsafe(method(selectAll:))]
         fn select_all(&self, _sender: Option<&AnyObject>) {
-            self.with_state(|st| {
-                let mut t = st.session.lock_term();
-                let s = &mut t.state;
-                let first = s.visible_point(0, 0).line - (s.scrollback_len() - s.display_offset()) as u64;
-                let last = s.visible_point(s.lines() - 1, s.cols() - 1);
-                s.set_selection(Some(Selection { anchor: Point { line: first, col: 0 }, head: last }));
-            });
+            self.with_state(|st| st.session.lock_term().state.select_all());
             self.request_redraw();
         }
 
@@ -896,51 +890,17 @@ impl TerminalView {
             st.selecting = true;
             let mut t = st.session.lock_term();
             let s = &mut t.state;
-            let point = s.visible_point(line, col);
-            let selection = match clicks {
-                1 => None,
-                2 => {
-                    let row = s.visible_row(line);
-                    let chars: Vec<char> = (0..s.cols()).map(|c| row.cell(c).ch()).collect();
-                    match mouse::word_at(&chars, col) {
-                        None => Some(Selection {
-                            anchor: point,
-                            head: point,
-                        }),
-                        Some((a, b)) => Some(Selection {
-                            anchor: Point { col: a, ..point },
-                            head: Point { col: b, ..point },
-                        }),
-                    }
+            let point = s.point_at(line, col);
+            match clicks {
+                1 => {
+                    // Remember the anchor in an empty selection; dragging extends it.
+                    s.set_selection(Some(Selection::new(point, point)));
+                    st.scroll_accum = 0.0;
                 }
-                _ => {
-                    let (a, b) = mouse::line_span(s.cols());
-                    Some(Selection {
-                        anchor: Point { col: a, ..point },
-                        head: Point { col: b, ..point },
-                    })
-                }
-            };
-            s.set_selection(selection);
-            if clicks == 1 {
-                // Remember the anchor in an empty selection; dragging extends it.
-                s.set_selection(Some(Selection {
-                    anchor: point,
-                    head: point,
-                }));
-                st.scroll_accum = 0.0;
+                2 => s.select_word(point),
+                _ => s.select_line(point),
             }
         });
-        if clicks == 1 {
-            // A plain click clears any visible selection until a drag starts.
-            self.with_state(|st| {
-                let mut t = st.session.lock_term();
-                if let Some(mut sel) = t.state.selection() {
-                    sel.head = sel.anchor;
-                    t.state.set_selection(Some(sel));
-                }
-            });
-        }
         self.request_redraw();
     }
 
@@ -961,15 +921,13 @@ impl TerminalView {
                 return false;
             }
             let mut t = st.session.lock_term();
-            let head = t.state.visible_point(line, col);
-            match t.state.selection() {
-                Some(mut sel) if sel.head != head => {
-                    sel.head = head;
-                    t.state.set_selection(Some(sel));
-                    true
-                }
-                _ => false,
+            let before = t.state.selection();
+            if before.is_none() {
+                return false;
             }
+            let to = t.state.point_at(line, col);
+            t.state.extend_selection(to);
+            t.state.selection() != before
         });
         if changed == Some(true) {
             self.request_redraw();

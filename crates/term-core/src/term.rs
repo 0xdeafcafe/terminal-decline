@@ -8,7 +8,7 @@ use unicode_width::UnicodeWidthChar;
 use vte::{Params, Perform};
 
 use crate::cell::{Cell, Color, Row, flags};
-use crate::rows::{RowRef, style_of};
+use crate::rows::{Content, RowRef, style_of};
 use crate::scrollback::Scrollback;
 use crate::style::Style;
 
@@ -117,13 +117,59 @@ pub struct Point {
     pub col: usize,
 }
 
-#[derive(Clone, Copy, Debug)]
+/// What a selection grows by when it is extended.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum SelectionKind {
+    /// Cell by cell (a click and drag).
+    #[default]
+    Normal,
+    /// Whole words (a double-click and drag).
+    Word,
+    /// Whole logical lines (a triple-click and drag).
+    Line,
+}
+
+/// A selection from `anchor` (where it started) to `head` (where it
+/// ends now), both included, in text order whichever comes first.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Selection {
     pub anchor: Point,
     pub head: Point,
+    pub kind: SelectionKind,
+}
+
+/// Where the view is: following output, or showing history from a fixed
+/// place.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ViewTop {
+    /// Following output: the view shows the screen.
+    Bottom,
+    /// Scrolled back. `point` is the first cell shown (column 0 of its row);
+    /// `offset` is that cell's offset in its logical line, counted in cells
+    /// at the current width, so the place can be found again after the
+    /// width changes.
+    At { point: Point, offset: usize },
+}
+
+/// An OSC 8 hyperlink, by value: links are compared by URI and id, never
+/// by table id, since screen and history number them differently.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct LinkValue {
+    pub uri: String,
+    /// The `id=` parameter, if the program gave one.
+    pub id: Option<String>,
 }
 
 impl Selection {
+    /// A plain, cell-by-cell selection.
+    pub fn new(anchor: Point, head: Point) -> Selection {
+        Selection {
+            anchor,
+            head,
+            kind: SelectionKind::Normal,
+        }
+    }
+
     pub fn ordered(&self) -> (Point, Point) {
         if self.anchor <= self.head {
             (self.anchor, self.head)
@@ -400,11 +446,186 @@ impl Terminal {
         self.scrollback.memory_bytes()
     }
 
-    /// The buffer position of visible line `line`.
-    pub fn visible_point(&self, line: usize, col: usize) -> Point {
+    /// The stable position of what is shown at view row `view_line` and
+    /// column `col`.
+    pub fn point_at(&self, view_line: usize, col: usize) -> Point {
         Point {
-            line: self.top_line - self.display_offset as u64 + line as u64,
+            line: self.top_line - self.display_offset as u64 + view_line as u64,
             col,
+        }
+    }
+
+    /// Where the cursor is in the view (row, column), if it is in view.
+    pub fn cursor_in_view(&self) -> Option<(usize, usize)> {
+        let line = self.cursor.row + self.display_offset;
+        (line < self.lines).then_some((line, self.cursor.col))
+    }
+
+    /// Where the view is.
+    pub fn view_top(&self) -> ViewTop {
+        if self.display_offset == 0 {
+            return ViewTop::Bottom;
+        }
+        let line = self.top_line - self.display_offset as u64;
+        let start = self.logical_line(line).0;
+        ViewTop::At {
+            point: Point { line, col: 0 },
+            offset: (line - start) as usize * self.cols,
+        }
+    }
+
+    /// Move the view: back to following output, or to show `point`'s row
+    /// at the top (as near as the history allows).
+    pub fn set_view_top(&mut self, top: ViewTop) {
+        match top {
+            ViewTop::Bottom => self.scroll_view_to_bottom(),
+            ViewTop::At { point, .. } => {
+                if self.alt_active {
+                    return;
+                }
+                let offset = self.top_line.saturating_sub(point.line).min(self.scrollback.len() as u64) as usize;
+                if offset != self.display_offset {
+                    self.display_offset = offset;
+                    self.touch();
+                }
+            }
+        }
+    }
+
+    /// The hyperlink at `p`, by value. There are no links yet (OSC 8 comes
+    /// with the link table), so this is always `None`.
+    pub fn link_at(&self, p: Point) -> Option<LinkValue> {
+        let _ = p;
+        None
+    }
+
+    /// Select the word at `p`, on its logical line: a word that a soft wrap
+    /// splits across rows is selected whole. Off a word, just that cell.
+    pub fn select_word(&mut self, p: Point) {
+        let (anchor, head) = self.word_span(p);
+        self.set_selection(Some(Selection {
+            anchor,
+            head,
+            kind: SelectionKind::Word,
+        }));
+    }
+
+    /// Select the whole logical line at `p`, every row it wraps onto.
+    pub fn select_line(&mut self, p: Point) {
+        let (anchor, head) = self.line_span(p);
+        self.set_selection(Some(Selection {
+            anchor,
+            head,
+            kind: SelectionKind::Line,
+        }));
+    }
+
+    /// Select everything stored: all of history and the screen.
+    pub fn select_all(&mut self) {
+        let first = if self.alt_active {
+            self.top_line
+        } else {
+            self.top_line - self.scrollback.len() as u64
+        };
+        let last = Point {
+            line: self.top_line + self.lines as u64 - 1,
+            col: self.cols - 1,
+        };
+        self.set_selection(Some(Selection::new(Point { line: first, col: 0 }, last)));
+    }
+
+    /// Move the selection's head to `to`, keeping its anchor. Word and line
+    /// selections grow by whole words or logical lines, and keep the word
+    /// or line they started on. With no selection, starts one at `to`.
+    pub fn extend_selection(&mut self, to: Point) {
+        let Some(sel) = self.selection else {
+            self.set_selection(Some(Selection::new(to, to)));
+            return;
+        };
+        let span = |t: &Self, p: Point| match sel.kind {
+            SelectionKind::Normal => (p, p),
+            SelectionKind::Word => t.word_span(p),
+            SelectionKind::Line => t.line_span(p),
+        };
+        let (start, end) = span(self, sel.anchor);
+        let (to_start, to_end) = span(self, to);
+        let (anchor, head) = match sel.kind {
+            SelectionKind::Normal => (sel.anchor, to),
+            _ if to < start => (end, to_start),
+            _ => (start, to_end),
+        };
+        self.set_selection(Some(Selection { anchor, head, ..sel }));
+    }
+
+    /// The first and last line numbers of the logical line `line` is part
+    /// of: the rows joined to it by soft wraps, as far as they are stored.
+    fn logical_line(&self, line: u64) -> (u64, u64) {
+        let wrapped = |l: u64| self.row_at(l).is_some_and(|r| r.wrapped);
+        let mut start = line;
+        while start > 0 && wrapped(start - 1) {
+            start -= 1;
+        }
+        let mut end = line;
+        while wrapped(end) && self.row_at(end + 1).is_some() {
+            end += 1;
+        }
+        (start, end)
+    }
+
+    fn line_span(&self, p: Point) -> (Point, Point) {
+        let (start, end) = self.logical_line(p.line);
+        (
+            Point { line: start, col: 0 },
+            Point {
+                line: end,
+                col: self.cols - 1,
+            },
+        )
+    }
+
+    /// The first and last cell of the word at `p` on its logical line, or
+    /// `(p, p)` when `p` isn't on a word.
+    fn word_span(&self, p: Point) -> (Point, Point) {
+        let (start, end) = self.logical_line(p.line);
+        // One entry per character: the character, and its first and last
+        // cell (a wide character's last cell is its spacer).
+        let mut text = Vec::new();
+        let mut cells: Vec<(Point, Point)> = Vec::new();
+        let mut at = None;
+        for line in start..=end {
+            let Some(row) = self.row_at(line) else { continue };
+            let row = RowRef::new(row);
+            // A wrapped row's trailing empty cells (where a wide character
+            // didn't fit) don't break the line's text.
+            let len = if row.wrapped() {
+                row.cells()
+                    .rposition(|c| c.content() != Content::Empty || c.is_spacer())
+                    .map_or(0, |i| i + 1)
+            } else {
+                row.len().max(self.cols)
+            };
+            for col in 0..len {
+                let cell = row.cell(col);
+                let here = Point { line, col };
+                if cell.is_spacer() {
+                    if let Some(last) = cells.last_mut() {
+                        last.1 = here;
+                    }
+                    if p == here {
+                        at = cells.len().checked_sub(1);
+                    }
+                    continue;
+                }
+                if p == here {
+                    at = Some(cells.len());
+                }
+                text.push(cell.ch());
+                cells.push((here, here));
+            }
+        }
+        match at.and_then(|i| crate::word::word_at(&text, i)) {
+            Some((a, b)) => (cells[a].0, cells[b].1),
+            None => (p, p),
         }
     }
 
@@ -432,7 +653,18 @@ impl Terminal {
         for line in a.line..=b.line {
             let Some(row) = self.row_at(line) else { continue };
             let start = if line == a.line { a.col } else { 0 };
-            let end = if line == b.line { b.col + 1 } else { self.cols };
+            let wrapped = row.wrapped && line != b.line;
+            let mut end = if line == b.line { b.col + 1 } else { self.cols };
+            if wrapped {
+                // Empty cells at the end of a wrapped row (where a wide
+                // character didn't fit) aren't part of the line's text.
+                end = end.min(
+                    row.cells
+                        .iter()
+                        .rposition(|c| c.codepoint() != 0 || c.has(flags::WIDE_SPACER))
+                        .map_or(0, |i| i + 1),
+                );
+            }
             let mut text = String::new();
             for col in start..end.min(row.cells.len().max(start)) {
                 let cell = row.get(col);
@@ -440,7 +672,6 @@ impl Terminal {
                     text.push(cell.ch());
                 }
             }
-            let wrapped = row.wrapped && line != b.line;
             if !wrapped {
                 text.truncate(text.trim_end_matches(' ').len());
             }

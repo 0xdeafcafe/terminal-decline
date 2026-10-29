@@ -133,9 +133,9 @@ fn run_stream(seed: u64, sizes: &[(usize, usize, usize)], bytes_per_size: usize)
                     t.state.scroll_view(-(rng.below(50) as isize));
                 }
                 2 => {
-                    let a = t.state.visible_point(rng.below(lines.max(1)), rng.below(cols + 2));
-                    let b = t.state.visible_point(rng.below(lines.max(1)), rng.below(cols + 2));
-                    t.state.set_selection(Some(term_core::Selection { anchor: a, head: b }));
+                    let a = t.state.point_at(rng.below(lines.max(1)), rng.below(cols + 2));
+                    let b = t.state.point_at(rng.below(lines.max(1)), rng.below(cols + 2));
+                    t.state.set_selection(Some(term_core::Selection::new(a, b)));
                     let _ = t.state.selection_text();
                     t.state.set_selection(None);
                 }

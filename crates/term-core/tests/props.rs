@@ -216,6 +216,12 @@ enum Step {
     /// Visible (line, col) of anchor and head, reduced to the screen size.
     Select((usize, usize), (usize, usize)),
     ClearSelection,
+    /// A double- or triple-click (1 or 2) at a visible (line, col), or a
+    /// drag (0) to it.
+    Gesture(u8, (usize, usize)),
+    SelectAll,
+    /// Leave the view where it is, through `view_top` and `set_view_top`.
+    KeepView,
 }
 
 fn step() -> impl Strategy<Value = Step> {
@@ -224,8 +230,11 @@ fn step() -> impl Strategy<Value = Step> {
         12 => chunk().prop_map(Step::Output),
         1 => (1usize..=200, 1usize..=60).prop_map(|(c, l)| Step::Resize(c, l)),
         2 => (-30isize..=30).prop_map(Step::ScrollView),
-        2 => (point.clone(), point).prop_map(|(a, b)| Step::Select(a, b)),
+        2 => (point.clone(), point.clone()).prop_map(|(a, b)| Step::Select(a, b)),
         1 => Just(Step::ClearSelection),
+        2 => (0u8..3, point).prop_map(|(k, p)| Step::Gesture(k, p)),
+        1 => Just(Step::SelectAll),
+        1 => Just(Step::KeepView),
     ]
 }
 
@@ -236,11 +245,29 @@ fn apply(t: &mut Term, step: &Step) {
         Step::ScrollView(d) => t.state.scroll_view(*d),
         Step::Select(a, b) => {
             let (lines, cols) = (t.state.lines(), t.state.cols());
-            let anchor = t.state.visible_point(a.0 % lines, a.1 % cols);
-            let head = t.state.visible_point(b.0 % lines, b.1 % cols);
-            t.state.set_selection(Some(Selection { anchor, head }));
+            let anchor = t.state.point_at(a.0 % lines, a.1 % cols);
+            let head = t.state.point_at(b.0 % lines, b.1 % cols);
+            t.state.set_selection(Some(Selection::new(anchor, head)));
         }
         Step::ClearSelection => t.state.set_selection(None),
+        Step::Gesture(kind, (l, c)) => {
+            let p = t.state.point_at(l % t.state.lines(), c % t.state.cols());
+            match kind {
+                0 => t.state.extend_selection(p),
+                1 => t.state.select_word(p),
+                _ => t.state.select_line(p),
+            }
+            let sel = t.state.selection().expect("a gesture leaves a selection");
+            if *kind > 0 {
+                assert!(sel.contains(p), "{sel:?} doesn't contain the click at {p:?}");
+            }
+        }
+        Step::SelectAll => t.state.select_all(),
+        Step::KeepView => {
+            let (offset, top) = (t.state.display_offset(), t.state.view_top());
+            t.state.set_view_top(top);
+            assert_eq!(t.state.display_offset(), offset, "{top:?}");
+        }
     }
 }
 
@@ -249,7 +276,7 @@ fn check(t: &Term) -> Result<(), TestCaseError> {
     t.state.check_invariants().map_err(TestCaseError::fail)?;
     for line in 0..t.state.lines() {
         let _ = t.state.visible_row(line);
-        let _ = t.state.visible_point(line, 0);
+        let _ = t.state.point_at(line, 0);
     }
     let _ = t.state.selection_text();
     let dump = t.state.dump();

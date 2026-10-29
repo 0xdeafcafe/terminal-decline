@@ -114,9 +114,9 @@ fn line_drawing_charset() {
 fn selection_text_joins_wrapped_lines() {
     let mut t = Term::new(4, 3, 10);
     t.advance(b"abcdef\r\nxy");
-    let a = t.state.visible_point(0, 0);
-    let b = t.state.visible_point(2, 3);
-    t.state.set_selection(Some(term_core::Selection { anchor: a, head: b }));
+    let a = t.state.point_at(0, 0);
+    let b = t.state.point_at(2, 3);
+    t.state.set_selection(Some(term_core::Selection::new(a, b)));
     assert_eq!(t.state.selection_text().unwrap(), "abcdef\nxy");
 }
 
@@ -294,9 +294,9 @@ fn utf8_split_across_chunks_keeps_the_text_after_it() {
 }
 
 fn select(t: &mut Term, from: (usize, usize), to: (usize, usize)) {
-    let anchor = t.state.visible_point(from.0, from.1);
-    let head = t.state.visible_point(to.0, to.1);
-    t.state.set_selection(Some(term_core::Selection { anchor, head }));
+    let anchor = t.state.point_at(from.0, from.1);
+    let head = t.state.point_at(to.0, to.1);
+    t.state.set_selection(Some(term_core::Selection::new(anchor, head)));
 }
 
 #[test]

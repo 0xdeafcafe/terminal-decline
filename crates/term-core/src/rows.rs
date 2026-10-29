@@ -179,7 +179,7 @@ impl<'a> RowRef<'a> {
     }
 
     /// The stored cells, left to right.
-    pub fn cells(&self) -> impl ExactSizeIterator<Item = CellRef<'_>> + '_ {
+    pub fn cells(&self) -> impl DoubleEndedIterator<Item = CellRef<'_>> + ExactSizeIterator + '_ {
         self.row.cells.iter().map(|&c| CellRef::new(c))
     }
 

@@ -1030,9 +1030,9 @@ fn resize_clamps_cursor_and_clears_pending_wrap() {
 fn resize_clears_selection() {
     let mut t = new(10, 2);
     t.advance(b"hello");
-    let a = t.state.visible_point(0, 0);
-    let b = t.state.visible_point(0, 3);
-    t.state.set_selection(Some(Selection { anchor: a, head: b }));
+    let a = t.state.point_at(0, 0);
+    let b = t.state.point_at(0, 3);
+    t.state.set_selection(Some(Selection::new(a, b)));
     t.state.resize(5, 2);
     assert!(t.state.selection().is_none());
 }
@@ -1135,9 +1135,9 @@ fn decstr_is_a_soft_reset() {
 fn selection_text_single_line() {
     let mut t = new(10, 1);
     t.advance(b"abcdef");
-    let a = t.state.visible_point(0, 1);
-    let b = t.state.visible_point(0, 3);
-    t.state.set_selection(Some(Selection { anchor: a, head: b }));
+    let a = t.state.point_at(0, 1);
+    let b = t.state.point_at(0, 3);
+    t.state.set_selection(Some(Selection::new(a, b)));
     assert_eq!(t.state.selection_text().unwrap(), "bcd");
 }
 
@@ -1145,9 +1145,9 @@ fn selection_text_single_line() {
 fn selection_text_multiline_uses_newlines() {
     let mut t = new(10, 3);
     t.advance(b"aaa\r\nbbb\r\nccc");
-    let a = t.state.visible_point(0, 1);
-    let b = t.state.visible_point(1, 1);
-    t.state.set_selection(Some(Selection { anchor: a, head: b }));
+    let a = t.state.point_at(0, 1);
+    let b = t.state.point_at(1, 1);
+    t.state.set_selection(Some(Selection::new(a, b)));
     assert_eq!(t.state.selection_text().unwrap(), "aa\nbb");
 }
 
@@ -1155,9 +1155,9 @@ fn selection_text_multiline_uses_newlines() {
 fn selection_text_trims_trailing_blanks() {
     let mut t = new(10, 2);
     t.advance(b"ab\r\ncd");
-    let a = t.state.visible_point(0, 0);
-    let b = t.state.visible_point(0, 9);
-    t.state.set_selection(Some(Selection { anchor: a, head: b }));
+    let a = t.state.point_at(0, 0);
+    let b = t.state.point_at(0, 9);
+    t.state.set_selection(Some(Selection::new(a, b)));
     assert_eq!(t.state.selection_text().unwrap(), "ab");
 }
 
@@ -1165,9 +1165,9 @@ fn selection_text_trims_trailing_blanks() {
 fn selection_text_joins_wrapped_without_newline() {
     let mut t = new(5, 3);
     t.advance(b"abcdefgh");
-    let a = t.state.visible_point(0, 2);
-    let b = t.state.visible_point(1, 1);
-    t.state.set_selection(Some(Selection { anchor: a, head: b }));
+    let a = t.state.point_at(0, 2);
+    let b = t.state.point_at(1, 1);
+    t.state.set_selection(Some(Selection::new(a, b)));
     assert_eq!(t.state.selection_text().unwrap(), "cdefg");
 }
 
@@ -1175,9 +1175,9 @@ fn selection_text_joins_wrapped_without_newline() {
 fn selection_text_reversed_is_ordered() {
     let mut t = new(10, 2);
     t.advance(b"abcdef");
-    let a = t.state.visible_point(0, 1);
-    let b = t.state.visible_point(0, 3);
-    t.state.set_selection(Some(Selection { anchor: b, head: a }));
+    let a = t.state.point_at(0, 1);
+    let b = t.state.point_at(0, 3);
+    t.state.set_selection(Some(Selection::new(b, a)));
     assert_eq!(t.state.selection_text().unwrap(), "bcd");
 }
 
@@ -1185,9 +1185,9 @@ fn selection_text_reversed_is_ordered() {
 fn selection_text_wide_chars_once() {
     let mut t = new(5, 1);
     t.advance("a漢b".as_bytes());
-    let a = t.state.visible_point(0, 0);
-    let b = t.state.visible_point(0, 3);
-    t.state.set_selection(Some(Selection { anchor: a, head: b }));
+    let a = t.state.point_at(0, 0);
+    let b = t.state.point_at(0, 3);
+    t.state.set_selection(Some(Selection::new(a, b)));
     assert_eq!(t.state.selection_text().unwrap(), "a漢b");
 }
 
@@ -1197,10 +1197,10 @@ fn selection_text_spans_scrollback() {
     t.advance(b"aa\r\nbb\r\ncc");
     assert_eq!(t.state.scrollback_len(), 1);
     t.state.scroll_view(1);
-    let a = t.state.visible_point(0, 1); // scrollback "aa", col 1
+    let a = t.state.point_at(0, 1); // scrollback "aa", col 1
     t.state.scroll_view_to_bottom();
-    let b = t.state.visible_point(1, 1); // screen "cc", col 1
-    t.state.set_selection(Some(Selection { anchor: a, head: b }));
+    let b = t.state.point_at(1, 1); // screen "cc", col 1
+    t.state.set_selection(Some(Selection::new(a, b)));
     assert_eq!(t.state.selection_text().unwrap(), "a\nbb\ncc");
 }
 

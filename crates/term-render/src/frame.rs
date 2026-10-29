@@ -191,17 +191,18 @@ impl Frame {
         self.clear = with_alpha(default_bg, theme.background_opacity);
 
         // Where the cursor is in the view, if it is visible at all.
-        let cursor_line = term.cursor().row() + term.display_offset();
-        let show_cursor = term.modes().cursor_visible && cursor_line < term.lines() && (cursor_on || !focused || !term.cursor_blink());
-        let cursor = show_cursor.then_some((cursor_line, term.cursor().col()));
+        let in_view = term.cursor_in_view();
+        let show_cursor = term.modes().cursor_visible && (cursor_on || !focused || !term.cursor_blink());
+        let cursor = in_view.filter(|_| show_cursor);
         let block_cursor = focused && term.cursor_shape() == CursorShape::Block;
 
         let selection = term.selection().map(|s| s.ordered());
+        // Input-method text is drawn at the cursor, when it is in view.
+        let preedit = preedit.filter(|t| !t.is_empty()).zip(in_view);
         // Cells covered by input-method text don't draw their own glyphs.
-        let preedit_cells = preedit.filter(|t| !t.is_empty()).map(|t| {
-            let line = term.cursor().row() + term.display_offset();
+        let preedit_cells = preedit.map(|(t, (line, col))| {
             let width: usize = t.chars().map(char_cells).sum();
-            (line, term.cursor().col()..term.cursor().col() + width)
+            (line, col..col + width)
         });
 
         for line in 0..term.lines() {
@@ -209,7 +210,7 @@ impl Frame {
             let y = py + line as i32 * ch;
             // Selected columns on this line, as a half-open range.
             let sel = selection.and_then(|(a, b)| {
-                let p = term.visible_point(line, 0).line;
+                let p = term.point_at(line, 0).line;
                 if p < a.line || p > b.line {
                     return None;
                 }
@@ -329,18 +330,18 @@ impl Frame {
             };
             self.decorations.extend_from_slice(rects);
         }
-        if let Some(text) = preedit.filter(|t| !t.is_empty()) {
-            self.draw_preedit(text, input, glyphs);
+        if let Some((text, at)) = preedit {
+            self.draw_preedit(text, at, input, glyphs);
         }
         self.rects.extend_from_slice(&self.decorations);
     }
 
-    fn draw_preedit(&mut self, text: &str, input: &FrameInput, glyphs: &mut impl GlyphSource) {
+    /// Input-method text at view row and column `at`.
+    fn draw_preedit(&mut self, text: &str, at: (usize, usize), input: &FrameInput, glyphs: &mut impl GlyphSource) {
         let m = input.metrics;
         let (cw, ch) = (m.cell_width as i32, m.cell_height as i32);
-        let line = input.term.cursor().row() + input.term.display_offset();
+        let (line, mut col) = at;
         let y = input.padding.1 as i32 + line as i32 * ch;
-        let mut col = input.term.cursor().col();
         for c in text.chars() {
             let width = char_cells(c);
             if width == 0 {

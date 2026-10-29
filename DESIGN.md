@@ -33,7 +33,7 @@ any command as its own Dock app.
 | `term-core`   | escape-code handling (via vendored `vte`), screen grid, scrollback, selection |
 | `term-pty`    | spawns the shell on a pseudo-terminal, reader thread, resize          |
 | `term-font`   | Core Text: font loading, cell metrics, glyph rasterising              |
-| `term-render` | Metal: glyph texture, per-cell instance buffer, one instanced draw    |
+| `term-render` | Metal: glyph textures shared by every window, panes drawn into one layer |
 | `term-app`    | AppKit window/view, keyboard + IME, mouse, clipboard, config, pins    |
 | `term-prefs`  | the preferences: settings schema, safe `config.toml` edits, the TUI (no platform code) |
 | `term-icon`   | generated pin icons by the Slope rule (`slope-pins-2`): Core Text outline of the initial, CoreGraphics drawing after `pin-template.svg`, ImageIO `.icns` |
@@ -172,10 +172,27 @@ Oct 2026, 1.90 → 2.16 MB) and no measurable parse speed.
   vertex buffer is needed. Two passes in one encoder: backgrounds, then glyphs
   (glyphs can overflow their cell, e.g. italics and wide icons).
 - Glyph texture: an `R8` texture for text (coverage, blended in sRGB space
-  like native Mac text) and a `BGRA8` texture for colour emoji. Shelf-packed;
-  only the texture that fills up grows (caps: 4096² and 2048², 16 MB each);
-  at the cap it is emptied and refilled with what's on screen. Glyphs are
-  rasterised once by Core Text; ASCII is pre-rasterised at start.
+  like native Mac text) and a `BGRA8` texture for colour emoji, **one pair
+  per process**, shared by every window and keyed by (fonts, glyph key)
+  (splits design §3.3). Shelf-packed; only the texture that fills up grows
+  (caps: 4096² and 2048², 16 MB each), and growing copies the old texture
+  into the corner of the new one on the GPU, so glyphs already placed stay
+  where they are and nothing is rebuilt. At the cap it is emptied and
+  refilled with what's on screen, and every pane built before is built
+  again. Glyphs are rasterised once by Core Text; ASCII is pre-rasterised
+  for each new font setting. When fonts no window uses are dropped (a
+  window closed, the font size changed), both textures are emptied back to
+  their starting sizes, so they never stay bigger than the open windows
+  need. The textures go purgeable only when every window is hidden.
+- One process-wide Metal device, queue and pair of pipelines; one `Fonts`
+  per font setting and scale, shared by the windows using it. Each window
+  has its own instance buffers and waits only on its own frames; uploads
+  into the shared textures wait on every window's frames.
+- Panes: each terminal's instances (its `PaneRender`, with the row cache)
+  are placed relative to the pane's corner. A frame copies every pane's
+  instances back to back into the window's buffers and draws each pane
+  with `baseInstance`, its origin in the uniforms and a scissor (clamped to
+  the drawable) around its rectangle, then the dividers.
 - Box drawing (U+2500–257F), block elements (U+2580–259F), braille
   (U+2800–28FF), Powerline (U+E0A0–E0A3, U+E0B0–E0BF) and the legacy
   computing sextants, wedges and eighth blocks (U+1FB00–1FB8B) are drawn
@@ -954,3 +971,27 @@ coloured 114 → 24 µs; scrolled a line 118 → 44 µs. When every row changed
 it costs more, 80×24 6.4 → 8.3 µs and 300×100 plain 94.6 → 127.2 µs,
 coloured 108.2 → 143.6 µs, a style per cell 142.1 → 179.3 µs: the snapshot
 copy and copying the rows' instances into the frame, which R.2 removes.
+
+### Panes in one layer, shared glyph textures (splits design B2.1)
+
+Each window's frame draws any number of panes into its one layer, and
+every window shares one device, one pair of glyph textures and one `Fonts`
+per font setting (splits.md §3, "Landed (B2.1)"). The app still draws one
+full-window pane. Interleaved with main, best of 3, load 5–8, Menlo 28 px
+with real glyphs (`cargo bench -p term-render --bench renderer`):
+
+| case | main | B2.1 |
+|---|---|---|
+| 1 pane 160×48, every row changed (build) | 55.8 µs | 55.9 µs |
+| 1 pane 160×48, nothing changed (build) | 4.41 µs | 4.20 µs |
+| 1 pane 160×48, encode | 15.0 µs | 14.7 µs |
+| 4 panes 80×24, every row changed (build) | | 57.6 µs |
+| 4 panes 80×24, nothing changed (build) | | 5.81 µs |
+| 4 panes 80×24 and 2 dividers, encode | | 16.8 µs |
+
+The same cells in four panes cost 3% more to build when every row
+changed, 1.6 µs more when nothing did (four snapshots and row caches),
+and 2 µs more to encode (eight draws and four scissors). With the bench
+glyph source (`--bench frame`): 160×48 coloured 36.4 µs against 4 × 80×24
+37.2 µs, and 4.8 against 6.3 µs unchanged. The `frame` cases of one pane
+are unchanged (the code is the same).

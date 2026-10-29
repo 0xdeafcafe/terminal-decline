@@ -1,6 +1,6 @@
 //! The app bundle `scripts/bundle.sh` makes: its Info.plist is valid and
 //! declares what the app answers (folders opened with it, the Services
-//! menu items, named with [`terminal_decline::PRODUCT_NAME`]).
+//! menu items, named with [`terminal_decline_app::PRODUCT_NAME`]).
 #![cfg(target_os = "macos")]
 
 use std::path::{Path, PathBuf};
@@ -51,7 +51,7 @@ fn info_plist_declares_folders_and_services() {
         assert_eq!(service("NSMessage"), message);
         assert_eq!(
             service("NSMenuItem.default"),
-            format!("New {} {title} at Folder", terminal_decline::PRODUCT_NAME)
+            format!("New {} {title} at Folder", terminal_decline_app::PRODUCT_NAME)
         );
         assert_eq!(service("NSPortName"), bundle_name);
         assert_eq!(service("NSSendFileTypes.0"), "public.folder");

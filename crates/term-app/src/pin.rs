@@ -24,7 +24,7 @@ pub const OLD_ID_PREFIX: &str = "red.forbes.decline.pin.";
 
 /// The executable's own names: `terminal-decline`, and the `decline` alias
 /// the cask links (and builds from before the rename). Never pin ids.
-const OWN_NAMES: [&str; 2] = ["terminal-decline", "decline"];
+pub(crate) const OWN_NAMES: [&str; 2] = ["terminal-decline", "decline"];
 
 const LSREGISTER: &str = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister";
 
@@ -275,6 +275,7 @@ pub struct Created {
 
 pub fn create(o: Options, paths: &Paths, run: &mut Runner) -> Result<Created, String> {
     check_name(&o.name)?;
+    clone_source(&paths.exe)?;
     let slug = slug(&o.name);
     let app = o.dir.join(format!("{}.app", o.name));
     let config_path = paths.pin_config(&slug);
@@ -323,7 +324,7 @@ pub fn create(o: Options, paths: &Paths, run: &mut Runner) -> Result<Created, St
 /// and renamed into place: overwriting a signed binary that may be running
 /// gets it killed on Apple Silicon.
 fn install_binary(exe: &Path, dest: &Path, run: &mut Runner) -> Result<(), String> {
-    let exe = exe.canonicalize().map_err(|e| format!("{}: {e}", exe.display()))?;
+    let exe = clone_source(exe)?;
     let tmp = dest.with_extension("new");
     let _ = std::fs::remove_file(&tmp);
     let cloned = succeeds(run, Command::new("/bin/cp").arg("-c").arg(&exe).arg(&tmp)) && tmp.is_file();
@@ -333,6 +334,28 @@ fn install_binary(exe: &Path, dest: &Path, run: &mut Runner) -> Result<(), Strin
     }
     std::fs::rename(&tmp, dest).map_err(|e| format!("installing binary: {e}"))?;
     Ok(())
+}
+
+/// The binary a clone pin copies: `exe`, unless it is the launcher of an
+/// app bundle whose code is in `Contents/Frameworks/libterminal_decline.dylib`
+/// (pins.md §2.1). A copy of the launcher would look for the library
+/// inside the pin; stub pins (pins.md §3), made from the app's
+/// `Contents/Helpers/terminal-decline-pin`, replace clones there.
+fn clone_source(exe: &Path) -> Result<PathBuf, String> {
+    let exe = exe.canonicalize().map_err(|e| format!("{}: {e}", exe.display()))?;
+    let launcher = exe
+        .parent()
+        .and_then(Path::parent)
+        .is_some_and(|contents| contents.join("Frameworks/libterminal_decline.dylib").is_file());
+    if launcher {
+        return Err(format!(
+            "{} is the app's launcher, which can't be copied into a pin; until pins are made \
+             from the app's pin stub, make and update pins with a bare `terminal-decline` binary \
+             (`cargo install --path crates/term-app`)",
+            exe.display()
+        ));
+    }
+    Ok(exe)
 }
 
 /// Drop the download quarantine copied from Terminal Decline itself, sign the
@@ -516,6 +539,7 @@ pub fn list(paths: &Paths) -> Vec<(PathBuf, String)> {
 /// and its Info.plist, so pins made before the rename (bundle ids
 /// `red.forbes.decline.pin.*`) get the current [`ID_PREFIX`].
 pub fn update(paths: &Paths, run: &mut Runner) -> Result<(), String> {
+    clone_source(&paths.exe)?;
     for (id, app) in pins(paths) {
         let bin = app.join("Contents/MacOS").join(&id);
         if !bin.is_file() {
@@ -568,6 +592,7 @@ mod tests {
                 config_dir: dir.join("config/terminal-decline"),
                 apps_dir: apps,
                 exe,
+                app_bundle: None,
             };
             Env { dir, paths }
         }
@@ -748,6 +773,31 @@ mod tests {
             assert!(p.contains(key), "missing {key}");
         }
         assert!(!info_plist("A", "a", false).contains("CFBundleIconFile"));
+    }
+
+    #[test]
+    fn the_launcher_makes_no_clone_pins() {
+        let env = Env::new("launcher");
+        let app = env.dir.join("Terminal Decline.app/Contents");
+        std::fs::create_dir_all(app.join("MacOS")).unwrap();
+        std::fs::create_dir_all(app.join("Frameworks")).unwrap();
+        std::fs::write(app.join("Frameworks/libterminal_decline.dylib"), "").unwrap();
+        let launcher = app.join("MacOS/terminal-decline");
+        std::fs::write(&launcher, "").unwrap();
+        let paths = Paths {
+            exe: launcher,
+            ..env.paths.clone()
+        };
+        let mut ran = 0;
+        let mut runner = |_: &mut Command| {
+            ran += 1;
+            Ok(ExitStatus::default())
+        };
+        let e = create(env.options("Rush", &["/bin/echo"]), &paths, &mut runner).unwrap_err();
+        assert!(e.contains("launcher"), "{e}");
+        assert!(!paths.pin_config("rush").exists() && !env.paths.apps_dir.join("Rush.app").exists());
+        assert!(update(&paths, &mut runner).unwrap_err().contains("launcher"));
+        assert_eq!(ran, 0);
     }
 
     #[test]

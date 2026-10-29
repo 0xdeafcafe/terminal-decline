@@ -963,6 +963,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "term-dylib"
+version = "0.0.1"
+dependencies = [
+ "term-pin",
+ "terminal-decline",
+]
+
+[[package]]
 name = "term-font"
 version = "0.0.1"
 dependencies = [

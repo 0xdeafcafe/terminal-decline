@@ -4,7 +4,7 @@
 //!
 //! Each launches the built `terminal-decline` with
 //! `DECLINE_TEST_DUMP=<file>`, so a program in the window can drive it with
-//! the private control OSC (see `terminal_decline::control`): `dump` writes a
+//! the private control OSC (see `terminal_decline_app::control`): `dump` writes a
 //! line of JSON after the next frame the GPU has finished, then `resize`,
 //! `font` and `quit`. The tests assert on the dumps, not on pixels. Config
 //! comes from an empty temp dir (`XDG_CONFIG_HOME`), never the user's.
@@ -484,7 +484,7 @@ fn smoke_secure_keyboard_entry_from_user_defaults() {
     }
     let dir = TempDir::new("secure");
     let unique = format!("{}", std::process::id());
-    let id = format!("{}terminal-decline-secure-{unique}", terminal_decline::pin::ID_PREFIX);
+    let id = format!("{}terminal-decline-secure-{unique}", terminal_decline_app::pin::ID_PREFIX);
     /// Removes the temp bundle's defaults domain, even if the test fails.
     struct Domain(String);
     impl Drop for Domain {
@@ -513,11 +513,12 @@ fn smoke_secure_keyboard_entry_from_user_defaults() {
 /// A pin bundle for `script` in `dir`'s Applications, made by the pin
 /// module the way `terminal-decline pin` does (the Dock is never touched).
 fn temp_bundle(dir: &TempDir, name: &str, script: &str) -> PathBuf {
-    use terminal_decline::pin::{self, Options};
-    let paths = terminal_decline::Paths {
+    use terminal_decline_app::pin::{self, Options};
+    let paths = terminal_decline_app::Paths {
         config_dir: dir.config_home().join("terminal-decline"),
         apps_dir: dir.path().join("Applications"),
         exe: PathBuf::from(APP),
+        app_bundle: None,
     };
     std::fs::create_dir_all(&paths.apps_dir).unwrap();
     let options = Options {
@@ -737,7 +738,7 @@ fn smoke_font_settings_from_the_config() {
 #[test]
 #[ignore = "opens a window; run with --run-ignored"]
 fn smoke_pin_bundle_launches() {
-    use terminal_decline::pin::{self, Options};
+    use terminal_decline_app::pin::{self, Options};
     if !have_metal() {
         return;
     }
@@ -750,10 +751,11 @@ fn smoke_pin_bundle_launches() {
             .unwrap()
             .as_millis()
     );
-    let paths = terminal_decline::Paths {
+    let paths = terminal_decline_app::Paths {
         config_dir: dir.config_home().join("terminal-decline"),
         apps_dir: dir.path().join("Applications"),
         exe: PathBuf::from(APP),
+        app_bundle: None,
     };
     std::fs::create_dir_all(&paths.apps_dir).unwrap();
     let extra = dir.path().join("extra.toml");
@@ -1066,8 +1068,8 @@ fn smoke_dropped_files_are_typed_as_a_paste() {
     let d = dir.path().display();
     let first = ["/tmp/My Files/a (1).txt", "/tmp/$HOME & co"];
     let second = ["/Users/me/it is ~here"];
-    let bracketed = format!("\x1b[200~{}\x1b[201~", terminal_decline::desktop::dropped_text(&first));
-    let plain = terminal_decline::desktop::dropped_text(&second);
+    let bracketed = format!("\x1b[200~{}\x1b[201~", terminal_decline_app::desktop::dropped_text(&first));
+    let plain = terminal_decline_app::desktop::dropped_text(&second);
     let script = format!(
         "printf '\\033[?2004h'; stty -icanon -echo min 1 time 0; {drop1}\
          dd bs=1 count={n1} of='{d}/got1' 2>/dev/null; \

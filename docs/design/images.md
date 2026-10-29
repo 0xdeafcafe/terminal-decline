@@ -1143,7 +1143,8 @@ the switch.
 **Settings (after I.5a).** `images` (default off until Alex decides),
 `image_memory` (MB, 0 = the larger of 32 MB and two window-sized images)
 and `image_file_transfer` (default on) are in the preferences schema and
-all apply live: `images::apply_config` runs at start and on each reload.
+all apply live (the test dump has an `images` section: enabled, count,
+ready, bytes, placements_in_view, budget): `images::apply_config` runs at start and on each reload.
 `TD_IMAGES=1` still turns images on whatever `images` says. Sessions
 always install the app's host, so `images` can be turned on in a running
 window; turning it off stops new images and queries, and what is held

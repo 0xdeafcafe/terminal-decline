@@ -4,7 +4,7 @@
 //! send `ESC ] 7770 ; <command> BEL` (or ST instead of BEL):
 //!
 //! - `dump`: after the next frame the GPU has finished, append one line of
-//!   JSON to the file (see [`Dump`]);
+//!   JSON to the file (see [`Dump`]; its `images` section is [`ImagesDump`]);
 //! - `resize C L`: resize the window to C columns × L lines;
 //! - `font +1` / `font -1`: change the font size by one point;
 //! - `tab`: open a new tab beside this window, running the same program;
@@ -466,6 +466,24 @@ pub struct Dump {
     pub background: String,
     /// `phys_footprint` from `task_info`, bytes.
     pub phys_footprint: u64,
+    pub images: ImagesDump,
+}
+
+/// The `images` section of a dump (images.md §11): this window's panes'
+/// images, and the process pool they live in.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct ImagesDump {
+    /// Whether images are on (the `images` setting).
+    pub enabled: bool,
+    /// Images the panes hold, and how many of them are decoded.
+    pub count: usize,
+    pub ready: usize,
+    /// Bytes the pool holds, for the whole app.
+    pub bytes: usize,
+    /// Placements with a row in view, over the panes.
+    pub placements_in_view: usize,
+    /// The pool's budget in bytes.
+    pub budget: usize,
 }
 
 /// One pane in a dump.

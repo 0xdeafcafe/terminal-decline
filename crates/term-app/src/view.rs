@@ -2963,6 +2963,7 @@ fn write_dump(st: &mut State, window: Window) {
     use std::io::Write;
     let focused = st.tree.focused();
     let zoomed = st.tree.zoomed();
+    let mut images = control::ImagesDump::default();
     let every: Vec<PaneDump> = st
         .tree
         .ids()
@@ -2970,6 +2971,17 @@ fn write_dump(st: &mut State, window: Window) {
         .filter_map(|id| {
             let p = st.panes.get(&id)?;
             let t = p.session.lock_term();
+            let g = t.state.graphics();
+            images.count += g.images().count();
+            images.ready += g
+                .images()
+                .filter(|i| matches!(i.state, term_core::image::ImageState::Ready))
+                .count();
+            if t.state.lines() > 0 {
+                let top = t.state.point_at(0, 0).line;
+                let bottom = t.state.point_at(t.state.lines() - 1, 0).line + 1;
+                images.placements_in_view += g.placements_in(top, bottom).count();
+            }
             Some(PaneDump {
                 id,
                 rect: [p.rect.x, p.rect.y, p.rect.w, p.rect.h],
@@ -2983,6 +2995,10 @@ fn write_dump(st: &mut State, window: Window) {
             })
         })
         .collect();
+    let pool = term_core::ImagePool::process();
+    images.enabled = pool.enabled();
+    images.bytes = pool.used();
+    images.budget = pool.limit();
     let dividers = st.dividers.len();
     let State { win, panes, .. } = st;
     let Some(p) = panes.get(&focused) else { return };
@@ -3064,6 +3080,7 @@ fn write_dump(st: &mut State, window: Window) {
         foreground: format!("#{:06x}", crate::config::rgb_of(theme.foreground)),
         background: format!("#{:06x}", crate::config::rgb_of(theme.background)),
         phys_footprint: control::phys_footprint(),
+        images,
     };
     let line = serde_json::to_string(&dump).expect("dump serialises");
     let written = std::fs::OpenOptions::new()

@@ -2275,3 +2275,37 @@ fn smoke_click_in_a_find_bar_focuses_its_pane() {
     assert_eq!(focused(&d[1]), Some(0), "{}", d[1]);
     assert_eq!(d[1]["find"]["focused"], true, "{}", d[1]);
 }
+
+/// `images = true`: a kitty PNG sent by the program is listed in the
+/// dump's `images` section, decoded, placed in view and counted in the
+/// pool (docs/design/images.md §11).
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_kitty_png_is_listed_in_the_images_dump() {
+    if !have_metal() {
+        return;
+    }
+    // A 1 x 1 RGBA PNG.
+    const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+    let dir = TempDir::new("images");
+    std::fs::create_dir_all(dir.config_home().join("terminal-decline")).unwrap();
+    std::fs::write(dir.config_home().join("terminal-decline/config.toml"), "images = true\n").unwrap();
+    // Decoding runs on a queue: give it a moment before the dump.
+    let script = format!(
+        "printf '\\033_Ga=T,f=100,i=7,q=2;{PNG}\\033\\\\\\n'; sleep 1; {}{}sleep 20",
+        osc("dump"),
+        osc("quit")
+    );
+    let (status, _) = decline(&dir, &script, true);
+    assert!(status.success(), "{status}");
+    let d = dumps(&dir);
+    assert_eq!(d.len(), 1, "{d:?}");
+    check_dump(&d[0]);
+    let images = &d[0]["images"];
+    assert_eq!(images["enabled"], true, "{}", d[0]);
+    assert_eq!(images["count"], 1, "{}", d[0]);
+    assert_eq!(images["ready"], 1, "{}", d[0]);
+    assert_eq!(images["placements_in_view"], 1, "{}", d[0]);
+    assert!(num(images, "bytes") > 0.0, "{}", d[0]);
+    assert!(num(images, "budget") >= (32 << 20) as f64, "{}", d[0]);
+}

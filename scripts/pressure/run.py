@@ -6,7 +6,8 @@ usage: run.py BINARY WORKDIR [SCENARIO...]
 
 WORKDIR must hold the inputs, made with gen.py: big.txt (`gen.py big`),
 fuzz.bin (`gen.py fuzz ... 64000000`) and glyphs.txt (`gen.py glyphs`).
-Prints one JSON line per scenario. Scenarios needing a program that isn't
+The images_* and sixel_* scenarios are generated on the fly (gen.py) and run
+with TD_IMAGES=1. Prints one JSON line per scenario. Scenarios needing a program that isn't
 installed (htop) are skipped. Exits 1 if any scenario didn't survive.
 """
 import json, os, re, shutil, subprocess, sys, time
@@ -25,6 +26,13 @@ def scenarios():
         "one-50mb-line": "head -c 50000000 /dev/zero | tr '\\0' 'x'",
         "sync-flood-15s": f"python3 {HERE}/gen.py sync 15",
         "tui-htop-20s": "htop -d 5 & P=$!; sleep 20; kill $P; wait $P 2>/dev/null",
+        "images_flood": f"python3 {HERE}/gen.py images-flood 500",
+        "images_ids": f"python3 {HERE}/gen.py images-ids 2000",
+        "images_tiny": f"python3 {HERE}/gen.py images-tiny 20000",
+        "images_chunks_abandoned": f"python3 {HERE}/gen.py images-abandoned 10000",
+        "images_scrollback": f"python3 {HERE}/gen.py images-scrollback 100000",
+        "sixel_flood": f"python3 {HERE}/gen.py sixel-flood 2000",
+        "sixel_huge": f"python3 {HERE}/gen.py sixel-huge 200",
         "blink-idle-20s": "printf '\\033[1 q'; sleep 20",
         "plain-idle-20s": "sleep 20",
     }
@@ -33,6 +41,10 @@ def scenarios():
 REQUIRES = {
     "tui-htop-20s": "htop",
 }
+
+# Scenarios that need images on: run with the hidden switch, TD_IMAGES=1
+# (images.md section 11). The app ignores the strings without it.
+IMAGES = {"images_flood", "images_ids", "images_tiny", "images_chunks_abandoned", "images_scrollback", "sixel_flood", "sixel_huge"}
 
 def footprint(pid):
     out = subprocess.run(["/usr/bin/footprint", "-p", str(pid)], capture_output=True, text=True).stdout
@@ -66,6 +78,8 @@ def run(name, cmd):
         os.remove(marker)
     script = f"S=$({NOW}); {cmd}; E=$({NOW}); echo $S $E > {marker}; sleep 4"
     env = dict(os.environ, DECLINE_DEBUG="1")
+    if name in IMAGES:
+        env["TD_IMAGES"] = "1"
     p = subprocess.Popen([BIN, "-e", "sh", "-c", script], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
     t0 = time.time()
     peak, samples, window = 0.0, [], None

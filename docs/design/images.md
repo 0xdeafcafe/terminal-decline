@@ -1140,6 +1140,36 @@ the switch.
 | I.6 | ci + fuzz | fuzz targets in the nightly rotation, the `parse` target with images on, dictionary entries, the pressure scenarios added | S | I.1, I.2 |
 | I.7 | docs | DESIGN.md (Rendering, memory, idle), the manual checklist, numbers on the standard set, roadmap B.3/B.5 marked; the hidden switch removed | S | I.3, I.5b |
 
+**Landed (I.6).** Fuzzing and pressure, ahead of the image code being
+complete (the seeds and dictionary entries simply find nothing to do until
+I.2 and I.3 land).
+
+- **Nightly rotation**: `.github/workflows/fuzz.yml` is a matrix, one job
+  per target, all of them every night (not one per night as planned:
+  they run in parallel, so it costs no more wall time). `parse` gets 20
+  minutes, the term-image targets (`sixel`, `kitty_keys`, `iterm_args`,
+  `inflate`, `sniff`) and `decode` 5 each. Each target has its own corpus
+  cache entry (`fuzz-corpus-<target>-<run>`), its own crash artifact
+  (`fuzz-crash-<target>`) and its issues carry the target in the title.
+  Manual runs can name targets and minutes. CI builds all targets.
+- **`parse` with images on**: `fuzz/steps.rs` makes the terminal under
+  test with a 4 MB pool with images enabled (not the process pool, which
+  the hidden switch leaves off); `TD_FUZZ_IMAGES=0` goes back to the
+  process pool. The corpus replay test shares the file, so it replays
+  with images on too. Image jobs are dropped after each slice (no host).
+- **Seeds**: `scripts/fuzz-seed.py` writes `parse` seeds for kitty
+  graphics (all actions, chunks, id-less frames, placeholders, refused
+  file and shm media), iTerm2 `File=` and Sixel, mixed with resizes,
+  scrolling, selections and the alternate screen, and seeds for the five
+  term-image targets. Dictionaries: `parse.dict` gains the image
+  sequences; `sixel.dict`, `kitty_keys.dict` and `iterm_args.dict` are new.
+- **Pressure** (`scripts/pressure/gen.py` generates them on the fly, `run.py`
+  runs them with `TD_IMAGES=1`): `images_flood` (500 id-less 1600 x 1000
+  PNG frames), `images_ids`, `images_tiny`, `images_chunks_abandoned`,
+  `images_scrollback`, `sixel_flood`, `sixel_huge`. Not run yet:
+  footprint numbers come with I.5b. `images_hidden_tab` waits for a way
+  to drive tabs.
+
 **Landed (I.0).** What was built (`term-core/src/image.rs`,
 `image/pool.rs` and its tests), and where it differs from §4 and §5:
 - **Graphics** is one per screen (cells §8.1), boxed in the terminal,

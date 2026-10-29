@@ -2206,3 +2206,40 @@ fn smoke_find_bar_searches_history() {
     assert!(d[6]["find"].is_null(), "{}", d[6]);
     assert_eq!(offset(&d[6]), offset(&d[5]), "{}", d[6]);
 }
+
+/// The find bar keeps searching across a switch to the alternate screen
+/// and back (vim or less opening and closing): the hits are the screen
+/// being shown's, found again at each switch, and the current one is
+/// highlighted.
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_find_bar_restarts_on_the_alternate_screen() {
+    if !have_metal() {
+        return;
+    }
+    let dir = TempDir::new("find-alt");
+    let wait = "i=0; while [ \"$(stty size)\" != '20 80' ] && [ $i -lt 100 ]; do sleep 0.05; i=$((i+1)); done; ";
+    // Two hits on the main screen, three on the alternate one.
+    let main = "echo 'one needle'; echo 'two needle'; ";
+    let enter = "printf '\\033[?1049h\\033[Hneedle needle\\r\\nneedle'; ";
+    let leave = "printf '\\033[?1049l'; ";
+    let script = format!(
+        "{resize}{wait}{main}{find}{dump}{enter}sleep 1; {dump}{leave}sleep 1; {dump}{quit}sleep 20",
+        resize = osc("resize 80 20"),
+        find = [osc("menu find"), osc("find needle")].concat(),
+        dump = dump_and_wait(&dir),
+        quit = osc("quit"),
+    );
+    let (status, _) = decline(&dir, &script, true);
+    assert!(status.success(), "{status}");
+    let d = dumps(&dir);
+    assert_eq!(d.len(), 3, "{d:?}");
+    let hits = |i: usize| d[i]["find"]["hits"].clone();
+    assert_eq!(hits(0), 2, "{}", d[0]);
+    assert_eq!(hits(1), 3, "{}", d[1]);
+    assert!(d[1]["find"]["current"].is_u64(), "{}", d[1]);
+    assert_eq!(d[1]["find"]["highlights"], 3, "{}", d[1]);
+    assert_eq!(hits(2), 2, "{}", d[2]);
+    assert!(d[2]["find"]["current"].is_u64(), "{}", d[2]);
+    assert_eq!(d[2]["find"]["highlights"], 2, "{}", d[2]);
+}

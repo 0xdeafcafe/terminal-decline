@@ -933,14 +933,7 @@ impl PaneView {
     /// How many of the grid's top rows the find bar is over.
     fn rows_under_find_bar(&self) -> usize {
         let titlebar = self.window_view().map_or(0.0, |w| w.titlebar_height());
-        self.with(|win, p| {
-            let top = p.rect.y == 0;
-            let bottom = (if top { titlebar } else { 0.0 } + crate::find_bar::HEIGHT) * win.scale;
-            let grid_top = pane_padding(&win.config, titlebar, win.scale, p.rect).top as f64;
-            let cell = win.renderer.metrics().cell_height.max(1) as f64;
-            ((bottom - grid_top) / cell).ceil().max(0.0) as usize
-        })
-        .unwrap_or(0)
+        self.with(|win, p| crate::view::rows_under_find_bar(win, p, titlebar)).unwrap_or(0)
     }
 
     /// Hide the find bar and drop its hits; the keys go back to the pane.
@@ -976,6 +969,7 @@ impl PaneView {
             let f = p.find.as_mut()?;
             let mut t = p.session.lock_term();
             f.search.start(&mut t.state, &q, covered);
+            f.seen = Some((t.state.terminal_id(), t.state.alt_screen_active()));
             p.find_query = q.clone();
             Some((f.bar.clone(), f.search.status(&t.state)))
         }) else {

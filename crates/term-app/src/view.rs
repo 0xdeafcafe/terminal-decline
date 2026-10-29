@@ -1177,7 +1177,16 @@ impl WindowView {
             };
             // The find bar's search keeps up with output, and its hits in
             // view go into the snapshot.
+            let covered = rows_under_find_bar(win, p, titlebar);
             if let Some(f) = &mut p.find {
+                // A new terminal (after a caught panic) or a switch to or
+                // from the alternate screen leaves the hits meaning
+                // something else: search again.
+                let now = (t.state.terminal_id(), t.state.alt_screen_active());
+                if f.seen.is_some_and(|seen| seen != now) {
+                    f.search.start(&mut t.state, &p.find_query, covered);
+                    f.seen = Some(now);
+                }
                 let polled = f.search.poll(&mut t.state);
                 let status = f.search.status(&t.state);
                 if polled.changed || status != f.shown {
@@ -2354,6 +2363,15 @@ pub(crate) fn padding_for(config: &Config, titlebar: f64, scale: f64) -> Padding
 
 /// The padding inside a pane at `rect`: the title bar's inset on top of it
 /// only when it touches the window's top.
+/// How many of `p`'s grid rows its find bar is over.
+pub(crate) fn rows_under_find_bar(win: &Win, p: &Pane, titlebar: f64) -> usize {
+    let top = p.rect.y == 0;
+    let bottom = (if top { titlebar } else { 0.0 } + crate::find_bar::HEIGHT) * win.scale;
+    let grid_top = pane_padding(&win.config, titlebar, win.scale, p.rect).top as f64;
+    let cell = win.renderer.metrics().cell_height.max(1) as f64;
+    ((bottom - grid_top) / cell).ceil().max(0.0) as usize
+}
+
 pub(crate) fn pane_padding(config: &Config, titlebar: f64, scale: f64, rect: PxRect) -> Padding {
     padding_for(config, if rect.y == 0 { titlebar } else { 0.0 }, scale)
 }

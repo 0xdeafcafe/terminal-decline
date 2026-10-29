@@ -59,6 +59,9 @@ pub(crate) struct Find {
     pub(crate) drawn: usize,
     /// The count as last shown.
     pub(crate) shown: Status,
+    /// The terminal (its id, and whether it shows the alternate screen)
+    /// the search was started on; None before the first search.
+    pub(crate) seen: Option<(u64, bool)>,
 }
 
 impl Find {
@@ -69,6 +72,7 @@ impl Find {
             marks: Vec::new(),
             drawn: 0,
             shown: Status::default(),
+            seen: None,
         }
     }
 }

@@ -103,6 +103,10 @@ mod extra {
     pub const TLEN: u8 = 1 << 3;
 }
 
+/// Flags bits search reads (§13.5): a line with either can't take the
+/// all-ASCII shortcut from byte offsets to columns.
+pub(crate) const SEARCH_SLOW_FLAGS: u8 = flag::CLUSTERS | flag::WIDTHS;
+
 /// Unwrapped lines with this much text or more record its length.
 const LONG_TEXT: usize = 128;
 
@@ -883,7 +887,7 @@ fn stored_len(cells: &[Cell]) -> usize {
 
 /// Columns of text to store for an unwrapped row: up to the last cell with
 /// content other than a space, or a wide one (and its spacer).
-fn text_end(cells: &[Cell]) -> usize {
+pub(crate) fn text_end(cells: &[Cell]) -> usize {
     // An empty wide cell keeps its width only through the text.
     let has_text =
         |c: &Cell| c.is_wide() || c.bits() & (Cell::CONTENT | Cell::KIND) != 0 && (c.is_cluster() || c.codepoint() != ' ' as u32);
@@ -1472,6 +1476,8 @@ pub struct Scrollback {
     last_wrapped: bool,
     /// The lowest line number popped since [`Scrollback::take_popped_from`].
     popped_from: Option<u64>,
+    /// The same for search (§13.4), since [`Scrollback::take_search_popped`].
+    search_popped: Option<u64>,
     /// The style table the slot cache was filled from: its epoch and sweep
     /// count. `[0, 0]` = unknown, so the cache is dropped each line.
     cache_key: [u64; 2],
@@ -1490,6 +1496,7 @@ impl Scrollback {
             end: 0,
             last_wrapped: false,
             popped_from: None,
+            search_popped: None,
             cache_key: [0, 0],
             scratch: Scratch::default(),
         }
@@ -1728,6 +1735,7 @@ impl Scrollback {
         }
         self.end = line;
         self.popped_from = Some(self.popped_from.map_or(line, |p| p.min(line)));
+        self.search_popped = Some(self.search_popped.map_or(line, |p| p.min(line)));
         // Lines hidden by the limit may fit again.
         self.start = self.oldest().max(self.end.saturating_sub(self.limit as u64));
         self.last_wrapped = !self.is_empty() && self.wrapped(self.len() - 1);
@@ -2102,6 +2110,86 @@ fn get_style(data: &[u8]) -> Style {
         }
     }
     s
+}
+
+/// What search reads (§13.4, §13.5).
+impl BlockData {
+    /// Where each of the first `len` lines' text starts, and (last) where
+    /// the text of those lines ends: `len + 1` offsets.
+    pub(crate) fn line_starts(&self, len: usize) -> Vec<u32> {
+        let view = self.view(len.min(self.starts.len()));
+        let mut out = Vec::with_capacity(len + 1);
+        let mut at = 0;
+        for n in 0..view.starts.len() {
+            out.push(at as u32);
+            at += view.stored_len(n, at);
+        }
+        out.push(at as u32);
+        out
+    }
+
+    /// Line `n`'s flags byte.
+    pub(crate) fn line_flags(&self, n: usize) -> u8 {
+        self.view(self.starts.len()).flags(n)
+    }
+
+    /// Expand line `n`, whose text starts at `start`, into `row`.
+    pub(crate) fn decode_line(&self, n: usize, start: usize, row: &mut Row) {
+        let (mut styles, mut links) = (Vec::new(), Vec::new());
+        self.view(self.starts.len()).decode(n, Some(start), 0, row, &mut styles, &mut links);
+    }
+}
+
+impl Scrollback {
+    /// The blocks holding lines at or after `from` (a stable line
+    /// number), oldest first, with how many lines of each are in use: the
+    /// sealed ones shared, the open one copied (§13.4). Also the first
+    /// visible line, so a search skips hidden ones.
+    pub(crate) fn search_blocks(&self, from: u64) -> (Vec<(Arc<BlockData>, usize)>, u64) {
+        let mut out: Vec<(Arc<BlockData>, usize)> = self
+            .blocks
+            .iter()
+            .filter(|b| b.data.first + b.len as u64 > from)
+            .map(|b| (b.data.clone(), b.len as usize))
+            .collect();
+        if self.open.lines() > 0 {
+            let o = &self.open;
+            let data = BlockData {
+                meta: o.meta.clone().into_boxed_slice(),
+                starts: o.starts.clone().into_boxed_slice(),
+                text: o.text.clone().into_boxed_slice(),
+                checkpoints: o.checkpoints.clone().into_boxed_slice(),
+                styles: o.styles.clone().into_boxed_slice(),
+                style_starts: o.style_starts.clone().into_boxed_slice(),
+                links: o.links.clone().into_boxed_slice(),
+                first: o.first,
+                width: if o.width == u16::MAX { 0 } else { o.width },
+                ambiguous: o.ambiguous,
+                head_continues: o.head_continues,
+                has_marks: o.has_marks,
+            };
+            out.push((Arc::new(data), o.lines()));
+        }
+        (out, self.start)
+    }
+
+    /// The first line still visible.
+    pub(crate) fn first_visible(&self) -> u64 {
+        self.start
+    }
+
+    /// The lowest line popped since the last call (§13.4: search's own
+    /// mark, apart from the snapshot's).
+    pub(crate) fn take_search_popped(&mut self) -> Option<u64> {
+        self.search_popped.take()
+    }
+
+    /// Test aid: seal the open block now, so tests get block boundaries
+    /// without 64 KB of output.
+    #[doc(hidden)]
+    pub fn seal_for_test(&mut self) {
+        self.seal();
+    }
 }
 
 #[cfg(test)]

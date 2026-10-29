@@ -10,6 +10,7 @@ pub mod clusters;
 mod links;
 pub mod rows;
 pub mod scrollback;
+pub mod search;
 pub mod style;
 mod style_table;
 pub mod term;
@@ -19,8 +20,10 @@ pub mod word;
 pub use cell::{Cell, Color, ColorKind, Mark, MarkKind, Row};
 
 pub use rows::{CellRef, Content, RowRef, StyleKey, Width};
+pub use search::{Hit, HitBatch, Query, SearchJob, WordMatch};
 pub use style::{Attrs, LinkId, Style, Underline};
 pub use style_table::StyleStats;
+pub use term::SearchCount;
 pub use term::{
     Cursor, CursorShape, DynamicColor, LinkValue, Modes, MouseMode, Notification, Point, Progress, Selection, SelectionKind, Term,
     Terminal, ViewTop,

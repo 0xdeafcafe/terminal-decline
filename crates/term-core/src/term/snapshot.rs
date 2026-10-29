@@ -239,6 +239,7 @@ impl Terminal {
         let cols = to_u16(self.cols);
         let same_terminal = out.terminal_id == self.terminal_id;
         let same_history = same_terminal && out.history_epoch == self.history_epoch && out.cols == cols;
+        self.refresh_search();
         let popped = self.scrollback.take_popped_from();
         out.rows.clear();
         out.cells.clear();
@@ -281,6 +282,7 @@ impl Terminal {
         let first = history - self.display_offset;
         // History rows are read one after another.
         let mut reader = HistoryReader::default();
+        let mut found = Vec::new();
         for view_line in 0..self.lines {
             let line = self.point_at(view_line, 0).line;
             let highlights = out.highlights.len() as u32;
@@ -341,6 +343,21 @@ impl Terminal {
                     cols: to_u16(start)..to_u16(end.min(self.cols)),
                     kind: HighlightKind::HoveredLink,
                 });
+                out.highlights[highlights as usize..].sort_by_key(|h| h.cols.start);
+            }
+            found.clear();
+            self.search_highlights(line, &mut found);
+            if !found.is_empty() {
+                for (cols, current) in found.drain(..) {
+                    out.highlights.push(Highlight {
+                        cols: to_u16(cols.start)..to_u16(cols.end),
+                        kind: if current {
+                            HighlightKind::CurrentSearchHit
+                        } else {
+                            HighlightKind::SearchHit
+                        },
+                    });
+                }
                 out.highlights[highlights as usize..].sort_by_key(|h| h.cols.start);
             }
             let highlights = highlights..out.highlights.len() as u32;

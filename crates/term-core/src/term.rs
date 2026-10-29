@@ -16,8 +16,11 @@ use crate::style_table::{StyleStats, StyleTable};
 use crate::unicode::{self, Segmenter};
 
 mod replies;
+mod search;
 mod snapshot;
+
 pub use replies::DynamicColor;
+pub use search::SearchCount;
 pub use snapshot::{Highlight, HighlightKind, RowFlags, RowKey, ScreenId, SnapCursor, SnapRow, Snapshot};
 
 /// A style table holding more ids than this gives its memory back when
@@ -395,6 +398,8 @@ pub struct Terminal {
     /// Write printable ASCII runs in bulk ([`Terminal::write_ascii`]); off
     /// only in tests, as the reference the bulk path is compared against.
     bulk_ascii: bool,
+    /// The search, while the find bar is open (§13.4).
+    search: Option<Box<search::SearchState>>,
 }
 
 impl Terminal {
@@ -462,6 +467,7 @@ impl Terminal {
             terminal_id: snapshot::next_terminal_id(),
             history_epoch: 0,
             bulk_ascii: true,
+            search: None,
         }
         .with_rows_touched()
     }
@@ -1634,6 +1640,8 @@ impl Terminal {
         fresh.ambiguous = self.ambiguous;
         fresh.grapheme_log = self.grapheme_log.take();
         fresh.hover = self.hover;
+        // The find bar stays open: its search carries on over the new state.
+        fresh.search = self.search.take();
         // Like xterm, a full reset clears scrollback too.
         fresh.scrollback = std::mem::replace(&mut self.scrollback, Scrollback::new(0));
         fresh.scrollback.clear();

@@ -48,7 +48,7 @@ use crate::panes::{Dir, Direction, Divider, Geometry, PaneId, Panes, PxRect, Spl
 use crate::reload::{SavedPane, SavedPanes};
 use crate::running::Closing;
 use crate::select::{Block, Gesture};
-use crate::session::{Events, Hooks, Outcome, Session};
+use crate::session::{Events, Hooks, Outcome, PendingEvents, Session};
 use crate::theme::Appearance;
 
 pub(crate) const BLINK_INTERVAL: Duration = Duration::from_millis(530);
@@ -3032,8 +3032,16 @@ fn pane_hooks(id: usize, pane: PaneId, test: bool, settings: bool) -> Hooks {
         // The latency log counts by window (one pane each until B2.5).
         hooks.on_parsed = Some(Box::new(move || lat.parsed(id)));
     }
+    let pending = Arc::new(PendingEvents::default());
     hooks.on_events = Some(Box::new(move |events| {
-        DispatchQueue::main().exec_async(move || with_view(id, |v| v.events(pane, events)));
+        if pending.push(events) {
+            let pending = pending.clone();
+            DispatchQueue::main().exec_async(move || {
+                if let Some(events) = pending.take() {
+                    with_view(id, |v| v.events(pane, events));
+                }
+            });
+        }
     }));
     if settings {
         hooks.on_prefs = Some(Box::new(move |what: String| {

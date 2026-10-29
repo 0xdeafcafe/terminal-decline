@@ -25,6 +25,13 @@
 # packaging/entitlements-dev.plist (library validation off: ad-hoc code
 # has no team ID to match). DOGFOOD=1 marks a local build that restarts
 # itself when a newer one is installed (crates/term-app/src/reload.rs).
+#
+# Sparkle (docs/design/updater.md §5): when scripts/sparkle.sh has fetched
+# it (target/sparkle/<version>, or SPARKLE_DIR), Sparkle.framework is
+# embedded, thinned and signed, and the updater's Info.plist keys are
+# written. SPARKLE_REQUIRED=1 (the release job) fails without it. The
+# updater still only runs in Developer ID builds that aren't dogfood or
+# nightly builds (crates/term-app/src/update.rs).
 set -euo pipefail
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -40,7 +47,7 @@ while [[ $# -gt 0 ]]; do
     --launcher) launcher=$2; shift 2 ;;
     --stub) stub=$2; shift 2 ;;
     -h|--help)
-      sed -n '2,27p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      sed -n '2,34p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     -*) echo "unknown option $1" >&2; exit 64 ;;
@@ -86,6 +93,72 @@ cp "$lib" "$contents/Frameworks/libterminal_decline.dylib"
 cp "$stub" "$contents/Helpers/terminal-decline-pin"
 chmod 755 "$contents/MacOS/terminal-decline" "$contents/Helpers/terminal-decline-pin"
 chmod 644 "$contents/Frameworks/libterminal_decline.dylib"
+
+# Sparkle.framework, without what only an Xcode build or a sandboxed app
+# uses: the XPC services (the folder and its top-level symlink, or
+# `codesign --verify --strict` fails on the dangling link), headers,
+# modules and other localisations. Thinned to the library's architecture.
+sparkle_version=$(sed -n 's/^version="\(.*\)"$/\1/p' "$script_dir/sparkle.sh")
+sparkle_dir=${SPARKLE_DIR:-"$repo_root/target/sparkle/$sparkle_version"}
+fw="$contents/Frameworks/Sparkle.framework"
+sparkle=0
+if [[ -d "$sparkle_dir/Sparkle.framework" ]]; then
+  sparkle=1
+  ditto "$sparkle_dir/Sparkle.framework" "$fw"
+  rm -rf "$fw/Versions/B/XPCServices" "$fw/XPCServices" \
+    "$fw/Versions/B/Headers" "$fw/Headers" \
+    "$fw/Versions/B/PrivateHeaders" "$fw/PrivateHeaders" \
+    "$fw/Versions/B/Modules" "$fw/Modules" \
+    "$fw/Versions/B/_CodeSignature"
+  find "$fw/Versions/B/Resources" -maxdepth 1 -name '*.lproj' ! -name 'en.lproj' ! -name 'Base.lproj' -exec rm -rf {} +
+  arch=$(lipo -archs "$lib" 2>/dev/null || true)
+  if [[ "$arch" == "arm64" || "$arch" == "x86_64" ]]; then
+    for bin in "$fw/Versions/B/Sparkle" "$fw/Versions/B/Autoupdate" "$fw/Versions/B/Updater.app/Contents/MacOS/Updater"; do
+      if [[ "$(lipo -archs "$bin")" != "$arch" ]]; then
+        lipo -thin "$arch" "$bin" -output "$bin.thin"
+        mv "$bin.thin" "$bin"
+      fi
+    done
+  fi
+elif [[ "${SPARKLE_REQUIRED:-}" == "1" ]]; then
+  echo "no Sparkle.framework in $sparkle_dir (run scripts/sparkle.sh)" >&2
+  exit 66
+fi
+
+# The updater's keys (docs/design/updater.md §5.2). Without a public key
+# the updater stays off.
+sparkle_keys=""
+if [[ $sparkle == 1 ]]; then
+  public_key=""
+  if [[ -f "$repo_root/packaging/sparkle-public-key" ]]; then
+    public_key=$(tr -d '[:space:]' < "$repo_root/packaging/sparkle-public-key")
+  fi
+  if [[ -n "$public_key" ]]; then
+    sparkle_keys="  <key>SUPublicEDKey</key>
+  <string>${public_key}</string>
+"
+  fi
+  sparkle_keys+="  <key>SUFeedURL</key>
+  <string>https://github.com/0xdeafcafe/terminal-decline/releases/latest/download/appcast.xml</string>
+  <key>SUEnableAutomaticChecks</key>
+  <true/>
+  <key>SUScheduledCheckInterval</key>
+  <integer>86400</integer>
+  <key>SUAutomaticallyUpdate</key>
+  <true/>
+  <key>SUAllowsAutomaticUpdates</key>
+  <true/>
+  <key>SUEnableSystemProfiling</key>
+  <false/>
+  <key>SUVerifyUpdateBeforeExtraction</key>
+  <true/>
+  <key>SURequireSignedFeed</key>
+  <true/>
+  <!-- An update that has waited a week asks to Quit and Install. -->
+  <key>SUScheduledImpatientCheckInterval</key>
+  <integer>604800</integer>
+"
+fi
 
 icon_entry=""
 if [[ -f "$icon" ]]; then
@@ -204,7 +277,7 @@ cat > "$contents/Info.plist" <<EOF
       </array>
     </dict>
   </array>
-${usage_strings}${icon_entry}
+${usage_strings}${sparkle_keys}${icon_entry}
 </dict>
 </plist>
 EOF
@@ -229,7 +302,12 @@ sign() {
   codesign --force --sign "$identity" ${opts[@]+"${opts[@]}"} "$@"
 }
 sign --identifier "$bundle_id.lib" "$contents/Frameworks/libterminal_decline.dylib"
-# B.4: Sparkle's parts, then Sparkle.framework (docs/design/updater.md §5.3).
+# Sparkle's helpers, then Sparkle.framework (docs/design/updater.md §5.3).
+if [[ $sparkle == 1 ]]; then
+  sign "$fw/Versions/B/Autoupdate"
+  sign "$fw/Versions/B/Updater.app"
+  sign "$fw"
+fi
 sign --identifier "$bundle_id.pin-stub" "$contents/Helpers/terminal-decline-pin"
 sign --entitlements "$entitlements" "$app"
 codesign --verify --strict --deep "$app"

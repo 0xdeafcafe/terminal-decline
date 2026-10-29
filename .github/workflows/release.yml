@@ -108,7 +108,7 @@ jobs:
           SIGN_IDENTITY: ${{ steps.cert.outputs.identity }}
         run: |
           # Falls back to ad-hoc signing when no certificate was imported.
-          CODESIGN_IDENTITY="${SIGN_IDENTITY:--}" scripts/bundle.sh \
+          SPARKLE_REQUIRED=1 CODESIGN_IDENTITY="${SIGN_IDENTITY:--}" scripts/bundle.sh \
             --lib target/aarch64-apple-darwin/release/libterminal_decline.dylib \
             --launcher target/aarch64-apple-darwin/release-stub/terminal-decline-launcher \
             --stub target/aarch64-apple-darwin/release-stub/terminal-decline-pin \

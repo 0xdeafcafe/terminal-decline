@@ -234,3 +234,63 @@ fn hardened_ad_hoc_bundle_starts() {
     let version = run_ok(Command::new(support::launcher(&app)).arg("-V"));
     assert!(version.starts_with("terminal-decline "), "{version}");
 }
+
+/// docs/design/updater.md §5: with Sparkle fetched (scripts/sparkle.sh;
+/// macOS CI does), the framework is embedded without its XPC services
+/// (folder and symlink), headers and modules, keeps Updater.app, is
+/// thinned to the library's architecture and signed; Info.plist has the
+/// updater's keys and the committed public key.
+#[test]
+fn sparkle_is_embedded_thinned_and_signed() {
+    let fetched = std::fs::read_dir(support::repo().join("target/sparkle"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|e| e.path().join("Sparkle.framework").is_dir());
+    if !fetched {
+        eprintln!("skipped: no target/sparkle/*/Sparkle.framework (run scripts/sparkle.sh)");
+        return;
+    }
+    let out = OutDir::new("sparkle");
+    let app = support::bundle(&out.0, &[("HARDENED", "1")]);
+    let fw = app.join("Contents/Frameworks/Sparkle.framework");
+    assert!(fw.join("Versions/B/Updater.app/Contents/MacOS/Updater").is_file());
+    assert!(fw.join("Versions/B/Autoupdate").is_file());
+    for gone in ["XPCServices", "Versions/B/XPCServices", "Headers", "PrivateHeaders", "Modules"] {
+        assert!(std::fs::symlink_metadata(fw.join(gone)).is_err(), "{gone} is still there");
+    }
+    let lib_arch = run_ok(Command::new("/usr/bin/lipo").arg("-archs").arg(&support::parts().lib));
+    for bin in [
+        "Versions/B/Sparkle",
+        "Versions/B/Autoupdate",
+        "Versions/B/Updater.app/Contents/MacOS/Updater",
+    ] {
+        let arch = run_ok(Command::new("/usr/bin/lipo").arg("-archs").arg(fw.join(bin)));
+        assert_eq!(arch.trim(), lib_arch.trim(), "{bin}");
+    }
+    for part in [fw.join("Versions/B/Autoupdate"), fw.join("Versions/B/Updater.app"), fw.clone()] {
+        let d = codesign_display(&part, &[]);
+        assert!(d.contains("(adhoc,runtime)"), "{}: {d}", part.display());
+    }
+    run_ok(Command::new("/usr/bin/codesign").args(["--verify", "--strict", "--deep"]).arg(&app));
+    let plist = app.join("Contents/Info.plist");
+    let key = std::fs::read_to_string(support::repo().join("packaging/sparkle-public-key")).unwrap();
+    assert_eq!(extract(&plist, "SUPublicEDKey"), key.trim());
+    assert_eq!(
+        extract(&plist, "SUFeedURL"),
+        "https://github.com/0xdeafcafe/terminal-decline/releases/latest/download/appcast.xml"
+    );
+    for (k, v) in [
+        ("SUEnableAutomaticChecks", "true"),
+        ("SUScheduledCheckInterval", "86400"),
+        ("SUAutomaticallyUpdate", "true"),
+        ("SUEnableSystemProfiling", "false"),
+        ("SUVerifyUpdateBeforeExtraction", "true"),
+        ("SURequireSignedFeed", "true"),
+        ("SUScheduledImpatientCheckInterval", "604800"),
+    ] {
+        assert_eq!(extract(&plist, k), v, "{k}");
+    }
+    let version = run_ok(Command::new(support::launcher(&app)).arg("-V"));
+    assert!(version.starts_with("terminal-decline "), "{version}");
+}

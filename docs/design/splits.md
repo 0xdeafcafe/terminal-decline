@@ -450,6 +450,54 @@ Panes split, close and take focus; dividers are drawn but don't drag yet
   (about 0.6 MB per extra idle pane); 0.0% CPU and 0 idle wake-ups
   (`top -stats cpu,idlew`, three 3 s samples) with 1, 2 and 4 panes.
 
+### 3.8 Landed (B2.3c)
+
+Dividers drag, the keyboard moves and evens them out, and a pane zooms.
+
+- **`DividerView`** (`divider_view.rs`, `DeclineDividerView`): a plain
+  `NSView` over each divider's grab zone (`panes::GRAB`, 3 pt either side
+  of the line, below the title bar) that draws nothing. The window view
+  makes, moves and removes them as it lays the panes out, and adds pane
+  views below them, so they win hit testing. Mouse down starts a drag
+  (keeping where in the zone it was taken), mouse dragged moves the split
+  through `Panes::drag` (clamped at the minimum) and lays the panes out,
+  and the next display-link tick draws at the input rate (120 Hz: the
+  drag counts as input). A double-click evens out the run of panes the
+  divider runs between (`Panes::equalize_at`). `acceptsFirstMouse` is YES,
+  so a drag works in an inactive window.
+- **Cursors**: `resetCursorRects` puts `columnResizeCursor` /
+  `rowResizeCursor` (macOS 15+; `resizeLeftRightCursor` /
+  `resizeUpDownCursor` on 14) over the grab zones, and the I-beam over the
+  rest of each pane (`panes::subtract`), so no two cursor rects overlap.
+  A drag sets the resize cursor on every move.
+- **Grids**: a pane's program is told its size (PTY resize, SIGWINCH)
+  only when its columns, lines or cell size change, for drags and window
+  resizes alike; a pane that moved or changed size is drawn again.
+- **Actions** on `WindowView`: `resizePane{Left,Right,Up,Down}:`
+  (Cmd+Ctrl+arrows: the nearest divider across that way moves one cell;
+  beeps when there is none, it can't move, or a pane is zoomed),
+  `equalizePanes:` (Cmd+Ctrl+=), `togglePaneZoom:` (Cmd+Shift+Enter;
+  beeps with one pane). Window menu: Move Divider Left/Right/Up/Down,
+  Equalize Panes, Zoom Pane (with a checkmark while zoomed).
+- **Zoom**: the focused pane fills the window; the others' views are
+  hidden, their programs keep running at their sizes and their frames
+  aren't built, and no dividers are drawn. Zooming again, splitting,
+  closing the zoomed pane, or focusing another pane (`focus`, the
+  Select items) ends it; the panes come back drawn afresh.
+- **Restore** keeps a saved zoom: the hidden panes open at the size
+  they get when it ends.
+- **Keys for tests**: `key` gives Return and the arrows their AppKit
+  characters, so their menu shortcuts match.
+- **Test control**: `drag N PX` (through the drag handlers), `resize-pane
+  left|right|up|down`, `equalize`, `zoom`; dumps give `zoomed` and each
+  pane's `shown`. Smoke tests: a drag, Cmd+Ctrl+→, Cmd+Ctrl+=,
+  Cmd+Shift+Enter, `zoom` and `focus` each give the panes the rects
+  expected and both programs the sizes of their grids (a hidden pane
+  keeps its size); a restored zoom shows one pane and saves back zoomed.
+- Not measured: nothing in the frame path changed beyond the layout.
+  Divider drag with Neovim in both panes and zoom with htop (§9's manual
+  checks) are still to do.
+
 ## 4. Input and focus
 
 - The focused pane's PaneView is the window's first responder. Focus

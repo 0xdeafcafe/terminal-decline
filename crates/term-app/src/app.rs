@@ -1098,6 +1098,13 @@ pub fn build_menus(mtm: MainThreadMarker, app_name: &str, binds: &Keybinds) -> R
         b(MenuAction::FocusPaneUp.label(), MenuAction::FocusPaneUp),
         b(MenuAction::FocusPaneDown.label(), MenuAction::FocusPaneDown),
         vec![NSMenuItem::separatorItem(mtm)],
+        b(MenuAction::ResizePaneLeft.label(), MenuAction::ResizePaneLeft),
+        b(MenuAction::ResizePaneRight.label(), MenuAction::ResizePaneRight),
+        b(MenuAction::ResizePaneUp.label(), MenuAction::ResizePaneUp),
+        b(MenuAction::ResizePaneDown.label(), MenuAction::ResizePaneDown),
+        b(MenuAction::EqualizePanes.label(), MenuAction::EqualizePanes),
+        b(MenuAction::TogglePaneZoom.label(), MenuAction::TogglePaneZoom),
+        vec![NSMenuItem::separatorItem(mtm)],
         b("Show Previous Tab", MenuAction::PreviousTab),
         b("Show Next Tab", MenuAction::NextTab),
         vec![

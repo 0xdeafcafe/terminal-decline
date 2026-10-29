@@ -1513,3 +1513,216 @@ zle -N zle-line-pre-redraw td-line-pre-redraw
     assert_eq!(right["b"]["pane"]["cwd"], c.as_str());
     assert!(right["b"]["pane"].get("program").is_none(), "{right}");
 }
+
+/// A window saved with a pane zoomed reopens zoomed: that pane fills the
+/// window, the other runs hidden, and saved again it is still zoomed.
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_restore_keeps_a_zoom() {
+    if !have_metal() {
+        return;
+    }
+    let dir = TempDir::new("restore-zoom");
+    let sub = |name: &str| {
+        let p = dir.path().join(name);
+        std::fs::create_dir_all(&p).unwrap();
+        p.display().to_string()
+    };
+    let (a, b) = (sub("pane-a"), sub("pane-b"));
+    let layout = serde_json::json!({
+        "root": {"split": {"dir": "right", "ratio": 0.5,
+            "a": {"pane": {"cwd": a, "program": true}},
+            "b": {"pane": {"cwd": b, "program": true}}}},
+        "focused": 1,
+        "zoomed": 1
+    });
+    let restore = dir.path().join("restore.json");
+    let saved = serde_json::json!([{"cwd": b, "frame": [100.0, 100.0, 900.0, 600.0], "panes": layout}]);
+    std::fs::write(&restore, saved.to_string()).unwrap();
+    let saved_file = format!("{}.saved", dir.dump_file().display());
+    // Both panes run this; the zoomed one dumps, saves and quits.
+    let script = format!(
+        "echo \"in $(basename \"$PWD\")\"; if [ \"$(basename \"$PWD\")\" = pane-b ]; then \
+           {dump}{save}{wait_saved}{quit}fi; sleep 20",
+        dump = dump_and_wait(&dir),
+        save = osc("save"),
+        wait_saved = wait_for(&format!("[ -s '{saved_file}' ]")),
+        quit = osc("quit"),
+    );
+    let mut cmd = Command::new(APP);
+    cmd.arg("--restore")
+        .arg(&restore)
+        .args(["-e", "/bin/sh", "-c", &script])
+        .env("XDG_CONFIG_HOME", dir.config_home())
+        .env("DECLINE_TEST_DUMP", dir.dump_file())
+        .current_dir(dir.path());
+    let (status, _) = run(&mut cmd);
+    assert!(status.success(), "{status}");
+    let all = dumps(&dir);
+    let last = all.last().unwrap_or_else(|| panic!("no dumps"));
+    check_dump(last);
+    let p = panes(last);
+    assert_eq!((p.len(), num(last, "dividers")), (2, 0.0), "{last}");
+    assert_eq!(last["zoomed"], p[1]["id"], "{last}");
+    assert_eq!(
+        (p[0]["shown"].clone(), p[1]["shown"].clone()),
+        (false.into(), true.into()),
+        "{last}"
+    );
+    assert_eq!(p[1]["focused"], true, "{last}");
+    assert!(pane_screen(&p[1]).starts_with("in pane-b|"), "{}", pane_screen(&p[1]));
+    // The zoomed pane has the whole window; the hidden one the half it
+    // gets back.
+    assert_eq!(
+        (num(last, "cols"), num(last, "lines")),
+        (p[1]["cols"].as_f64().unwrap(), p[1]["lines"].as_f64().unwrap())
+    );
+    assert!(p[0]["cols"].as_u64().unwrap() < p[1]["cols"].as_u64().unwrap() / 2 + 2, "{last}");
+
+    let again: Value = serde_json::from_str(&std::fs::read_to_string(&saved_file).unwrap()).unwrap();
+    let again = &again[0]["panes"];
+    assert_eq!((again["focused"].clone(), again["zoomed"].clone()), (1.into(), 1.into()), "{again}");
+}
+
+/// The last `two L C` line pane 2's program printed: the size it was
+/// last told.
+fn last_told(p: &Value) -> String {
+    let screen = pane_screen(p);
+    let row = screen.lines().map(|r| r.trim_end_matches('|')).rfind(|r| r.starts_with("two "));
+    row.unwrap_or_else(|| panic!("no size in {screen}"))
+        .trim_start_matches("two ")
+        .trim()
+        .to_string()
+}
+
+/// Dividers drag, move a cell with Cmd+Ctrl+arrows and even out, and the
+/// focused pane zooms with Cmd+Shift+Enter: each pane's program is told
+/// its new size as its grid changes; a zoomed pane fills the window while
+/// the other is hidden but keeps running at its size; zooming again, or
+/// focusing the hidden pane, brings them all back.
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_drag_resize_equalize_and_zoom_panes() {
+    if !have_metal() {
+        return;
+    }
+    let dir = TempDir::new("drag-zoom");
+    let d = dir.path().display();
+    // The split prints its size whenever it changes, and keeps it in a file.
+    let zshrc = format!(
+        r#"PS1='%% '
+last=
+while :; do s=$(stty size); if [ "$s" != "$last" ]; then echo "two $s"; print -r -- "$s" > '{d}/size1.new'; mv '{d}/size1.new' '{d}/size1'; last=$s; fi; sleep 0.05; done
+"#
+    );
+    // `step ACTION`: do it, wait until the split's size changes, then let
+    // this pane print its own and dump.
+    let step = |action: &str| {
+        format!(
+            "p=$(cat '{d}/size1'); {action}{wait}echo \"one $(stty size)\"; {dump}",
+            wait = wait_for(&format!("[ \"$(cat '{d}/size1')\" != \"$p\" ]")),
+            dump = dump_and_wait(&dir),
+        )
+    };
+    let script = format!(
+        "full=$(stty size); echo \"full $full\"; {split}{wait_split}{drag}{right}{equalize}{zoom}{unzoom}{zoom_again}{focus0}{quit}sleep 20",
+        split = osc("split right"),
+        wait_split = wait_for(&format!("[ -s '{d}/size1' ]")),
+        drag = step(&osc("drag 0 300")),
+        // Cmd+Ctrl+→ in the split (focused): its divider one cell right.
+        right = step(&osc("key 124 cmd+ctrl")),
+        equalize = step(&osc("key 24 cmd+ctrl")),
+        zoom = step(&osc("key 36 cmd+shift")),
+        unzoom = step(&osc("zoom")),
+        zoom_again = step(&osc("zoom")),
+        focus0 = step(&osc("focus 0")),
+        quit = osc("quit"),
+    );
+    let mut cmd = Command::new(APP);
+    cmd.args(["-e", "/bin/sh", "-c", &script])
+        .env("XDG_CONFIG_HOME", dir.config_home())
+        .env("DECLINE_TEST_DUMP", dir.dump_file())
+        .current_dir(dir.path());
+    with_zsh(&mut cmd, &dir, &zshrc);
+    let (status, _) = run(&mut cmd);
+    assert!(status.success(), "{status}");
+    let all = dumps(&dir);
+    assert_eq!(all.len(), 7, "{all:?}");
+    for x in &all {
+        check_dump(x);
+    }
+    let rect = |p: &Value| -> Vec<i64> { p["rect"].as_array().unwrap().iter().map(|v| v.as_i64().unwrap()).collect() };
+    let grid = |p: &Value| format!("{} {}", p["lines"], p["cols"]);
+    // Each shown pane's program was told its grid.
+    let told = |d: &Value| {
+        let p = panes(d);
+        let one = pane_screen(&p[0])
+            .lines()
+            .map(|r| r.trim_end_matches('|'))
+            .rfind(|r| r.starts_with("one "))
+            .unwrap_or("")
+            .to_string();
+        if p[0]["shown"] == true {
+            assert_eq!(one.trim(), format!("one {}", grid(&p[0])), "{d}");
+        }
+        if p[1]["shown"] == true {
+            assert_eq!(last_told(&p[1]), grid(&p[1]), "{d}");
+        }
+    };
+    let (dragged, right, even, zoomed, back, again, focused) = (&all[0], &all[1], &all[2], &all[3], &all[4], &all[5], &all[6]);
+    let full = pane_screen(&panes(dragged)[0])
+        .split('|')
+        .next()
+        .unwrap()
+        .trim_start_matches("full ")
+        .trim()
+        .to_string();
+    let cell = num(dragged, "cell_width") as i64;
+
+    // Dragged: the first pane is 300 px wide, the second takes the rest.
+    let p = panes(dragged);
+    assert_eq!(rect(&p[0])[2], 300, "{dragged}");
+    assert!(rect(&p[1])[0] > 300, "{dragged}");
+    told(dragged);
+
+    // Cmd+Ctrl+→: one cell wider.
+    let p = panes(right);
+    assert_eq!(rect(&p[0])[2], 300 + cell, "{right}");
+    told(right);
+
+    // Cmd+Ctrl+=: even shares.
+    let p = panes(even);
+    assert!((rect(&p[0])[2] - rect(&p[1])[2]).abs() <= 1, "{even}");
+    told(even);
+    let even_grid = grid(&p[1]);
+
+    // Cmd+Shift+Enter: the split fills the window; the first pane is
+    // hidden and keeps the size it had.
+    let p = panes(zoomed);
+    assert_eq!(
+        (zoomed["zoomed"].clone(), num(zoomed, "dividers")),
+        (p[1]["id"].clone(), 0.0),
+        "{zoomed}"
+    );
+    assert_eq!(
+        (p[0]["shown"].clone(), p[1]["shown"].clone()),
+        (false.into(), true.into()),
+        "{zoomed}"
+    );
+    assert_eq!((rect(&p[1])[0], rect(&p[1])[1]), (0, 0), "{zoomed}");
+    assert_eq!(grid(&p[1]), full, "{zoomed}");
+    assert_eq!(grid(&p[0]), grid(&panes(even)[0]), "{zoomed}");
+    told(zoomed);
+
+    // Zoomed again: back as they were. Then zoomed, and focusing the
+    // hidden pane ended the zoom.
+    for d in [back, focused] {
+        let p = panes(d);
+        assert_eq!((d["zoomed"].clone(), num(d, "dividers")), (Value::Null, 1.0), "{d}");
+        assert!(p.iter().all(|p| p["shown"] == true), "{d}");
+        assert_eq!(grid(&p[1]), even_grid, "{d}");
+        told(d);
+    }
+    assert_eq!(again["zoomed"], panes(again)[1]["id"], "{again}");
+    assert_eq!(panes(focused)[0]["focused"], true, "{focused}");
+}

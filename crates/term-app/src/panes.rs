@@ -139,6 +139,48 @@ impl Layout {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TooSmall;
 
+/// `r` without `holes`: the rectangles left, not overlapping (for the
+/// I-beam's cursor rects around the dividers' grab zones, since
+/// overlapping cursor rects have no defined winner).
+pub fn subtract(r: PxRect, holes: &[PxRect]) -> Vec<PxRect> {
+    let mut out = vec![r];
+    for h in holes {
+        let mut next = Vec::with_capacity(out.len() + 3);
+        for r in out {
+            let (x0, y0) = (r.x.max(h.x), r.y.max(h.y));
+            let (x1, y1) = (r.right().min(h.right()), r.bottom().min(h.bottom()));
+            if x0 >= x1 || y0 >= y1 {
+                next.push(r);
+                continue;
+            }
+            // Above and below the hole, full width; then left and right of it.
+            let pieces = [
+                PxRect { h: y0 - r.y, ..r },
+                PxRect {
+                    y: y1,
+                    h: r.bottom() - y1,
+                    ..r
+                },
+                PxRect {
+                    y: y0,
+                    w: x0 - r.x,
+                    h: y1 - y0,
+                    ..r
+                },
+                PxRect {
+                    x: x1,
+                    y: y0,
+                    w: r.right() - x1,
+                    h: y1 - y0,
+                },
+            ];
+            next.extend(pieces.into_iter().filter(|p| p.w > 0 && p.h > 0));
+        }
+        out = next;
+    }
+    out
+}
+
 /// A window's panes: the tree, the pane with focus, and the zoomed one.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Panes {
@@ -510,8 +552,9 @@ impl Panes {
         }
     }
 
-    /// The layout as if not zoomed.
-    fn full_layout(&self, g: &Geometry) -> Layout {
+    /// The layout as if not zoomed: where the panes a zoom hides would
+    /// be.
+    pub fn full_layout(&self, g: &Geometry) -> Layout {
         let mut out = Layout::default();
         self.root.layout(g.bounds, g, true, &mut Vec::new(), &mut out);
         out
@@ -610,6 +653,26 @@ impl Panes {
     /// same width (or height), to within a divider.
     pub fn equalize(&mut self) {
         self.root.equalize(None);
+    }
+
+    /// Equal shares for the run of side-by-side (or stacked) panes the
+    /// split at `path` is part of, and the splits inside it (a
+    /// double-click on its divider). Returns whether there is such a
+    /// split.
+    pub fn equalize_at(&mut self, path: &SplitPath) -> bool {
+        let Some(Node::Split { dir, .. }) = self.root.node_at(&path.0) else {
+            return false;
+        };
+        let dir = *dir;
+        // Up while the parent splits the same way: they form one run.
+        let mut top = path.0.len();
+        while top > 0 && matches!(self.root.node_at(&path.0[..top - 1]), Some(Node::Split { dir: d, .. }) if *d == dir) {
+            top -= 1;
+        }
+        if let Some(node) = self.root.node_at(&path.0[..top]) {
+            node.equalize(None);
+        }
+        true
     }
 
     /// The pane next to the focused one in `dir`: of those across a
@@ -1027,6 +1090,47 @@ mod tests {
         // Window resizes keep the shares.
         let wide = geometry(1801, 600);
         assert_eq!(p.layout(&wide).rect(1).unwrap().w, 900);
+    }
+
+    #[test]
+    fn equalize_at_evens_out_one_run() {
+        let g = geometry(901, 601);
+        // [1 | [2 / [3 / 4]]]: the right column is a run of three.
+        let mut p = panes(
+            split(Dir::Right, leaf(1), split(Dir::Down, leaf(2), split(Dir::Down, leaf(3), leaf(4)))),
+            1,
+        );
+        p.drag(&SplitPath(vec![]), 200, &g);
+        p.drag(&SplitPath(vec![true]), 100, &g);
+        // The innermost divider of the column evens out the whole column.
+        assert!(p.equalize_at(&SplitPath(vec![true, true])));
+        let l = p.layout(&g);
+        let heights: Vec<i32> = [2, 3, 4].iter().map(|&id| l.rect(id).unwrap().h).collect();
+        assert!(heights.iter().all(|h| (h - 200).abs() <= 1), "{heights:?}");
+        assert_eq!(l.rect(1).unwrap().w, 200, "the outer split stays");
+        assert!(p.equalize_at(&SplitPath(vec![])));
+        assert_eq!(p.layout(&g).rect(1).unwrap().w, 450);
+        assert!(!p.equalize_at(&SplitPath(vec![false])), "a pane");
+        assert!(!p.equalize_at(&SplitPath(vec![true, true, true, true])));
+    }
+
+    #[test]
+    fn subtract_leaves_what_is_outside_the_holes() {
+        let r = rect(0, 0, 100, 50);
+        assert_eq!(subtract(r, &[]), [r]);
+        assert_eq!(subtract(r, &[rect(200, 0, 10, 10)]), [r]);
+        assert_eq!(subtract(r, &[rect(-5, -5, 200, 200)]), []);
+        // A grab zone down the right edge and one across the middle.
+        let left = subtract(r, &[rect(94, 0, 12, 50), rect(0, 20, 100, 6)]);
+        let area: i32 = left.iter().map(|p| p.w * p.h).sum();
+        assert_eq!(area, 94 * 50 - 94 * 6, "{left:?}");
+        for (i, a) in left.iter().enumerate() {
+            assert!(a.x >= 0 && a.right() <= 94 && !(a.y < 26 && a.bottom() > 20), "{a:?}");
+            for b in &left[i + 1..] {
+                let apart = a.right() <= b.x || b.right() <= a.x || a.bottom() <= b.y || b.bottom() <= a.y;
+                assert!(apart, "{a:?} {b:?}");
+            }
+        }
     }
 
     #[test]

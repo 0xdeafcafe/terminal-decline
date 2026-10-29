@@ -19,6 +19,13 @@
 //!   Nth pane (from 0, in the order the dump lists them), or as the pane
 //!   actions do;
 //! - `close-pane`: close the focused pane as Cmd+W does;
+//! - `drag N PX`: drag divider N (from 0, in tree order) so its line
+//!   starts at PX (window pixels: x for side-by-side panes, y for
+//!   stacked), as the mouse does;
+//! - `resize-pane left|right|up|down`: move the focused pane's divider
+//!   one cell, as Cmd+Ctrl+arrows do;
+//! - `equalize`: equal shares (Cmd+Ctrl+=);
+//! - `zoom`: zoom the focused pane, or end the zoom (Cmd+Shift+Enter);
 //! - `save`: write what a restart would save (every window, its tabs and
 //!   panes) to the dump file's path with `.saved` added, as JSON;
 //! - `settings`: Terminal Decline > Settings… (Cmd+,);
@@ -162,6 +169,18 @@ pub enum Control {
     Focus(FocusTarget),
     /// Shell > Close: the focused pane.
     ClosePane,
+    /// Drag divider `index` (tree order) so its line starts at `to`
+    /// pixels.
+    Drag {
+        index: usize,
+        to: i32,
+    },
+    /// Window > Move Divider ….
+    ResizePane(Direction),
+    /// Window > Equalize Panes.
+    Equalize,
+    /// Window > Zoom Pane.
+    Zoom,
     /// Write the windows as a restart saves them.
     Save,
     /// Terminal Decline > Settings….
@@ -222,6 +241,19 @@ impl Control {
             "front" => Control::Front,
             "close" => Control::Close,
             "close-pane" => Control::ClosePane,
+            "equalize" => Control::Equalize,
+            "zoom" => Control::Zoom,
+            "drag" => Control::Drag {
+                index: words.next()?.parse().ok()?,
+                to: words.next()?.parse().ok()?,
+            },
+            "resize-pane" => Control::ResizePane(match words.next()? {
+                "left" => Direction::Left,
+                "right" => Direction::Right,
+                "up" => Direction::Up,
+                "down" => Direction::Down,
+                _ => return None,
+            }),
             "save" => Control::Save,
             "split" => Control::Split(match words.next()? {
                 "right" => Dir::Right,
@@ -308,6 +340,8 @@ pub struct Dump {
     pub panes: Vec<PaneDump>,
     /// The dividers drawn between them.
     pub dividers: usize,
+    /// The zoomed pane's id, while one fills the window.
+    pub zoomed: Option<PaneId>,
     /// Frames the GPU has finished drawing.
     pub frames: u64,
     /// The last frame's glyph and rectangle (background, decoration)
@@ -337,6 +371,8 @@ pub struct PaneDump {
     pub cols: usize,
     pub lines: usize,
     pub focused: bool,
+    /// Shown: not hidden by another pane's zoom.
+    pub shown: bool,
     /// As [`Dump::screen`].
     pub screen: String,
 }
@@ -442,6 +478,16 @@ mod tests {
             ("front", Some(Control::Front)),
             ("close", Some(Control::Close)),
             ("close-pane", Some(Control::ClosePane)),
+            ("drag 0 300", Some(Control::Drag { index: 0, to: 300 })),
+            ("drag 1", None),
+            ("drag x 3", None),
+            ("resize-pane left", Some(Control::ResizePane(Direction::Left))),
+            ("resize-pane down", Some(Control::ResizePane(Direction::Down))),
+            ("resize-pane", None),
+            ("resize-pane 3", None),
+            ("equalize", Some(Control::Equalize)),
+            ("zoom", Some(Control::Zoom)),
+            ("zoom 1", None),
             ("save", Some(Control::Save)),
             ("split right", Some(Control::Split(Dir::Right))),
             ("split down", Some(Control::Split(Dir::Down))),

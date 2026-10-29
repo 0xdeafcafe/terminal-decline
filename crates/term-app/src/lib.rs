@@ -11,6 +11,7 @@ pub mod config;
 pub mod control;
 pub mod crash;
 pub mod desktop;
+mod divider_view;
 pub mod frame_policy;
 pub mod import;
 pub mod keybind;

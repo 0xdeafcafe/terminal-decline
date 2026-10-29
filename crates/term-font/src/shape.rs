@@ -418,8 +418,9 @@ impl Fonts {
         self.clusters.borrow().len()
     }
 
-    /// Empty the shaped-cluster cache; for measuring shaping cold.
-    #[doc(hidden)]
+    /// Empty the shaped-cluster cache: for measuring shaping cold, and
+    /// after a panic while building a frame, when what it holds can't be
+    /// trusted.
     pub fn clear_shaped_clusters(&self) {
         self.clusters.borrow_mut().clear();
     }

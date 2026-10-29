@@ -5,9 +5,11 @@
 //!
 //! What happens next depends on the thread. A panic while a session's
 //! reader thread parses output is caught there (see [`crate::session`]): that
-//! window shows an error and the others keep running. A panic on the main
-//! thread (AppKit) aborts once it is logged, since AppKit's state can't be
-//! trusted after it.
+//! window shows an error and the others keep running. A panic while the
+//! main thread builds one pane's frame is caught where that pane is built
+//! ([`contain`], splits design §7): that pane shows an error and the others
+//! keep drawing. Any other panic on the main thread (AppKit) aborts once it
+//! is logged, since AppKit's state can't be trusted after it.
 
 use std::backtrace::Backtrace;
 use std::cell::RefCell;
@@ -23,6 +25,24 @@ static LOG_DIR: OnceLock<PathBuf> = OnceLock::new();
 thread_local! {
     /// The crash log written for this thread's last panic.
     static LAST_LOG: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+    /// Inside [`contain`]: a panic here is caught, so the main thread
+    /// doesn't abort for it.
+    static CONTAINED: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Run `f`, catching a panic in it (logged as any other) instead of
+/// aborting on the main thread. Only for code whose state is thrown away
+/// or replaced after a panic, as a pane's frame build is.
+pub fn contain<R>(f: impl FnOnce() -> R) -> std::thread::Result<R> {
+    struct Leave;
+    impl Drop for Leave {
+        fn drop(&mut self) {
+            CONTAINED.set(CONTAINED.get() - 1);
+        }
+    }
+    CONTAINED.set(CONTAINED.get() + 1);
+    let _leave = Leave;
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
 }
 
 /// `~/Library/Logs/terminal-decline`.
@@ -48,7 +68,7 @@ pub fn install(dir: PathBuf, abort_on_main: bool) {
             oslog::fault(&summary);
             LAST_LOG.with(|l| *l.borrow_mut() = path);
             previous(info);
-            if abort_on_main && unsafe { libc::pthread_main_np() } != 0 {
+            if abort_on_main && CONTAINED.get() == 0 && unsafe { libc::pthread_main_np() } != 0 {
                 std::process::abort();
             }
         }));
@@ -201,6 +221,17 @@ mod tests {
     fn summary_is_the_report_before_the_backtrace() {
         let r = "Terminal Decline 1 hit a bug\nthread 'x' panicked at a.rs:1:2:\nboom\n\nbacktrace:\n  0: f\n";
         assert_eq!(first_lines(r), "Terminal Decline 1 hit a bug thread 'x' panicked at a.rs:1:2: boom");
+    }
+
+    #[test]
+    fn contain_catches_and_leaves() {
+        assert_eq!(contain(|| 3).ok(), Some(3));
+        let caught = contain(|| {
+            assert_eq!(CONTAINED.get(), 1);
+            panic!("contained in a unit test, ignore")
+        });
+        assert!(caught.is_err());
+        assert_eq!(CONTAINED.get(), 0);
     }
 
     #[test]

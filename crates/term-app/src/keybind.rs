@@ -28,10 +28,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::keys::{KeyEventType, KeyInput, flags};
 
-/// The app's actions that can be bound: its menu items. The pane actions
-/// that move dividers and zoom (`resize_pane_*`, `equalize_panes`,
-/// `toggle_pane_zoom`) have defaults but no menu items or handlers yet;
-/// until they do, their keys do what they did before.
+/// The app's actions that can be bound: its menu items.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum MenuAction {
     NewWindow,
@@ -163,9 +160,7 @@ impl MenuAction {
         }
     }
 
-    /// Its menu item, as the menus and the preferences show it. The
-    /// divider and zoom actions have no items yet; these are the names
-    /// they will have.
+    /// Its menu item, as the menus and the preferences show it.
     pub fn label(self) -> &'static str {
         match self {
             MenuAction::NewWindow => "New Window",

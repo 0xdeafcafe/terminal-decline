@@ -196,7 +196,9 @@ fn parse(term: &Mutex<Term>, bytes: &[u8], on_parsed: Option<&(dyn Fn() + Send)>
     }
 }
 
-fn replace_term(t: &mut Term) {
+/// Replace a terminal that may be half-updated by a panic with a fresh one
+/// of the same size and colours.
+pub(crate) fn replace_term(t: &mut Term) {
     let mut fresh = Term::new(t.state.cols(), t.state.lines(), 0);
     fresh.state.set_default_colors(t.state.default_colors());
     fresh.state.set_default_palette(t.state.default_palette());
@@ -224,6 +226,10 @@ pub struct Session {
     writer: Option<JoinHandle<()>>,
     /// Batches of output read so far.
     batches: Arc<AtomicU64>,
+    /// Stopped for a bug outside the reader ([`Session::stop_for_bug`]):
+    /// output is dropped unparsed, and the end of it holds the window
+    /// without a message of its own.
+    stopped: Arc<AtomicBool>,
     /// Where a command waiting for the prompt is sent
     /// ([`Session::type_at_prompt`]); taken when it is sent or given up
     /// on, or when something else is typed first.
@@ -259,6 +265,7 @@ impl Session {
                     reader: None,
                     writer: None,
                     batches: Arc::default(),
+                    stopped: Arc::default(),
                     at_prompt: Arc::default(),
                 });
             }
@@ -279,6 +286,8 @@ impl Session {
         let (term2, dirty2, tx2) = (term.clone(), dirty.clone(), tx.clone());
         let batches = Arc::new(AtomicU64::new(0));
         let batches2 = batches.clone();
+        let stopped = Arc::new(AtomicBool::new(false));
+        let stopped2 = stopped.clone();
         let Hooks {
             wake,
             on_exit,
@@ -296,7 +305,7 @@ impl Session {
                 let mut asked = Vec::new();
                 let mut found = Vec::new();
                 let parse = |bytes: &[u8]| -> Result<(), Bug> {
-                    if bytes.is_empty() {
+                    if bytes.is_empty() || stopped2.load(Ordering::Acquire) {
                         return Ok(());
                     }
                     let (replies, events) = parse(&term2, bytes, on_parsed.as_deref(), on_events.is_some())?;
@@ -340,6 +349,8 @@ impl Session {
                 }
             }));
             let outcome = match read {
+                // The message is in the terminal already.
+                Ok(Ok(())) if stopped2.load(Ordering::Acquire) => Outcome::Hold,
                 Ok(Ok(())) => finished(&term2, &child, started),
                 Ok(Err(Bug)) | Err(_) => {
                     child.signal(libc::SIGKILL, true);
@@ -366,6 +377,7 @@ impl Session {
             reader: Some(reader),
             writer: Some(writer),
             batches,
+            stopped,
             at_prompt: Arc::default(),
         })
     }
@@ -417,6 +429,18 @@ impl Session {
         if spawned.is_err() {
             *lock_slot(&self.at_prompt) = None;
         }
+    }
+
+    /// Terminal Decline hit a bug drawing this session (splits design §7):
+    /// its program is killed and its output from now on dropped, and the
+    /// session ends held, with whatever message the caller wrote.
+    pub fn stop_for_bug(&mut self) {
+        self.stopped.store(true, Ordering::Release);
+        if let Some(pty) = &self.pty {
+            pty.child().signal(libc::SIGKILL, true);
+        }
+        self.input = None;
+        *lock_slot(&self.at_prompt) = None;
     }
 
     pub fn term(&self) -> &Arc<Mutex<Term>> {
@@ -548,6 +572,12 @@ fn show_bug(term: &Mutex<Term>) {
     // After a panic outside `parse` the terminal may be half-updated too;
     // after one inside, this is already a fresh one.
     replace_term(&mut t);
+    write_bug(&mut t, log);
+}
+
+/// Write into `t` that Terminal Decline hit a bug and stopped this session,
+/// and where the crash log `log` is.
+pub(crate) fn write_bug(t: &mut Term, log: Option<std::path::PathBuf>) {
     let msg = match log {
         Some(p) => format!(
             "Terminal Decline hit a bug and stopped this session; details in {}",
@@ -555,8 +585,8 @@ fn show_bug(term: &Mutex<Term>) {
         ),
         None => "Terminal Decline hit a bug and stopped this session; details on stderr".into(),
     };
-    write_red(&mut t, &msg);
-    write_dim(&mut t, PRESS_ANY_KEY);
+    write_red(t, &msg);
+    write_dim(t, PRESS_ANY_KEY);
 }
 
 impl Drop for Session {

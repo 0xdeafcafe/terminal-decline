@@ -222,13 +222,15 @@ impl ToP3 {
     /// One straight (not premultiplied) RGB colour.
     #[inline]
     pub fn rgb(&self, [r, g, b]: [u8; 3]) -> [u8; 3] {
+        // In 64 bits: a profile's matrix may have entries up to 8 (32768
+        // in Q12), and 3 × 32768 × 65535 passes i32.
         let lin = [
-            self.decode[r as usize] as i32,
-            self.decode[g as usize] as i32,
-            self.decode[b as usize] as i32,
+            self.decode[r as usize] as i64,
+            self.decode[g as usize] as i64,
+            self.decode[b as usize] as i64,
         ];
         self.matrix.map(|row| {
-            let v = (row[0] * lin[0] + row[1] * lin[1] + row[2] * lin[2]) >> Q;
+            let v = (row[0] as i64 * lin[0] + row[1] as i64 * lin[1] + row[2] as i64 * lin[2]) >> Q;
             self.encode[(v.clamp(0, 65535) as u32 >> ENCODE_SHIFT) as usize]
         })
     }

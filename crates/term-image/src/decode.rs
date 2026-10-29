@@ -20,7 +20,8 @@
 //!     (it has no scaled decoding), plus its own working copy: the YUV
 //!     planes (lossy), an RGBA frame (lossless), or the canvas and a frame
 //!     (animated). Checked against the limit before decoding.
-//! - Each decoder's own allocations are capped by [`Options::transient`].
+//! - Each decoder's own allocations are capped by [`Options::transient`],
+//!   and so are the scaler's rows together with the decoder's.
 //! - Colour: converted to Display P3 from the image's ICC profile, or from
 //!   sRGB if it has none ([`Options::display_p3`]); gamma chunks are
 //!   ignored.
@@ -159,7 +160,14 @@ fn png(bytes: &[u8], into: &mut dyn PixelTarget, limits: &Options) -> Result<boo
     let mut own = None;
     let convert = colour_for(reader.info().icc_profile.as_deref(), limits, &mut own);
     let colour = convert.then(|| own.as_ref().unwrap_or(ToP3::srgb()));
-    let mut sink = Sink::new((sw, sh), 1, colour, into);
+    // The decoder's own rows: its output row, and the raw rows (this one
+    // and the last, for unfiltering) it keeps as it inflates.
+    let raw = reader.info().raw_row_length();
+    let held = reader
+        .output_line_size(sw)
+        .ok_or(DecodeError::TooLarge)?
+        .saturating_add(raw.saturating_mul(2));
+    let mut sink = Sink::new((sw, sh), 1, colour, into, held, limits)?;
     if interlaced {
         let size = reader.output_buffer_size().ok_or(DecodeError::TooLarge)?;
         if size > limits.transient {
@@ -220,7 +228,7 @@ fn jpeg(bytes: &[u8], p: &Probe, into: &mut dyn PixelTarget, limits: &Options) -
     let mut own = None;
     let convert = colour_for(icc.as_deref(), limits, &mut own);
     let colour = convert.then(|| own.as_ref().unwrap_or(ToP3::srgb()));
-    let mut sink = Sink::new((sw, sh), p.orientation, colour, into);
+    let mut sink = Sink::new((sw, sh), p.orientation, colour, into, estimate, limits)?;
     for row in data.chunks_exact(line).take(sh as usize) {
         sink.row(layout, row);
     }
@@ -260,8 +268,10 @@ fn gif(bytes: &[u8], into: &mut dyn PixelTarget, limits: &Options) -> Result<boo
     }
     // The logical screen, transparent where the first frame doesn't cover it.
     let colour = limits.display_p3.then(ToP3::srgb);
-    let mut sink = Sink::new((sw, sh), 1, colour, into);
-    let mut row = vec![0u8; sw as usize * 4];
+    let row_bytes = sw as usize * 4;
+    let held = frame.buffer.len() + row_bytes;
+    let mut sink = Sink::new((sw, sh), 1, colour, into, held, limits)?;
+    let mut row = vec![0u8; row_bytes];
     for y in 0..sh {
         row.fill(0);
         if y >= fy && y < fy + fh {
@@ -316,7 +326,7 @@ fn webp(bytes: &[u8], into: &mut dyn PixelTarget, limits: &Options) -> Result<bo
     let mut own = None;
     let convert = colour_for(icc.as_deref(), limits, &mut own);
     let colour = convert.then(|| own.as_ref().unwrap_or(ToP3::srgb()));
-    let mut sink = Sink::new((sw, sh), 1, colour, into);
+    let mut sink = Sink::new((sw, sh), 1, colour, into, out, limits)?;
     for row in buf.chunks_exact(sw as usize * px).take(sh as usize) {
         sink.row(layout, row);
     }
@@ -370,9 +380,10 @@ struct Sink<'a> {
     cols: Vec<(u32, u32)>,
     /// Premultiplied BGRA of the source row being added.
     line: Vec<u8>,
-    /// Sums for the scaled row being built.
-    acc: Vec<u32>,
-    acc_rows: u32,
+    /// Sums for the scaled row being built: 64-bit, as a span can hold
+    /// more than 2³² / 255 source pixels (a 17,000,000 × 1 image).
+    acc: Vec<u64>,
+    acc_rows: u64,
     /// Next source row, next scaled row.
     sy: u32,
     ty: u32,
@@ -380,14 +391,30 @@ struct Sink<'a> {
 }
 
 impl<'a> Sink<'a> {
-    fn new((sw, sh): (u32, u32), orientation: u8, colour: Option<&'a ToP3>, target: &'a mut dyn PixelTarget) -> Sink<'a> {
+    /// A sink for a `sw` × `sh` source, or [`DecodeError::TooLarge`] if
+    /// its rows and the `held` bytes the decoder keeps for its own would
+    /// pass [`Options::transient`]: a source row is 4 bytes a pixel here
+    /// whatever the decoder's own size, so a very wide grey image could
+    /// otherwise take 4 × the decoder's row past the cap.
+    fn new(
+        (sw, sh): (u32, u32),
+        orientation: u8,
+        colour: Option<&'a ToP3>,
+        target: &'a mut dyn PixelTarget,
+        held: usize,
+        limits: &Options,
+    ) -> Result<Sink<'a>, DecodeError> {
         let (tw, th) = if orientation >= 5 {
             (target.height(), target.width())
         } else {
             (target.width(), target.height())
         };
+        let own = sw as u64 * 4 + tw as u64 * (4 * size_of::<u64>() as u64 + size_of::<(u32, u32)>() as u64);
+        if (held as u64).saturating_add(own) > limits.transient as u64 {
+            return Err(DecodeError::TooLarge);
+        }
         let cols = (0..tw).map(|x| span(x, sw, tw)).collect();
-        Sink {
+        Ok(Sink {
             target,
             colour,
             orientation,
@@ -401,7 +428,7 @@ impl<'a> Sink<'a> {
             sy: 0,
             ty: 0,
             opaque: true,
-        }
+        })
     }
 
     fn row(&mut self, layout: Src, src: &[u8]) {
@@ -448,7 +475,7 @@ impl<'a> Sink<'a> {
             let a = &mut self.acc[x * 4..x * 4 + 4];
             for px in self.line[x0 as usize * 4..x1 as usize * 4].as_chunks::<4>().0 {
                 for c in 0..4 {
-                    a[c] += px[c] as u32;
+                    a[c] += px[c] as u64;
                 }
             }
         }
@@ -462,7 +489,7 @@ impl<'a> Sink<'a> {
         let rows = self.acc_rows.max(1);
         let bytes = self.target.bytes_mut();
         for (x, &(x0, x1)) in self.cols.iter().enumerate() {
-            let n = rows * (x1 - x0).max(1);
+            let n = rows * (x1 - x0).max(1) as u64;
             let a = &mut self.acc[x * 4..x * 4 + 4];
             let px = [0, 1, 2, 3].map(|c| ((a[c] + n / 2) / n) as u8);
             a.fill(0);

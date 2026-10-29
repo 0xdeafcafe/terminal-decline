@@ -3,8 +3,9 @@
 //! pane of the window in one frame (splits design §1). The panes are
 //! [`PaneView`]s laid over it, which take the keys, the input method and
 //! the mouse; each owns a session (program, PTY and terminal). Panes are
-//! split, closed and focused here; the window view draws the 1 pt
-//! dividers between them and sets the cursor over them.
+//! split, closed, focused, resized and zoomed here; the window view draws
+//! the 1 pt dividers between them and sets the cursor over them, and a
+//! [`DividerView`] over each takes the drags that move it.
 
 use std::cell::{Cell as StdCell, RefCell};
 use std::collections::{HashMap, VecDeque};
@@ -20,8 +21,8 @@ use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSAlert, NSAlertFirstButtonReturn, NSApplication, NSBeep, NSCursor, NSEvent, NSEventMask, NSEventModifierFlags, NSModalResponse,
-    NSPasteboard, NSPasteboardTypeString, NSResponder, NSView, NSWindow, NSWindowDelegate,
+    NSAlert, NSAlertFirstButtonReturn, NSApplication, NSBeep, NSCursor, NSEvent, NSEventMask, NSEventModifierFlags, NSMenuItem,
+    NSModalResponse, NSPasteboard, NSPasteboardTypeString, NSResponder, NSView, NSWindow, NSWindowDelegate, NSWindowOrderingMode,
 };
 use objc2_foundation::{
     NSArray, NSKeyValueObservingOptions, NSNotification, NSObjectNSKeyValueObserverRegistration, NSObjectProtocol, NSPoint, NSRect,
@@ -35,13 +36,14 @@ use term_render::{FrameInput, PaneDraw, PaneRender, RectInstance, Renderer, Rgba
 
 use crate::config::Config;
 use crate::control::{self, Control, Dump, FocusTarget, PaneDump};
+use crate::divider_view::DividerView;
 use crate::frame_policy::{self, Decision, ECHO_WAIT, PaneFrame, WindowTick};
 use crate::keybind::{self, Keybinds};
 use crate::keys::{KeyInput, KeyModes, KeysDown};
 use crate::latency::{self, FrameKeys, Latency};
 use crate::layout::{self, CellSize, Padding};
 use crate::pane_view::PaneView;
-use crate::panes::{Dir, Direction, Geometry, PaneId, Panes, PxRect};
+use crate::panes::{Dir, Direction, Divider, Geometry, PaneId, Panes, PxRect, SplitPath};
 use crate::reload::{SavedPane, SavedPanes};
 use crate::running::Closing;
 use crate::select::{Block, Gesture};
@@ -153,6 +155,10 @@ pub(crate) struct Pane {
     /// It runs the window's own program (the first pane, or one restored
     /// as such), not the user's shell as a split does.
     program: bool,
+    /// The size its program was last told (columns, lines and cell
+    /// pixels): the PTY is resized only when that changes, not for every
+    /// pixel of a divider drag or window resize.
+    told: Option<(u16, u16, u16, u16)>,
     /// It runs the preferences (the Settings tab's first pane): not a
     /// running program for `confirm_close`, the only pane whose chord
     /// recording is honoured, and titled "Settings".
@@ -162,7 +168,27 @@ pub(crate) struct Pane {
     /// The left click that focused it: it goes nowhere else (no
     /// selection, no mouse report) until the button comes up.
     pub(crate) swallow_click: bool,
+    /// Times its frame was built (for the test dumps).
+    builds: u64,
+    /// Building its frame panicked (splits design §7).
+    crash: Option<Crash>,
+    /// The test-only `build-panic`: its next build panics, taking the
+    /// snapshot (`Some(true)`) or building from it.
+    panic_next: Option<bool>,
 }
+
+/// Building a pane's frame panicked: when last, how many times, and
+/// whether it has stopped being built.
+#[derive(Clone, Copy)]
+struct Crash {
+    at: Instant,
+    count: u32,
+    stopped: bool,
+}
+
+/// A second panic building the same pane within this long stops it being
+/// built, so a panic doesn't repeat every frame.
+const CRASH_REPEAT: Duration = Duration::from_secs(10);
 
 pub(crate) struct State {
     pub(crate) win: Win,
@@ -170,6 +196,21 @@ pub(crate) struct State {
     pub(crate) panes: HashMap<PaneId, Pane>,
     /// The lines between the panes, as drawn (window pixels).
     dividers: Vec<RectInstance>,
+    /// The dividers as laid out: their lines, grab zones and splits.
+    grabs: Vec<Divider>,
+    /// A view over each divider's grab zone, in the same order.
+    divider_views: Vec<Retained<DividerView>>,
+    /// The divider being dragged with the mouse.
+    dragging: Option<Drag>,
+}
+
+/// A divider drag under way: its split, which way it moves, and where in
+/// its grab zone the mouse took it (pixels from the line's start), so
+/// the line keeps that distance from the pointer.
+struct Drag {
+    path: SplitPath,
+    dir: Dir,
+    offset: i32,
 }
 
 impl State {
@@ -422,32 +463,92 @@ define_class!(
             self.focus_in_order(false);
         }
 
-        /// The I-beam over every pane, below the title bar. Set here for
-        /// all of them, since overlapping cursor rects of sibling views
-        /// have no defined winner.
+        /// Window > Move Divider Left (Cmd+Ctrl+←), and the other three.
+        #[unsafe(method(resizePaneLeft:))]
+        fn resize_pane_left(&self, _sender: Option<&AnyObject>) {
+            self.resize_pane(Direction::Left);
+        }
+
+        #[unsafe(method(resizePaneRight:))]
+        fn resize_pane_right(&self, _sender: Option<&AnyObject>) {
+            self.resize_pane(Direction::Right);
+        }
+
+        #[unsafe(method(resizePaneUp:))]
+        fn resize_pane_up(&self, _sender: Option<&AnyObject>) {
+            self.resize_pane(Direction::Up);
+        }
+
+        #[unsafe(method(resizePaneDown:))]
+        fn resize_pane_down(&self, _sender: Option<&AnyObject>) {
+            self.resize_pane(Direction::Down);
+        }
+
+        /// Window > Equalize Panes (Cmd+Ctrl+=).
+        #[unsafe(method(equalizePanes:))]
+        fn equalize_panes(&self, _sender: Option<&AnyObject>) {
+            self.equalize();
+        }
+
+        /// Window > Zoom Pane (Cmd+Shift+Enter): the focused pane fills the
+        /// window, or the zoom ends.
+        #[unsafe(method(togglePaneZoom:))]
+        fn toggle_pane_zoom(&self, _sender: Option<&AnyObject>) {
+            self.toggle_zoom();
+        }
+
+        /// Zoom Pane has a checkmark while a pane is zoomed. Every item
+        /// sent here stays enabled (pane items beep when they can't act).
+        #[unsafe(method(validateMenuItem:))]
+        fn validate_menu_item(&self, item: &NSMenuItem) -> bool {
+            if item.action() == Some(sel!(togglePaneZoom:)) {
+                let zoomed = self.with_state(|st| st.tree.zoomed().is_some()).unwrap_or(false);
+                item.setState(if zoomed {
+                    objc2_app_kit::NSControlStateValueOn
+                } else {
+                    objc2_app_kit::NSControlStateValueOff
+                });
+            }
+            true
+        }
+
+        /// The I-beam over every pane below the title bar, and a resize
+        /// cursor over each divider's grab zone. Set here for all of them,
+        /// since overlapping cursor rects (of sibling views, or of one
+        /// view) have no defined winner: the I-beam's rects leave the grab
+        /// zones out.
         #[unsafe(method(resetCursorRects))]
         fn reset_cursor_rects(&self) {
             let titlebar = self.titlebar_height();
             let rects = self.with_state(|st| {
                 let scale = st.win.scale;
-                let shown = st.shown();
-                shown
+                let inset = (titlebar * scale).round() as i32;
+                let holes: Vec<PxRect> = st.grabs.iter().map(|d| d.grab).collect();
+                let beams: Vec<NSRect> = st
+                    .shown()
                     .iter()
                     .filter_map(|id| st.panes.get(id))
-                    .map(|p| {
-                        let mut r = points(p.rect, scale);
-                        if p.rect.y == 0 {
-                            let cut = titlebar.min(r.size.height);
-                            r.origin.y += cut;
-                            r.size.height -= cut;
+                    .flat_map(|p| {
+                        let mut r = p.rect;
+                        if r.y == 0 {
+                            let cut = inset.min(r.h);
+                            r.y += cut;
+                            r.h -= cut;
                         }
-                        r
+                        crate::panes::subtract(r, &holes)
                     })
-                    .collect::<Vec<_>>()
+                    .map(|r| points(r, scale))
+                    .collect();
+                let grabs: Vec<(NSRect, Dir)> = st.grabs.iter().map(|d| (points(d.grab, scale), d.dir)).collect();
+                (beams, grabs)
             });
+            let Some((beams, grabs)) = rects else { return };
             let cursor = NSCursor::IBeamCursor();
-            for r in rects.unwrap_or_default() {
+            for r in beams {
                 self.addCursorRect_cursor(r, &cursor);
+            }
+            for (r, dir) in grabs {
+                self.addCursorRect_cursor(r, &resize_cursor(dir));
             }
         }
     }
@@ -547,7 +648,7 @@ impl WindowView {
         let tree = Panes::new();
         let size = view.frame().size;
         let pane = PaneView::new(mtm, &view, tree.focused(), NSRect::new(NSPoint::new(0.0, 0.0), size));
-        view.addSubview(&pane);
+        view.add_pane_view(&pane);
         *view.ivars().first.borrow_mut() = Some((tree, pane));
         VIEWS.with(|v| v.borrow_mut().insert(id, Weak::from_retained(&view)));
         view
@@ -615,17 +716,15 @@ impl WindowView {
             Some(saved) => {
                 first_view.removeFromSuperview();
                 let (mut tree, list) = Panes::restore(saved);
-                // Zooming comes with dividers that drag (B2.3c).
-                if tree.zoomed().is_some() {
-                    tree.toggle_zoom();
-                }
                 let g = geometry_of(&config, m, scale, size, titlebar);
-                let laid = tree.layout(&g);
+                // Panes a zoom hides are opened at the size they have
+                // once it ends.
+                let laid = tree.full_layout(&g);
                 let mut failed = None;
                 for (pane_id, saved) in list {
                     let rect = laid.rect(pane_id).unwrap_or_default();
                     let view = PaneView::new(mtm, self, pane_id, points(rect, scale));
-                    self.addSubview(&view);
+                    self.add_pane_view(&view);
                     let mut command = if saved.program {
                         launch.command.clone()
                     } else {
@@ -701,6 +800,9 @@ impl WindowView {
             tree,
             panes,
             dividers: Vec::new(),
+            grabs: Vec::new(),
+            divider_views: Vec::new(),
+            dragging: None,
         });
         if let Some(window) = self.window() {
             unsafe {
@@ -1012,13 +1114,19 @@ impl WindowView {
         }
         let mut clipboard = None;
         let mut blinking = Vec::new();
+        // The panes whose snapshots were taken, shaped and built once the
+        // terminals are unlocked (ligatures design §5).
+        let mut snapped = Vec::new();
+        // The panes whose snapshot or build panicked (splits design §7).
+        let mut crashed = Vec::new();
         for ((id, frame, t), (_, term)) in ticks.iter_mut().zip(&terms) {
             let (id, frame) = (*id, *frame);
             let p = panes.get_mut(&id).expect("shown pane");
             // A pane built against emptied glyph textures or old fonts is
             // built again before it is drawn, held or not.
             let build = frame == PaneFrame::Build || !win.renderer.is_current(&p.render);
-            if !build {
+            // A pane whose builds kept panicking shows its background only.
+            if !build || p.crash.is_some_and(|c| c.stopped) {
                 continue;
             }
             let t = t.get_or_insert_with(|| crate::session::lock(term));
@@ -1037,19 +1145,92 @@ impl WindowView {
                 p.theme = crate::config::program_theme(&win.theme, &t.state);
             }
             let pad = pane_padding(&win.config, titlebar, win.scale, p.rect);
+            let (padding, cursor_on) = ((pad.x, pad.top), p.cursor_on || !focused);
             let input = FrameInput {
                 theme: p.theme.as_ref().unwrap_or(&win.theme),
                 metrics: win.renderer.metrics(),
-                padding: (pad.x, pad.top),
-                cursor_on: p.cursor_on || !focused,
+                padding,
+                cursor_on,
                 focused,
                 preedit: Some(p.marked.as_str()),
             };
-            win.renderer.build_pane(&mut p.render, &mut t.state, &input);
+            p.builds += 1;
+            // A panic taking the snapshot stays in this pane. The
+            // terminal's guard is held outside the catch, and a terminal
+            // that may be half-updated is replaced before it is released,
+            // so its reader never parses into it.
+            let panic_snapshot = p.panic_next.take_if(|snapshot| *snapshot).is_some();
+            let snap = crate::crash::contain(|| {
+                test_build_panic(panic_snapshot);
+                win.renderer.snapshot_pane(&mut p.render, &mut t.state, &input)
+            });
+            if snap.is_err() {
+                crate::session::replace_term(t);
+                p.render.forget();
+                crashed.push(id);
+                continue;
+            }
+            snapped.push((id, padding, cursor_on, focused));
         }
         // With the terminals still locked: the keys whose output this frame shows.
         let timed = latency::get().map(|l| (l, l.take_for_frame(self.ivars().id, rate)));
         drop(ticks);
+        // Shaping and building, unlocked. Rarely the glyph textures were
+        // emptied since a pane's snapshot (by another pane's build): that
+        // pane is built again with its terminal locked. A panic in either
+        // stays in its pane.
+        for (id, padding, cursor_on, focused) in snapped {
+            let p = panes.get_mut(&id).expect("shown pane");
+            // The input the snapshot was taken with.
+            let input = FrameInput {
+                theme: &win.theme,
+                metrics: win.renderer.metrics(),
+                padding,
+                cursor_on,
+                focused,
+                preedit: Some(p.marked.as_str()),
+            };
+            let panic_now = p.panic_next.take().is_some();
+            // Unlocked, the terminal is untouched by a panic here.
+            let built = crate::crash::contain(|| {
+                test_build_panic(panic_now);
+                win.renderer.build_from_snapshot(&mut p.render, &input)
+            });
+            let ok = match built {
+                Ok(true) => true,
+                Ok(false) => {
+                    let mut t = crate::session::lock(p.session.term());
+                    let built = crate::crash::contain(|| win.renderer.build_pane(&mut p.render, &mut t.state, &input));
+                    if built.is_err() {
+                        crate::session::replace_term(&mut t);
+                    }
+                    built.is_ok()
+                }
+                Err(_) => false,
+            };
+            if !ok {
+                p.render.forget();
+                crashed.push(id);
+            }
+        }
+        if !crashed.is_empty() {
+            crash_panes(win, panes, &crashed);
+        }
+        // Panes that stopped being built fill their rectangle with the
+        // background, drawn with the dividers.
+        let stopped: Vec<RectInstance> = shown
+            .iter()
+            .filter_map(|id| panes.get(id))
+            .filter(|p| p.crash.is_some_and(|c| c.stopped))
+            .map(|p| rect_instance(p.rect, win.theme.background))
+            .collect();
+        let lines: Vec<RectInstance>;
+        let dividers = if stopped.is_empty() {
+            dividers
+        } else {
+            lines = [stopped, dividers.to_vec()].concat();
+            &lines
+        };
         let (w, h) = {
             let s = self.ivars().layer.drawableSize();
             (s.width as u32, s.height as u32)
@@ -1154,10 +1335,24 @@ impl WindowView {
         geometry_of(&st.win.config, st.win.renderer.metrics(), st.win.scale, self.frame().size, titlebar)
     }
 
-    /// Lay out the panes for the view's size, title bar and fonts: each
-    /// pane view gets its rectangle and each session its grid.
+    /// Lay out the panes for the view's size, title bar and fonts, and
+    /// draw them at once.
     fn resize(&self) {
-        let Some(window) = self.window() else { return };
+        if self.lay_out() {
+            // Draw now so live resizing doesn't show a stretched old frame.
+            self.draw();
+        }
+    }
+
+    /// Lay out the panes for the view's size, title bar, fonts and shares:
+    /// each shown pane view gets its rectangle (panes a zoom hides are
+    /// hidden, keeping theirs) and each session its grid, its program told
+    /// only when the grid or cell size changed; each divider gets its view.
+    /// A pane that moved or changed size is drawn again. False before the
+    /// view is in a window.
+    fn lay_out(&self) -> bool {
+        let Some(window) = self.window() else { return false };
+        let mtm = MainThreadMarker::from(self);
         let titlebar = self.titlebar_height();
         let min = self.with_state(|st| {
             st.win.scale = window.backingScaleFactor();
@@ -1169,11 +1364,21 @@ impl WindowView {
             layer.setDrawableSize(NSSize::new((size.width * scale).round(), (size.height * scale).round()));
             let layout = st.tree.layout(&self.geometry(st, titlebar));
             let m = st.win.renderer.metrics();
-            for (id, rect) in layout.panes {
+            let alone = layout.panes.len() == 1;
+            for (id, p) in st.panes.iter_mut() {
+                let shown = layout.rect(*id).is_some();
+                if p.view.isHidden() == shown {
+                    p.view.setHidden(!shown);
+                }
+            }
+            for &(id, rect) in &layout.panes {
                 let Some(p) = st.panes.get_mut(&id) else { continue };
-                p.rect = rect;
+                if p.rect != rect {
+                    p.rect = rect;
+                    p.session.mark_dirty();
+                }
                 // One pane fills the view, in points as the view has them.
-                let frame = if st.tree.len() == 1 {
+                let frame = if alone {
                     NSRect::new(NSPoint::new(0.0, 0.0), size)
                 } else {
                     points(rect, scale)
@@ -1181,20 +1386,32 @@ impl WindowView {
                 p.view.setFrame(frame);
                 let pad = pane_padding(&st.win.config, titlebar, scale, rect);
                 let (cols, lines) = layout::grid_size((frame.size.width, frame.size.height), scale, m.into(), pad);
-                let _ = p.session.resize(pty_size(cols, lines, m));
+                let size = pty_size(cols, lines, m);
+                if p.told != Some(told(&size)) {
+                    p.told = Some(told(&size));
+                    let _ = p.session.resize(size);
+                }
+            }
+            // A view over each divider, above the panes.
+            while st.divider_views.len() > layout.dividers.len() {
+                if let Some(v) = st.divider_views.pop() {
+                    v.removeFromSuperview();
+                }
+            }
+            for (i, d) in layout.dividers.iter().enumerate() {
+                let frame = points(d.grab, scale);
+                match st.divider_views.get(i) {
+                    Some(v) => v.setFrame(frame),
+                    None => {
+                        let v = DividerView::new(mtm, self, i, frame);
+                        self.addSubview(&v);
+                        st.divider_views.push(v);
+                    }
+                }
             }
             let colour = st.win.divider;
-            st.dividers = layout
-                .dividers
-                .iter()
-                .map(|d| RectInstance {
-                    x: d.line.x.clamp(0, i16::MAX as i32) as i16,
-                    y: d.line.y.clamp(0, i16::MAX as i32) as i16,
-                    w: d.line.w.clamp(0, u16::MAX as i32) as u16,
-                    h: d.line.h.clamp(0, u16::MAX as i32) as u16,
-                    color: colour,
-                })
-                .collect();
+            st.dividers = layout.dividers.iter().map(|d| rect_instance(d.line, colour)).collect();
+            st.grabs = layout.dividers;
             // With several panes the window can't be made smaller than
             // they all fit at their minimum.
             let base = *st.win.base_min.get_or_insert_with(|| window.contentMinSize());
@@ -1213,8 +1430,13 @@ impl WindowView {
             window.setContentMinSize(min);
         }
         window.invalidateCursorRectsForView(self);
-        // Draw now so live resizing doesn't show a stretched old frame.
-        self.draw();
+        true
+    }
+
+    /// Add a pane's view below the dividers' views (and below the other
+    /// panes', which it doesn't overlap), so the dividers win hit testing.
+    fn add_pane_view(&self, view: &PaneView) {
+        self.addSubview_positioned_relativeTo(view, NSWindowOrderingMode::Below, None);
     }
 
     fn reload_fonts(&self, size: Option<f64>) {
@@ -1372,11 +1594,13 @@ impl WindowView {
         match outcome {
             Outcome::Closed => self.close_pane(pane),
             Outcome::Hold => {
-                // The session wrote why into the terminal.
+                // The session wrote why into the terminal. A pane stopped
+                // for a crash while drawing is held already.
                 let testing = self.with_pane(pane, |win, p| {
+                    let crashed = p.crash.is_some();
                     p.held = true;
                     p.session.mark_dirty();
-                    win.test.is_some()
+                    win.test.is_some() && !crashed
                 });
                 self.request_redraw(pane);
                 if testing == Some(true) {
@@ -1445,7 +1669,7 @@ impl WindowView {
             NSBeep();
             return;
         };
-        self.addSubview(&view);
+        self.add_pane_view(&view);
         self.resize();
         if let Some(window) = self.window() {
             window.makeFirstResponder(Some(&view));
@@ -1552,8 +1776,14 @@ impl WindowView {
     }
 
     /// Give pane `pane` the keys. Its view becoming first responder does
-    /// the rest ([`Self::pane_focused`]).
+    /// the rest ([`Self::pane_focused`]). A pane hidden by a zoom ends the
+    /// zoom first, so a shown view gets the keys.
     pub(crate) fn focus_pane(&self, pane: PaneId) {
+        let unzoom =
+            self.with_state(|st| st.panes.contains_key(&pane) && st.tree.zoomed().is_some_and(|z| z != pane) && st.tree.toggle_zoom());
+        if unzoom == Some(true) {
+            self.resize();
+        }
         let view = self.with_state(|st| st.panes.get(&pane).map(|p| p.view.clone())).flatten();
         if let (Some(view), Some(window)) = (view, self.window()) {
             window.makeFirstResponder(Some(&view));
@@ -1566,8 +1796,11 @@ impl WindowView {
     /// title becomes the window's. `clicked`: a left click in it did this,
     /// which goes nowhere else.
     pub(crate) fn pane_focused(&self, pane: PaneId, clicked: bool) {
+        let mut unzoomed = false;
         let got = self.with_state(|st| {
+            let zoomed = st.tree.zoomed();
             st.tree.focus(pane);
+            unzoomed = zoomed != st.tree.zoomed();
             let key = st.win.focused;
             let fixed = st.win.config.title.clone();
             let p = st.panes.get_mut(&pane)?;
@@ -1582,6 +1815,11 @@ impl WindowView {
             Some((report, p.view.clone(), title))
         });
         let Some(Some((report, view, title))) = got else { return };
+        if unzoomed {
+            // Focusing a pane hidden by a zoom ended it.
+            self.resize();
+            self.redraw_all();
+        }
         if report {
             view.send_raw(b"\x1b[I".to_vec());
         }
@@ -1589,6 +1827,144 @@ impl WindowView {
             window.setTitle(&NSString::from_str(&title));
         }
         self.request_redraw(pane);
+    }
+
+    /// Window > Move Divider …: the divider nearest the focused pane that
+    /// runs across `dir` moves one cell that way. Beeps when there is none,
+    /// it can't move further, or a pane is zoomed.
+    pub(crate) fn resize_pane(&self, dir: Direction) {
+        let titlebar = self.titlebar_height();
+        let moved = self.with_state(|st| {
+            if st.tree.zoomed().is_some() {
+                return false;
+            }
+            let m = st.win.renderer.metrics();
+            let by = match dir {
+                Direction::Left | Direction::Right => m.cell_width,
+                Direction::Up | Direction::Down => m.cell_height,
+            } as i32;
+            let g = self.geometry(st, titlebar);
+            st.tree.resize(dir, by, &g)
+        });
+        match moved {
+            Some(true) => self.resize(),
+            _ => NSBeep(),
+        }
+    }
+
+    /// Window > Equalize Panes: every run of side-by-side or stacked
+    /// panes gets equal shares. Beeps with one pane.
+    pub(crate) fn equalize(&self) {
+        let done = self.with_state(|st| {
+            let several = st.tree.len() > 1;
+            if several {
+                st.tree.equalize();
+            }
+            several
+        });
+        match done {
+            Some(true) => self.resize(),
+            _ => NSBeep(),
+        }
+    }
+
+    /// Window > Zoom Pane: the focused pane fills the window, the others
+    /// hidden but still running; again, they all come back. Beeps with one
+    /// pane.
+    pub(crate) fn toggle_zoom(&self) {
+        let done = self.with_state(|st| {
+            st.dragging = None;
+            st.tree.toggle_zoom()
+        });
+        if done != Some(true) {
+            NSBeep();
+            return;
+        }
+        self.resize();
+        // Panes coming back show what changed while they were hidden.
+        self.redraw_all();
+    }
+
+    /// The mouse went down on divider `index` at `at` (the window view's
+    /// points): a drag starts, keeping where in the grab zone it was
+    /// taken; a double-click evens out the panes it runs between instead.
+    pub(crate) fn divider_down(&self, index: usize, at: NSPoint, clicks: isize) {
+        let equalized = self.with_state(|st| {
+            let d = st.grabs.get(index)?;
+            if clicks >= 2 {
+                let path = d.path.clone();
+                st.dragging = None;
+                return Some(st.tree.equalize_at(&path));
+            }
+            let (pos, start) = match d.dir {
+                Dir::Right => ((at.x * st.win.scale).round() as i32, d.line.x),
+                Dir::Down => ((at.y * st.win.scale).round() as i32, d.line.y),
+            };
+            st.dragging = Some(Drag {
+                path: d.path.clone(),
+                dir: d.dir,
+                offset: pos - start,
+            });
+            Some(false)
+        });
+        if equalized == Some(Some(true)) {
+            self.resize();
+        }
+        if let Some(Some(dir)) = self.with_state(|st| st.grabs.get(index).map(|d| d.dir)) {
+            resize_cursor(dir).set();
+        }
+    }
+
+    /// The mouse dragged a divider to `at` (the window view's points): its
+    /// split moves there (clamped so no pane gets under its minimum), the
+    /// panes are laid out and their programs told of new grid sizes, and
+    /// the next display-link tick draws it at the input rate (120 Hz).
+    pub(crate) fn divider_dragged(&self, at: NSPoint) {
+        let titlebar = self.titlebar_height();
+        let moved = self.with_state(|st| {
+            let drag = st.dragging.as_ref()?;
+            let pos = match drag.dir {
+                Dir::Right => (at.x * st.win.scale).round() as i32,
+                Dir::Down => (at.y * st.win.scale).round() as i32,
+            };
+            let (path, to, dir) = (drag.path.clone(), pos - drag.offset, drag.dir);
+            let g = self.geometry(st, titlebar);
+            st.win.last_input = Instant::now();
+            Some((st.tree.drag(&path, to, &g), dir))
+        });
+        let Some(Some((moved, dir))) = moved else { return };
+        if moved {
+            self.lay_out();
+            self.unpause();
+        }
+        resize_cursor(dir).set();
+    }
+
+    /// The mouse came up after a divider drag.
+    pub(crate) fn divider_up(&self) {
+        self.with_state(|st| st.dragging = None);
+        if let Some(window) = self.window() {
+            window.invalidateCursorRectsForView(self);
+        }
+    }
+
+    /// The test-only `drag N PX`: divider `index` is dragged, as with the
+    /// mouse (taken 2 px past its line), until its line starts at `to`
+    /// pixels. Beeps if there is no such divider.
+    fn drag_divider(&self, index: usize, to: i32) {
+        let Some(Some((line, dir, scale))) = self.with_state(|st| st.grabs.get(index).map(|d| (d.line, d.dir, st.win.scale))) else {
+            NSBeep();
+            return;
+        };
+        let pt = |x: i32, y: i32| NSPoint::new(x as f64 / scale, y as f64 / scale);
+        let (from, at) = match dir {
+            Dir::Right => (pt(line.x + 2, line.y + line.h / 2), pt(to + 2, line.y + line.h / 2)),
+            Dir::Down => (pt(line.x + line.w / 2, line.y + 2), pt(line.x + line.w / 2, to + 2)),
+        };
+        self.divider_down(index, from, 1);
+        self.divider_dragged(at);
+        self.divider_up();
+        self.draw();
     }
 
     /// Bytes typed for the latency harness (its `type` command), into the
@@ -1998,9 +2374,13 @@ fn spawn_pane(window: usize, config: &Config, theme: &Theme, m: term_font::Metri
         awaiting_echo: None,
         runs_shell: !n.settings && n.command.argv.is_empty(),
         program: n.program,
+        told: Some(told(&pty_size(cols, lines, m))),
         settings: n.settings,
         title: None,
         swallow_click: false,
+        builds: 0,
+        crash: None,
+        panic_next: None,
     })
 }
 
@@ -2058,6 +2438,83 @@ fn geometry_of(config: &Config, m: term_font::Metrics, scale: f64, size: NSSize,
             (3 * m.cell_height + pad.top + pad.bottom) as i32,
         ),
         divider: scale.round().max(1.0) as i32,
+    }
+}
+
+/// Panes whose snapshot or frame build panicked this frame: each program
+/// is killed and its pane holds with the crash's message in a fresh
+/// terminal, as a parse panic does; the glyph textures and the fonts'
+/// shaping are forgotten, so every pane is built again; a second panic in
+/// the same pane within [`CRASH_REPEAT`] stops it being built.
+fn crash_panes(win: &mut Win, panes: &mut HashMap<PaneId, Pane>, crashed: &[PaneId]) {
+    win.renderer.forget_glyphs();
+    let now = Instant::now();
+    for id in crashed {
+        let Some(p) = panes.get_mut(id) else { continue };
+        let again = p.crash.is_some_and(|c| now.duration_since(c.at) < CRASH_REPEAT);
+        let count = p.crash.map_or(0, |c| c.count) + 1;
+        p.crash = Some(Crash {
+            at: now,
+            count,
+            stopped: again,
+        });
+        p.held = true;
+        p.session.stop_for_bug();
+        // A fresh terminal with the message only, also after a panic that
+        // left the terminal untouched (building unlocked): what it shows
+        // likely led to the panic, and drawing it again would only panic
+        // again, hiding the message behind the repeat limit.
+        let mut t = p.session.lock_term();
+        crate::session::replace_term(&mut t);
+        crate::session::write_bug(&mut t, crate::crash::take_last_log());
+    }
+    for p in panes.values() {
+        p.session.mark_dirty();
+    }
+    win.link.setPaused(false);
+}
+
+/// With the `test-hooks` feature, the test-only `build-panic` makes a
+/// pane's build panic here.
+#[cfg(feature = "test-hooks")]
+fn test_build_panic(now: bool) {
+    if now {
+        panic!("test-hooks: building this pane's frame was asked to panic");
+    }
+}
+
+#[cfg(not(feature = "test-hooks"))]
+#[inline(always)]
+fn test_build_panic(_now: bool) {}
+
+/// A filled rectangle at `r` (window pixels).
+fn rect_instance(r: PxRect, color: Rgba) -> RectInstance {
+    RectInstance {
+        x: r.x.clamp(0, i16::MAX as i32) as i16,
+        y: r.y.clamp(0, i16::MAX as i32) as i16,
+        w: r.w.clamp(0, u16::MAX as i32) as u16,
+        h: r.h.clamp(0, u16::MAX as i32) as u16,
+        color,
+    }
+}
+
+/// What a program was told of its size, to compare.
+fn told(s: &Size) -> (u16, u16, u16, u16) {
+    (s.cols, s.lines, s.cell_width, s.cell_height)
+}
+
+/// The cursor over a divider's grab zone: for side-by-side panes (`Right`)
+/// the column resize cursor, for stacked ones the row resize cursor (macOS
+/// 15's, else the older left-right and up-down arrows).
+// The older cursors are deprecated in macOS 15, which has the newer.
+#[allow(deprecated)]
+fn resize_cursor(dir: Dir) -> Retained<NSCursor> {
+    let newer = |name| <NSCursor as objc2::ClassType>::class().class_method(name).is_some();
+    match dir {
+        Dir::Right if newer(sel!(columnResizeCursor)) => NSCursor::columnResizeCursor(),
+        Dir::Right => NSCursor::resizeLeftRightCursor(),
+        Dir::Down if newer(sel!(rowResizeCursor)) => NSCursor::rowResizeCursor(),
+        Dir::Down => NSCursor::resizeUpDownCursor(),
     }
 }
 
@@ -2179,6 +2636,17 @@ impl WindowView {
                 }
                 Some(Control::Split(dir)) => self.split(dir),
                 Some(Control::ClosePane) => self.close_focused_pane(),
+                Some(Control::Drag { index, to }) => self.drag_divider(index, to),
+                Some(Control::ResizePane(dir)) => self.resize_pane(dir),
+                Some(Control::Equalize) => self.equalize(),
+                Some(Control::Zoom) => self.toggle_zoom(),
+                Some(Control::BuildPanic { index, snapshot }) => {
+                    let pane = self.with_state(|st| st.tree.ids().get(index).copied()).flatten();
+                    if let Some(pane) = pane {
+                        self.with_pane(pane, |_, p| p.panic_next = Some(snapshot));
+                        self.request_redraw(pane);
+                    }
+                }
                 Some(Control::Save) => {
                     let path = self.with_state(|st| st.win.test.as_ref().map(|t| t.path.clone())).flatten();
                     if let Some(path) = path {
@@ -2282,19 +2750,18 @@ fn post_key(mtm: MainThreadMarker, keycode: u16, flags: u64) {
     let app = NSApplication::sharedApplication(mtm);
     let Some(window) = app.keyWindow() else { return };
     let mut flags = NSEventModifierFlags(flags as usize);
-    let arrow = match keycode {
-        0x7B => Some('\u{F702}'),
-        0x7C => Some('\u{F703}'),
-        0x7D => Some('\u{F701}'),
-        0x7E => Some('\u{F700}'),
-        _ => None,
-    };
-    if arrow.is_some() {
+    if (123..=126).contains(&keycode) {
         flags |= NSEventModifierFlags::Function | NSEventModifierFlags::NumericPad;
     }
-    let (plain, shifted) = match arrow {
-        Some(c) => (Some(c), Some(c)),
-        None => crate::ascii_layout::chars(keycode),
+    // Return and the arrows type no printable character; AppKit gives
+    // them these, which their menu key equivalents match.
+    let (plain, shifted) = match keycode {
+        36 => (Some('\r'), Some('\r')),
+        123..=126 => {
+            let c = char::from_u32([0xF702, 0xF703, 0xF701, 0xF700][keycode as usize - 123]);
+            (c, c)
+        }
+        _ => crate::ascii_layout::chars(keycode),
     };
     let typed = if flags.contains(NSEventModifierFlags::Shift) {
         shifted
@@ -2339,6 +2806,7 @@ struct Window {
 fn write_dump(st: &mut State, window: Window) {
     use std::io::Write;
     let focused = st.tree.focused();
+    let zoomed = st.tree.zoomed();
     let every: Vec<PaneDump> = st
         .tree
         .ids()
@@ -2352,6 +2820,9 @@ fn write_dump(st: &mut State, window: Window) {
                 cols: t.state.cols(),
                 lines: t.state.lines(),
                 focused: id == focused,
+                shown: zoomed.is_none_or(|z| z == id),
+                builds: p.builds,
+                crashes: p.crash.map_or(0, |c| c.count),
                 screen: t.state.dump(),
             })
         })
@@ -2402,6 +2873,7 @@ fn write_dump(st: &mut State, window: Window) {
         view_offset,
         selection,
         dividers,
+        zoomed,
         frames: win.renderer.frames_completed(),
         glyphs: p.render.frame.glyphs.len(),
         rects: p.render.frame.rects.len(),

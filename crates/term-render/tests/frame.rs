@@ -603,6 +603,32 @@ fn decorations_follow_thicker_metrics() {
     assert_eq!(ys, [(19, 3), (25, 3)]);
 }
 
+#[test]
+fn hovered_link_is_underlined_in_the_text_colour() {
+    let mut t = term(10, 2, &format!("{NO_CURSOR}a \x1b]8;;https://x\x1b\\link\x1b]8;;\x1b\\ b"));
+    let theme = Theme::default();
+    let plain = build(&mut t.state);
+    // Only the snapshot path draws the hovered link: not compared with the
+    // reference path.
+    let hovered = |t: &mut Term| {
+        let mut f = Frame::default();
+        f.build(&mut t.state, &input(&theme, &Opts::default()), &mut Fake);
+        f
+    };
+    t.state.set_hover(Some(t.state.point_at(0, 3)));
+    let f = hovered(&mut t);
+    let underline = RectInstance {
+        x: 2 * CW,
+        y: (M.baseline + M.underline_offset) as i16,
+        w: 4 * CW as u16,
+        h: M.underline_thickness as u16,
+        color: theme.foreground,
+    };
+    assert_eq!(f.rects, [plain.rects.clone(), vec![underline]].concat());
+    t.state.set_hover(Some(t.state.point_at(0, 0)));
+    assert_eq!(hovered(&mut t).rects, plain.rects, "off the link");
+}
+
 // ---- cursor --------------------------------------------------------------
 
 fn cursor_rects(f: &Frame, theme: &Theme) -> Vec<RectInstance> {

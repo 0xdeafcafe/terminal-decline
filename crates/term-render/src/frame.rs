@@ -557,14 +557,18 @@ impl Frame {
         // Highlights, then the block cursor over them.
         for (line, row) in snap.rows.iter().enumerate() {
             for h in snap.row_highlights(row) {
-                let color = match h.kind {
-                    HighlightKind::Selection => theme.selection,
-                    // Drawn once search (E.7) and links (PR 9) set them.
-                    HighlightKind::SearchHit | HighlightKind::CurrentSearchHit | HighlightKind::HoveredLink => continue,
-                };
                 let (a, b) = (h.cols.start as usize, (h.cols.end as usize).min(cols));
-                if a < b {
-                    self.rects.push(full(line, a..b, color));
+                match h.kind {
+                    _ if a >= b => {}
+                    HighlightKind::Selection => self.rects.push(full(line, a..b, theme.selection)),
+                    // Underlined in the text colour, over the backgrounds.
+                    HighlightKind::HoveredLink => self.decorations.push(RectInstance {
+                        y: s16(row_y(line) + (m.baseline + m.underline_offset) as i32),
+                        h: m.underline_thickness.max(1) as u16,
+                        ..full(line, a..b, theme.foreground)
+                    }),
+                    // Drawn once search (E.7) sets them.
+                    HighlightKind::SearchHit | HighlightKind::CurrentSearchHit => {}
                 }
             }
         }

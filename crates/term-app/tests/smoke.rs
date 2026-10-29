@@ -9,6 +9,12 @@
 //! `font` and `quit`. The tests assert on the dumps, not on pixels. Config
 //! comes from an empty temp dir (`XDG_CONFIG_HOME`), never the user's.
 //!
+//! Under the test control the app stays in the background (see
+//! `background.rs`): it never activates and its windows, transparent, sit
+//! behind every other window. Bundles are opened with `open -g` so
+//! Launch Services doesn't bring them to the front either. Set
+//! `DECLINE_TEST_FOREGROUND=1` to watch a run.
+//!
 //! On CI (`CI` set) a missing Metal device fails the test; locally it is
 //! skipped. A launch failure always fails.
 #![cfg(target_os = "macos")]
@@ -115,6 +121,9 @@ fn decline_from(program: &Path, dir: &TempDir, script: &str, dump: bool) -> (Exi
         .current_dir(dir.path());
     if dump {
         cmd.env("DECLINE_TEST_DUMP", dir.dump_file());
+    } else {
+        // In the background all the same (the test control does that).
+        cmd.env("DECLINE_TEST_BACKGROUND", "1");
     }
     run(&mut cmd)
 }
@@ -602,8 +611,7 @@ fn temp_bundle(dir: &TempDir, name: &str, script: &str) -> PathBuf {
 /// Launch `app` as the Dock does and wait for it to quit; its dumps.
 fn launch_bundle(dir: &TempDir, app: &Path) -> Vec<Value> {
     let mut open = Command::new("/usr/bin/open");
-    open.arg("-n")
-        .arg("-W")
+    open.args(["-g", "-n", "-W"])
         .arg("--env")
         .arg(format!("DECLINE_TEST_DUMP={}", dir.dump_file().display()))
         .arg("--env")
@@ -842,8 +850,7 @@ fn smoke_pin_bundle_launches() {
     assert!(std::fs::read_to_string(made.app.join("Contents/Info.plist")).unwrap().contains(&id));
 
     let mut open = Command::new("/usr/bin/open");
-    open.arg("-n")
-        .arg("-W")
+    open.args(["-g", "-n", "-W"])
         .arg("--env")
         .arg(format!("DECLINE_TEST_DUMP={}", dir.dump_file().display()))
         .arg("--env")
@@ -917,8 +924,7 @@ fn smoke_stub_pin_launches() {
     assert!(plist.contains("<key>TDPinAbi</key>"), "{plist}");
 
     let mut open = Command::new("/usr/bin/open");
-    open.arg("-n")
-        .arg("-W")
+    open.args(["-g", "-n", "-W"])
         .arg("--env")
         .arg(format!("DECLINE_TEST_DUMP={}", dir.dump_file().display()))
         .arg("--env")
@@ -1458,7 +1464,7 @@ fn smoke_folders_opened_with_the_app() {
     let app = temp_bundle(&dir, &name, &script);
     assert_eq!(app, app_path);
     let mut open = Command::new("/usr/bin/open");
-    open.args(["-n", "-W", "--env"])
+    open.args(["-g", "-n", "-W", "--env"])
         .arg(format!("DECLINE_TEST_DUMP={}", dir.dump_file().display()))
         .arg("--env")
         .arg(format!("XDG_CONFIG_HOME={}", dir.config_home().display()))

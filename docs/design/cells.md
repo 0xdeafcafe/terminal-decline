@@ -1,9 +1,10 @@
 # Cells, styles, runs and scrollback: the storage model for 1.0 (F.0)
 
-Status: **accepted with changes** by the Opus (xhigh) review, and revised
-on 29 Oct 2026 with those changes and with Alex's decisions (§0). Nothing
-here is built yet, except the code-drawn glyphs (F.6), which have landed in
-term-font. The design builds on the parser work now on `main`: vendored vte
+Status: **accepted with changes** by two Opus (xhigh) reviews, and revised
+on 29 Oct 2026 with those changes and with Alex's decisions (§0). Two
+pieces have landed: the code-drawn glyphs (F.6, in term-font) and the vte
+parser changes (PR 3, `0bb234d`). Everything else is still to be built. The
+design builds on the parser work now on `main`: vendored vte
 with `print_ascii`, `write_ascii` row-segment writes, the screen as a ring
 of rows, the memset row reset and the faster scrollback encoder. Every
 phase-F item, and the image, ligature, search and frame-outside-the-lock
@@ -59,13 +60,48 @@ Modules named here:
 | **Scrollback limit**: lines (the existing `scrollback = 10000` setting), plus a hidden 32 MB byte backstop. The Ghostty comparison is made at the same number of lines kept | §11.2 |
 | **Image budget**: 32 MB per process by default, a setting; CPU and GPU copies counted once | §8.4 |
 | **East Asian Ambiguous width**: a setting in 1.0 (`ambiguous_width = 1 \| 2`, default 1) | §6.3 |
-| **Search (Cmd+F) and VoiceOver cover all of history**, with per-block UTF-16 counts: in-view hits first, then history outwards; fast block search with a per-block filter | §11.2, §13.3–§13.9 |
+| **Search (Cmd+F) and VoiceOver cover all of history**, with per-block UTF-16 counts: in-view hits first, then history outwards; fast block search with a per-block filter | §11.2, §13.3–§13.10 |
 | Everything else stands as the engineering answers | §19 |
 
 The search design changed history's layout slightly: each block now keeps
 its lines' text contiguous, in a separate array from the rest of each line
 (§11.2). That costs one byte on plain lines (42 → 43 B) and nothing on
 styled ones.
+
+### After the second review (search, ambiguous width, checks on the fixes)
+
+The reviewer measured search with a prototype over 100k stored lines of
+real output (logs, `ls`, source code, man pages, git log). Those numbers
+replace the earlier estimates in §1, §13.6 and §13.7.
+
+| Review item | Where |
+|---|---|
+| Matches across a block boundary, and from history onto screen row 0: search a small buffer around each boundary | §13.5 |
+| Blocks split into shared, immutable `BlockData` (in an `Arc`) and history's own `BlockEntry` (length, UTF-16 count, row counts, filter); `pop()` lowers the length only; the old `Cell` (not `Sync`) is gone | §11.2, §11.8 |
+| Search has its own word rule; double-click keeps the path-friendly one | §13.2, §13.8 |
+| One style mirror per screen; epochs from a terminal-wide counter | §5.2, §9.2 |
+| Filter numbers measured; built in the background only | §13.6, §13.7 |
+| `pop()` no longer bumps `history_epoch`; a "lowest line popped" mark limits what searches and the renderer drop | §9.1, §13.4 |
+| Ignoring case: lower-case each block into a scratch buffer, then memmem | §13.5 |
+| Case folding defined exactly, with its limits | §13.5 |
+| Matches start and end on cluster boundaries | §13.5 |
+| One rule for searching live output, with no duplicate hits | §13.4 |
+| Hits kept per block, so freeing a block is O(1); the reflow budget claim fixed | §13.4, §12.4 |
+| Narrowing while typing only for Contains, same case setting, below the cap | §13.8 |
+| View API: `view_position`, `scroll_to`, the UTF-16 calls, and what `point_at` returns at edges | §13.2 |
+| `new_ids` capped when interning | §5.2 |
+| PR plan: the gap between PRs 6 and 7 in daily builds; PR 13 split in three; which PRs touch term-app | §17 |
+| Ambiguous width: seal only a non-empty block, VS15 stays 1, narrow box drawing later, running programs keep their width | §6.3, §15 |
+| Keycap bases in the ASCII table | §6.2 |
+| Smaller items (could) | where they apply |
+
+### Alex's decisions (second round)
+
+| Decision | Where |
+|---|---|
+| **Keep the per-block filter in 1.0,** built in the background only and never while someone waits; a block without one is simply scanned. 4-byte grams in a 4 KB filter | §13.6 |
+| **Cmd+F uses our own native-style find bar, not NSTextFinder:** a search field with previous/next, a count, Done and an options menu; the standard Edit > Find actions; the shared find pasteboard | §13.9 |
+| **The UTF-16 piece API is for VoiceOver only;** its full text is an NSString subclass backed by history blocks, and the E.12 spike measures how often VoiceOver asks | §13.10 |
 
 ---
 
@@ -88,12 +124,13 @@ styled ones.
 | Shaping runs | break only on **font face** (bold/italic), **code-drawn glyphs** and **placeholders** | ligatures survive colour changes, the cursor and selection |
 | Ligatures | one glyph, **one instance per cell**, each quad clipped to its cell on the CPU, coloured by that cell | no shader change; per-cell colours inside a ligature |
 | Glyph key | **(font id, glyph id, cells)** from a **font registry** in term-font; code-drawn glyphs use a reserved font id and their `SpriteId` | CTLine picks fallback fonts itself, so a codepoint alone no longer names a glyph |
-| Scrollback v2 | stored lines are **physical lines as written**; logical lines are runs of wrapped stored lines; each block keeps its **text contiguous**, plus a style dictionary and a link table; trailing fill implied by runs | plain 43 B/line (today 46 sealed, 52 measured), `ls` 59 (86/93), full-width background 13 (174/183), CJK 66 (87/90) |
+| Scrollback v2 | stored lines are **physical lines as written**; logical lines are runs of wrapped stored lines; each block keeps its **text contiguous**, plus a style dictionary and a link table; trailing fill implied by runs; sealed blocks are shared, immutable `Arc<BlockData>` | plain 43 B/line (today 46 sealed, 52 measured), `ls` 59 (86/93), full-width background 13 (174/183), CJK 66 (87/90) |
 | History limits | `scrollback` lines (default 10,000) plus a hidden 32 MB backstop | Alex's decision |
 | Reflow | the screen is reflowed eagerly on every resize; **history is never rewritten**: rows at the current width are worked out on demand from the stored lines | resize costs O(screen), not O(history): 0.5–1 ms with 100k lines |
 | Points | `Point.line` stays the number a row got when it was written; history points never change; on-screen positions that matter are remapped in the same resize; the app does no line arithmetic of its own | selection, search hits, images and the view position survive output, scrolling and reflow |
-| Search | **in view first, then history outwards** from the view; SIMD substring search over each block's text, skipping blocks with a **2 KB trigram filter**; done on immutable blocks, off the lock | covers all of history (Alex's decision): ~0.1 ms for a rare word in 100k lines once filters exist |
-| Find bar and VoiceOver | UTF-16 offsets over all of history from **per-block UTF-16 counts** and checkpoints every 16 lines | O(log blocks) per lookup; 4 bytes per block |
+| Search | **in view first, then history outwards** from the view; SIMD substring search (memmem) over each block's text, with case ignored by lower-casing each block into a scratch buffer; blocks skipped with a **4 KB filter of 4-byte grams**, built in the background only; done on immutable blocks, off the lock | covers all of history (Alex's decision); measured on 100k lines: a full scan takes 0.11–0.33 ms, or 0.19–0.71 ms ignoring case |
+| Find bar | **our own native-style find bar** (Alex's decision): a search field, previous/next, a count, Done, an options menu; Edit > Find, Cmd+F/G/E and the shared find pasteboard work as usual | standard controls, and it uses our search directly |
+| VoiceOver | UTF-16 offsets over all of history from **per-block UTF-16 counts** and checkpoints every 16 lines; the full text is an NSString subclass backed by history blocks | O(log blocks) per lookup; 4 bytes per block |
 | Parser | vte gains an APC string state with start/put/end calls, a bulk `put_slice` for DCS, and a size policy for long OSC strings (streaming for OSC 1337 files) | kitty graphics, Sixel and iTerm2 images without buffering megabytes twice |
 
 ---
@@ -151,15 +188,16 @@ model must do is not make things worse, and keep 100k-line history small.
  │  └──────────────┬───────────────┘                                          │
  │                 │ rows scroll off the top                                  │
  │                 ▼                                                          │
- │  Scrollback (history): blocks of ≤ 64 KB, freed oldest first; sealed       │
- │  blocks are immutable Arc<Block>s                                          │
- │    block: line headers, contiguous text, style dictionary, links,          │
- │           UTF-16 count, trigram filter                                     │
+ │  Scrollback (history): blocks of ≤ 64 KB per part, freed oldest first      │
+ │    BlockEntry (history's own): Arc<BlockData>, line count, UTF-16 count,   │
+ │                                row counts, filter (built in background)    │
+ │    BlockData (shared, immutable): line headers, contiguous text, style     │
+ │                                   dictionary, links                        │
  │    rows at the current width are worked out on demand (lazy line index)    │
  └───────┬──────────────────────────────────────────────┬────────────────────┘
-         │ snapshot under the lock: changed rows,        │ search job: Arc<Block>
-         │ new styles, highlight ranges, cursor,         │ clones + the screen's
-         │ palette, visible images                       │ hits, taken under the lock
+         │ snapshot under the lock: changed rows,        │ search job: (Arc<BlockData>,
+         │ new styles, highlight ranges, cursor,         │ line count) per block + the
+         │ palette, visible images                       │ screen's hits, under the lock
          ▼                                               ▼
    term-render (main thread, outside the lock     search worker (one per process,
    from R.1): runs → term-font shapes (CTLine)    off the lock): blocks outwards
@@ -326,15 +364,24 @@ pub struct StyleTable {
     sweeps_blocked: bool,   // during resize
     recent: [(Style, u32); 2], // the last two styles interned: alternating styles skip the hash
     new_ids: Vec<u32>,      // ids interned since the last snapshot (§9.2)
-    epoch: u64,             // bumped when ids are renumbered
+    send_all: bool,         // too many new ids: the next snapshot sends the whole table
+    epoch: u64,             // from the terminal-wide counter: at creation and at each renumbering
 }
 ```
 
 **Interning** (`intern(&Style) -> u32`) checks `recent` first, then hashes the
 20 bytes (FxHash), probes linearly and compares. On a miss it takes an id from
-`free` or pushes a new one, and appends the id to `new_ids`. A hit costs
-about 5 ns on average, a miss 15–20 ns. If TUI parse speed drops (the gate
-in §17.4 will show it), `recent` can grow to a 16-entry cache (could).
+`free` or pushes a new one, and appends the id to `new_ids`. If that would
+take `new_ids` past half the table (a gradient), the list is cleared and
+`send_all` is set instead, so the list can't grow without bound between
+snapshots. A hit costs about 5 ns on average, a miss 15–20 ns. If TUI parse
+speed drops (the gate in §17.4 will show it), `recent` can grow to a
+16-entry cache (could).
+
+**Epochs never repeat.** Each table takes its `epoch` from a counter kept by
+the terminal, not by the table, both when it is made and when it is
+renumbered. The alternate screen's table is freed and made again (§19), and
+a new table never repeats an epoch the renderer has already seen (§9.2).
 
 **Holders of style ids**, all handled by the sweep:
 
@@ -344,7 +391,7 @@ in §17.4 will show it), `recent` can grow to a 16-entry cache (could).
 | the pen's cached template (`Option<Cell>`) | marked; dropped on every SGR, every 47/1047/1049 switch (it belongs to the other screen's table) and every DECRC restore |
 | the erase template (`Option<Cell>`) | marked; dropped when the pen's background changes and on every screen switch |
 | `recent` | **cleared** by every sweep (it may name a freed id) |
-| saved cursors (DECSC, 1048, 1049) | hold the pen's `Style` **and its link (URI and id parameter) by value**, never an id; restoring re-interns on the next print |
+| saved cursors (DECSC, 1048, 1049) | hold the pen's `Style` **and its link (URI and id parameter) by value**. The saved `Style`'s own `link` field is an id from one screen's link table, so restoring clears it and looks the link up again from the saved URI; the next print then re-interns the style |
 | history | styles by value in each block's dictionary (§11.5) |
 | the snapshot and renderer | style values, mirrored from `new_ids` (§9.2) |
 
@@ -361,11 +408,11 @@ in §17.4 will show it), `recent` can grow to a 16-entry cache (could).
 4. it sweeps the link table the same way, from the live styles (§5.5);
 5. **if fewer than a quarter of the entries are live, it renumbers.** It
    builds an old-to-new id map, then rewrites in one pass every cell of
-   every row, the pen and erase templates, `index` and `styles`. It clears
-   `recent` and `new_ids`, touches every row (each gets a new change
-   counter) and bumps `epoch`, so the next snapshot carries the whole
-   table. Memory is given back after a gradient-heavy program exits, and
-   ids stay dense.
+   every row, the pen and erase templates, `index` and `styles`, and
+   shrinks the vectors' capacity. It clears `recent` and `new_ids`, touches
+   every row (each gets a new change counter) and takes a new `epoch`, so
+   the next snapshot carries the whole table. Memory is given back after a
+   gradient-heavy program exits, and ids stay dense.
 
 **No sweep during resize.** Reflow and pull-back intern styles while rows
 are half-built, and a sweep then would free ids that rows in the working set
@@ -519,7 +566,9 @@ It is a two-level lookup giving, per scalar:
 
 It takes about 60–80 KB of read-only data and costs one lookup per non-ASCII
 scalar. ASCII never reaches it: `write_ascii` handles ASCII and sets the
-state below from a 128-entry table.
+state below from a 128-entry table. That table also marks `#`, `*` and
+`0`–`9` as keycap bases, so `1` + VS16 + U+20E3 becomes a keycap even when
+the `1` came through the ASCII fast path.
 
 ```rust
 /// Enough to decide whether the next scalar joins the last printed cell,
@@ -599,21 +648,28 @@ uses; the Unicode table carries that flag next to the width.
 
 - **The width rule.** Step 3 uses 2 for an ambiguous first scalar when the
   setting is 2. Emoji sequences stay 2 and VS15 sequences 1, whatever the
-  setting. Mode 2027 off uses the setting the same way. With 2, box drawing
-  is two cells wide too: that is what CJK-mode terminals and
-  `wcwidth_cjk`-based programs do, and why it is a setting.
+  setting. That includes VS15 after an ambiguous character with the setting
+  at 2, on purpose: VS15 asks for text presentation, and `string-width`
+  gives 1 too. Mode 2027 off uses the setting the same way. With 2, box
+  drawing is two cells wide too: that is what CJK-mode terminals and
+  `wcwidth_cjk`-based programs do, and why it is a setting. Keeping box
+  drawing narrow under setting 2, as some terminals offer, is later work.
+- **Cost.** The ambiguous flag comes from the same table lookup as the width,
+  so non-ASCII characters pay one extra bit test and ASCII pays nothing
+  (§15).
 - **Screen cells keep their width.** A cell's width is stored in the cell, so
   changing the setting doesn't touch what is already on the screen. New
   output uses the new width. The grid doesn't change size, so nothing is
   reflowed.
 - **History shows lines exactly as written.** Each block records the setting
-  its lines were written with (`ambiguous` in §11.2), and the open block is
-  sealed early when the setting changes; such changes are rare, so this
-  costs nothing. A row written before the change but pushed into history
+  its lines were written with (`ambiguous` in §11.2). When the setting
+  changes, the open block is sealed early if it holds any lines (an empty
+  one just takes the new setting); such changes are rare, so this costs
+  nothing. A row written before the change but pushed into history
   after it gets width exceptions (§11.3) for its ambiguous cells: the encoder
   compares every cell's real width with what the block's setting would give.
   Decoding, rows at another width (§12.3), search columns (§13.8) and UTF-16
-  offsets (§13.9) all use the block's own setting.
+  offsets (§13.10) all use the block's own setting.
 - **Drawing.** An ambiguous character drawn two cells wide is centred in the
   two cells (`GlyphKey.cells = 2`, with no scaling for text glyphs).
   Code-drawn ones are drawn two cells wide by term-font's sprite module,
@@ -623,8 +679,11 @@ uses; the Unicode table carries that flag next to the width.
   check: it prints an ambiguous character and asks for the cursor position.
   That works because the cursor really moves by the configured width.
 - **Changing it at runtime** (config reload, E.9):
-  `Terminal::set_ambiguous_width` seals the open history block, clears the
-  grapheme state, and changes nothing else.
+  `Terminal::set_ambiguous_width` seals the open history block (if it isn't
+  empty), clears the grapheme state, and changes nothing else. Programs
+  already running keep the width they worked out when they started (their
+  own setting or locale), so a full-screen program may misalign until it is
+  restarted. That is the same in every terminal with this setting.
 
 ### 6.4 What each operation does to clusters
 
@@ -894,12 +953,19 @@ things on `main` or in this design could make them repeat:
 |---|---|
 | RIS (`Terminal::reset`) builds a fresh `Terminal`, which would restart `counter` at 0 | `reset()` carries `counter` across, as it already carries line numbers, and bumps `history_epoch` |
 | `session::replace_term` builds a new `Term` after a caught parser panic, restarting the counter and line numbers | every `Terminal` gets a process-wide unique `terminal_id` (an atomic counter) at creation; a new terminal means a new id |
-| `Scrollback::pop()` (pull-back, §12.2) can hand a popped line's number to new text, and ED 3 clears history | `history_epoch` is bumped by `pop()`, ED 3 and RIS |
+| `Scrollback::pop()` (pull-back, §12.2) can hand a popped line's number to new text | history records the **lowest line number popped**, twice: since the last snapshot, and since the current search started. Only lines at or after that mark can have changed |
+| ED 3 and RIS clear history | `history_epoch` is bumped by ED 3 and RIS (not by `pop()`) |
 
-Both go in the snapshot. The renderer drops its cached screen rows when
-`terminal_id` changes, and its cached history rows when `terminal_id` or
-`history_epoch` changes, or when the width changes. A running search drops
-results from an older `history_epoch` (§13.4).
+All three go in the snapshot (`terminal_id`, `history_epoch`,
+`popped_from`). The renderer drops:
+- its cached screen rows when `terminal_id` changes;
+- all its cached history rows when `terminal_id` or `history_epoch`
+  changes, or when the width changes;
+- only the cached history rows at or after `popped_from` when that is set,
+  so pulling a few lines back doesn't throw away the rest.
+
+A running search drops only hits at or after its own popped mark, and starts
+again after ED 3 or RIS (§13.4).
 
 Tracked separately, because they are not row content:
 - palette changes (OSC 4, 104, 10–12), tracked by `palette_seq`;
@@ -919,8 +985,10 @@ renderer and reused, so a snapshot allocates nothing in steady state.
 ```rust
 pub struct Snapshot {
     pub terminal_id: u64,                 // new terminal: drop every cached row and style
-    pub history_epoch: u64,               // changed: drop cached history rows
-    pub styles_epoch: u64,                // changed (ids renumbered): `style_updates` is the whole table
+    pub history_epoch: u64,               // changed (ED 3, RIS): drop cached history rows
+    pub popped_from: Option<u64>,         // lines at or after this were pulled back: drop those cached rows
+    pub screen: ScreenId,                 // Primary or Alternate: which style mirror the ids refer to
+    pub styles_epoch: u64,                // that screen's table epoch; changed: `style_updates` is the whole table
     pub counter: u64,                     // the terminal's counter when taken
     pub cols: u16, pub lines: u16,
     pub rows: Vec<SnapRow>,               // one per visible row, top to bottom
@@ -961,8 +1029,15 @@ pub enum HighlightKind { Selection, SearchHit, CurrentSearchHit, HoveredLink }
   stable positions. This costs O(visible rows).
 - **Styles are mirrored, not copied each frame.** `new_ids` lists ids
   interned since the last snapshot, and the snapshot copies just those. If
-  the list grows past half the table (a gradient), the snapshot copies the
-  whole table instead. Steady-state frames copy no styles at all.
+  the table has set `send_all` (the list would have passed half the table,
+  §5.2), the snapshot copies the whole table instead. Steady-state frames
+  copy no styles at all.
+- **One mirror per screen.** The primary and alternate screens have separate
+  tables with overlapping ids, so the renderer keeps a mirror for each.
+  `screen` says which one a snapshot's cells refer to. When a screen's
+  `styles_epoch` changes (renumbered, or the alternate table freed and made
+  again), the renderer clears that screen's mirror and takes the whole
+  table. Epochs come from a terminal-wide counter, so they never repeat.
 - **Cost under the lock:**
   - a full 300×100 change copies 240 KB of cells plus the new styles, about
     15–25 µs;
@@ -1120,34 +1195,52 @@ its stable line number (§13) for as long as it is stored.
 
 Each block keeps every line's text **contiguous**, in its own array, apart
 from the rest of each line (its flags, runs and other sections). Search
-runs SIMD substring search straight over that array (§13.5), and the find
-bar and VoiceOver count UTF-16 over it (§13.9).
+runs SIMD substring search straight over that array (§13.5), and VoiceOver
+counts UTF-16 over it (§13.10).
+
+A block is in two parts. What a sealed block holds never changes and is
+shared; what history knows about it (how many of its lines are still in
+use, counts worked out later, the filter) changes, and only under the lock:
 
 ```rust
-/// Stored lines of about 64 KB, freed whole. Sealed blocks never change and
-/// are shared as Arc<Block> (the renderer's decode cache and search hold them
-/// without the lock).
-struct Block {
-    meta: Vec<u8>,          // each line's flags and sections (§11.3); ≤ 65,536 bytes
-    starts: Vec<u16>,       // offset of each line in `meta`
-    text: Vec<u8>,          // every line's text back to back; a 0x0A ends each logical line; ≤ 65,536 bytes
-    checkpoints: Vec<[u16; 2]>, // every 16th line: its offset in `text`, and the UTF-16 offset there
-    utf16_len: u32,         // UTF-16 units in `text` (placeholders as spaces): the find bar and VoiceOver
-    first: u64,             // stable line number of the first stored line
-    len: u32,               // stored lines in use (pop() lowers it; bytes stay until freed)
-    styles: Vec<u8>,        // the block's style dictionary, encoded (§11.5); ≤ 65,536 bytes
-    style_starts: Vec<u16>, // id 0 = default, implicit
-    links: Vec<u8>,         // the block's hyperlinks: URI + id parameter; ≤ 65,536 bytes
-    link_starts: Vec<u16>,
-    images: Vec<ImageId>,   // decline's own and kitty images its dictionary mentions (§8.2)
-    width: u16,             // width every line here was written at, 0 if mixed
-    ambiguous: u8,          // the ambiguous-width setting its lines were written with (§6.3)
-    rows_at: Cell<(u16, u32)>, // (width, rows the logical lines starting here take): lazy
-    has_marks: bool,        // some line here has prompt marks
-    head_continues: bool,   // the first line continues a logical line from the block before
-    filter: OnceLock<Box<[u64; 256]>>, // 2 KB trigram filter for search (§13.6), built lazily
+/// What a sealed block holds: immutable, shared as Arc<BlockData>. The
+/// renderer's decode cache, the search worker and VoiceOver read it without
+/// the lock.
+pub struct BlockData {
+    meta: Box<[u8]>,          // each line's flags and sections (§11.3); ≤ 65,536 bytes
+    starts: Box<[u16]>,       // offset of each line in `meta`
+    text: Box<[u8]>,          // every line's text back to back; a 0x0A ends each logical line; ≤ 65,536 bytes
+    checkpoints: Box<[[u16; 2]]>, // every 16th line: its offset in `text`, and the UTF-16 offset there
+    styles: Box<[u8]>,        // the block's style dictionary, encoded (§11.5); ≤ 65,536 bytes
+    style_starts: Box<[u16]>, // id 0 = default, implicit
+    links: Box<[u8]>,         // the block's hyperlinks: URI + id parameter; ≤ 65,536 bytes
+    link_starts: Box<[u16]>,
+    images: Box<[ImageId]>,   // decline's own and kitty images its dictionary mentions (§8.2)
+    first: u64,               // stable line number of the first stored line
+    width: u16,               // width every line here was written at, 0 if mixed
+    ambiguous: u8,            // the ambiguous-width setting its lines were written with (§6.3)
+    has_marks: bool,          // some line here has prompt marks
+    head_continues: bool,     // the first line continues a logical line from the block before
 }
+
+/// History's own record of a block, owned by Scrollback, changed only under the lock.
+struct BlockEntry {
+    data: Arc<BlockData>,
+    len: u32,                 // lines still in use; pop() lowers it, the shared data is untouched
+    utf16_len: u32,           // UTF-16 units in the first `len` lines (placeholders as spaces)
+    rows_at: (u16, u32),      // (width, rows the logical lines starting here take), worked out lazily
+    filter: Option<Arc<Filter>>, // 4 KB, built in the background (§13.6); None = just scan
+}
+
+/// The block being written: the same parts as growable vectors, plus the
+/// encoder's style and link maps. Sealing turns it into a BlockData.
+struct OpenBlock { /* … */ }
 ```
+
+Because `rows_at` is a plain field of the entry, updated through `&mut`
+under the lock, nothing shared holds a `Cell` (which isn't `Sync`). Readers
+that fill it in already run under the lock. The worker can also work counts
+out on its own copy and store them afterwards (§13.10).
 
 - **Finding a line's text.** Line `k`'s text starts at
   `checkpoints[k / 16]`, plus the text lengths of the lines in between: at
@@ -1156,15 +1249,21 @@ struct Block {
   0.25 B per line.
 - **Sealing.** A block is sealed when the next line would take `meta`,
   `text`, the style dictionary or the link table past 64 KB, so every offset
-  fits in 16 bits. It is also sealed when the ambiguous-width setting
-  changes. Today's offsets are 32 bits, so the 16-bit ones save 2 bytes per
-  line. The open block never holds more than 64 KB of capacity in each part
-  (today's doubling can reach 128 KB).
+  fits in 16 bits. It is also sealed, if it holds any lines, when the
+  ambiguous-width setting changes. Today's offsets are 32 bits, so the
+  16-bit ones save 2 bytes per line. The open block never holds more than
+  64 KB of capacity in each part (today's doubling can reach 128 KB).
+- **Lines per block.** For text-heavy output the text part fills first:
+  about 1,600 plain lines (40 bytes of text each), 1,350 `ls` lines or 1,000
+  CJK lines per block. A full 64 KB of text, plus meta, means a block is up
+  to about 70–80 KB in all.
 - **Line size.** A stored line can't exceed 64 KB: it has at most 4096 cells,
   and cluster text is capped at 8 KB per row.
-- **Sealed blocks are immutable** and held as `Arc<Block>`. The search worker
-  (§13.4) and later readers keep them without the lock; a block freed from
-  history while a search holds it lives until the search lets go.
+- **Sharing.** A search captures `(Arc<BlockData>, len)` for each block and
+  scans only the first `len` lines (§13.4). A block freed from history while
+  a search holds it lives until the search lets go. R.7's compression
+  replaces an entry's `data` with a compressed `BlockData`; a running search
+  keeps the old `Arc` (§11.8).
 - **Writing history when the screen scrolls.** For the open block only, the
   encoder keeps a `HashMap<Style, u32>` (and one for links) from style to
   dictionary slot, dropped on sealing. In front of it sits a 64-entry cache
@@ -1172,21 +1271,26 @@ struct Block {
   case is one array compare per run, with no hashing. The cache is reset
   when the block is sealed and after every style sweep, because a sweep may
   reuse ids. The encoder also adds each line's UTF-16 length to
-  `utf16_len`: for ASCII text that is its byte length, otherwise about 1 ns
-  per byte.
+  `utf16_len`, counted without branches (could): bytes − continuation bytes
+  (0x80–0xBF) + 4-byte lead bytes (≥ 0xF0), which vectorises; for ASCII it
+  is simply the byte length.
 - **`pop()`** removes the newest stored line, for pulling lines back
-  (§12.2). In the open block it truncates `meta`, `text` and `starts`. A
-  sealed block is never reopened (could): `len` goes down, the bytes stay
-  until the block is freed, and the next push starts a new open block.
-  Popping bumps `history_epoch` (§9.1). Dictionary entries left unused are
-  freed with the block.
+  (§12.2). In the open block it truncates `meta`, `text` and `starts`. For a
+  sealed block it lowers the entry's `len` and `utf16_len` and leaves the
+  shared data alone (could: a sealed block is never reopened); the bytes
+  stay until the block is freed, and the next push starts a new open block.
+  Popping records the lowest line popped (§9.1). Dictionary entries left
+  unused are freed with the block.
 - **Limits (Alex's decision).**
   - the limit is lines: the existing `scrollback = 10000` setting, counted
     in stored lines;
   - a **hidden 32 MB backstop** catches gradient-heavy output. It counts
     every byte a block holds: text, meta, dictionary, links, filters and all
     the offset arrays. It isn't a config key;
-  - both free whole blocks from the oldest end;
+  - both free whole blocks from the oldest end. Until the oldest block can
+    be freed whole, it still holds some lines past the limit, as today.
+    Those lines are hidden: searches, `select_all` and UTF-16 offsets start
+    at the first line within the limit (could);
   - the Ghostty comparison is made at the **same number of lines kept**.
     Ghostty's limit is in bytes, so the comparison script raises it until
     Ghostty keeps the same number of lines, then measures both footprints.
@@ -1371,9 +1475,9 @@ today (+43%)**. This is the case the hidden backstop is for.
 | gradient, 160 cells | ~1,120 | – | ~1,600 | +43% |
 
 The measured figures will add about 3–6 bytes per line for the open block,
-as they do today. Search filters, once built, add about 1.4–2 B per line
-(§13.6), counted separately because they are built only when idle or
-searched. `scripts/bench-limits.json` gets lower limits with the v2 PR.
+as they do today. Search filters, once built, add about 2.2–6.4 B per line
+(4 KB per block, §13.6). They are counted separately, because they are
+built in the background after a block is sealed. `scripts/bench-limits.json` gets lower limits with the v2 PR.
 Suggested limits:
 - plain 50, `ls` 70, compiler 75, full-width background 25, CJK 75;
 - new entries: emoji 95, a placeholder row 60, and a gradient line 1,800
@@ -1414,15 +1518,18 @@ image ids its dictionary mentions.
 
 ### 11.8 What R.7's compression leaves uncompressed
 
-R.7 compresses idle sealed blocks with LZ4. Some parts stay outside the
-compressed data, so that line counts, prompt jumps, rows-at-width counts,
-line lookups, UTF-16 offsets and search filtering keep working without
-decompressing anything:
+R.7 compresses idle sealed blocks with LZ4. It does this by building a
+compressed `BlockData` and swapping it into the block's entry under the
+lock. A search or decode that still holds the old `Arc` carries on with it,
+and the entry's own fields (`len`, `utf16_len`, `rows_at`, the filter) don't
+change. Some parts stay outside the compressed data, so that line counts,
+prompt jumps, rows-at-width counts, line lookups, UTF-16 offsets and search
+filtering keep working without decompressing anything:
 - `starts` and `checkpoints`;
 - each line's flags and extra bytes and its text length, about 3 bytes per
   line, kept as side arrays;
-- `has_marks`, `width`, `ambiguous`, `rows_at`, `utf16_len`, the image list
-  and the search filter.
+- `has_marks`, `width`, `ambiguous` and the image list (and, in the entry,
+  `rows_at`, `utf16_len` and the filter).
 
 What is compressed:
 - `text`;
@@ -1460,8 +1567,10 @@ resize(cols, lines), primary screen (style sweeps blocked throughout, §5.2):
     1. if the first screen row continues a logical line from history, that line's stored
        lines are going to be pulled back (up to 4 × `lines` of them; older ones stay stored)
     2. note every tracked position as (logical line, cell offset): the cursor, saved cursors,
-       selection ends, search hits, placement anchors, the view position — those on the
-       screen **and those inside the stored lines about to be pulled back**, before pop()
+       selection ends, placement anchors, the view position — those on the screen **and
+       those inside the stored lines about to be pulled back**, before pop(). Search hits
+       on the screen and in pulled-back lines are dropped instead: the new screen is
+       searched again afterwards (step 6)
     3. pop() those stored lines and decode them
     4. re-split each logical line at the new width: copy cells, re-insert clusters into
        the new rows' stores, move prompt marks with their cells, put an edge spacer where
@@ -1470,7 +1579,8 @@ resize(cols, lines), primary screen (style sweeps blocked throughout, §5.2):
     5. if there are more rows than `lines`, move rows from the top into history (as stored
        lines at the new width) until the cursor row fits; if fewer, pull more logical lines
        back from history (as in "grow", noting positions inside them first)
-    6. turn the noted positions back into Points; every screen row gets a new seq
+    6. turn the noted positions back into Points; every screen row gets a new seq; with
+       the find bar open, search the new screen again
   then: unblock sweeps and sweep once
 ```
 
@@ -1515,7 +1625,7 @@ resize(cols, lines), primary screen (style sweeps blocked throughout, §5.2):
   no count. Only `display_offset()` as a number needs the count from the
   bottom (the test dump; a scrollbar, which the zero-UI goal rules out). It
   works the count out from the block caches. VoiceOver's line numbers use
-  the same counts (§13.9).
+  the same counts (§13.10).
 
 ### 12.4 The 120 Hz, 100k-line budget
 
@@ -1526,7 +1636,8 @@ Per resize event at 300×100 with 100k lines of history:
 | screen re-split: 30k cells | ~0.1–0.2 ms |
 | pull back up to 4 × `lines` = 400 stored lines (decode) | up to ~0.2 ms |
 | push back ≤ 100 rows (encode) | ~50 µs |
-| tracked positions | < 10 µs |
+| tracked positions (cursor, saved cursors, selection, placements, view): a handful | < 10 µs |
+| search hits, with the find bar open: history hits untouched (kept per block); the new screen searched again | ~30 µs |
 | one style sweep afterwards | ~30 µs |
 | history | **0** (nothing rewritten; block caches checked lazily) |
 | drawing while scrolled back: decode ≤ 100 logical lines | ~0.1 ms |
@@ -1565,10 +1676,11 @@ re-split screen rows numbers that follow the end of history, so a number
 that belonged to an old screen row or a pulled-back line can be handed to
 different text. That is safe for three reasons:
 - everything in term-core that holds a Point is remapped or cleared in the
-  same call: the cursor, saved cursors, selection, search hits, placements,
-  the view position and the grapheme state;
-- the renderer keys screen rows by change counter, and drops history rows on
-  `history_epoch`;
+  same call: the cursor, saved cursors, selection, placements, the view
+  position and the grapheme state. Search hits on the screen and in
+  pulled-back lines are dropped, and the screen is searched again;
+- the renderer keys screen rows by change counter, and drops cached history
+  rows at or after the lowest popped line (§9.1);
 - **the app holds no Points and does no line arithmetic** (§13.2).
 
 Ordering is text order: (line, col) sorts by stored line, and the stored
@@ -1590,6 +1702,10 @@ provides instead:
 impl Terminal {
     /// The stable position of what is shown at this view row and column.
     pub fn point_at(&self, view_line: usize, col: usize) -> Point;
+    /// Where `p` is shown now, as (view row, column); None if it isn't in view.
+    pub fn view_position(&self, p: Point) -> Option<(usize, usize)>;
+    /// Scroll so that `p`'s row is in view (to the middle if it was far off).
+    pub fn scroll_to(&mut self, p: Point);
     /// Select the word at `p`, on its logical line (a word can cross a soft wrap).
     pub fn select_word(&mut self, p: Point);
     /// Select the whole logical line at `p`.
@@ -1598,16 +1714,33 @@ impl Terminal {
     pub fn extend_selection(&mut self, to: Point);
     /// Where the cursor is in the view, if it is in view.
     pub fn cursor_in_view(&self) -> Option<(usize, usize)>;
-    /// The hyperlink at `p`, by value (URI and id parameter).
+    /// The hyperlink at `p`, by value (URI and id parameter). None until links land (PR 9).
     pub fn link_at(&self, p: Point) -> Option<LinkValue>;
+    /// VoiceOver (§13.10): UTF-16 offset of `p`, the Point at an offset, and
+    /// the piece of text holding an offset.
+    pub fn utf16_offset(&self, p: Point) -> usize;
+    pub fn point_at_utf16(&self, offset: usize) -> Point;
+    pub fn utf16_piece(&self, offset: usize) -> (Range<usize>, Utf16Piece);
 }
 ```
 
-The word rule moves from `term-app/src/mouse.rs` into term-core, with its
-tests; search's whole-word matching uses the same rule (§13.8). The PR that
-adds this API also changes term-app (view.rs) and term-render (frame.rs) to
-use it (§17.1, PR 2), and `Terminal`'s public fields (`cursor`, `selection`,
-`modes`, …) become private behind accessors in PR 1.
+What `point_at` returns at the edges:
+- **on the right half of a wide character:** the wide character's own Point
+  (its left column), so a click on either half selects the whole character;
+- **past the end of a row's text:** the Point at that column, beyond the
+  text. Selection treats it as the line's end, and `selection_text()` trims
+  it;
+- **below the last row** (a click in the bottom padding): clamped to the
+  last view row.
+
+**Two word rules.** Double-click keeps today's path-friendly rule: anything
+but whitespace and a few separators is part of a word, so a double-click
+takes a whole path or URL. That rule moves from `term-app/src/mouse.rs` into
+term-core, with its tests, for `select_word`. Search's whole-word matching
+uses a rule of its own (§13.8). The PR that adds this API also changes
+term-app (view.rs) and term-render (frame.rs) to use it (§17.1, PR 2), and
+`Terminal`'s public fields (`cursor`, `selection`, `modes`, …) become private
+behind accessors in PR 1.
 
 - **`Selection`** is `{ anchor: Point, head: Point }` plus a kind (normal,
   word, line, rectangular). Today it is cleared on resize; with this model
@@ -1624,19 +1757,31 @@ use it (§17.1, PR 2), and `Terminal`'s public fields (`cursor`, `selection`,
 
 ### 13.3 Search: what it has to do
 
-Alex's decision: search (Cmd+F, E.7) and VoiceOver (E.12) cover **all of
-history**. Search should show what is in view first, and searching history
-must be fast. The engine below lives in term-core (no platform code);
-term-app connects it to the find bar (§13.9).
+Alex's decisions: search (Cmd+F, E.7) and VoiceOver (E.12) cover **all of
+history**, search shows what is in view first, and searching history must be
+fast. Cmd+F uses our own native-style find bar (§13.9). The engine below
+lives in term-core (no platform code); term-app owns the bar and the worker
+thread.
 
 Requirements, as designed here:
 - in-view hits within one frame of typing;
 - history searched outwards from the view, nearest first, results streaming
   in;
 - typing, output and drawing never wait behind a search;
-- a rare word in 100k lines found in well under a millisecond once filters
-  exist, and in a few milliseconds without them;
-- hits that stay right through output, scrolling and reflow.
+- a full scan of 100k lines in well under a millisecond (measured: 0.11–0.71
+  ms), and less still for rare words once filters exist;
+- hits that stay right through output, scrolling and reflow, with no
+  duplicates.
+
+What is searched:
+- **On the primary screen:** the screen and all of history, from the first
+  line within the limit (hidden lines at the start of the oldest block are
+  skipped).
+- **On the alternate screen:** only the alternate screen, which has no
+  history. Switching screens with the bar open starts the search again on
+  the new screen.
+- **After a caught parser panic,** the session's new terminal has a new
+  `terminal_id`; the app starts the search again with the same query.
 
 ### 13.4 How a search runs
 
@@ -1644,7 +1789,7 @@ Requirements, as designed here:
 pub struct Query {
     pub text: String,
     pub ignore_case: bool,
-    pub word: WordMatch,          // Contains, StartsWith, FullWord, EndsWith (the find bar's options)
+    pub word: WordMatch,          // Contains, StartsWith, FullWord (the bar's menu); EndsWith (find pasteboard only)
 }
 
 impl Terminal {
@@ -1656,18 +1801,18 @@ impl Terminal {
 }
 
 pub struct SearchJob {
-    query: Arc<Matcher>,          // the compiled query: memmem finder or case-insensitive scanner, trigrams
-    blocks: Vec<Arc<Block>>,      // sealed blocks, oldest first (one refcount bump each)
-    open: OpenBlockCopy,          // the open block's meta and text, copied (≤ 128 KB)
-    start: usize,                 // the block holding the view's top row
-    epoch: u64,                   // history_epoch when taken
-    cancel: Arc<AtomicU64>,       // the pane's search generation; a newer one stops this job
+    matcher: Arc<Matcher>,          // the compiled query (§13.5) and its 4-byte grams
+    blocks: Vec<BlockRef>,          // per sealed block, oldest first: see below
+    open: OpenBlockCopy,            // the open block's meta and text, copied (≤ 128 KB)
+    start: usize,                   // the block holding the view's top row
+    cancel: Arc<AtomicU64>,         // the pane's search generation; a newer one stops this job
 }
 
-impl SearchJob {
-    /// Off the lock, on the search worker. Calls `found` with each block's hits, in order
-    /// of distance from the view.
-    pub fn run(&self, found: impl FnMut(HitBatch));
+pub struct BlockRef {
+    data: Arc<BlockData>,           // one refcount bump
+    len: u32,                       // lines in use when the job was taken: only these are scanned
+    text_end: u32,                  // end of those lines' text (up to 65,536)
+    filter: Option<Arc<Filter>>,    // None: scan
 }
 ```
 
@@ -1676,33 +1821,66 @@ The steps:
 1. **Under the lock, about 0.1 ms** (`start_search`):
    - the rows in view are searched first, then the rest of the screen. Their
      text is built from cells (≤ 30k cells at 300×100, ~30 µs). Their hits
-     go straight into the terminal's hit list and are drawn in the next
-     frame;
-   - the job is taken: an `Arc` clone of each sealed block, a copy of the
-     open block, the block nearest the view, `history_epoch`, and a new
-     search generation.
+     go straight into the hit list and are drawn in the next frame. A match
+     that starts in history and ends on screen row 0 (screen row 0 continues
+     a wrapped line) is found here too, using the boundary rule in §13.5;
+   - the job is taken: `(Arc<BlockData>, len)` and the filter for each sealed
+     block, a copy of the open block, the block nearest the view, and a new
+     search generation. History's "lowest line popped since this search
+     started" mark is reset (§9.1).
 2. **Off the lock, on the search worker.** There is one worker thread per
    process, and one job per pane at a time. It visits blocks by distance
-   from the view: the view's own block, then alternately the next older and
-   the next newer, so hits near what the user is looking at come first. For
-   each block it:
-   - checks the filter (§13.6) and skips the block, or scans it (§13.5);
+   from the view: the view's own block first, then alternately the next
+   older and the next newer, so hits near what the user is looking at come
+   first. For each block it:
+   - checks the filter (§13.6) if the block has one, and skips the block, or
+     scans the text of its first `len` lines (§13.5);
+   - checks the boundary with the block before it (§13.5);
    - turns each hit into Points (§13.8), which it can do without the lock
-     because the block is immutable;
+     because `BlockData` is immutable;
    - checks `cancel` between blocks.
 3. **Back on the main thread,** each batch is added under the lock in
-   O(batch). Hits from an older `history_epoch`, or on lines no longer
-   stored, are dropped. If any hit is in view, a redraw is asked for, and the
-   find bar's count is updated.
-4. **While the find bar is open, new output is searched as it arrives:**
-   - a line pushed into history is searched as it is pushed (its text is
-     right there, so this costs O(line) under the lock);
-   - screen rows whose `seq` changed are searched again;
-   - freed blocks take their hits with them.
+   O(batch). It drops hits on lines no longer stored, and hits at or after
+   the lowest line popped since the search started (pulled back by a
+   resize; those lines are searched again as live output, step 4). If any
+   hit is in view, a redraw is asked for, and the bar's count is updated.
+   After ED 3 or RIS (`history_epoch` changed) the search starts again.
 
 Typing never waits behind a search. The lock is held for step 1 and for
 merging batches, never while scanning history. Cancelling a stale search
-costs at most one block's scan (~15 µs).
+costs at most one block's scan (a few µs).
+
+**Live output while the bar is open: one rule, no duplicates.**
+- Hits are keyed by their start Point, and adding a hit that is already
+  there does nothing. So the same match found twice (by the worker and by
+  the rules below) is kept once.
+- **History:** once per frame (at snapshot time), the open block's text
+  added since `searched_to` is searched, starting `q − 1` bytes before
+  `searched_to` so a match spanning the old and new text is found; then
+  `searched_to` moves to the end. `pop()` lowers `searched_to` to the popped
+  line, so lines pushed back after a resize are searched again. Sealing
+  hands the block to history unchanged; nothing is searched twice.
+- **Screen:** at snapshot time, each row whose `seq` differs from the `seq`
+  it was last searched at is searched again, over its whole logical line, so
+  a match spanning a wrap onto an unchanged row is found. Its old screen
+  hits are replaced.
+- **Freed blocks** take their hits with them.
+
+**How hits are kept.** Per block, plus the screen's own list:
+
+```rust
+pub struct SearchHits {
+    blocks: VecDeque<(u64, Vec<Hit>)>, // (first line of the block, its hits in text order)
+    screen: Vec<Hit>,
+    total: usize,                      // capped at 100k (§19)
+}
+/// 16 bytes (could): start line, start column, how many lines on it ends, end column.
+pub struct Hit { line: u64, col: u16, end_lines: u16, end_col: u16, _spare: u16 }
+```
+
+Freeing the oldest block pops the front entry, O(1). Reflow leaves history
+hits alone and searches the new screen again (§12.2), so no hit is ever
+remapped one by one.
 
 ### 13.5 Fast block search
 
@@ -1711,82 +1889,113 @@ costs at most one block's scan (~15 µs).
   soft wrap. A 0x0A ends each logical line, so a match never crosses a real
   line end unless the query contains a newline. Placeholder cells are 0x00,
   so they never match.
-- **Case-sensitive:** `memchr::memmem::Finder`, built once per query. It is
-  SIMD (NEON on Apple Silicon) and runs at several GB/s. memchr is already
-  a dependency, through vte.
-- **Case-insensitive, ASCII query:** the query's rarest byte, by a static
-  byte-frequency table (the same idea memchr uses internally), is found in
-  both cases with `memchr2`. Each candidate position is then compared with
-  `eq_ignore_ascii_case`. That runs at 2–6 GB/s for typical words, slower
-  for queries made only of very common letters.
-- **Case-insensitive, non-ASCII query:** the query is simple-case-folded,
-  candidates are found by its first scalar's case forms, and candidates are
-  compared folded. That is slower (~0.2–0.5 GB/s) but rare.
+- **Case-sensitive:** `memchr::memmem::Finder`, built once per query (SIMD,
+  NEON on Apple Silicon). Measured over 100k stored lines (3.6–10.5 MB of
+  text): 0.11–0.33 ms, about 31 GB/s. memchr is already a dependency,
+  through vte.
+- **Ignoring case, ASCII query:** each block's text is lower-cased (ASCII
+  only) into a 64 KB scratch buffer, and the lower-cased query is found there
+  with memmem. Measured: 0.19–0.71 ms for every query. Looking for the
+  query's rarest byte in both cases, then checking each candidate, measured
+  0.13–5.4 ms depending on the query, so it isn't used.
+- **Ignoring case, a query with no cased letters** (digits, punctuation, CJK):
+  plain memmem, case-sensitive.
+- **Ignoring case, a query with non-ASCII cased letters:**
+  - folding is Unicode **simple case folding** (CaseFolding.txt, status C and
+    S), except U+212A KELVIN SIGN → `k` and U+017F LONG S → `s`. Leaving
+    those two out keeps ASCII text entirely on the lower-cased byte path;
+  - each query scalar matches any scalar in its **fold-equivalence set**,
+    from a generated table (σ/ς/Σ, θ/ϑ/ϴ, ǆ/ǅ/Ǆ);
+  - a mixed query finds its longest ASCII stretch with the lower-cased
+    scratch buffer and memmem, then checks the rest scalar by scalar;
+  - a query with no ASCII stretch scans scalar by scalar (estimate
+    ~0.2–0.5 GB/s, off the lock);
+  - not covered: full case folding (`ß` does not match `ss`), Turkish dotted
+    and dotless `i`, and canonical equivalence (precomposed `é` does not
+    match `e` + U+0301).
+- **Cluster boundaries.** A match must start and end on a cluster boundary.
+  This is checked only on lines with the `CLUSTERS` flag, so a search for `e`
+  doesn't match the first half of `e` + U+0301, or one scalar of a ZWJ
+  sequence.
+- **Block boundaries.** A logical line can continue from one block into the
+  next (`head_continues`), and from the newest stored line onto screen row
+  0. Each boundary gets a small buffer: the last `q − 1` bytes before it and
+  the first `q − 1` bytes after it (for the folded path, `q − 1` scalars of up
+  to 4 bytes each side). That buffer is searched too, and only matches that
+  cross the boundary are kept; the rest were found in the blocks themselves.
+  Whole-word checks at the start of a block read the last scalar of the
+  block before it. A property test puts lines across block boundaries
+  (§17.3).
 - **Compressed blocks (R.7)** are decompressed into a scratch buffer
-  (LZ4, ~2–4 GB/s), and only when the filter lets them through.
+  (LZ4, ~2–4 GB/s) before scanning, and not at all when the filter rules
+  the block out.
 - No new dependencies.
 
-### 13.6 The per-block filter
+### 13.6 The per-block filter (Alex's decision: in 1.0)
 
-- **What it is:** a 16,384-bit (2 KB) set per sealed block, with one bit per
-  hashed trigram of the block's text (ASCII lower-cased, other bytes as they
-  are) and one hash function.
-- **How a query uses it:** the query's own trigrams are lower-cased the same
-  way (for a non-ASCII case-insensitive query, only its all-ASCII trigrams
-  are used), and the block is scanned only if all their bits are set. It
-  never wrongly skips a block that holds the text. Queries shorter than
-  3 bytes skip the filter and scan.
-- **When it is built:** not at sealing. During a flood, blocks are sealed
-  thousands of times a second and most are freed unsearched, so building
-  then would cost ~1 ns per byte of output (about +40% parse CPU). Instead it
-  is built:
-  - when a sealed block has been idle for a while, in the same pass that R.7
-    compresses it (one read of the text, ~60 µs per block);
-  - or by the search worker the first time it scans a block, since it is
-    reading the text anyway (that scan costs ~50% more, once).
-- **How often it wrongly lets a block through.** A typical block holds about
-  60 KB of text:
+- **What it is:** a 4 KB (32,768-bit) set per sealed block, with one bit per
+  hashed **4-byte gram** of the block's text (ASCII lower-cased, other bytes
+  as they are) and one hash function.
+- **How a query uses it:** the query's own 4-byte grams are lower-cased the
+  same way (for a non-ASCII query ignoring case, only its all-ASCII grams),
+  and the block is scanned only if all their bits are set. It never wrongly
+  skips a block that holds the text. Queries under 4 bytes skip the filter.
+- **Built only in the background, never on the search path.** When a block is
+  sealed, a background job (the search worker, when it is idle) builds the
+  filter from the shared `BlockData` and stores it in the block's entry
+  under the lock. A block without a filter is simply scanned. Building costs
+  about 100 µs per block, measured: 20–50 times as long as scanning that
+  block. That is why it is never built while someone is waiting. During a
+  flood, blocks freed before their turn are never built at all.
+- **How often it wrongly lets a block through,** measured over 100k stored
+  lines of each kind of output (blocks without the word that the filter lets
+  through):
 
-  | Content | Distinct trigrams per block | Bits set |
+  | Output | 3-byte grams, 2 KB | **4-byte grams, 4 KB (chosen)** |
   |---|---|---|
-  | logs, `ls` output | 2–5k | 12–26% |
-  | source code, prose | 6–12k | 31–52% |
+  | logs | 0.6% | 0% |
+  | `ls` | 3.5% | 0.4% |
+  | source code | 15% | 3.0% |
+  | man pages | 31% | 8.2% |
+  | git log | 22% | 7.6% |
 
-  A block without the word gets through only if every one of the word's
-  trigrams missing from it lands on a set bit: about fill^t for t missing
-  trigrams. For a rare 8-letter identifier with 3–6 of its 6 trigrams
-  missing from a block, that is 0.4³–0.4⁶ ≈ 6%–0.4% in code, and 0.2³ ≈ 0.8%
-  or less in logs. Common words really are in most blocks, so the filter
-  doesn't help there, and doesn't need to.
-- **Memory:** about 1,500 plain lines (or 1,100 `ls` lines) per block, so
-  2 KB is 1.4–1.9 B per line:
+  Common words really are in most blocks, so the filter doesn't help there,
+  and doesn't need to.
+- **Memory:** 4 KB per block. A block holds up to 64 KB of text, so filters
+  are at most about 6% of history's text:
 
-  | History | Blocks | Filters |
-  |---|---|---|
-  | 10k lines | 7–10 | 14–20 KB |
-  | 100k lines | 70–100 | 140–200 KB |
+  | History | Text (measured range) | Blocks | Filters |
+  |---|---|---|---|
+  | 10k lines | 0.36–1.05 MB | 6–17 | 24–68 KB |
+  | 100k lines | 3.6–10.5 MB | 55–161 | 220–644 KB |
 
-  Filters count against the hidden 32 MB backstop. They are dropped under
-  memory pressure (R.5) and rebuilt by the next search.
-- **Why trigrams, not bigrams:** the letter pairs of ordinary words appear
-  in almost every block. A 512-byte bigram set fills to about 40% from the
-  ~2k distinct pairs in a block, and nearly every English pair is in it, so
-  it would skip very little.
+  That is about 2.2–6.4 B per line. Filters count against the hidden 32 MB
+  backstop. They are dropped under memory pressure (R.5) and rebuilt in the
+  background.
+- **What it buys, when a full scan already takes under a millisecond:** for a
+  rare word the worker reads a few percent of history instead of all of it,
+  which matters while output is flowing and other panes are drawing. R.7's
+  compressed blocks are skipped without being decompressed, which would
+  otherwise cost ~20–30 µs per block.
 
-### 13.7 Expected speed
+### 13.7 Speed
 
-These are estimates for an M1-class Mac; the search PR adds a benchmark.
-100k lines of history is about 4–6 MB of text.
+Measured by the second review's prototype on 100k stored lines of real
+output (3.6–10.5 MB of text); the search PR adds the same cases to the
+standard benchmarks. Rows marked "estimate" are not measured yet.
 
-| Search | Time |
+| Search over 100k lines | Time |
 |---|---|
-| rare word, filters built | ~0.05–0.2 ms: ~100 filter checks (a few bit tests each, ~1 µs in all), then a scan of the 1–6% of blocks that pass |
-| rare word, no filters yet | ~1–1.5 ms case-sensitive, ~1.5–3 ms case-insensitive (a full scan) |
-| common word, such as "error" with 20k hits | scanning ~1.5 ms, plus ~2–6 ms to turn hits into Points; the hits near the view arrive in under 1 ms, because the search works outwards from the view |
-| non-ASCII, case-insensitive | ~10–30 ms for a full scan, off the lock |
-| with R.7-compressed blocks | +20–30 µs for each block that passes the filter |
+| case-sensitive, full scan (memmem) | **0.11–0.33 ms** (~31 GB/s) |
+| ignoring case: lower-case each block into a scratch buffer, then memmem | **0.19–0.71 ms**, for every query |
+| (not used) rarest byte in both cases, then check | 0.13–5.4 ms, depending on the query |
+| rare word, with filters | scans only the blocks that pass: 0–8.2% of those without the word |
+| building a filter (background only) | ~100 µs per block, 20–50× its scan |
+| turning hits into Points | estimate: ~0.1–0.3 µs per hit, so 20k hits take 2–6 ms; hits near the view arrive first |
+| non-ASCII query ignoring case, no ASCII stretch | estimate: ~10–50 ms, off the lock |
+| R.7-compressed blocks | estimate: +20–30 µs per block scanned |
 
-### 13.8 Hits: Points, columns, whole words, find next
+### 13.8 Hits: Points, columns, words, find next
 
 - **A hit is (start Point, end Point),** both stable: a line number as
   written plus a column as written. The worker finds them like this:
@@ -1798,80 +2007,131 @@ These are estimates for an M1-class Mac; the search PR adds a benchmark.
 
   A match that ends in a later stored line (across a soft wrap) gets its end
   Point the same way.
-- **Hits are tracked positions** (§13.1). History hits don't change with
-  output or reflow. Screen hits are remapped on reflow, moved by region
-  scrolls, and searched again when their row's `seq` changes.
 - **After a reflow,** history hits are drawn at the current width through
   the same Point-to-view mapping as everything else (the snapshot's
-  highlight ranges, §9.2), so nothing has to be searched again.
-- **Whole words and the find bar's match options** (contains, starts with,
-  full word, ends with, which is what AppKit's find bar offers) are checked
-  on each hit against the scalars on either side, with the same word rule
-  as `select_word`. A logical line's end counts as a boundary.
-- **Find next and previous.** The hit list is sorted by Point. "Next" is the
-  first hit after the current one, or after the view's top when there is no
-  current hit; "previous" is the same the other way. If the worker hasn't
-  finished that direction yet, it searches that direction first, and the
-  jump happens when the hit arrives. At either end it wraps around, as the
-  find bar asks.
-- **Typing more letters** starts a new search. When the new query contains
-  the old one and the old search had finished, only the blocks that had
-  old hits (and the screen) are scanned.
-- **Regex is not in 1.0.** AppKit's find bar has no regex mode, and adding
-  one would mean UI of our own. The engine can take a `regex::bytes`
-  matcher later, with the regex's required literals feeding the filter.
+  highlight ranges, §9.2), so nothing in history has to be searched again.
+  Region scrolls move or drop screen hits inside the region (§13.1).
+- **Search's word rule:** letters, digits, combining marks and `_` are word
+  characters; everything else is a boundary, and so is a logical line's end.
+  This is not the double-click rule (§13.2), which keeps paths and URLs
+  whole. Full Word doesn't find words inside CJK text written without spaces,
+  because every CJK character is a letter.
+- **Match options:** Contains, Starts With and Full Word, from the bar's
+  menu; Ends With is accepted if it arrives through the find pasteboard.
+  Starts With, Full Word and Ends With are checked on each raw match against
+  the scalars on either side, so they need **overlapping** candidates: after
+  a candidate fails the check, the search goes on one byte after its start,
+  not after its end.
+- **Find next and previous.** Hits are in Point order (blocks in order, hits
+  in text order within each). "Next" is the first hit after the current one,
+  or after the view's top when there is no current hit; "previous" is the
+  same the other way. If the worker hasn't finished that direction yet, it
+  searches that direction first, and the jump happens when the hit arrives.
+  At either end it wraps around. The jump calls `scroll_to` and selects the
+  hit.
+- **Typing more letters** starts a new search. It may scan only the blocks
+  where the old query matched (and the screen) when all of these hold:
+  - the new query contains the old one;
+  - both are Contains, with the same Ignore Case setting;
+  - the old search finished and didn't reach the hit cap.
 
-### 13.9 The find bar and VoiceOver: UTF-16 offsets over all of history
+  The narrowing uses the old query's raw substring matches, before any word
+  checks.
+- **Regex is not in 1.0.** The bar's options menu has no regex mode. The
+  engine can take a `regex::bytes` matcher later, with the regex's required
+  literals feeding the filter.
 
-AppKit's find bar (NSTextFinder, through the NSTextFinderClient protocol)
-and the accessibility element (E.12) address text by UTF-16 offset into one
-string. That string is every logical line from the first stored line to the
-bottom of the screen, each followed by a newline, with placeholder cells as
-spaces.
+### 13.9 The find bar (Alex's decision: our own, not NSTextFinder)
 
-- **Counts.** Each block keeps `utf16_len` (4 bytes), and its checkpoints
-  hold the UTF-16 offset of every 16th line. The terminal keeps the sums of
-  `utf16_len` over blocks, rebuilt in O(blocks) when a block is sealed or
-  freed.
+Cmd+F shows a native-style find bar of decline's own, made only of standard
+AppKit controls. It isn't NSTextFinder's bar, because NSTextFinder does its
+own matching over the client's text and can't take matches from our search.
+
+- **The bar** sits at the top of the pane:
+  - an `NSSearchField`;
+  - previous and next buttons;
+  - a count ("12 of 340", or "340+" while the search is still running);
+  - Done;
+  - an options menu on the field's magnifying glass: Ignore Case, and
+    Contains / Starts With / Full Word.
+
+  Whether it covers the top rows or makes the grid shorter is decided in
+  E.7; covering avoids resizing the program.
+- **Menus and keys.** The view implements `performTextFinderAction:` and
+  `validateUserInterfaceItem:` for the standard NSTextFinderAction tags, so
+  Edit > Find and its shortcuts work as in every Mac app:
+
+  | Tag | Action | Key |
+  |---|---|---|
+  | 1 | show the find bar | Cmd+F |
+  | 2 | next match | Cmd+G |
+  | 3 | previous match | Shift+Cmd+G |
+  | 7 | use the selection for find | Cmd+E |
+  | 11 | hide the find bar | Escape, Done |
+- **The shared find text.** The bar reads the find pasteboard
+  (`NSPasteboard(name: .find)`) when it opens and when the app becomes
+  active. That means the string, plus `NSPasteboardTypeTextFinderOptions`
+  with `NSTextFinderCaseInsensitiveKey` and `NSTextFinderMatchingTypeKey`.
+  It writes them back when the query changes or on Cmd+E, so the find text
+  is shared with Safari, Xcode and the rest, as users expect.
+- **What it calls:** `start_search`, `add_search_hits`, find next and
+  previous over the hit list (§13.8), and `scroll_to`. Its count is the hit
+  list's `total`.
+- This is the one piece of decline's own UI, by Alex's decision; it is built
+  from standard controls so it looks and behaves like the system's.
+
+### 13.10 VoiceOver: UTF-16 offsets over all of history
+
+The accessibility element (E.12) addresses text by UTF-16 offset into one
+string. That string is every logical line from the first line within the
+limit to the bottom of the screen, each followed by a newline, with
+placeholder cells as spaces. The UTF-16 calls in §13.2 are for VoiceOver
+only.
+
+- **Counts.** Each block's entry keeps `utf16_len` (4 bytes), and its
+  checkpoints hold the UTF-16 offset of every 16th line. The terminal keeps
+  the sums of `utf16_len` over blocks, rebuilt in O(blocks) when a block is
+  sealed, freed or popped from.
 - **Point to offset:** the blocks' sum, plus the checkpoint, plus at most 15
   lines, plus the line's own scalars up to the column. **Offset to Point:**
   the same in reverse, with binary searches. Each is O(log blocks), plus a
   line or two.
+- **The full text** goes to VoiceOver as an `NSString` subclass backed by the
+  history blocks: `length` is the sum of the counts plus the screen's part,
+  and `characterAtIndex:` and `getCharacters:range:` decode from the blocks
+  (UTF-8 to UTF-16 on demand, keeping the last block decoded). Nothing is
+  copied up front. The E.12 spike measures how often VoiceOver asks, and for
+  how much.
 - **The screen's part** is built on demand, under the lock.
-- **Offsets move.** They count from the first stored line, so they shift
-  when a block is freed, and the screen's part changes with output. The app
-  tells the find bar (`noteClientStringWillChange`) and accessibility (a
-  value-changed notification) at most once per frame. The terminal's own
-  hit list is in Points, so it doesn't move.
-- **Text in pieces.** `stringAtIndex:effectiveRange:endsWithSearchBoundary:`
-  serves one block's text at a time, converted to an NSString per piece.
-  Pieces come from immutable `Arc<Block>`s, so they can be served off the
-  main thread. The screen is the last piece.
+- **Offsets move.** They count from the first line within the limit, so they
+  shift when a block is freed, and the screen's part changes with output.
+  The app posts accessibility's value-changed notification at most once per
+  frame.
 - **VoiceOver's lines** are rows at the current width. A line number maps to
   a UTF-16 range through the blocks' row counts (§12.3) and a short walk
-  inside one block.
-- **One thing for the E.7 spike:** NSTextFinder matches text itself, over
-  the client's string, and has no public way to take matches from
-  elsewhere. Our engine's hits are what decline highlights and jumps to. The
-  spike checks whether the find bar's count and next/previous buttons can be
-  driven from our hits, or whether, for the bar's own count, NSTextFinder's
-  matching over our pieces is fast enough. Either way, the UTF-16 mapping
-  above is needed, and VoiceOver needs it regardless.
+  inside one block. After a width change, those counts are worked out by the
+  search worker on the shared `BlockData`, and stored in the entries under
+  the lock (could), so VoiceOver never makes the main thread walk all of
+  history.
 
 ---
 
 ## 14. Parser support (vendored vte)
 
-The vendored copy on `main` already has `print_ascii` and the UTF-8 split
-fix. Today its state machine:
-- sends SOS, PM and APC (`ESC X`, `ESC ^`, `ESC _`) to one state that
-  ignores them;
-- passes DCS through `hook`/`put`/`unhook`, one byte at a time;
-- with the `std` feature, buffers OSC strings in an unbounded `Vec`, and
-  splits them on `;` into at most 16 parts. It drops the separators from its
-  buffer, so bytes after the 16th part are lost.
+**Landed (PR 3, `0bb234d`).** The vendored copy already had `print_ascii`
+and the UTF-8 split fix. Before PR 3, its state machine:
+- sent SOS, PM and APC (`ESC X`, `ESC ^`, `ESC _`) to one state that
+  ignored them;
+- passed DCS through `hook`/`put`/`unhook`, one byte at a time;
+- with the `std` feature, buffered OSC strings in an unbounded `Vec`, and
+  split them on `;` into at most 16 parts, dropping the separators from its
+  buffer.
 
-The changes, each with tests in `vendor/vte` and listed in its README:
+PR 3 made these changes, as designed, with tests in
+`vendor/vte/src/string_tests.rs` and a list in its README.
+`osc_dispatch` itself is unchanged: at most 16 parts, and the rest of the
+string is dropped. The term-core side (what to do with each string) comes with
+the PRs that use it.
 
 ```rust
 pub trait Perform {
@@ -1950,7 +2210,7 @@ correctness.
 | Operation | Today | This model |
 |---|---|---|
 | ASCII run of n bytes in one row segment | n × 12-byte stores, OR over the cells | n × 8-byte stores (`template \| byte`), OR over n `u64`s, one `touch_row`, grapheme state set once |
-| non-ASCII scalar | `unicode-width` lookup, store | one table lookup (width + break class), O(1) break check, store; a join appends to the cluster, amortised O(1) |
+| non-ASCII scalar | `unicode-width` lookup, store | one table lookup (width, break class and the ambiguous flag; the ambiguous-width setting adds one bit test), O(1) break check, store; a join appends to the cluster, amortised O(1). ASCII pays nothing for either |
 | SGR | edit the pen | edit the pen's `Style`, clear its cached template |
 | first print after SGR | — | intern: ~5 ns hit, ~15–20 ns miss |
 | erase n cells | fill 12-byte cells | fill the 8-byte template; free cluster slots in the range only if the row has clusters |
@@ -1958,10 +2218,12 @@ correctness.
 | region scroll, IL/DL | rotate rows in the region | same, plus positions inside the region |
 | ICH/DCH | rotate within the row | same; free slots of cells pushed off |
 | sweep | — | O(cells), at most once per cells/2 new styles |
-| push to history | O(cells) | O(cells) + O(runs); with a search open, + O(line) to search the line |
+| push to history | O(cells) | O(cells) + O(runs); with the find bar open, the new text is searched once per frame (§13.4) |
 | resize, new width | O(screen), truncating | O(screen + pulled lines); history untouched |
 | snapshot | (frame built under the lock, O(cells)) | O(changed rows × cols) memcpy + new styles |
-| start a search | — | O(screen) + O(blocks) refcount bumps under the lock; history off the lock |
+| start a search | — | O(screen) + O(blocks) refcount bumps under the lock; history off the lock (0.11–0.71 ms for a full scan of 100k lines) |
+| merge a batch of hits | — | O(batch) under the lock; freeing a block drops its hits in O(1) |
+| build a block's filter | — | ~100 µs, in the background only |
 
 ---
 
@@ -1985,11 +2247,12 @@ in single-digit megabytes.
 | cluster stores, worst (8 KB cap per row) | ~200 KB | ~1 MB | combining-mark floods only |
 | link table | ~100 B per link | | bounded by the styles |
 | placement table | ~100 B per direct placement | | pixels count against the 32 MB image budget |
-| snapshot buffers (renderer, reused) | 15 KB | 234 KB | plus the renderer's style mirror (same size as the table) |
+| snapshot buffers (renderer, reused) | 15 KB | 234 KB | plus the renderer's style mirrors, one per screen (each the size of its table) |
 | renderer row cache (R.2) | ≤ 46 KB | ≤ 720 KB | same as today's frame vectors |
 | shaping cache (ligature fonts only) | ≤ 23 KB | ≤ 360 KB | 12 B per glyph |
 | shaped-cluster cache (per process) | ≤ ~400 KB | | 4096 entries |
-| search hit list | ~24 B per hit | | 20k hits ≈ 480 KB, only while the find bar is open |
+| search hit list | 16 B per hit | | 20k hits ≈ 320 KB, only while the find bar is open; capped at 100k hits (1.6 MB) |
+| search filters | 4 KB per sealed block | | built in the background; see §16.2 |
 | font registry | ~100 B per face + Core Text's own | | tens of faces |
 | Unicode table | 60–80 KB read-only, shared | | paged in on use |
 
@@ -1997,8 +2260,8 @@ in single-digit megabytes.
 
 Sealed bytes per line from §11.4, plus per block about 200 bytes of header
 and dictionary and 0.25 B per line of checkpoints, plus one open block
-(≤ 64 KB of each part) per terminal. Search filters add 1.4–1.9 B per line
-once they are built.
+(≤ 64 KB of each part) per terminal. Search filters add 2.2–6.4 B per line
+once they are built (4 KB per block, §13.6).
 
 | Content | B/line | 10k lines | 100k lines | Today, 10k (measured) |
 |---|---|---|---|---|
@@ -2009,16 +2272,16 @@ once they are built.
 | CJK | 66 | 0.66 MB | 6.6 MB | 0.90 MB |
 | emoji-heavy | 79 | 0.79 MB | 7.9 MB | – |
 | gradient, 160 cells | ~1,600 | 16 MB | stopped at the 32 MB backstop | ~11 MB |
-| search filters, once built | 1.4–1.9 | 14–20 KB | 140–200 KB | – |
+| search filters, once built | 2.2–6.4 | 24–68 KB | 220–644 KB | – |
 
 ### 16.3 Whole terminal state, worked
 
 | Case | Screen + tables | History | Snapshot + render caches | Total |
 |---|---|---|---|---|
-| 80×24, plain, 10k lines | 17 KB | 0.43 MB + ≤ 64 KB (+ 14 KB filters) | ~60 KB | **~0.6 MB** |
+| 80×24, plain, 10k lines | 17 KB | 0.43 MB + ≤ 64 KB (+ ~28 KB filters) | ~60 KB | **~0.6 MB** |
 | 80×24, CJK, 10k lines | 17 KB | 0.66 MB | ~60 KB | ~0.8 MB |
 | 300×100, coloured, 10k lines | 240 KB | 0.59 MB | ~1 MB | ~1.9 MB |
-| 300×100, emoji-heavy, 100k lines | 310 KB | 7.9 MB (+ 0.2 MB filters) | ~1.1 MB | ~9.5 MB |
+| 300×100, emoji-heavy, 100k lines | 310 KB | 7.9 MB (+ ~0.4 MB filters) | ~1.1 MB | ~9.7 MB |
 | 300×100, gradient TUI, 10k lines | 1.9 MB (peak) | 16 MB | ~3.5 MB (incl. style mirror) | ~21 MB |
 
 For comparison, Ghostty keeps full cells for history: 10k lines at 160
@@ -2038,19 +2301,21 @@ go in order, and the font and render agents run alongside.
 | # | Crate | PR | Size | After |
 |---|---|---|---|---|
 | 1 | core + render + app | `refactor(core)!: read cells through RowRef/CellRef and a Style value`: content (empty, char, cluster text, placeholder), width, `&Style`; `Style`, `Underline`, `Attrs` defined; implemented on today's 12-byte cells. **`Terminal`'s public fields (`cursor` and its pen, `selection`, `modes`, …) become private behind accessors.** Every caller moves over (frame.rs, view.rs, the conformance/term/props tests, the pipeline test). No behaviour change | **M** | — |
-| 2 | core + app + render | **view API and selection gestures at a fixed width** (§13.2): `point_at`, `select_word`/`select_line`/`select_all`/`extend_selection` on logical lines, `cursor_in_view`, `link_at`, `ViewTop`; view.rs and frame.rs stop doing line arithmetic; the word rule moves into term-core | M | 1 |
-| 3 | vte | APC state, `put_slice`, OSC separators kept and size policy (§14), no-op defaults | S | — |
+| 2 | core + app + render | **view API and selection gestures at a fixed width** (§13.2): `point_at` (with its edge rules), `view_position`, `scroll_to`, `select_word`/`select_line`/`select_all`/`extend_selection` on logical lines, `cursor_in_view`, `link_at` (None until PR 9), `ViewTop`; view.rs and frame.rs stop doing line arithmetic; the double-click word rule moves into term-core | M | 1 |
+| 3 | vte | APC state, `put_slice`, OSC separators kept and size policy (§14), no-op defaults. **Landed, `0bb234d`** | S | — |
 | 4 | core | Unicode table (with the ambiguous flag) + incremental segmentation; width lookups move to the table (a test checks it equals `unicode-width` per scalar); clusters not stored yet | M | 2 |
 | 5 | core | **8-byte cells and the per-screen style table**: SGR 4:x, 21, 53/55, 58/59 stored; erase style; sweep with every holder (§5.2); renumbering; `set_sweep_at`; `check_invariants` extended. History is still v1 | M | 4 |
 | 6 | core | **clusters per row and mode 2027** (the width rule of §6.3, legacy mode, REP by value, the extended `repair_wide`); `Terminal::set_ambiguous_width`; selection text and `dump()` show clusters | M | 5 |
-| 7 | core | **scrollback v2** (§11) at the written width only: meta and contiguous text, checkpoints, `utf16_len`, per-block ambiguous setting, `FILL`, `pop()`, the 32 MB backstop, the 64-entry slot cache; `scrollback_mem` gains emoji, placeholder, gradient and sealed figures; bench limits lowered | L | 6 |
-| 8 | core | row change counters, `terminal_id`, `history_epoch`, the snapshot with highlight ranges and style updates (§9) | S | 5 |
+| 7 | core | **scrollback v2** (§11) at the written width only: `BlockData` (shared) and `BlockEntry`, meta and contiguous text, checkpoints, per-block ambiguous setting, `FILL`, `pop()` with the lowest-popped mark, the 32 MB backstop, the 64-entry slot cache; `scrollback_mem` gains emoji, placeholder, gradient and sealed figures; bench limits lowered | L | 6 |
+| 8 | core | row change counters, `terminal_id`, `history_epoch`, `popped_from`, the snapshot with highlight ranges, the screen it shows and style updates (§9) | S | 5 |
 | 9 | core | OSC 8 link table and OSC 133 prompt marks, on the screen and in v2 | S | 7 |
 | 10 | core | kitty placeholders (cell kind, diacritic table, step-by-step inference, v2 list) | S | 7 |
 | 11 | core | **screen reflow, pull-back and tracked positions** (F.4, §12.2): the two ignored resize tests settled (§19) | L | 7, 8 |
 | 12 | core | **history at another width** (§12.3): rows-at-width counts, `ViewTop::At { point, offset }` across width changes, `FILL` at another width | M | 11 |
-| 13 | core | **search engine** (§13.3–§13.8): `start_search`, `SearchJob`, block filters, hit list as tracked positions, UTF-16 mapping (§13.9), and a search benchmark (rare and common word over 100k lines) | M | 12 |
-| 14 | core | placement table and decline's own images (§8) for B.3/B.5, with the `ImageDecoder` trait and the 32 MB budget | M | 12 |
+| 13a | core | **UTF-16 counts and mapping** (§13.10): `utf16_len` per entry, UTF-16 checkpoints, `utf16_offset` / `point_at_utf16` / `utf16_piece` | S | 7 |
+| 13b | core | **search engine and hits** (§13.3–§13.8): `start_search`, `SearchJob` over `(Arc<BlockData>, len)`, block boundaries, the live-output rule, hits per block, the case-folding table, and a search benchmark with the prototype's cases | M | 11 |
+| 13c | core | **search filters** (§13.6): 4-byte grams in 4 KB, built in the background only; still in 1.0 | S | 13b |
+| 14 | core (+ app for the decoder) | placement table and decline's own images (§8) for B.3/B.5, with the `ImageDecoder` trait and the 32 MB budget; the ImageIO decoder is a term-app part | M | 12 |
 | 15 | app | settings: `ambiguous_width` (and later `image_memory` with B.3), read by config and passed to term-core; main session | S | 7 |
 | F2.1 | font | font registry, `GlyphKey`, rasterise by (font, glyph); `rasterize(char, style)` kept as a wrapper | M | 1 |
 | F2.2 | font | CTLine shaping of runs (`shape()`) and the shaped-cluster cache; clusters now, ligatures in B.1 | M | F2.1 |
@@ -2059,8 +2324,9 @@ go in order, and the font and render agents run alongside.
 | F3.2 | render | glyph cache keyed by `GlyphKey` (sprites included); runs (§10.1); cluster cells via F2.2; curly/dotted/dashed via F2.3; ambiguous characters at two cells | M | 6, F2.2, F2.3 |
 | F3.3 | render | build frames from the snapshot with overlays (§9.3), still under the lock (R.1 moves it out) | M | 8 |
 
-E.7 (the find bar) and E.12 (VoiceOver) build on PR 13; the E.7 spike
-(§13.9) can start as soon as PR 13 is in review.
+PR 13 as a whole is L, so it is split as above. E.7 (our find bar, §13.9, in
+term-app) builds on 13b; E.12 (VoiceOver, term-app) builds on 13a, and its
+spike measures how often VoiceOver asks for text (§13.10).
 
 ### 17.2 Existing tests that carry over
 
@@ -2076,7 +2342,7 @@ E.7 (the find bar) and E.12 (VoiceOver) build on PR 13; the E.7 spike
 | `term-app/src/mouse.rs` word tests | move into term-core with the word rule (PR 2) |
 | `term-font/tests/font.rs`, the sprite tests from F.6 | carry over; registry and shaping tests added |
 | `term-app/tests/pipeline.rs`, `smoke.rs` | carry over (text dumps); the caught-panic test checks that the renderer drops its caches (a new `terminal_id`) |
-| benches (`parse`, `parse_1k`, `frame`) | carry over; numbers recorded before and after PRs 5, 6, 7, 8, 11, 12 and F3.2; a `search` bench joins in PR 13 |
+| benches (`parse`, `parse_1k`, `frame`) | carry over; numbers recorded before and after PRs 5, 6, 7, 8, 11, 12 and F3.2; a `search` bench with the review prototype's cases joins in PR 13b |
 
 ### 17.3 New invariants
 
@@ -2094,7 +2360,10 @@ renumbering happen constantly:
    - after a forced sweep, live ids = ids used; after a renumbering, ids are
      dense and every row's `seq` changed;
    - a cached template never belongs to the other screen's table: switch
-     screens at random in the property test.
+     screens at random in the property test;
+   - no table epoch repeats, even when the alternate table is freed and
+     made again;
+   - `new_ids` never holds more than half the table.
 
    (Ghostty's equivalent checks reference counts; ours checks the sweep's
    result and every holder.)
@@ -2119,12 +2388,15 @@ renumbering happen constantly:
    - after RIS, `counter` hasn't gone back and `history_epoch` has changed;
    - after a session's terminal is replaced, `terminal_id` has changed.
 7. **Snapshot:** a frame built from a snapshot equals a frame built from the
-   live terminal; applying `style_updates` to a mirror gives the live table.
+   live terminal; applying each snapshot's `style_updates` to the mirror of
+   its `screen` gives that screen's live table, across random screen
+   switches.
 8. **History:**
    - any row pushed and read back is the same row (cells, resolved styles,
      clusters, marks, placeholders, `FILL`), up to trailing blanks and the
      space/empty equivalence;
-   - `pop()` after `push()` gives the row back and bumps `history_epoch`;
+   - `pop()` after `push()` gives the row back, leaves the shared
+     `BlockData` unchanged, and sets the lowest-popped mark;
    - no part of the open block holds more than 64 KB;
    - the backstop counts every part;
    - checkpoints and `utf16_len` agree with the text.
@@ -2148,7 +2420,12 @@ renumbering happen constantly:
 13. **Search:**
     - for random content and queries (both cases, every word option), the
       engine's hits equal a plain scan of the decoded text, whichever order
-      blocks are visited in;
+      blocks are visited in, with no hit twice;
+    - **lines that cross a block boundary**, and a line continuing from
+      history onto screen row 0, are found like any other;
+    - matches never start or end inside a cluster;
+    - with output arriving and pull-backs during the search, the final hit
+      list equals a fresh search;
     - a block's filter never rejects a query the block contains;
     - hits keep pointing at the same text through output, region scrolls
       and reflow;
@@ -2170,8 +2447,11 @@ renumbering happen constantly:
 - **Before merging,** every PR passes `cargo fmt --all`,
   `cargo clippy --workspace --all-targets -- -D warnings` and
   `cargo test --workspace` (AGENTS.md).
-- **PRs 1 and 2 put every reader behind term-core's API,** so PRs 4–14
-  change term-core's insides without touching term-render or term-app.
+- **PRs 1 and 2 put every reader behind term-core's API,** so the core PRs
+  change term-core's insides without touching term-render. Some later work
+  does touch term-app, as its own app PRs: the ImageIO decoder (PR 14), the
+  find bar and search worker (E.7, on 13b), VoiceOver (E.12, on 13a) and
+  the settings (PR 15).
 - **Each switch over keeps the old path as a test-only reference for one
   PR,** as the parser work did (`set_bulk_ascii`, the reference encoder):
   - the cluster writer is checked against one codepoint at a time;
@@ -2185,14 +2465,15 @@ renumbering happen constantly:
   - the deterministic bytes-per-line gate (`scripts/bench-gate.py`) runs in
     CI. Its limits are lowered in PR 7 and never raised; the gradient limit
     is added then.
-  - parse speed is gated on PRs 5, 6, 7, 8, 11 and 12. A 3% threshold is
+  - parse speed is gated on PRs 5, 6, 7, 8, 11, 12 and 13b. A 3% threshold is
     below CI noise, so this gate is a script (`scripts/parse-gate.py`, new
     in PR 5). It builds the base and the PR, runs `parse_1k` interleaved
     (base, PR, base, PR… at least 5 pairs) on the fixed Mac from N.5,
     compares medians, and fails on a drop of more than 3% for plain,
     coloured, TUI or `seq`. Its output goes in the PR description. CI runs
     only the bytes gate.
-  - the frame-build bench for F3.x, and the search bench for PR 13;
+  - the frame-build bench for F3.x, and the search bench for PRs 13b and
+    13c;
   - footprint on the standard set for PRs 5, 7 and 11.
 - **Fuzzing:** the parse target is fuzzed on each merge (the nightly job),
   with 14 clean nights before 1.0, as planned.
@@ -2201,13 +2482,16 @@ renumbering happen constantly:
 
 ### 17.5 What dogfooding loses in between
 
-Alex runs builds of `main` daily (`scripts/dogfood.sh`). Two gaps show up in
-that app:
+Alex runs builds of `main` daily (`scripts/dogfood.sh`). Three gaps show up
+in that app:
 
 - **Between PRs 5 and 7,** history still uses v1. Lines that scroll into
   history lose underline colour and underline style (curly, dotted and
   dashed become a single underline), and also overline and links. On the
   screen they are correct.
+- **Between PRs 6 and 7,** clusters work on the screen, but v1 history keeps
+  only each cluster's first scalar: a family emoji scrolled into history
+  comes back as 👨, and `e` + U+0301 as `e`.
 - **Between PR 6 and F3.2,** cluster cells draw at least their first
   character (the renderer draws the base scalar). Widths and cursor
   positions are already right, so text lines up; only the joined glyph is
@@ -2261,9 +2545,9 @@ that app:
 1. **Sweep pauses on very large screens.** 160k cells means a sweep of about
    150 µs under the lock, amortised over ≥ 80k new styles. Measure it in
    PR 5 with a full-screen truecolour animation at 120 Hz.
-2. **The renderer's style mirror** doubles the style table's memory in the
-   gradient case (a second 0.9 MB at 300×100). Accepted; it goes when the
-   table is renumbered.
+2. **The renderer's style mirrors** (one per screen) double the style
+   tables' memory in the gradient case (a second 0.9 MB at 300×100).
+   Accepted; it goes when the table is renumbered.
 3. **Cluster store garbage** under spinners that rewrite emoji in place. A
    property test rewrites one cell a million times and checks the store
    stays bounded.
@@ -2272,7 +2556,8 @@ that app:
    (about 10 ms per 100k lines, once per width); drawing never does.
 5. **A number handed to new text after a reflow or `pop()`.** This is safe
    only while every holder of a Point lives in term-core and is remapped,
-   and the renderer and search watch `history_epoch`. New features that keep
+   and the renderer and search watch `history_epoch` and the lowest-popped
+   mark. New features that keep
    Points (E.5 prompt jumping, E.7 search, B.3 placements, E.12
    accessibility) must register as tracked positions; the reflow property
    test (§17.3, 10) covers each one as it lands.
@@ -2289,11 +2574,10 @@ that app:
    old, so this will show in some tools.
 9. **Image rows on reflow** wrap in pieces (§8.3); if that looks bad, clip
    rows that are all placeholders.
-10. **The find bar may not take our matches** (§13.9). If NSTextFinder can't
-    be driven from our hits, the bar's own count comes from AppKit's matching
-    over our pieces, which is slower over 100k lines and doesn't use the
-    filter. Decline's highlights and jumps still come from our engine. The
-    E.7 spike settles this before E.7 is sized again.
+10. **How often VoiceOver asks for text** (§13.10). The NSString backed by
+    history decodes on demand; if VoiceOver reads the whole string often, each
+    read decodes megabytes. The E.12 spike measures it; a cache of decoded
+    UTF-16 for the blocks near the view is the fallback.
 11. **Search memory with a very common query** (hundreds of thousands of
     hits). The hit list is capped at 100k hits; past that, the find bar shows
     "100,000+" and the next/previous buttons search on demand from the
@@ -2316,9 +2600,10 @@ that app:
    implementation in term-app (§8.4).
 7. **Prompt marks** are per row, with columns (up to four per row), not per
    cell. Five spare cell bits remain if that ever has to change.
-8. **Searching history** happens on immutable `Arc<Block>`s off the lock
-   (§13.4). This replaces the earlier "slices under the lock" answer, now
-   that search covers all of history.
+8. **Searching history** happens on immutable, shared `BlockData`s off the
+   lock, each captured with its line count (§13.4). This replaces the
+   earlier "slices under the lock" answer, now that search covers all of
+   history.
 
 ### Decided by Alex (29 Oct)
 
@@ -2332,4 +2617,17 @@ that app:
    and no reporting mode (§6.3).
 4. **Search and VoiceOver cover all of history,** with per-block UTF-16
    counts: in-view hits first, then history outwards, with fast block search
-   (§13.3–§13.9).
+   (§13.3–§13.8).
+
+### Decided by Alex (second round)
+
+5. **The per-block filter stays in 1.0,** built in the background only and
+   never while someone waits; a block without one is simply scanned. It uses
+   4-byte grams in 4 KB: 220–644 KB at 100k lines (§13.6).
+6. **Cmd+F uses our own native-style find bar, not NSTextFinder:** a search
+   field, previous/next, a count, Done and an options menu; the view handles
+   the standard find actions (tags 1, 2, 3, 7 and 11), and the bar shares the
+   find pasteboard (§13.9).
+7. **The UTF-16 piece API is for VoiceOver only;** its full text is an
+   NSString subclass backed by history blocks, and the E.12 spike measures
+   how often VoiceOver asks (§13.10).

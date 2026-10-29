@@ -2277,6 +2277,10 @@ target, 100k lines of `ls`/log output ≤ 3 MB, starts from 5.9 MB instead of
     status follows), `col:varint`, `[status:varint]`;
   - an empty wide cell (no character, two cells) is stored as a space
     with a width exception;
+  - an unwrapped line with 128 bytes of text or more records `tlen`
+    too, behind the `extra` byte's bit 3 (TLEN): walking from a
+    checkpoint past long lines (a gradient's 480 bytes) then scans
+    nothing, for 3 bytes on such lines;
   - `FILL` is set when the row's last column is an empty cell whose
     style shows; the decoder carries that style to the width it is
     asked for (`get_at_width(i, cols, …)`), which the terminal and the
@@ -2287,7 +2291,8 @@ target, 100k lines of `ls`/log output ≤ 3 MB, starts from 5.9 MB instead of
   screen's own `Arc<LinkValue>`s, each once, rather than encoded bytes:
   decoding is an `Arc` clone and nothing is copied, and the backstop
   counts each link's URI and id per block. The map from style to slot
-  uses FxHash. In front of it, the 64-entry slot cache is kept from
+  uses FxHash over three words. In front of it, the slot cache (256
+  entries, not 64: a gradient line has 160 styles) is kept from
   line to line while the screen table's `version()` (its epoch and
   sweep count) stays the same: ids are only reused after a sweep, and
   the primary screen's rows pushed while the alternate screen is shown
@@ -2344,6 +2349,19 @@ target, 100k lines of `ls`/log output ≤ 3 MB, starts from 5.9 MB instead of
   one. `bench-limits.json` is lowered to plain 50, `ls` 70, compiler
   75, background 35, CJK 75, emoji 95, gradient 2,100. (No placeholder
   figure until PR 10.)
+- **Reading in turn:** the snapshot reads its history rows with a
+  `HistoryReader`, which knows where the next line's text starts, so
+  consecutive rows need no walk from a checkpoint.
+- **Speed after profiling** (two `perf(core)` commits after the
+  numbers below; found with `sample` against the commit before v2, as
+  shares of time, since the machine was busy): storing skips a row's
+  trailing blanks once (the `seq` case is back to v1's share), writes
+  UTF-8 without a `memcpy` per cell, needs no table lookup for CJK,
+  kana and Hangul, finds runs per style id, and keeps the dictionary's
+  map from block to block; reading tests 32 bytes at a time for line
+  ends, reads runs once, reserves rows and cluster stores once and
+  skips revalidating the text. The gates are to be run again on a
+  quiet machine.
 - **Speed, busy machine** (another agent's load test ran at the same
   time, load average 25–45 on 10 cores; interleaved A/B, prebuilt
   binaries, 3 rounds, best of 3; to be run again on a quiet machine):

@@ -380,6 +380,30 @@ fn exit_status_and_on_exit() {
     assert_eq!(h.signal.exits(), 1, "on_exit fires once");
 }
 
+/// Titles and bells reach `on_events` as they are parsed, with no frame
+/// drawn and the dirty flag never taken: a background tab is never drawn,
+/// but its title shows in the tab bar.
+#[test]
+fn events_arrive_without_drawing() {
+    let home = TempDir::new("events");
+    let script = "printf '\\033]2;first\\007'; sleep 0.2; printf '\\033]0;second\\007\\007'; sleep 5";
+    let cmd = command(&["/bin/sh", "-c", script], home.path());
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut hooks = Arc::new(Signal::default()).hooks();
+    hooks.on_events = Some(Box::new(move |e| tx.send(e).unwrap()));
+    let session = Session::spawn(&cmd, size(80, 24), Term::new(80, 24, 100), hooks).expect("spawn");
+    let mut got = Vec::new();
+    while !got.iter().any(|e: &decline::session::Events| e.bell) {
+        got.push(rx.recv_timeout(DEADLINE).expect("no events"));
+    }
+    let titles: Vec<_> = got.iter().filter_map(|e| e.title.as_deref()).collect();
+    assert_eq!(titles, ["first", "second"], "{got:?}");
+    assert!(got.iter().all(|e| !e.is_empty()), "{got:?}");
+    // Taken out of the terminal, so a frame doesn't act on them again.
+    assert_eq!(session.lock_term().state.take_title(), None);
+    session.shut_down();
+}
+
 // --- Failures shown in the window -------------------------------------------
 
 /// Run `argv` on a `cols`-wide terminal until the session ends; the outcome

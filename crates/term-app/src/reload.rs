@@ -4,7 +4,8 @@
 //! Such a build watches its own executable with kqueue (a thread blocked in
 //! the kernel: no timers, no wakeups while nothing changes). When the file is
 //! replaced it saves each window's directory and frame, starts the new build
-//! with `--restore <file>`, and quits.
+//! with `--restore <file>`, and quits. Tabs are saved in order with the
+//! index of their tab group, and reopen as tabs of one window.
 
 use std::os::fd::RawFd;
 use std::path::{Path, PathBuf};
@@ -17,6 +18,35 @@ pub struct SavedWindow {
     pub cwd: Option<String>,
     /// x, y, width, height in screen points.
     pub frame: [f64; 4],
+    /// Windows with the same index were tabs of one window, saved in tab
+    /// order. `None` (and files from builds before tabs): a window of its
+    /// own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_group: Option<usize>,
+    /// The tab that was in front in its group.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub selected: bool,
+}
+
+/// Saved windows as they reopen: one list per window, its tabs in order.
+/// Tabs of one group stay together where the group was first seen, even if
+/// the file lists them apart.
+pub fn tab_groups(saved: Vec<SavedWindow>) -> Vec<Vec<SavedWindow>> {
+    let mut out: Vec<Vec<SavedWindow>> = Vec::new();
+    let mut index_of: Vec<(usize, usize)> = Vec::new();
+    for w in saved {
+        match w.tab_group {
+            Some(g) => match index_of.iter().find(|(group, _)| *group == g) {
+                Some(&(_, i)) => out[i].push(w),
+                None => {
+                    index_of.push((g, out.len()));
+                    out.push(vec![w]);
+                }
+            },
+            None => out.push(vec![w]),
+        }
+    }
+    out
 }
 
 /// The app bundle this binary runs from, if any.
@@ -132,14 +162,70 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("decline-reload-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("r.json");
-        let w = vec![SavedWindow {
-            cwd: Some("/tmp".into()),
-            frame: [1.0, 2.0, 300.0, 200.0],
-        }];
+        let w = vec![
+            SavedWindow {
+                cwd: Some("/tmp".into()),
+                frame: [1.0, 2.0, 300.0, 200.0],
+                tab_group: None,
+                selected: false,
+            },
+            SavedWindow {
+                cwd: None,
+                frame: [5.0, 6.0, 300.0, 200.0],
+                tab_group: Some(1),
+                selected: true,
+            },
+        ];
         std::fs::write(&path, serde_json::to_vec(&w).unwrap()).unwrap();
         assert_eq!(take(&path), w);
         assert!(!path.exists());
         assert!(take(&path).is_empty());
+    }
+
+    fn window(cwd: &str, tab_group: Option<usize>, selected: bool) -> SavedWindow {
+        SavedWindow {
+            cwd: Some(cwd.into()),
+            frame: [0.0, 0.0, 300.0, 200.0],
+            tab_group,
+            selected,
+        }
+    }
+
+    /// The running build writes the file and the new one reads it, so a
+    /// file from a build before tabs must still restore, as plain windows.
+    #[test]
+    fn files_from_before_tabs_still_restore() {
+        let old = br#"[{"cwd":"/a","frame":[1.0,2.0,3.0,4.0]},{"cwd":null,"frame":[5.0,6.0,7.0,8.0]}]"#;
+        let list: Vec<SavedWindow> = serde_json::from_slice(old).unwrap();
+        assert_eq!(list.len(), 2);
+        assert!(list.iter().all(|w| w.tab_group.is_none() && !w.selected));
+        assert_eq!(tab_groups(list).iter().map(Vec::len).collect::<Vec<_>>(), [1, 1]);
+        // Plain windows are written as before.
+        let json = serde_json::to_string(&window("/a", None, false)).unwrap();
+        assert_eq!(json, r#"{"cwd":"/a","frame":[0.0,0.0,300.0,200.0]}"#);
+    }
+
+    #[test]
+    fn tabs_reopen_together_in_order() {
+        let saved = vec![
+            window("/one", None, false),
+            window("/a1", Some(0), false),
+            window("/a2", Some(0), true),
+            window("/b1", Some(1), true),
+            window("/two", None, false),
+            // Out of place in the file: still a tab of group 0, at the end.
+            window("/a3", Some(0), false),
+        ];
+        let json = serde_json::to_vec(&saved).unwrap();
+        let back: Vec<SavedWindow> = serde_json::from_slice(&json).unwrap();
+        assert_eq!(back, saved);
+        let groups = tab_groups(back);
+        let groups: Vec<Vec<&str>> = groups
+            .iter()
+            .map(|g| g.iter().map(|w| w.cwd.as_deref().unwrap()).collect())
+            .collect();
+        assert_eq!(groups, [vec!["/one"], vec!["/a1", "/a2", "/a3"], vec!["/b1"], vec!["/two"]]);
+        assert!(tab_groups(Vec::new()).is_empty());
     }
 
     #[test]

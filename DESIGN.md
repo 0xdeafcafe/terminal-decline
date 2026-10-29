@@ -18,9 +18,10 @@ any command as its own Dock app.
   delivers at most ~240 MB/s (1 KB per read), so parsing must stay well above
   that: target ≥ 2× the PTY limit.
 - **Zero UI.** The window is the terminal surface only: transparent, full-size
-  content title bar with no title text, no tab bar, no settings screen,
-  no status bar. Config is a file. Menus exist only because macOS requires a
-  menu bar (Quit, Copy, Paste, New Window); they are standard AppKit menus.
+  content title bar with no title text, no tab bar of our own (tabs are
+  macOS's native window tabs), no settings screen, no status bar. Config is
+  a file. Menus exist only because macOS requires a menu bar (Quit, Copy,
+  Paste, New Window, New Tab); they are standard AppKit menus.
 - **Dock pins.** `decline pin` turns any command into its own macOS app.
 
 ## Modules (Cargo workspace)
@@ -47,7 +48,8 @@ executable) are passed in from `main`, and pins run other programs through
 an injected runner, so tests use temp dirs. `tests/pipeline.rs` runs real
 programs through `session` with no window; `tests/smoke.rs` drives the real
 app through a test-only control sequence (`ESC ] 7770 ; cmd BEL`, honoured
-only with `DECLINE_TEST_DUMP=<file>` set) that writes JSON dumps.
+only with `DECLINE_TEST_DUMP=<file>` set: `dump`, `resize`, `font`, `tab`,
+`quit`) that writes JSON dumps.
 
 ## Screen storage
 
@@ -196,13 +198,46 @@ tables and landing pads: 1.34 → 1.50 MB) and no measurable parse speed.
 - Cmd+← / Cmd+→ / Cmd+⌫ send start-of-line / end-of-line / delete-line.
 - Cmd shortcuts are handled by the app, never sent to the program:
   Cmd+C copy (selection), Cmd+V paste (bracketed paste when on), Cmd+N new
-  window, Cmd+W close, Cmd+Q quit, Cmd+K clear scrollback, Cmd+= / Cmd+-
-  font size. Pins may disable or remap these in their config.
+  window, Cmd+T new tab, Cmd+Shift+[ / ] previous / next tab, Cmd+1…8 that
+  tab and Cmd+9 the last, Cmd+W close, Cmd+Q quit, Cmd+K clear scrollback,
+  Cmd+= / Cmd+- font size, Ctrl+Cmd+F full screen. Pins may disable or
+  remap these in their config.
 - Mouse: drag to select (word on double-click, line on triple-click; words
   and lines are logical, so a word split by a soft wrap is selected whole,
   and dragging after a double- or triple-click grows by words or lines), wheel
   scrolls scrollback, or when the program asks for mouse reporting (1000/1002/
   1003 + SGR 1006) events go to the program; Shift overrides to select.
+
+## Windows and tabs
+
+Tabs are macOS's own window tabs: each tab is an `NSWindow` with its own
+view, session and renderer, all sharing one tabbing identifier. Shell >
+New Tab (Cmd+T, and the tab bar's "+", through `newWindowForTab:`) adds a
+tab after the current one, in the current tab's working directory, as
+Cmd+N does for windows. The Window menu has AppKit's own tab actions (Show
+Previous/Next Tab, Move Tab to New Window, Merge All Windows) and hidden
+Cmd+1…9 items. A new window is created with tabbing disallowed and allowed
+once it is on screen, so Cmd+N gives a window even when System Settings
+prefers tabs, while Merge All Windows and dragging tabs together still work.
+
+The content view runs under the title bar (full-size content), so the
+view's size doesn't change when the tab bar appears or goes. Each view
+observes its window's `contentLayoutRect` (KVO): when the top inset (window
+height less that rect's height: the title bar, plus the tab bar while it
+shows, 36 pt on macOS 27) changes, the top padding follows and the grid
+shrinks or grows, and the program gets a resize (`layout::top_inset`).
+
+A background tab is a hidden window: it gets the occlusion event, stops
+drawing and gives back its drawables like a covered window. Since it is
+never drawn, what a program asks for that must happen anyway (a new title,
+shown in the tab bar; the bell) is taken out of the terminal by the reader
+thread as it parses (`session::Events`) and handed to the main thread,
+rather than when a frame is drawn.
+
+A dogfood restart saves each window's directory and frame, plus, for tabs,
+the index of their tab group and which tab was in front
+(`reload::SavedWindow`); they reopen as tabs of one window, in order. Files
+from builds before tabs restore as plain windows.
 
 ## Dock pins ("make ./rush its own app")
 

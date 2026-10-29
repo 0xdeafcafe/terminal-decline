@@ -208,6 +208,119 @@ fn smoke_font_bigger_changes_the_cells() {
     assert!(c1 <= c0 && l1 <= l0 && (c1 < c0 || l1 < l0), "{} vs {}", d[0], d[1]);
 }
 
+/// A second tab through the `tab` control command: both tabs run their
+/// program, the tab bar that appears costs both of them lines at the top,
+/// the first tab's program is told its new size, and the first tab, now in
+/// the background, is hidden and gives back its drawables.
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_second_tab_shrinks_the_grid() {
+    if !have_metal() {
+        return;
+    }
+    let dir = TempDir::new("tab");
+    let d = dir.path().display();
+    // The same program runs in both tabs; the first to make the directory
+    // is the first tab.
+    let wait = |cond: &str| format!("i=0; while ! {{ {cond}; }} && [ $i -lt 200 ]; do sleep 0.05; i=$((i+1)); done; ");
+    let script = format!(
+        "if mkdir '{d}/first' 2>/dev/null; then \
+           s0=$(stty size); echo one; {dump}{tab}\
+           {wait_two}{wait_size}stty size; {dump}{quit}\
+         else \
+           echo two; {dump}{wait_dump}touch '{d}/two-done'; \
+         fi; sleep 20",
+        dump = osc("dump"),
+        tab = osc("tab"),
+        quit = osc("quit"),
+        wait_two = wait(&format!("[ -e '{d}/two-done' ]")),
+        wait_size = wait("[ \"$(stty size)\" != \"$s0\" ]"),
+        wait_dump = wait(&format!("grep -q '\"window\":2' '{}'", dir.dump_file().display())),
+    );
+    let (status, _) = decline(&dir, &script, true);
+    assert!(status.success(), "{status}");
+    let all = dumps(&dir);
+    for x in &all {
+        check_dump(x);
+    }
+    let of = |w: u64| all.iter().filter(|x| x["window"] == w).collect::<Vec<_>>();
+    let (one, two) = (of(1), of(2));
+    assert_eq!((one.len(), two.len()), (2, 1), "{all:?}");
+    let (before, after, two) = (one[0], one[1], two[0]);
+    assert!(screen(before).starts_with("one|"), "{}", screen(before));
+    assert!(screen(two).starts_with("two|"), "{}", screen(two));
+    assert_eq!(num(before, "tabs"), 1.0, "{before}");
+    assert_eq!((num(after, "tabs"), num(two, "tabs")), (2.0, 2.0), "{after} {two}");
+    // The tab bar pushes the grid down in both tabs, and costs lines.
+    assert!(num(after, "pad_top") > num(before, "pad_top"), "{before} {after}");
+    assert_eq!(num(two, "pad_top"), num(after, "pad_top"), "{two} {after}");
+    let lines = |x: &Value| num(x, "lines");
+    assert!(lines(after) < lines(before), "{before} {after}");
+    assert_eq!(lines(two), lines(after));
+    assert_eq!(num(two, "cols"), num(after, "cols"));
+    // The program in the first tab was told.
+    let size = format!("{} {}|", lines(after), num(after, "cols"));
+    assert!(screen(after).contains(&size), "{size} in {}", screen(after));
+    // The first tab is behind the second: hidden, and it gave back memory.
+    assert_eq!(after["visible"], false, "{after}");
+    assert!(num(after, "hidden") >= 1.0, "{after}");
+}
+
+/// What a dogfood build does after a restart (`--restore <file>`): two
+/// tabs reopen as tabs of one window, in order, each in its directory, and
+/// a plain window stays a window of its own.
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_restore_reopens_tabs_as_tabs() {
+    if !have_metal() {
+        return;
+    }
+    let dir = TempDir::new("restore");
+    let sub = |name: &str| {
+        let p = dir.path().join(name);
+        std::fs::create_dir_all(&p).unwrap();
+        p.display().to_string()
+    };
+    let (a, b, c) = (sub("tab-a"), sub("tab-b"), sub("solo"));
+    let restore = dir.path().join("restore.json");
+    let saved = serde_json::json!([
+        {"cwd": a, "frame": [100.0, 100.0, 700.0, 500.0], "tab_group": 0},
+        {"cwd": c, "frame": [200.0, 150.0, 700.0, 500.0]},
+        {"cwd": b, "frame": [100.0, 100.0, 700.0, 500.0], "tab_group": 0, "selected": true},
+    ]);
+    std::fs::write(&restore, saved.to_string()).unwrap();
+    // Each window says where it is, and the last to dump quits.
+    let all_dumped = format!("[ \"$(wc -l < '{}')\" -ge 3 ]", dir.dump_file().display());
+    let script = format!(
+        "echo \"in $(basename \"$PWD\")\"; {}i=0; while ! {all_dumped} && [ $i -lt 200 ]; do sleep 0.05; i=$((i+1)); done; {}sleep 20",
+        osc("dump"),
+        osc("quit")
+    );
+    let mut cmd = Command::new(APP);
+    cmd.arg("--restore")
+        .arg(&restore)
+        .args(["-e", "/bin/sh", "-c", &script])
+        .env("XDG_CONFIG_HOME", dir.config_home())
+        .env("DECLINE_TEST_DUMP", dir.dump_file())
+        .current_dir(dir.path());
+    let (status, _) = run(&mut cmd);
+    assert!(status.success(), "{status}");
+    assert!(!restore.exists(), "the restore file is used up");
+    let all = dumps(&dir);
+    let at = |name: &str| {
+        all.iter()
+            .find(|x| screen(x).starts_with(&format!("in {name}|")))
+            .unwrap_or_else(|| panic!("no window in {name}: {all:?}"))
+    };
+    let place = |x: &Value| (num(x, "tabs") as u32, num(x, "tab") as u32);
+    assert_eq!(place(at("tab-a")), (2, 0));
+    assert_eq!(place(at("tab-b")), (2, 1));
+    assert_eq!(place(at("solo")), (1, 0));
+    // Opened in the order saved, the group where it was first seen.
+    let id = |name| num(at(name), "window");
+    assert!(id("tab-a") < id("tab-b") && id("tab-b") < id("solo"), "{all:?}");
+}
+
 /// Without `DECLINE_TEST_DUMP` the control OSC is ignored: `quit` doesn't
 /// quit, the app ends when the program does.
 #[test]

@@ -16,11 +16,12 @@ use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, ProtocolObject, Sel};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSCursor, NSEvent, NSEventModifierFlags, NSPasteboard, NSPasteboardTypeString, NSResponder, NSTextInputClient, NSView, NSWindowDelegate,
+    NSCursor, NSEvent, NSEventModifierFlags, NSPasteboard, NSPasteboardTypeString, NSResponder, NSTextInputClient, NSView, NSWindow,
+    NSWindowDelegate,
 };
 use objc2_foundation::{
-    NSArray, NSAttributedString, NSAttributedStringKey, NSNotFound, NSNotification, NSObjectProtocol, NSPoint, NSRange, NSRect, NSRunLoop,
-    NSRunLoopCommonModes, NSSize, NSString,
+    NSArray, NSAttributedString, NSAttributedStringKey, NSKeyValueObservingOptions, NSNotFound, NSNotification,
+    NSObjectNSKeyValueObserverRegistration, NSObjectProtocol, NSPoint, NSRange, NSRect, NSRunLoop, NSRunLoopCommonModes, NSSize, NSString,
 };
 use objc2_metal::{MTLCommandBuffer, MTLDrawable};
 use objc2_quartz_core::{CADisplayLink, CALayer, CAMetalDrawable, CAMetalLayer};
@@ -36,7 +37,7 @@ use crate::keys::{KeyAction, KeyInput, KeyModes, Mods, encode_key, paste_bytes};
 use crate::latency::{self, FrameKeys, Latency};
 use crate::layout::{self, CellSize, Padding};
 use crate::mouse;
-use crate::session::{Hooks, Outcome, Session};
+use crate::session::{Events, Hooks, Outcome, Session};
 
 const BLINK_INTERVAL: Duration = Duration::from_millis(530);
 /// How long a tick waits for the echo of input before drawing without it.
@@ -77,6 +78,11 @@ struct State {
     /// When input was last sent and its echo not yet drawn: the first
     /// output after it is drawn at once, not on the next tick.
     awaiting_echo: Option<Instant>,
+    /// The title bar's height, plus the tab bar's while one shows (points),
+    /// as of the last resize.
+    top_inset: f64,
+    /// Times the window was hidden or covered and gave back its drawables.
+    hidden: u64,
 }
 
 /// Test-only control commands waiting to run, and the dump in progress.
@@ -100,7 +106,13 @@ pub struct Ivars {
     id: usize,
     layer: Retained<CAMetalLayer>,
     state: RefCell<Option<State>>,
+    /// The window whose `contentLayoutRect` this view observes (it changes
+    /// when the tab bar shows or hides), until the window closes.
+    observed: RefCell<Option<Retained<NSWindow>>>,
 }
+
+/// The key path observed for the tab bar showing or hiding.
+const LAYOUT_RECT: &str = "contentLayoutRect";
 
 thread_local! {
     static VIEWS: RefCell<HashMap<usize, Weak<TerminalView>>> = RefCell::new(HashMap::new());
@@ -161,6 +173,23 @@ define_class!(
         #[unsafe(method(viewDidChangeBackingProperties))]
         fn did_change_backing(&self) {
             self.reload_fonts(None);
+        }
+
+        /// The window's `contentLayoutRect` changed: with full-size content
+        /// the view keeps its size when the tab bar shows or hides, so the
+        /// grid has to follow the part nothing covers.
+        #[unsafe(method(observeValueForKeyPath:ofObject:change:context:))]
+        fn observe_value(
+            &self,
+            _key_path: Option<&NSString>,
+            _object: Option<&AnyObject>,
+            _change: Option<&AnyObject>,
+            _context: *mut std::ffi::c_void,
+        ) {
+            let inset = self.titlebar_height();
+            if self.with_state(|st| st.top_inset != inset) == Some(true) {
+                self.resize();
+            }
         }
 
         #[unsafe(method(tick:))]
@@ -286,9 +315,13 @@ define_class!(
             if self.visible() {
                 self.request_redraw();
             } else {
-                // Free what can be rebuilt while nothing can be seen.
+                // Free what can be rebuilt while nothing can be seen. A
+                // background tab is a hidden window, so it lands here too.
                 let minimised = self.window().is_some_and(|w| w.isMiniaturized());
-                self.with_state(|st| st.renderer.hide(minimised));
+                self.with_state(|st| {
+                    st.hidden += 1;
+                    st.renderer.hide(minimised)
+                });
                 self.trim_drawables();
             }
         }
@@ -406,6 +439,7 @@ impl TerminalView {
             id,
             layer: CAMetalLayer::new(),
             state: RefCell::new(None),
+            observed: RefCell::new(None),
         });
         let view: Retained<TerminalView> = unsafe { msg_send![super(this), initWithFrame: frame] };
         view.setWantsLayer(true);
@@ -451,6 +485,9 @@ impl TerminalView {
         if let Some(lat) = latency::get() {
             hooks.on_parsed = Some(Box::new(move || lat.parsed(id)));
         }
+        hooks.on_events = Some(Box::new(move |events| {
+            DispatchQueue::main().exec_async(move || with_view(id, |v| v.events(events)));
+        }));
         let session = Session::spawn(&launch.command, pty_size(cols, lines, m), t, hooks)?;
 
         let link = unsafe { self.displayLinkWithTarget_selector(self, sel!(tick:)) };
@@ -481,9 +518,43 @@ impl TerminalView {
             test,
             key_t0: None,
             awaiting_echo: None,
+            top_inset: self.titlebar_height(),
+            hidden: 0,
         });
+        if let Some(window) = self.window() {
+            unsafe {
+                window.addObserver_forKeyPath_options_context(
+                    self,
+                    &NSString::from_str(LAYOUT_RECT),
+                    NSKeyValueObservingOptions::empty(),
+                    std::ptr::null_mut(),
+                )
+            };
+            *self.ivars().observed.borrow_mut() = Some(window);
+        }
         self.resize();
         Ok(())
+    }
+
+    /// What the program asked for, taken as it was parsed (see
+    /// [`crate::session::Events`]): drawn or not, a tab's title is shown
+    /// in the tab bar and a bell bounces the Dock icon.
+    fn events(&self, events: Events) {
+        let mtm = MainThreadMarker::from(self);
+        let fixed_title = self.with_state(|st| st.config.title.is_some()).unwrap_or(true);
+        if let Some(window) = self.window()
+            && !fixed_title
+            && let Some(title) = &events.title
+        {
+            window.setTitle(&NSString::from_str(title));
+        }
+        if events.bell {
+            // Bounce the Dock icon if the app isn't in front.
+            let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
+            if !app.isActive() {
+                app.requestUserAttention(objc2_app_kit::NSRequestUserAttentionType::InformationalRequest);
+            }
+        }
     }
 
     fn with_state<R>(&self, f: impl FnOnce(&mut State) -> R) -> Option<R> {
@@ -503,9 +574,10 @@ impl TerminalView {
         .flatten()
     }
 
+    /// The title bar's height, plus the tab bar's while one shows.
     fn titlebar_height(&self) -> f64 {
         match self.window() {
-            Some(w) => (w.frame().size.height - w.contentLayoutRect().size.height).max(0.0),
+            Some(w) => layout::top_inset(w.frame().size.height, w.contentLayoutRect().size.height),
             None => 0.0,
         }
     }
@@ -638,16 +710,10 @@ impl TerminalView {
             });
         }
         let pad = padding_for(&st.config, titlebar, st.scale);
-        let mut title = None;
         let blink;
-        let bell;
         let clipboard;
         {
             let Some(t) = t.as_mut() else { return };
-            if let Some(new) = t.state.take_title() {
-                title = Some(new);
-            }
-            bell = t.state.take_bell();
             clipboard = t.state.take_clipboard();
             blink = t.state.cursor_blink();
             let input = FrameInput {
@@ -681,14 +747,7 @@ impl TerminalView {
         if need_blink {
             st.blink_scheduled = true;
         }
-        let fixed_title = st.config.title.clone();
         drop(guard);
-        if let Some(window) = self.window()
-            && fixed_title.is_none()
-            && let Some(title) = title
-        {
-            window.setTitle(&NSString::from_str(&title));
-        }
         if need_blink {
             self.schedule_blink();
         }
@@ -696,13 +755,6 @@ impl TerminalView {
             let pb = NSPasteboard::generalPasteboard();
             pb.clearContents();
             pb.setString_forType(&NSString::from_str(&text), unsafe { NSPasteboardTypeString });
-        }
-        if bell {
-            // Bounce the Dock icon if the app isn't in front.
-            let app = objc2_app_kit::NSApplication::sharedApplication(MainThreadMarker::from(self));
-            if !app.isActive() {
-                app.requestUserAttention(objc2_app_kit::NSRequestUserAttentionType::InformationalRequest);
-            }
         }
         if poll_dump {
             self.poll_dump();
@@ -753,6 +805,7 @@ impl TerminalView {
         let titlebar = self.titlebar_height();
         self.with_state(|st| {
             st.scale = window.backingScaleFactor();
+            st.top_inset = titlebar;
             let size = self.frame().size;
             let layer = &self.ivars().layer;
             layer.setContentsScale(st.scale);
@@ -797,6 +850,10 @@ impl TerminalView {
     }
 
     fn shut_down(&self) {
+        let observed = self.ivars().observed.borrow_mut().take();
+        if let Some(window) = observed {
+            unsafe { window.removeObserver_forKeyPath(self, &NSString::from_str(LAYOUT_RECT)) };
+        }
         let st = self.ivars().state.borrow_mut().take();
         if let Some(st) = st {
             st.link.invalidate();
@@ -1178,6 +1235,11 @@ impl TerminalView {
                     let size = self.with_state(|st| (st.font_size + delta as f64).max(6.0));
                     self.reload_fonts(size);
                 }
+                Some(Control::Tab) => {
+                    if let Some(window) = self.window() {
+                        crate::app::open_tab_beside(&window);
+                    }
+                }
                 Some(Control::Quit) => {
                     objc2_app_kit::NSApplication::sharedApplication(MainThreadMarker::from(self)).terminate(None);
                     return;
@@ -1213,15 +1275,37 @@ impl TerminalView {
                 let _ = DispatchQueue::main().after(DispatchTime::NOW.time(2_000_000), move || with_view(id, |v| v.poll_dump()));
             }
             Some(true) => {
-                self.with_state(write_dump);
+                let me = self.window();
+                let tabs = me.as_ref().and_then(|w| w.tabbedWindows());
+                let window = Window {
+                    id: self.ivars().id,
+                    tabs: tabs.as_ref().map_or(1, |t| t.len()),
+                    tab: tabs
+                        .zip(me)
+                        .and_then(|(t, me)| t.iter().position(|w| std::ptr::eq::<NSWindow>(&*w, &*me)))
+                        .unwrap_or(0),
+                    visible: self.visible(),
+                    top_inset: self.titlebar_height(),
+                };
+                self.with_state(|st| write_dump(st, window));
                 self.run_controls();
             }
         }
     }
 }
 
-fn write_dump(st: &mut State) {
+/// What a dump says about the window, read from AppKit.
+struct Window {
+    id: usize,
+    tabs: usize,
+    tab: usize,
+    visible: bool,
+    top_inset: f64,
+}
+
+fn write_dump(st: &mut State, window: Window) {
     use std::io::Write;
+    let pad_top = padding_for(&st.config, window.top_inset, st.scale).top;
     let Some(test) = &mut st.test else { return };
     test.seq += 1;
     test.dump = DumpState::Idle;
@@ -1233,6 +1317,12 @@ fn write_dump(st: &mut State) {
     let (mask_texture, color_texture) = st.renderer.glyphs.texture_sizes();
     let dump = Dump {
         seq: test.seq,
+        window: window.id,
+        tabs: window.tabs,
+        tab: window.tab,
+        visible: window.visible,
+        hidden: st.hidden,
+        pad_top,
         screen,
         cols,
         lines,

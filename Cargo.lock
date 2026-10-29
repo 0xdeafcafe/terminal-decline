@@ -850,6 +850,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "term-prefs"
+version = "0.0.1"
+dependencies = [
+ "libc",
+ "proptest",
+ "term-core",
+ "toml_edit",
+ "unicode-width",
+]
+
+[[package]]
 name = "term-pty"
 version = "0.0.1"
 dependencies = [
@@ -890,6 +901,7 @@ dependencies = [
  "objc2-metal",
  "objc2-quartz-core",
  "objc2-user-notifications",
+ "proptest",
  "serde",
  "serde_json",
  "term-core",
@@ -943,6 +955,7 @@ dependencies = [
  "indexmap",
  "toml_datetime",
  "toml_parser",
+ "toml_writer",
  "winnow",
 ]
 

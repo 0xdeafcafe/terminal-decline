@@ -435,6 +435,11 @@ another.
 
 ## 11. Open questions for Alex
 
+Decided 29 Oct 2026, all as proposed: 1 the §5 keybinds (iTerm2's);
+2 not dimmed, `unfocused_pane_opacity` default 1.0; 3 font size per
+window; 4 a split in a pin runs the user's shell; 5 views per pane;
+6 commit the marked text; 7 the focusing click is swallowed.
+
 1. **Keybinds** as in §5 (iTerm2/Ghostty defaults; Cmd+W closes a pane
    first; Cmd+Shift+W closes the whole window with its tabs).
 2. **Dim unfocused panes?** Ghostty does by default (70%). Proposed: no,

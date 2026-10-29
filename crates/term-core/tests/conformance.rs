@@ -830,6 +830,117 @@ fn sgr_unknown_codes_ignored_and_58_skipped() {
 }
 
 #[test]
+fn sgr_curly_dotted_dashed_underlines_are_stored() {
+    let mut t = new(6, 1);
+    t.advance(b"\x1b[4:3mA\x1b[4:4mB\x1b[4:5mC\x1b[4:9mD\x1b[24mE\x1b[4mF");
+    let r = t.state.visible_row(0);
+    let u: Vec<Underline> = (0..6).map(|i| r.cell(i).style().underline).collect();
+    assert_eq!(
+        u,
+        [
+            Underline::Curly,
+            Underline::Dotted,
+            Underline::Dashed,
+            Underline::Dashed, // an unknown style keeps the current one
+            Underline::None,
+            Underline::Single,
+        ]
+    );
+}
+
+#[test]
+fn sgr_overline_53_55() {
+    let mut t = new(3, 1);
+    t.advance(b"\x1b[53mA\x1b[1mB\x1b[55mC");
+    let r = t.state.visible_row(0);
+    assert!(r.cell(0).style().attrs.contains(Attrs::OVERLINE));
+    assert!(r.cell(1).style().attrs.contains(Attrs::OVERLINE | Attrs::BOLD));
+    assert!(!r.cell(2).style().attrs.contains(Attrs::OVERLINE));
+    assert!(r.cell(2).style().attrs.contains(Attrs::BOLD), "55 clears only overline");
+}
+
+#[test]
+fn sgr_underline_colour_58_59() {
+    let mut t = new(5, 1);
+    t.advance(b"\x1b[4;58;2;1;2;3mA\x1b[58:2::4:5:6mB\x1b[58;5;99mC\x1b[58:5:7mD\x1b[59mE");
+    let r = t.state.visible_row(0);
+    let c: Vec<Color> = (0..5).map(|i| r.cell(i).style().underline_color).collect();
+    assert_eq!(
+        c,
+        [
+            Color::rgb(1, 2, 3),
+            Color::rgb(4, 5, 6),
+            Color::indexed(99),
+            Color::indexed(7),
+            Color::DEFAULT
+        ]
+    );
+    assert_eq!(r.cell(0).style().fg, Color::DEFAULT, "58 leaves fg alone");
+    t.advance(b"\x1b[58;5;1m\x1b[0mF");
+    assert_eq!(t.state.cursor().pen(), Style::DEFAULT, "SGR 0 resets the underline colour");
+}
+
+#[test]
+fn erase_uses_the_pens_background_only() {
+    let mut t = new(4, 2);
+    t.advance(b"\x1b[1;4;31;44mAB\x1b[K\r\n\x1b[2;5;7mX\x1b[1X");
+    let r = t.state.visible_row(0);
+    let erased = r.cell(3).style();
+    assert_eq!(
+        erased,
+        Style {
+            bg: Color::indexed(4),
+            ..Style::DEFAULT
+        },
+        "the erase style is the pen's background alone"
+    );
+    assert!(!r.cell(3).is_blank(), "a coloured erase shows");
+    let r = t.state.visible_row(1);
+    assert!(r.cell(0).style().attrs.contains(Attrs::INVERSE));
+    assert_eq!(r.cell(1).style().bg, Color::indexed(4), "ECH at the cursor");
+    assert!(r.cell(1).style().attrs.is_empty());
+}
+
+#[test]
+fn saved_cursor_keeps_its_style_across_screens_and_sweeps() {
+    let mut t = new(10, 3);
+    t.state.set_sweep_at(Some(8));
+    // Save a pen with every stored field, then churn both tables.
+    t.advance(b"\x1b[1;4:3;53;38;2;9;8;7;48;5;3;58;5;2m\x1b7");
+    t.advance(b"\x1b[?1049h");
+    for i in 0..60u8 {
+        t.advance(format!("\x1b[38;5;{i}m{}", (b'a' + i % 26) as char).as_bytes());
+    }
+    t.advance(b"\x1b[?1049l");
+    for i in 0..60u8 {
+        t.advance(format!("\x1b[48;5;{i}m\x1b[K").as_bytes());
+    }
+    t.advance(b"\x1b8Z");
+    let saved = Style {
+        fg: Color::rgb(9, 8, 7),
+        bg: Color::indexed(3),
+        underline_color: Color::indexed(2),
+        attrs: Attrs::BOLD | Attrs::OVERLINE,
+        underline: Underline::Curly,
+        ..Style::DEFAULT
+    };
+    assert_eq!(t.state.cursor().pen(), saved);
+    let (row, col) = (t.state.cursor().row(), t.state.cursor().col() - 1);
+    assert_eq!(t.state.visible_row(row).cell(col).style(), saved);
+    let (primary, alt) = t.state.style_stats();
+    assert!(primary.sweeps > 0 && alt.sweeps > 0, "{primary:?} {alt:?}");
+    t.state.check_invariants().unwrap();
+    // A plain pen and a cleared screen leave only the default style: the
+    // sweep renumbers, and the saved cursor still has its style.
+    t.advance(b"\x1b[0m\x1b[2J");
+    t.state.sweep_styles_now().unwrap();
+    let (primary, _) = t.state.style_stats();
+    assert!(primary.renumberings > 0 && primary.len == 1, "{primary:?}");
+    t.advance(b"\x1b8Y");
+    assert_eq!(t.state.visible_row(row).cell(col).style(), saved);
+}
+
+#[test]
 fn sgr_incomplete_truecolor_leaves_pen() {
     let mut t = new(1, 1);
     t.advance(b"\x1b[31m\x1b[38;2;10mA");

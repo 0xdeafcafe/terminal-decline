@@ -327,6 +327,9 @@ F3.2, which touches only term-render.
 
 ## 8. Open questions for Alex
 
+Decided 29 Oct 2026: 1 on by default; 2 only `font_features` (off with
+`["-calt", "-liga"]`); 3 check in JetBrains Mono for tests; 4 keep.
+
 1. **Ligatures on by default** for fonts that have them? Ghostty and
    kitty: on; iTerm2: off ("Use ligatures"). Proposed: on (the font's own
    defaults). The default font stays Menlo, so default installs don't

@@ -2,20 +2,22 @@
 //! grid, scrollback and selection.
 //!
 //! Other crates read the screen through [`RowRef`] and [`CellRef`] and the
-//! [`Terminal`] accessors. [`Cell`], [`Row`] and [`flags`] are today's
-//! storage, public only for scrollback tests; they will change.
+//! [`Terminal`] accessors. [`Cell`] and [`Row`] are the storage, public for
+//! the scrollback tests; they will change.
 
 pub mod cell;
 pub mod rows;
 pub mod scrollback;
 pub mod style;
+mod style_table;
 pub mod term;
 pub mod unicode;
 pub mod word;
 
-pub use cell::{Cell, Color, ColorKind, Row, flags};
+pub use cell::{Cell, Color, ColorKind, Row};
 pub use rows::{CellRef, Content, RowRef, StyleKey, Width};
 pub use style::{Attrs, LinkId, Style, Underline};
+pub use style_table::{StyleStats, StyleUpdates};
 pub use term::{
     Cursor, CursorShape, LinkValue, Modes, MouseMode, Notification, Point, Progress, Selection, SelectionKind, Term, Terminal, ViewTop,
 };

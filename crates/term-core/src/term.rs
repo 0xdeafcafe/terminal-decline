@@ -6,11 +6,16 @@ use std::collections::VecDeque;
 
 use vte::{OscLarge, Params, Perform};
 
-use crate::cell::{Cell, Color, Row, flags};
-use crate::rows::{Content, RowRef, style_of};
+use crate::cell::{Cell, Color, Row, Width};
+use crate::rows::{Content, RowRef};
 use crate::scrollback::Scrollback;
-use crate::style::Style;
+use crate::style::{Attrs, Style, Underline};
+use crate::style_table::{StyleStats, StyleTable, StyleUpdates};
 use crate::unicode::{self, Segmenter};
+
+/// A style table holding more ids than this gives its memory back when
+/// the screen is cleared.
+const GIVE_BACK_AT: usize = 256;
 
 /// A desktop notification a program asked for: OSC 9 (`9;body`, iTerm2's
 /// form, no title) or OSC 777 (`777;notify;title;body`, rxvt's).
@@ -67,8 +72,10 @@ impl GraphemeState {
 pub struct Cursor {
     pub(crate) row: usize,
     pub(crate) col: usize,
-    /// The style new characters are drawn with.
-    pub(crate) pen: Cell,
+    /// The style new characters are drawn with. Held by value, so a saved
+    /// cursor holds no style id: an id belongs to one screen's table, and
+    /// that table may free it.
+    pub(crate) pen: Style,
     /// Set after writing the last column; the next character wraps first.
     pub(crate) pending_wrap: bool,
 }
@@ -90,7 +97,7 @@ impl Cursor {
 
     /// The style new characters are drawn with.
     pub fn pen(&self) -> Style {
-        style_of(self.pen)
+        self.pen
     }
 }
 
@@ -235,6 +242,22 @@ pub struct Terminal {
     screen: VecDeque<Row>,
     /// The other screen: the alternate one while on the primary, and vice versa.
     other_screen: VecDeque<Row>,
+    /// The styles `screen`'s cells use, and `other_screen`'s.
+    styles: StyleTable,
+    other_styles: StyleTable,
+    /// The pen's style interned in `styles`: the template cells are
+    /// written with. Dropped by every SGR, screen switch and cursor
+    /// restore; otherwise kept alive by the sweep.
+    pen_cell: Option<Cell>,
+    /// The erase style (the pen's background alone) interned in `styles`,
+    /// for the background `erase_bg`. Dropped on every screen switch.
+    erase_cell: Option<Cell>,
+    erase_bg: Color,
+    /// Where style table epochs come from: terminal-wide, and carried
+    /// across a reset, so no epoch repeats.
+    epochs: u64,
+    /// Test aid: sweep tables once they hold this many ids.
+    sweep_at_test: Option<u32>,
     alt_active: bool,
     /// Lines that scrolled off the top (primary screen only). Its total
     /// count of lines ever pushed is the base for [`Point`] line numbers.
@@ -311,6 +334,13 @@ impl Terminal {
             lines,
             screen: blank_screen(cols, lines),
             other_screen: blank_screen(cols, lines),
+            styles: StyleTable::new(1, cols * lines, None),
+            other_styles: StyleTable::new(2, cols * lines, None),
+            pen_cell: Some(Cell::BLANK),
+            erase_cell: None,
+            erase_bg: Color::DEFAULT,
+            epochs: 2,
+            sweep_at_test: None,
             alt_active: false,
             scrollback: Scrollback::new(scrollback_limit),
             display_offset: 0,
@@ -396,20 +426,26 @@ impl Terminal {
 
     /// The row shown at visible line `line`, taking the scroll position into
     /// account. Rows from scrollback may be shorter than `cols`.
-    pub fn visible_row(&self, line: usize) -> RowRef<'_> {
-        RowRef::new(self.visible_row_cow(line))
-    }
-
+    ///
     /// History lines are expanded from their compact form, so they come back
-    /// owned; screen lines are borrowed.
-    fn visible_row_cow(&self, line: usize) -> Cow<'_, Row> {
+    /// owned, with their own list of styles; screen lines are borrowed.
+    pub fn visible_row(&self, line: usize) -> RowRef<'_> {
         let sb = self.scrollback.len();
         let idx = sb - self.display_offset + line;
         if idx < sb {
-            Cow::Owned(self.scrollback.get(idx).unwrap_or_default())
+            self.history_row(idx)
         } else {
-            Cow::Borrowed(&self.screen[idx - sb])
+            self.screen_row(idx - sb)
         }
+    }
+
+    fn screen_row(&self, r: usize) -> RowRef<'_> {
+        RowRef::new(Cow::Borrowed(&self.screen[r]), Cow::Borrowed(self.styles.styles()))
+    }
+
+    fn history_row(&self, i: usize) -> RowRef<'_> {
+        let (row, styles) = self.scrollback.get(i).unwrap_or_default();
+        RowRef::new(Cow::Owned(row), Cow::Owned(styles))
     }
 
     /// The cursor's position on the screen, and the pen it writes with.
@@ -633,7 +669,7 @@ impl Terminal {
     /// The first and last line numbers of the logical line `line` is part
     /// of: the rows joined to it by soft wraps, as far as they are stored.
     fn logical_line(&self, line: u64) -> (u64, u64) {
-        let wrapped = |l: u64| self.row_at(l).is_some_and(|r| r.wrapped);
+        let wrapped = |l: u64| self.row_at(l).is_some_and(|r| r.wrapped());
         let mut start = line;
         while start > 0 && wrapped(start - 1) {
             start -= 1;
@@ -667,7 +703,6 @@ impl Terminal {
         let mut at = None;
         for line in start..=end {
             let Some(row) = self.row_at(line) else { continue };
-            let row = RowRef::new(row);
             // A wrapped row's trailing empty cells (where a wide character
             // didn't fit) don't break the line's text.
             let len = if row.wrapped() {
@@ -703,9 +738,10 @@ impl Terminal {
     }
 
     /// The row at buffer line `line`, or None if it is not stored (any more).
-    fn row_at(&self, line: u64) -> Option<Cow<'_, Row>> {
+    fn row_at(&self, line: u64) -> Option<RowRef<'_>> {
         if line >= self.top_line {
-            return self.screen.get((line - self.top_line) as usize).map(Cow::Borrowed);
+            let r = (line - self.top_line) as usize;
+            return (r < self.screen.len()).then(|| self.screen_row(r));
         }
         if self.alt_active {
             // Rows that scroll off the alternate screen are not kept.
@@ -716,7 +752,7 @@ impl Terminal {
         if back > sb as u64 {
             return None;
         }
-        self.scrollback.get(sb - back as usize).map(Cow::Owned)
+        Some(self.history_row(sb - back as usize))
     }
 
     pub fn selection_text(&self) -> Option<String> {
@@ -726,22 +762,21 @@ impl Terminal {
         for line in a.line..=b.line {
             let Some(row) = self.row_at(line) else { continue };
             let start = if line == a.line { a.col } else { 0 };
-            let wrapped = row.wrapped && line != b.line;
+            let wrapped = row.wrapped() && line != b.line;
             let mut end = if line == b.line { b.col + 1 } else { self.cols };
             if wrapped {
                 // Empty cells at the end of a wrapped row (where a wide
                 // character didn't fit) aren't part of the line's text.
                 end = end.min(
-                    row.cells
-                        .iter()
-                        .rposition(|c| c.codepoint() != 0 || c.has(flags::WIDE_SPACER))
+                    row.cells()
+                        .rposition(|c| c.content() != Content::Empty || c.is_spacer())
                         .map_or(0, |i| i + 1),
                 );
             }
             let mut text = String::new();
-            for col in start..end.min(row.cells.len().max(start)) {
-                let cell = row.get(col);
-                if !cell.has(flags::WIDE_SPACER) {
+            for col in start..end.min(row.len().max(start)) {
+                let cell = row.cell(col);
+                if !cell.is_spacer() {
                     text.push(cell.ch());
                 }
             }
@@ -763,6 +798,10 @@ impl Terminal {
             return;
         }
         self.clear_grapheme();
+        // No sweeps while rows are half-built (§5.2): the tables may grow
+        // past `sweep_at` for a moment, and are swept once at the end.
+        self.styles.set_sweeps_blocked(true);
+        self.other_styles.set_sweeps_blocked(true);
         // On the primary screen, rows pushed off the top go into scrollback so
         // the cursor stays visible.
         let removed = resize_screen(&mut self.screen, &mut self.cursor, cols, lines);
@@ -774,8 +813,12 @@ impl Terminal {
             let removed = resize_screen(&mut other, &mut cursor, cols, lines);
             self.other_screen = other;
             self.other_top_line += removed.len() as u64;
+            // Those rows' ids are in the primary screen's table.
             for row in removed {
-                self.push_scrollback(&row);
+                if self.scrollback.limit() > 0 {
+                    self.scrollback.push(&row, self.other_styles.styles());
+                    self.follow_history();
+                }
             }
             if let Some(saved) = &mut self.saved_primary {
                 saved.cursor.row = cursor.row;
@@ -798,6 +841,27 @@ impl Terminal {
         self.tabs = default_tabs(cols);
         self.display_offset = self.display_offset.min(self.scrollback.len());
         self.selection = None;
+
+        self.styles.set_sweeps_blocked(false);
+        self.other_styles.set_sweeps_blocked(false);
+        self.styles.set_cells(cols * lines);
+        self.other_styles.set_cells(cols * lines);
+        if self.styles.needs_sweep() {
+            self.sweep_styles(false);
+        }
+        if self.other_styles.needs_sweep() {
+            // The other screen's templates were dropped when it was left.
+            let epochs = &mut self.epochs;
+            self.other_styles.sweep(
+                &mut self.other_screen,
+                &mut [],
+                || {
+                    *epochs += 1;
+                    *epochs
+                },
+                false,
+            );
+        }
         self.touch();
     }
 
@@ -806,20 +870,132 @@ impl Terminal {
         self.generation = self.generation.wrapping_add(1);
     }
 
-    fn blank(&self) -> Cell {
-        Cell::erased(self.cursor.pen.bg)
+    /// The cell erasing writes: empty, in the erase style (the pen's
+    /// background alone, §5.4), interned once per background. Interning
+    /// can sweep and renumber the table, so callers take it before any
+    /// other template they hold in a local.
+    #[inline]
+    fn blank(&mut self) -> Cell {
+        let bg = self.cursor.pen.bg;
+        if bg == Color::DEFAULT {
+            return Cell::BLANK;
+        }
+        match self.erase_cell {
+            Some(c) if self.erase_bg == bg => c,
+            _ => self.intern_erase(bg),
+        }
     }
 
-    /// Copy a row into scrollback. The row itself is left for the caller to
-    /// reuse as the new blank line. Callers also advance the screen's
-    /// `top_line`, which counts rows whether or not they were stored.
+    #[cold]
+    #[inline(never)]
+    fn intern_erase(&mut self, bg: Color) -> Cell {
+        // Drop the old one first, so the sweep doesn't keep it alive.
+        self.erase_cell = None;
+        let c = self.intern(Style { bg, ..Style::DEFAULT });
+        self.erase_cell = Some(c);
+        self.erase_bg = bg;
+        c
+    }
+
+    /// The template the pen writes with: its style id and SE bit. Like
+    /// [`Terminal::blank`], it may sweep the table when it interns, so take
+    /// it after anything else that might intern.
+    #[inline(always)]
+    fn pen_template(&mut self) -> Cell {
+        match self.pen_cell {
+            Some(c) => c,
+            None => self.intern_pen(),
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn intern_pen(&mut self) -> Cell {
+        let c = self.intern(self.cursor.pen);
+        self.pen_cell = Some(c);
+        c
+    }
+
+    /// The pen's style changed: its template is out of date, and so is the
+    /// erase template if the background changed (dropped, so the sweep
+    /// doesn't keep its id alive).
+    #[inline]
+    fn pen_changed(&mut self) {
+        self.pen_cell = None;
+        if self.cursor.pen.bg != self.erase_bg {
+            self.erase_cell = None;
+        }
+    }
+
+    /// The template for `s` in the active screen's table, adding it (after
+    /// a sweep, if the table is full) when it is new.
+    fn intern(&mut self, s: Style) -> Cell {
+        match self.styles.lookup(&s) {
+            Ok(c) => c,
+            Err(miss) => {
+                if self.styles.needs_sweep() {
+                    // Rebuilds the index: `insert` finds its own slot.
+                    self.sweep_styles(false);
+                }
+                self.styles.insert(s, miss)
+            }
+        }
+    }
+
+    /// Sweep the active screen's table (§5.2): free the ids no cell and no
+    /// template uses, renumbering if few are left. With `give_back`, the
+    /// table's memory shrinks to what is left.
+    fn sweep_styles(&mut self, give_back: bool) {
+        let epochs = &mut self.epochs;
+        let renumbered = self.styles.sweep(
+            &mut self.screen,
+            &mut [&mut self.pen_cell, &mut self.erase_cell],
+            || {
+                *epochs += 1;
+                *epochs
+            },
+            give_back,
+        );
+        if renumbered {
+            // Every row's cells changed bits (row change counters come
+            // with the snapshot, §9.1).
+            self.touch();
+        }
+    }
+
+    /// The whole screen was just erased (`clear`, a program exiting): a
+    /// big style table is swept now and gives its memory back, rather than
+    /// waiting for it to fill again (§5.3).
+    fn screen_cleared(&mut self) {
+        // With a test's small `sweep_at`, clears renumber too.
+        let at = self.sweep_at_test.map_or(GIVE_BACK_AT, |n| (n as usize).min(GIVE_BACK_AT));
+        if self.styles.len() > at {
+            self.sweep_styles(true);
+        }
+    }
+
+    /// The next table epoch: terminal-wide, so none repeats.
+    fn next_epoch(&mut self) -> u64 {
+        self.epochs += 1;
+        self.epochs
+    }
+
+    /// Copy a row of the active screen into scrollback. The row itself is
+    /// left for the caller to reuse as the new blank line. Callers also
+    /// advance the screen's `top_line`, which counts rows whether or not
+    /// they were stored.
     fn push_scrollback(&mut self, row: &Row) {
         if self.scrollback.limit() == 0 {
             return;
         }
-        self.scrollback.push(row);
+        self.scrollback.push(row, self.styles.styles());
+        self.follow_history();
+    }
+
+    /// A line went into history: keep the view still while output arrives
+    /// underneath it.
+    fn follow_history(&mut self) {
         if self.display_offset > 0 {
-            // Keep the view still while output arrives underneath it.
             self.display_offset = (self.display_offset + 1).min(self.scrollback.len());
         }
     }
@@ -920,10 +1096,10 @@ impl Terminal {
         let start = range.start.min(end);
         cells[start..end].fill(blank);
         // Don't leave half of a wide character behind.
-        if start > 0 && cells[start - 1].has(flags::WIDE) {
+        if start > 0 && cells[start - 1].is_wide() {
             cells[start - 1] = blank;
         }
-        if end < cells.len() && cells[end].has(flags::WIDE_SPACER) {
+        if end < cells.len() && cells[end].is_spacer() {
             cells[end] = blank;
         }
     }
@@ -945,6 +1121,8 @@ impl Terminal {
         let saved = if self.alt_active { self.saved_alt } else { self.saved_primary };
         match saved {
             Some(s) => {
+                // The saved pen is a style by value: it is interned again
+                // in this screen's table at the next print.
                 self.cursor = s.cursor;
                 self.modes.origin = s.origin;
                 self.line_drawing = s.line_drawing;
@@ -954,6 +1132,7 @@ impl Terminal {
                 self.modes.origin = false;
             }
         }
+        self.pen_changed();
         self.cursor.row = self.cursor.row.min(self.lines - 1);
         self.cursor.col = self.cursor.col.min(self.cols - 1);
         if self.modes.origin {
@@ -968,8 +1147,8 @@ impl Terminal {
         let cells = &mut self.screen[row].cells;
         for i in 0..cells.len() {
             let c = cells[i];
-            let orphan_lead = c.has(flags::WIDE) && !cells.get(i + 1).is_some_and(|n| n.has(flags::WIDE_SPACER));
-            let orphan_spacer = c.has(flags::WIDE_SPACER) && (i == 0 || !cells[i - 1].has(flags::WIDE));
+            let orphan_lead = c.is_wide() && !cells.get(i + 1).is_some_and(|n| n.is_spacer());
+            let orphan_spacer = c.is_spacer() && (i == 0 || !cells[i - 1].is_wide());
             if orphan_lead || orphan_spacer {
                 cells[i] = blank;
             }
@@ -981,6 +1160,10 @@ impl Terminal {
             return;
         }
         std::mem::swap(&mut self.screen, &mut self.other_screen);
+        std::mem::swap(&mut self.styles, &mut self.other_styles);
+        // The templates name ids in the other screen's table.
+        self.pen_cell = None;
+        self.erase_cell = None;
         std::mem::swap(&mut self.top_line, &mut self.other_top_line);
         if on {
             // Number the alternate screen's rows after the primary's, so a
@@ -989,17 +1172,35 @@ impl Terminal {
         }
         self.alt_active = on;
         if on && clear {
-            let blank = self.blank();
-            for row in &mut self.screen {
-                row.reset(self.cols, blank);
-            }
+            self.clear_alt_screen();
         }
         self.display_offset = 0;
         self.selection = None;
     }
 
+    /// Clear the alternate screen (the active one) with a fresh style
+    /// table: no cell refers to the old one any more, so whatever a program
+    /// left there (a gradient, say) is given back.
+    fn clear_alt_screen(&mut self) {
+        debug_assert!(self.alt_active);
+        let epoch = self.next_epoch();
+        self.styles = StyleTable::new(epoch, self.cols * self.lines, self.sweep_at_test);
+        self.pen_cell = None;
+        self.erase_cell = None;
+        let blank = self.blank();
+        for row in &mut self.screen {
+            row.reset(self.cols, blank);
+        }
+    }
+
     fn reset(&mut self) {
         let mut fresh = Terminal::new(self.cols, self.lines, self.scrollback.limit());
+        // New tables, with epochs that carry on from these.
+        let cells = self.cols * self.lines;
+        fresh.styles = StyleTable::new(self.epochs + 1, cells, self.sweep_at_test);
+        fresh.other_styles = StyleTable::new(self.epochs + 2, cells, self.sweep_at_test);
+        fresh.epochs = self.epochs + 2;
+        fresh.sweep_at_test = self.sweep_at_test;
         fresh.generation = self.generation.wrapping_add(1);
         fresh.replies = std::mem::take(&mut self.replies);
         fresh.default_colors = self.default_colors;
@@ -1098,27 +1299,20 @@ impl Terminal {
             cells[col..].rotate_right(width.min(self.cols - col));
             self.repair_wide(row);
         }
-        let pen = self.cursor.pen;
-        let style = pen.flags() & flags::STYLE_MASK;
         let cells = &mut self.screen[row].cells;
         // Only overwriting part of a wide character needs cleanup.
-        let touches_wide =
-            cells[col].has(flags::WIDE | flags::WIDE_SPACER) || (width == 2 && cells[col + 1].has(flags::WIDE | flags::WIDE_SPACER));
+        let touches_wide = cells[col].is_wide_part() || (width == 2 && cells[col + 1].is_wide_part());
         if touches_wide {
             self.erase_cells(row, col..col + width);
         }
+        // After the erase: interning the erase style may renumber ids.
+        let pen = self.pen_template();
         let cells = &mut self.screen[row].cells;
-        cells[col] = Cell {
-            packed: c as u32 | style | if width == 2 { flags::WIDE } else { 0 },
-            fg: pen.fg,
-            bg: pen.bg,
-        };
         if width == 2 {
-            cells[col + 1] = Cell {
-                packed: style | flags::WIDE_SPACER,
-                fg: pen.fg,
-                bg: pen.bg,
-            };
+            cells[col] = pen.with_char(c).with_width(Width::Wide);
+            cells[col + 1] = pen.with_width(Width::Spacer);
+        } else {
+            cells[col] = pen.with_char(c);
         }
 
         if col + width >= self.cols {
@@ -1145,8 +1339,6 @@ impl Terminal {
             }
             return;
         }
-        let pen = self.cursor.pen;
-        let style = pen.flags() & flags::STYLE_MASK;
         let cols = self.cols;
         let mut rest = bytes;
         while !rest.is_empty() {
@@ -1159,8 +1351,11 @@ impl Terminal {
             let n = rest.len().min(cols - col);
             let (segment, tail) = rest.split_at(n);
             rest = tail;
+            // Taken per segment: a linefeed's scroll may have interned the
+            // erase style, and that may have renumbered the ids.
+            let pen = self.pen_template().bits();
             let cells = &mut self.screen[row].cells[col..col + n];
-            if cells.iter().fold(0, |a, c| a | c.packed) & (flags::WIDE | flags::WIDE_SPACER) != 0 {
+            if cells.iter().fold(0, |a, c| a | c.bits()) & (Cell::WIDTH | Cell::KIND) != 0 {
                 // Overwriting part of a wide character: put_char cleans up.
                 for &b in segment {
                     self.put_char(b as char, 1);
@@ -1168,11 +1363,7 @@ impl Terminal {
                 continue;
             }
             for (cell, &b) in cells.iter_mut().zip(segment) {
-                *cell = Cell {
-                    packed: b as u32 | style,
-                    fg: pen.fg,
-                    bg: pen.bg,
-                };
+                *cell = Cell::from_bits(pen | b as u64);
             }
             if col + n == cols {
                 self.cursor.col = cols - 1;
@@ -1286,21 +1477,19 @@ impl Terminal {
         }
         let (row, col) = (self.cursor.row, self.cursor.col - 1);
         let cell = self.screen[row].cells[col];
-        if cell.has(flags::WIDE | flags::WIDE_SPACER) || cell.codepoint() < 0x2000 {
+        if cell.is_wide_part() || cell.codepoint() < 0x2000 {
             return;
         }
         // The spacer goes where the next cell is; if that is the left half of
         // a wide character, erase the whole of it rather than half.
-        if self.screen[row].cells[col + 1].has(flags::WIDE) {
+        if self.screen[row].cells[col + 1].is_wide() {
             self.erase_cells(row, col + 1..col + 2);
         }
+        // Read again: the erase may have renumbered the ids.
         let cells = &mut self.screen[row].cells;
-        cells[col].packed |= flags::WIDE;
-        cells[col + 1] = Cell {
-            packed: (cell.flags() & flags::STYLE_MASK) | flags::WIDE_SPACER,
-            fg: cell.fg,
-            bg: cell.bg,
-        };
+        let cell = cells[col];
+        cells[col] = cell.with_width(Width::Wide);
+        cells[col + 1] = cell.style_part().with_width(Width::Spacer);
         if col + 2 >= self.cols {
             self.cursor.col = self.cols - 1;
             self.cursor.pending_wrap = self.modes.autowrap;
@@ -1353,7 +1542,8 @@ impl Terminal {
             self.modes.focus_events,
             self.modes.bracketed_paste,
         ) = keep_mouse;
-        self.cursor.pen = Cell::BLANK;
+        self.cursor.pen = Style::DEFAULT;
+        self.pen_changed();
         self.cursor.pending_wrap = false;
         self.scroll_top = 0;
         self.scroll_bottom = self.lines - 1;
@@ -1385,10 +1575,7 @@ impl Terminal {
             // 1047 clears the alternate screen when leaving it, not on entry.
             1047 => {
                 if !on && self.alt_active {
-                    let blank = self.blank();
-                    for row in &mut self.screen {
-                        row.reset(self.cols, blank);
-                    }
+                    self.clear_alt_screen();
                 }
                 self.set_alt_screen(on, false);
             }
@@ -1420,60 +1607,75 @@ impl Terminal {
     }
 
     fn sgr(&mut self, params: &Params) {
-        let pen = &mut self.cursor.pen;
-        let mut iter = params.iter();
-        if params.is_empty() {
-            *pen = Cell::BLANK;
-            return;
-        }
-        while let Some(p) = iter.next() {
-            match p[0] {
-                0 => *pen = Cell::BLANK,
-                1 => pen.packed |= flags::BOLD,
-                2 => pen.packed |= flags::DIM,
-                3 => pen.packed |= flags::ITALIC,
-                4 => {
-                    pen.packed &= !(flags::UNDERLINE | flags::DOUBLE_UNDERLINE);
-                    match p.get(1) {
-                        Some(0) => {}
-                        Some(2) => pen.packed |= flags::DOUBLE_UNDERLINE,
-                        _ => pen.packed |= flags::UNDERLINE,
-                    }
+        apply_sgr(&mut self.cursor.pen, params);
+        self.pen_changed();
+    }
+}
+
+/// Apply an SGR sequence to `pen`. Stored: 1–9 (4 with `4:0`–`4:5`), 21,
+/// 22–29, 30–49 (38/48 extended), 53/55, 58/59 and 90–107 (§5.1).
+#[inline]
+fn apply_sgr(pen: &mut Style, params: &Params) {
+    if params.is_empty() {
+        *pen = Style::DEFAULT;
+        return;
+    }
+    let mut iter = params.iter();
+    while let Some(p) = iter.next() {
+        match p[0] {
+            0 => *pen = Style::DEFAULT,
+            1 => pen.attrs.insert(Attrs::BOLD),
+            2 => pen.attrs.insert(Attrs::DIM),
+            3 => pen.attrs.insert(Attrs::ITALIC),
+            4 => {
+                pen.underline = match p.get(1) {
+                    None | Some(1) => Underline::Single,
+                    Some(0) => Underline::None,
+                    Some(2) => Underline::Double,
+                    Some(3) => Underline::Curly,
+                    Some(4) => Underline::Dotted,
+                    Some(5) => Underline::Dashed,
+                    // An unknown underline style: keep the current one.
+                    Some(_) => pen.underline,
                 }
-                5 | 6 => pen.packed |= flags::BLINK,
-                7 => pen.packed |= flags::INVERSE,
-                8 => pen.packed |= flags::HIDDEN,
-                9 => pen.packed |= flags::STRIKE,
-                21 => pen.packed |= flags::DOUBLE_UNDERLINE,
-                22 => pen.packed &= !(flags::BOLD | flags::DIM),
-                23 => pen.packed &= !flags::ITALIC,
-                24 => pen.packed &= !(flags::UNDERLINE | flags::DOUBLE_UNDERLINE),
-                25 => pen.packed &= !flags::BLINK,
-                27 => pen.packed &= !flags::INVERSE,
-                28 => pen.packed &= !flags::HIDDEN,
-                29 => pen.packed &= !flags::STRIKE,
-                n @ 30..=37 => pen.fg = Color::indexed((n - 30) as u8),
-                38 => {
-                    if let Some(c) = extended_color(p, &mut iter) {
-                        pen.fg = c;
-                    }
-                }
-                39 => pen.fg = Color::DEFAULT,
-                n @ 40..=47 => pen.bg = Color::indexed((n - 40) as u8),
-                48 => {
-                    if let Some(c) = extended_color(p, &mut iter) {
-                        pen.bg = c;
-                    }
-                }
-                49 => pen.bg = Color::DEFAULT,
-                58 => {
-                    // Underline colour: parsed so its arguments are skipped.
-                    let _ = extended_color(p, &mut iter);
-                }
-                n @ 90..=97 => pen.fg = Color::indexed((n - 90 + 8) as u8),
-                n @ 100..=107 => pen.bg = Color::indexed((n - 100 + 8) as u8),
-                _ => {}
             }
+            5 | 6 => pen.attrs.insert(Attrs::BLINK),
+            7 => pen.attrs.insert(Attrs::INVERSE),
+            8 => pen.attrs.insert(Attrs::HIDDEN),
+            9 => pen.attrs.insert(Attrs::STRIKE),
+            21 => pen.underline = Underline::Double,
+            22 => pen.attrs.remove(Attrs::BOLD | Attrs::DIM),
+            23 => pen.attrs.remove(Attrs::ITALIC),
+            24 => pen.underline = Underline::None,
+            25 => pen.attrs.remove(Attrs::BLINK),
+            27 => pen.attrs.remove(Attrs::INVERSE),
+            28 => pen.attrs.remove(Attrs::HIDDEN),
+            29 => pen.attrs.remove(Attrs::STRIKE),
+            n @ 30..=37 => pen.fg = Color::indexed((n - 30) as u8),
+            38 => {
+                if let Some(c) = extended_color(p, &mut iter) {
+                    pen.fg = c;
+                }
+            }
+            39 => pen.fg = Color::DEFAULT,
+            n @ 40..=47 => pen.bg = Color::indexed((n - 40) as u8),
+            48 => {
+                if let Some(c) = extended_color(p, &mut iter) {
+                    pen.bg = c;
+                }
+            }
+            49 => pen.bg = Color::DEFAULT,
+            53 => pen.attrs.insert(Attrs::OVERLINE),
+            55 => pen.attrs.remove(Attrs::OVERLINE),
+            58 => {
+                if let Some(c) = extended_color(p, &mut iter) {
+                    pen.underline_color = c;
+                }
+            }
+            59 => pen.underline_color = Color::DEFAULT,
+            n @ 90..=97 => pen.fg = Color::indexed((n - 90 + 8) as u8),
+            n @ 100..=107 => pen.bg = Color::indexed((n - 100 + 8) as u8),
+            _ => {}
         }
     }
 }
@@ -1517,7 +1719,7 @@ fn resize_screen(screen: &mut VecDeque<Row>, cursor: &mut Cursor, cols: usize, l
     for row in screen.iter_mut() {
         row.cells.resize(cols, Cell::BLANK);
         if let Some(last) = row.cells.last_mut()
-            && last.has(flags::WIDE)
+            && last.is_wide()
         {
             *last = Cell::BLANK;
         }
@@ -1768,6 +1970,9 @@ impl Perform for Terminal {
                             self.erase_cells(r, 0..self.cols);
                             self.screen[r].wrapped = false;
                         }
+                        if (row, col) == (0, 0) {
+                            self.screen_cleared();
+                        }
                     }
                     1 => {
                         for r in 0..row {
@@ -1780,6 +1985,7 @@ impl Perform for Terminal {
                             self.erase_cells(r, 0..self.cols);
                             self.screen[r].wrapped = false;
                         }
+                        self.screen_cleared();
                     }
                     3 => {
                         self.scrollback.clear();
@@ -1979,10 +2185,7 @@ impl Perform for Terminal {
             }
             ([b'#'], b'8') => {
                 for row in &mut self.screen {
-                    row.cells.fill(Cell {
-                        packed: 'E' as u32,
-                        ..Cell::BLANK
-                    });
+                    row.cells.fill(Cell::BLANK.with_char('E'));
                 }
             }
             _ => return,
@@ -2054,11 +2257,6 @@ impl Perform for Terminal {
 
 /// Testing aids: shared by the unit, property, conformance and fuzz tests.
 impl Terminal {
-    /// Check the rules the rest of the code relies on: the cursor is on the
-    /// screen; both screens have `lines` rows of exactly `cols` cells; every
-    /// WIDE cell is followed by a WIDE_SPACER and every spacer follows a WIDE
-    /// cell; the view is not scrolled back further than the scrollback; the
-    /// scroll region is inside the screen. Costs one pass over the screens.
     /// Turn the bulk ASCII path off (or back on), for tests that compare it
     /// with writing one character at a time.
     #[doc(hidden)]
@@ -2066,13 +2264,85 @@ impl Terminal {
         self.bulk_ascii = on;
     }
 
+    /// Test aid: sweep the style tables once they hold `n` ids (at least
+    /// 2), instead of 1.5 × the screen's cells; `None` goes back to that.
+    /// With a small `n` sweeps and renumberings happen every few prints, so
+    /// every holder of an id is exercised (§5.2).
+    #[doc(hidden)]
+    pub fn set_sweep_at(&mut self, n: Option<u32>) {
+        self.sweep_at_test = n;
+        let cells = self.cols * self.lines;
+        self.styles.set_sweep_at_test(n, cells);
+        self.other_styles.set_sweep_at_test(n, cells);
+    }
+
+    /// Test aid: the active screen's style table, and the other's.
+    #[doc(hidden)]
+    pub fn style_stats(&self) -> (StyleStats, StyleStats) {
+        (self.styles.stats(), self.other_styles.stats())
+    }
+
+    /// Test aid: the styles the active screen's table took since the last
+    /// call, as a snapshot will take them (§9.2), and whether that is the
+    /// alternate screen's table.
+    #[doc(hidden)]
+    pub fn take_style_updates(&mut self) -> (bool, StyleUpdates) {
+        (self.alt_active, self.styles.take_updates())
+    }
+
+    /// Test aid: the active screen's table by id, `None` for free ids.
+    #[doc(hidden)]
+    pub fn live_styles(&self) -> Vec<Option<Style>> {
+        (0..self.styles.styles().len() as u32)
+            .map(|id| self.styles.is_live(id).then(|| *self.styles.get(id)))
+            .collect()
+    }
+
+    /// Test aid: sweep the active screen's table now, and check that
+    /// exactly the ids its cells and templates use are left, and that a
+    /// renumbering left them dense.
+    #[doc(hidden)]
+    pub fn sweep_styles_now(&mut self) -> Result<(), String> {
+        let before = self.styles.stats().renumberings;
+        self.sweep_styles(true);
+        let mut used: Vec<u32> = self.screen.iter().flat_map(|r| r.cells.iter().map(|c| c.style_id())).collect();
+        used.extend(self.pen_cell.iter().chain(&self.erase_cell).map(|c| c.style_id()));
+        used.push(0);
+        used.sort_unstable();
+        used.dedup();
+        let live: Vec<u32> = (0..self.styles.styles().len() as u32)
+            .filter(|&id| self.styles.is_live(id))
+            .collect();
+        if live != used {
+            return Err(format!("after a sweep, live ids {live:?} but used {used:?}"));
+        }
+        let stats = self.styles.stats();
+        if stats.renumberings > before && stats.len != stats.live {
+            return Err(format!("renumbered to {} ids, {} live", stats.len, stats.live));
+        }
+        self.check_invariants()
+    }
+
+    /// Check the rules the rest of the code relies on: the cursor is on the
+    /// screen; both screens have `lines` rows of exactly `cols` cells; every
+    /// wide cell is followed by a spacer in its style and every spacer
+    /// follows a wide cell; every cell's style id is live in its screen's
+    /// table and its SE bit matches the style; the pen and erase templates
+    /// are live in the active screen's table and stand for the pen and the
+    /// erase style; each table is consistent on its own (§17.3); the view
+    /// is not scrolled back further than the scrollback; the scroll region
+    /// is inside the screen. Costs one pass over the screens.
     #[doc(hidden)]
     pub fn check_invariants(&self) -> Result<(), String> {
         let (cols, lines) = (self.cols, self.lines);
         if self.cursor.row >= lines || self.cursor.col >= cols {
             return Err(format!("cursor ({}, {}) outside {cols}x{lines}", self.cursor.row, self.cursor.col));
         }
-        for (name, screen) in [("screen", &self.screen), ("other screen", &self.other_screen)] {
+        for (name, screen, styles) in [
+            ("screen", &self.screen, &self.styles),
+            ("other screen", &self.other_screen, &self.other_styles),
+        ] {
+            styles.check().map_err(|e| format!("{name}'s style table: {e}"))?;
             if screen.len() != lines {
                 return Err(format!("{name} has {} rows, expected {lines}", screen.len()));
             }
@@ -2080,15 +2350,41 @@ impl Terminal {
                 if row.cells.len() != cols {
                     return Err(format!("{name} row {r} has {} cells, expected {cols}", row.cells.len()));
                 }
-                for (c, cell) in row.cells.iter().enumerate() {
-                    if cell.has(flags::WIDE) && !row.cells.get(c + 1).is_some_and(|n| n.has(flags::WIDE_SPACER)) {
+                for (c, &cell) in row.cells.iter().enumerate() {
+                    check_cell(cell, styles).map_err(|e| format!("{name} row {r} col {c}: {e}"))?;
+                    let next = row.cells.get(c + 1);
+                    if cell.is_wide() && !next.is_some_and(|n| n.width() == Width::Spacer) {
                         return Err(format!("{name} row {r} col {c}: wide cell without a spacer after it"));
                     }
-                    if cell.has(flags::WIDE_SPACER) && (c == 0 || !row.cells[c - 1].has(flags::WIDE)) {
-                        return Err(format!("{name} row {r} col {c}: spacer without a wide cell before it"));
+                    if cell.width() == Width::Spacer {
+                        if c == 0 || !row.cells[c - 1].is_wide() {
+                            return Err(format!("{name} row {r} col {c}: spacer without a wide cell before it"));
+                        }
+                        if cell.style_id() != row.cells[c - 1].style_id() {
+                            return Err(format!("{name} row {r} col {c}: spacer in another style than its wide cell"));
+                        }
+                    }
+                    if cell.width() == Width::EdgeSpacer {
+                        return Err(format!("{name} row {r} col {c}: edge spacer (not written yet)"));
                     }
                 }
             }
+        }
+        // The cached templates name live ids of the active screen's table,
+        // with the styles they stand for.
+        if let Some(t) = self.pen_cell {
+            check_template(t, &self.cursor.pen, &self.styles).map_err(|e| format!("pen template: {e}"))?;
+        }
+        if let Some(t) = self.erase_cell {
+            let erase = Style {
+                bg: self.erase_bg,
+                ..Style::DEFAULT
+            };
+            check_template(t, &erase, &self.styles).map_err(|e| format!("erase template: {e}"))?;
+        }
+        let (a, b) = (self.styles.epoch(), self.other_styles.epoch());
+        if a == b || a.max(b) > self.epochs {
+            return Err(format!("table epochs {a} and {b}, counter at {}", self.epochs));
         }
         if self.display_offset > self.scrollback.len() {
             return Err(format!(
@@ -2137,17 +2433,13 @@ impl Terminal {
     pub fn dump(&self) -> String {
         let mut out = String::new();
         for line in 0..self.lines {
-            let row = self.visible_row_cow(line);
-            let len = row.cells.iter().rposition(|c| !c.is_blank()).map_or(0, |i| i + 1);
-            let text: String = row.cells[..len]
-                .iter()
-                .filter(|c| !c.has(flags::WIDE_SPACER))
-                .map(|c| c.ch())
-                .collect();
+            let row = self.visible_row(line);
+            let len = row.cells().rposition(|c| !c.is_blank()).map_or(0, |i| i + 1);
+            let text: String = row.cells().take(len).filter(|c| !c.is_spacer()).map(|c| c.ch()).collect();
             let kept = text.trim_end_matches(' ');
             out.push_str(kept);
             out.extend(std::iter::repeat_n('·', text.len() - kept.len()));
-            out.push(if row.wrapped { '⏎' } else { '|' });
+            out.push(if row.wrapped() { '⏎' } else { '|' });
             out.push('\n');
         }
         out.push_str(&format!(
@@ -2170,6 +2462,41 @@ impl Terminal {
             row.reset(self.cols, blank);
         }
     }
+}
+
+/// A screen cell is a narrow, wide or spacer scalar (no clusters or
+/// placeholders yet), its spare bits are zero, and its style id is live
+/// with SE matching the style.
+fn check_cell(cell: Cell, styles: &StyleTable) -> Result<(), String> {
+    let bits = cell.bits();
+    if bits & (Cell::KIND | Cell::PROTECTED | 0x1F << 27) != 0 {
+        return Err(format!("cell {bits:#x} has kind, protected or spare bits set"));
+    }
+    if cell.codepoint() != 0 && char::from_u32(cell.codepoint()).is_none() {
+        return Err(format!("cell {bits:#x} holds no scalar"));
+    }
+    if cell.is_spacer() && cell.codepoint() != 0 {
+        return Err(format!("spacer {bits:#x} holds a character"));
+    }
+    let id = cell.style_id();
+    if !styles.is_live(id) {
+        return Err(format!("style id {id} isn't live"));
+    }
+    if cell.shows_empty() != styles.get(id).shows_empty() {
+        return Err(format!("SE bit of {bits:#x} doesn't match style {id}"));
+    }
+    Ok(())
+}
+
+fn check_template(t: Cell, style: &Style, styles: &StyleTable) -> Result<(), String> {
+    if t.style_part() != t {
+        return Err(format!("{:#x} isn't a template", t.bits()));
+    }
+    check_cell(t, styles)?;
+    if styles.get(t.style_id()) != style {
+        return Err(format!("id {} is {:?}, not {style:?}", t.style_id(), styles.get(t.style_id())));
+    }
+    Ok(())
 }
 
 /// The parser plus the state it drives.

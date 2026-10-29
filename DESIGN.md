@@ -35,6 +35,7 @@ any command as its own Dock app.
 | `term-font`   | Core Text: font loading, cell metrics, glyph rasterising              |
 | `term-render` | Metal: glyph texture, per-cell instance buffer, one instanced draw    |
 | `term-app`    | AppKit window/view, keyboard + IME, mouse, clipboard, config, pins    |
+| `term-prefs`  | the preferences: settings schema, safe `config.toml` edits, the TUI (no platform code) |
 
 `term-core` has no platform code and is tested and benchmarked on its own.
 
@@ -55,9 +56,15 @@ only with `DECLINE_TEST_DUMP=<file>` set: `dump`, `resize`, `font`, `tab`,
 
 ## Screen storage
 
-- A cell is 12 bytes: `u32` with the 21-bit Unicode scalar plus 11 style flag
-  bits (bold, italic, underline, wide, …), and one `u32` each for foreground
-  and background (default / palette index / 24-bit RGB, tagged in the top byte).
+- A cell is 8 bytes (`u64`): a 21-bit Unicode scalar, its width (narrow,
+  wide, spacer), a "shows when empty" bit, and a 32-bit id into its screen's
+  style table. Each screen (primary, alternate) has its own table of
+  distinct `Style`s (colours, attributes, underline style and colour,
+  overline, link), each stored once. Ids are freed by a sweep over the
+  screen when the table reaches 1.5 × the screen's cells, with no reference
+  counts; clearing the whole screen renumbers them and gives the memory
+  back. History stores styles by value. Details and measurements:
+  `docs/design/cells.md` §4–§5.
 - The visible screen is a ring of rows (`VecDeque<Row>`), so scrolling the
   whole screen moves the top row to the bottom without shifting the others;
   scroll regions rotate just their rows. A row is `Vec<Cell>` plus a
@@ -304,6 +311,17 @@ build from before the rename to Terminal Decline, removed by the dogfood
 script), it restarts into `Terminal Decline.app` in the same folder
 (`reload::relaunch_target`).
 
+Splits (docs/design/splits.md) are being built. In place so far, with no
+AppKit yet: the pane tree (`panes`: layout in whole device pixels with a
+1 pt divider and a minimum pane size, focus by direction and in order,
+zoom, close, equalize, divider drags and keyboard resizes, all property
+tested), the per-pane and per-window frame decisions
+(`frame_policy::pane` / `combine`; `decide` is now the one-pane case), the
+pane actions and their keys, and `reload::SavedPanes`, the tree with each
+pane's directory, which `SavedWindow` carries (absent in older files: one
+pane). `unfocused_pane_opacity` (default 1.0: not dimmed) is read but not
+yet drawn.
+
 ## Files, folders and Services
 
 What the app does with files and folders from the rest of macOS
@@ -455,6 +473,7 @@ else the built-in theme of that name; `theme = { light = "x", dark = "y" }`
 picks by each window's macOS appearance and switches when it changes
 (`viewDidChangeEffectiveAppearance`, a notification, no polling). A theme
 file has the keys of `[colors]` (foreground, background, cursor, selection,
+split_divider (unset: the background mixed 25% towards the foreground),
 `palette` of up to 16; unset ones are the defaults'), and any `[colors]` in
 the config override the theme's, one by one (`""` in `palette` keeps the
 theme's entry). Colours must be `#rrggbb`; a bad one, a bad theme file or a
@@ -476,8 +495,12 @@ foreground/background/cursor/selection colours, font-family (the first is
 `font_family`, the rest `font_fallback`), the bold/italic faces,
 font-size, adjust-cell-height/width percentages, background-opacity,
 background-blur, macos-option-as-alt, copy-on-select, window-padding-x,
-window-width/height and keybinds (actions with a Terminal Decline equivalent,
-text:/csi:/esc:, unbind; not sequences or global ones). `terminal-decline import
+window-width/height, split-divider-color (`[colors] split_divider`),
+unfocused-split-opacity (`unfocused_pane_opacity`) and keybinds (actions
+with a Terminal Decline equivalent, new_split right/down, goto_split,
+resize_split (its amount dropped: our keys move a divider one cell),
+equalize_splits and toggle_split_zoom included; text:/csi:/esc:, unbind;
+not sequences or global ones). `terminal-decline import
 iterm FILE.itermcolors [--name NAME]` turns an iTerm2 preset (XML, or
 binary through `plutil`) into `themes/<name>.toml`, converting calibrated
 and P3 colours to sRGB with AppKit. Both print the TOML; `--write` writes
@@ -518,7 +541,13 @@ Shortcuts (`[keybind]`, `keybind`): a chord (`"cmd+k"`, `"ctrl+shift+t"`,
 set to a menu action (new_window, new_tab, close, copy, paste, select_all,
 clear_scrollback, font_bigger, font_smaller, font_reset,
 toggle_full_screen, next_tab, previous_tab, and find, a placeholder whose
-Edit > Find… item stays disabled until the find bar exists), `"none"`, or
+Edit > Find… item stays disabled until the find bar exists; and the pane
+actions of docs/design/splits.md §5, split_right/down, close_tab,
+close_window, focus_pane_left/right/up/down/next/previous,
+resize_pane_left/right/up/down, equalize_panes and toggle_pane_zoom, which
+have their defaults (Cmd+D, Cmd+Opt+arrows, …) but no menu items or
+handlers until panes are wired in, so their keys do what they did),
+`"none"`, or
 `{ text = "…" }`. The menus' own shortcuts are the defaults and each entry
 replaces or removes one chord; the menus are built from the result, so
 they show what works (an action's first chord shows, any others work
@@ -783,8 +812,8 @@ pin identity collisions, pin signing and quarantine.
 ## Next milestone
 
 1. ~~Scrollback as text + style runs~~ (done). Next: compress sealed blocks.
-2. **Wider live cells** (16 bytes or a style table) for underline styles and
-   colours, hyperlinks (OSC 8) and grapheme clusters.
+2. ~~8-byte cells with a style table per screen~~ (done, cells design
+   PR 5). Next: grapheme clusters per row (PR 6), OSC 8 links (PR 9).
 3. ~~Parse plain-text runs in bulk~~ (done). Next: a CSI/SGR fast path.
 4. **Copy cells under the lock, build GPU instances outside it**, with
    per-row dirty flags so a spinner doesn't rebuild the whole screen.
@@ -821,3 +850,16 @@ them, and runs of same-styled cells share one resolved style. Text whose
 style changes every one or two cells is still 10–25% slower than before PR 1
 (each change re-reads the style); PR 5's style ids make that a single
 compare.
+
+### 8-byte cells and style tables (cells design PR 5)
+
+Interleaved A/B against `main`, best of 5, busy machine. Parse
+(`cargo bench -p term-core --bench parse`, 64 KB / 1 KB pieces): plain
+418 → 534 / 413 → 520 MiB/s, `seq` +29% / +28%, coloured +8.5% / +7.6%,
+unicode +19% / +19%, `tui` 0.0% / −1.5% (noise). Frames
+(`cargo bench -p term-render --bench frame`): 80×24 plain 6.61 → 6.33 µs,
+300×100 plain 99.3 → 93.4 µs, coloured 112.6 → 106.8 µs, a different
+style every cell 152.8 → 140.9 µs. Memory: 8 B a cell (was 12); style
+tables 92 B for plain text, 14 KB for 256 colours, 117 KB / 1.83 MB at
+80×24 / 300×100 for a truecolour gradient, back under 4 KB once the screen
+is cleared.

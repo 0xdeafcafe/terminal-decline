@@ -441,6 +441,7 @@ impl AppDelegate {
                 frame: [f.origin.x, f.origin.y, f.size.width, f.size.height],
                 tab_group,
                 selected,
+                panes: None,
             }
         };
         let mut saved = Vec::new();

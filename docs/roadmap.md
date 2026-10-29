@@ -59,6 +59,8 @@ set, not only perf work: shaping, images and the updater each cost something.
 
 ## P — Pins and packaging (before the beta)
 
+Design: docs/design/pins.md.
+
 | # | Work | Size | Done when |
 |---|---|---|---|
 | P.1 | Bundle layout: `Terminal Decline.app` = launcher + `libterminal_decline.dylib`; inside-out signing (no `--deep`); hardened runtime; usage-description strings + entitlements (camera, microphone, Apple Events, location…) so programs in the terminal can ask | M | notarized build runs; a program asking for the mic gets a prompt |
@@ -93,9 +95,9 @@ set, not only perf work: shaping, images and the updater each cost something.
 |---|---|---|---|
 | B.1 | Ligatures: shape at draw time per style run with Core Text, cache per row counter, skip for fonts without ligatures, `font_features` | L | Fira/JetBrains Mono ligatures; frame build and `cat` measured Menlo vs JetBrains Mono |
 | B.2 | Splits: one CAMetalLayer per window, plain NSViews per pane for input/IME/a11y, cached instances per pane, panes in sync-update reuse last frame, one display link per window, one glyph atlas per process | L | 4 panes all flooding: frame p99 and WindowServer+Terminal Decline CPU vs one pane; footprint per extra pane recorded |
-| B.3 | Inline images: kitty graphics (APC; transmit/place/delete; virtual placements), iTerm2 OSC 1337; per-process memory budget (default 64 MB), volatile while hidden; pixel caps, file/temp-file transmission limits; fuzz targets for graphics commands | L | `kitty +kitten icat`, `imgcat`, yazi previews |
-| B.4 | Updater: Sparkle 2 for everyone (the cask declares `auto_updates true`), in Terminal Decline.app's main process only (never pins), silent driver, no system profiling, daily check (DESIGN's "no timers" updated), EdDSA key backed up | M | update applied without prompts; signature checked |
-| B.5 | Sixel (in 1.0), fuzzed decoder, same image budget | M | `chafa --format sixel` |
+| B.3 | Inline images: kitty graphics (APC; transmit/place/delete; virtual placements), iTerm2 OSC 1337; per-process memory budget (default 32 MB, Alex's decision), volatile while hidden; pixel caps, file/temp-file transmission limits; fuzz targets for graphics commands; design in docs/design/images.md | L | `kitty +kitten icat`, `imgcat`, yazi previews |
+| B.4 | Updater: Sparkle 2 for everyone (the cask declares `auto_updates true`), in Terminal Decline.app's main process only (never pins), silent driver, no system profiling, daily check (DESIGN's "no timers" updated), EdDSA key backed up; design in docs/design/updater.md | M | update applied without prompts; signature checked |
+| B.5 | Sixel (in 1.0), fuzzed decoder, same image budget; design in docs/design/images.md | M | `chafa --format sixel` |
 
 ## R — Performance round 2 (on the final formats)
 

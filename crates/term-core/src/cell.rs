@@ -1,7 +1,7 @@
-//! Packed cell storage. One cell is 12 bytes: the character and its style
-//! flags share one `u32`, and each colour is one `u32`.
+//! Packed cell storage. One cell is 8 bytes (§4 of the cells design): what
+//! it shows, how wide it is, and an id in its screen's style table.
 
-/// A colour as stored in a cell. The top byte says what kind it is:
+/// A colour as stored in a style. The top byte says what kind it is:
 /// 0 = the terminal's default, 1 = a palette index, 2 = 24-bit RGB.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Hash)]
 #[repr(transparent)]
@@ -34,84 +34,159 @@ pub enum ColorKind {
     Rgb(u8, u8, u8),
 }
 
-/// Style flags, stored in the 11 bits above the 21-bit Unicode scalar.
-pub mod flags {
-    pub const BOLD: u32 = 1 << 21;
-    pub const DIM: u32 = 1 << 22;
-    pub const ITALIC: u32 = 1 << 23;
-    pub const UNDERLINE: u32 = 1 << 24;
-    pub const STRIKE: u32 = 1 << 25;
-    pub const INVERSE: u32 = 1 << 26;
-    pub const HIDDEN: u32 = 1 << 27;
-    /// First half of a double-width character.
-    pub const WIDE: u32 = 1 << 28;
-    /// Second half of a double-width character; draws nothing itself.
-    pub const WIDE_SPACER: u32 = 1 << 29;
-    pub const BLINK: u32 = 1 << 30;
-    pub const DOUBLE_UNDERLINE: u32 = 1 << 31;
-
-    pub const STYLE_MASK: u32 = BOLD | DIM | ITALIC | UNDERLINE | STRIKE | INVERSE | HIDDEN | BLINK | DOUBLE_UNDERLINE;
-    pub const CHAR_MASK: u32 = (1 << 21) - 1;
+/// How much of a row a cell's content takes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u8)]
+pub enum Width {
+    /// One cell.
+    Narrow = 0,
+    /// The left half of a two-cell character.
+    Wide = 1,
+    /// The right half of a two-cell character; draws nothing itself.
+    Spacer = 2,
+    /// The last column of a row whose next wide character didn't fit and
+    /// moved to the next row.
+    EdgeSpacer = 3,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-#[repr(C)]
-pub struct Cell {
-    /// Low 21 bits: Unicode scalar (0 = empty). High 11 bits: [`flags`].
-    pub packed: u32,
-    pub fg: Color,
-    pub bg: Color,
-}
+/// One screen cell, 8 bytes:
+///
+/// ```text
+///  63            32 31   27  26  25  24 23  22 21  20         0
+/// ┌────────────────┬───────┬───┬───┬──────┬──────┬────────────┐
+/// │ style id (32)  │ 0 (5) │SE │ P │width │ kind │ content(21)│
+/// └────────────────┴───────┴───┴───┴──────┴──────┴────────────┘
+/// ```
+///
+/// - content: a Unicode scalar, 0 = empty (kind 0; the other kinds come
+///   with clusters and placeholders);
+/// - width: a [`Width`];
+/// - P: protected (DECSCA), always 0 for now;
+/// - SE, "shows when empty": a copy of the style's
+///   [`Style::shows_empty`](crate::Style::shows_empty), so blank tests need
+///   no table lookup;
+/// - style id: an index into the screen's style table, 0 = the default.
+///
+/// The blank cell is all zero, so a row of blanks resets with a memset.
+#[repr(transparent)]
+#[derive(Clone, Copy, PartialEq, Eq, Default, Hash, Debug)]
+pub struct Cell(u64);
 
-const _: () = assert!(std::mem::size_of::<Cell>() == 12);
+const _: () = assert!(std::mem::size_of::<Cell>() == 8);
 
 impl Cell {
-    pub const BLANK: Cell = Cell {
-        packed: 0,
-        fg: Color::DEFAULT,
-        bg: Color::DEFAULT,
-    };
+    pub const BLANK: Cell = Cell(0);
+    pub const CONTENT: u64 = (1 << 21) - 1;
+    pub const KIND: u64 = 3 << 21;
+    pub const WIDTH: u64 = 3 << 23;
+    const WIDTH_SHIFT: u32 = 23;
+    pub const PROTECTED: u64 = 1 << 25;
+    pub const SHOWS_EMPTY: u64 = 1 << 26;
+    /// The bits a cell's style gives it: the style id and SE.
+    pub const STYLE: u64 = 0xFFFF_FFFF << 32 | Self::SHOWS_EMPTY;
+    /// Bits that make a cell draw something when a row ends there.
+    pub const NOT_BLANK: u64 = Self::CONTENT | Self::KIND | Self::SHOWS_EMPTY;
+
+    /// The template the pen writes with: style id and SE, empty, narrow.
+    #[inline]
+    pub const fn template(style: u32, shows_empty: bool) -> Cell {
+        Cell((style as u64) << 32 | (shows_empty as u64) << 26)
+    }
+
+    /// The raw bits.
+    #[inline]
+    pub const fn bits(self) -> u64 {
+        self.0
+    }
 
     #[inline]
+    pub const fn from_bits(bits: u64) -> Cell {
+        Cell(bits)
+    }
+
+    /// This cell's style (id and SE) with `c` in it, narrow.
+    #[inline]
+    pub const fn with_char(self, c: char) -> Cell {
+        Cell(self.0 & Self::STYLE | c as u64)
+    }
+
+    #[inline]
+    pub const fn with_width(self, w: Width) -> Cell {
+        Cell(self.0 & !Self::WIDTH | (w as u64) << Self::WIDTH_SHIFT)
+    }
+
+    /// The same content and width in another style.
+    #[inline]
+    pub const fn with_style(self, template: Cell) -> Cell {
+        Cell(self.0 & !Self::STYLE | template.0 & Self::STYLE)
+    }
+
+    /// Just the style part (id and SE), as a template.
+    #[inline]
+    pub const fn style_part(self) -> Cell {
+        Cell(self.0 & Self::STYLE)
+    }
+
+    #[inline]
+    pub const fn style_id(self) -> u32 {
+        (self.0 >> 32) as u32
+    }
+
+    #[inline]
+    pub const fn shows_empty(self) -> bool {
+        self.0 & Self::SHOWS_EMPTY != 0
+    }
+
+    #[inline]
+    pub const fn width(self) -> Width {
+        match (self.0 >> Self::WIDTH_SHIFT) & 3 {
+            0 => Width::Narrow,
+            1 => Width::Wide,
+            2 => Width::Spacer,
+            _ => Width::EdgeSpacer,
+        }
+    }
+
+    #[inline]
+    pub const fn is_wide(self) -> bool {
+        self.0 & Self::WIDTH == (Width::Wide as u64) << Self::WIDTH_SHIFT
+    }
+
+    /// The right half of a wide character, or an edge spacer.
+    #[inline]
+    pub const fn is_spacer(self) -> bool {
+        self.0 & (2 << Self::WIDTH_SHIFT) != 0
+    }
+
+    /// Either half of a wide character (or an edge spacer).
+    #[inline]
+    pub const fn is_wide_part(self) -> bool {
+        self.0 & Self::WIDTH != 0
+    }
+
+    /// The content bits: a Unicode scalar, 0 = empty.
+    #[inline]
+    pub const fn codepoint(self) -> u32 {
+        (self.0 & Self::CONTENT) as u32
+    }
+
+    /// The character shown; a space for an empty cell.
+    #[inline]
     pub fn ch(self) -> char {
-        match self.packed & flags::CHAR_MASK {
+        match self.codepoint() {
             0 => ' ',
             c => char::from_u32(c).unwrap_or(' '),
         }
     }
 
+    /// Nothing would be drawn here if the row ended at this cell.
     #[inline]
-    pub fn codepoint(self) -> u32 {
-        self.packed & flags::CHAR_MASK
-    }
-
-    #[inline]
-    pub fn flags(self) -> u32 {
-        self.packed & !flags::CHAR_MASK
-    }
-
-    #[inline]
-    pub fn has(self, flag: u32) -> bool {
-        self.packed & flag != 0
-    }
-
-    #[inline]
-    pub fn is_blank(self) -> bool {
-        self.codepoint() == 0 && self.bg == Color::DEFAULT && self.flags() & (flags::INVERSE | flags::UNDERLINE | flags::STRIKE) == 0
-    }
-
-    /// An empty cell that keeps the given background (used when erasing).
-    #[inline]
-    pub fn erased(bg: Color) -> Cell {
-        Cell {
-            packed: 0,
-            fg: Color::DEFAULT,
-            bg,
-        }
+    pub const fn is_blank(self) -> bool {
+        self.0 & Self::NOT_BLANK == 0
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Row {
     pub cells: Vec<Cell>,
     /// The line continues onto the next row (soft wrap).
@@ -145,20 +220,6 @@ impl Row {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const ALL_FLAGS: [u32; 11] = [
-        flags::BOLD,
-        flags::DIM,
-        flags::ITALIC,
-        flags::UNDERLINE,
-        flags::STRIKE,
-        flags::INVERSE,
-        flags::HIDDEN,
-        flags::WIDE,
-        flags::WIDE_SPACER,
-        flags::BLINK,
-        flags::DOUBLE_UNDERLINE,
-    ];
 
     #[test]
     fn color_kinds_round_trip() {
@@ -196,79 +257,66 @@ mod tests {
     }
 
     #[test]
-    fn flag_bits_are_distinct_and_above_the_char_bits() {
-        let mut seen = 0u32;
-        for f in ALL_FLAGS {
-            assert_eq!(f.count_ones(), 1, "{f:#x} is one bit");
-            assert_eq!(f & flags::CHAR_MASK, 0, "{f:#x} overlaps the character");
-            assert_eq!(seen & f, 0, "{f:#x} used twice");
+    fn bit_layout() {
+        // The fields don't overlap and leave bits 27–31 spare.
+        let fields = [
+            Cell::CONTENT,
+            Cell::KIND,
+            Cell::WIDTH,
+            Cell::PROTECTED,
+            Cell::SHOWS_EMPTY,
+            0xFFFF_FFFF << 32,
+        ];
+        let mut seen = 0u64;
+        for f in fields {
+            assert_eq!(seen & f, 0, "{f:#x} overlaps");
             seen |= f;
         }
-        // Together with the 21 character bits they fill the u32 exactly.
-        assert_eq!(seen | flags::CHAR_MASK, u32::MAX);
-        assert!(flags::CHAR_MASK >= char::MAX as u32);
-        // The style mask is every flag except the two wide-character markers.
-        assert_eq!(flags::STYLE_MASK, seen & !(flags::WIDE | flags::WIDE_SPACER));
-    }
+        assert_eq!(!seen, 0x1F << 27);
+        assert!(Cell::CONTENT >= char::MAX as u64);
 
-    #[test]
-    fn flags_do_not_change_the_character() {
-        let all = ALL_FLAGS.iter().fold(0, |a, f| a | f);
-        for c in ['a', '漢', '\u{10FFFF}', '😀'] {
-            let cell = Cell {
-                packed: c as u32 | all,
-                ..Cell::BLANK
-            };
-            assert_eq!(cell.ch(), c);
-            assert_eq!(cell.codepoint(), c as u32);
-            assert_eq!(cell.flags(), all);
-            for f in ALL_FLAGS {
-                assert!(cell.has(f));
-            }
+        let t = Cell::template(0xABCD_1234, true);
+        assert_eq!(t.bits(), 0xABCD_1234 << 32 | 1 << 26);
+        assert_eq!((t.style_id(), t.shows_empty()), (0xABCD_1234, true));
+        let c = t.with_char('\u{10FFFF}').with_width(Width::Wide);
+        assert_eq!((c.ch(), c.codepoint(), c.width()), ('\u{10FFFF}', 0x10FFFF, Width::Wide));
+        assert_eq!(c.style_part(), t);
+        assert!(c.is_wide() && !c.is_spacer() && c.is_wide_part());
+        for w in [Width::Narrow, Width::Wide, Width::Spacer, Width::EdgeSpacer] {
+            let c = t.with_width(w);
+            assert_eq!(c.width(), w);
+            assert_eq!(c.is_spacer(), matches!(w, Width::Spacer | Width::EdgeSpacer));
+            assert_eq!(c.is_wide(), w == Width::Wide);
+            assert_eq!(c.is_wide_part(), w != Width::Narrow);
+            assert_eq!(c.style_part(), t, "width leaves the style alone");
         }
+        let other = Cell::template(7, false);
+        assert_eq!(c.with_style(other).style_part(), other);
+        assert_eq!(c.with_style(other).ch(), '\u{10FFFF}');
+        assert_eq!(c.with_style(other).width(), Width::Wide);
     }
 
     #[test]
-    fn ch_of_empty_and_invalid_scalars_is_space() {
-        assert_eq!(Cell::BLANK.ch(), ' ');
-        assert_eq!(Cell::BLANK.codepoint(), 0);
-        for invalid in [0xD800u32, 0xDBFF, 0xDC00, 0xDFFF, 0x11_0000, flags::CHAR_MASK] {
-            let cell = Cell {
-                packed: invalid | flags::BOLD,
-                ..Cell::BLANK
-            };
-            assert_eq!(cell.ch(), ' ', "{invalid:#x}");
-        }
-    }
-
-    #[test]
-    fn is_blank() {
+    fn blank_is_zero() {
+        assert_eq!(Cell::BLANK.bits(), 0);
+        assert_eq!(Cell::default(), Cell::BLANK);
         assert!(Cell::BLANK.is_blank());
-        // Foreground colour and most styles don't show on an empty cell.
-        let plain = |packed, fg, bg| Cell { packed, fg, bg };
-        assert!(plain(0, Color::indexed(1), Color::DEFAULT).is_blank());
-        assert!(
-            plain(
-                flags::BOLD | flags::ITALIC | flags::DIM | flags::BLINK,
-                Color::DEFAULT,
-                Color::DEFAULT
-            )
-            .is_blank()
-        );
-        // A character, a background, or a style that draws on empty cells does.
-        assert!(!plain('a' as u32, Color::DEFAULT, Color::DEFAULT).is_blank());
-        assert!(!plain(' ' as u32, Color::DEFAULT, Color::DEFAULT).is_blank());
-        assert!(!plain(0, Color::DEFAULT, Color::indexed(0)).is_blank());
-        assert!(!Cell::erased(Color::rgb(0, 0, 0)).is_blank());
-        assert!(Cell::erased(Color::DEFAULT).is_blank());
-        for f in [flags::INVERSE, flags::UNDERLINE, flags::STRIKE] {
-            assert!(!plain(f, Color::DEFAULT, Color::DEFAULT).is_blank(), "{f:#x}");
+        assert_eq!(Cell::BLANK.ch(), ' ');
+        // A style id alone (a foreground colour, bold) doesn't show.
+        assert!(Cell::template(5, false).is_blank());
+        assert!(Cell::template(5, false).with_width(Width::Spacer).is_blank());
+        // A character, even a space, or a style that shows when empty does.
+        assert!(!Cell::BLANK.with_char(' ').is_blank());
+        assert!(!Cell::BLANK.with_char('a').is_blank());
+        assert!(!Cell::template(5, true).is_blank());
+        for invalid in [0xD800u64, 0xDFFF, 0x11_0000, Cell::CONTENT] {
+            assert_eq!(Cell::from_bits(invalid).ch(), ' ', "{invalid:#x}");
         }
     }
 
     #[test]
     fn row_helpers() {
-        let fill = Cell::erased(Color::indexed(4));
+        let fill = Cell::template(4, true);
         let mut row = Row::new(3, fill);
         assert_eq!(row.cells, vec![fill; 3]);
         assert!(!row.wrapped);
@@ -279,11 +327,7 @@ mod tests {
         assert_eq!(row.cells, vec![Cell::BLANK; 5]);
         assert!(!row.wrapped);
         // Same length: the blank fill (a memset) and any other fill.
-        row.cells[1] = Cell {
-            packed: 'x' as u32 | flags::BOLD,
-            fg: Color::indexed(1),
-            bg: Color::rgb(1, 2, 3),
-        };
+        row.cells[1] = Cell::template(9, true).with_char('x');
         row.wrapped = true;
         row.reset(5, Cell::BLANK);
         assert_eq!(row.cells, vec![Cell::BLANK; 5]);

@@ -3,7 +3,9 @@
 Status: **accepted with changes** by two Opus (xhigh) reviews, and revised
 on 29 Oct 2026 with those changes and with Alex's decisions (§0). Two
 pieces have landed: the code-drawn glyphs (F.6, in term-font) and the vte
-parser changes (PR 3, `0bb234d`). Everything else is still to be built. The
+parser changes (PR 3, `0bb234d`). Since then the Unicode table (PR 4) and
+the 8-byte cells with their style tables (PR 5, §5.4) have landed too.
+Everything else is still to be built. The
 design builds on the parser work now on `main`: vendored vte
 with `print_ascii`, `write_ascii` row-segment writes, the screen as a ring
 of rows, the memset row reset and the faster scrollback encoder. Every
@@ -466,6 +468,95 @@ about 20 bytes of escape code per character.
 - Erase commands with a coloured pen intern one erase style
   (`Style { bg: pen.bg, ..DEFAULT }`), cached until the pen's background
   changes.
+
+**Landed (PR 5).** What was built (`cell.rs`, `style_table.rs`, `term.rs`),
+and where it differs from §4 and §5.1–5.4:
+- **Cells are 8 bytes** with the layout of §4.1. Kinds 1 and 2 (clusters,
+  placeholders), P and the edge spacer aren't written yet;
+  `check_invariants` checks that they are zero, that a spacer holds no
+  character and has its wide cell's style id, and the SE bit of every cell.
+- **SGR stores** 4:0–4:5 (an unknown 4:n keeps the current underline), 21,
+  53/55 and 58/59 (every form of 58), as well as everything that was
+  stored before.
+- **The pen is a `Style` by value**, and so is the pen in a saved cursor
+  (DECSC, 1048, 1049). There is no link table yet, so a style's `link` is
+  always 0 and a saved cursor has no link to hold; that comes with PR 9.
+  The pen's template is dropped whenever SGR runs (not only when the pen
+  changed: interning the same style again is a hit in `recent`), on every
+  screen switch and on every cursor restore, DECSTR and RIS.
+- **The erase template** is dropped when the pen's background changes, so
+  the sweep doesn't keep an old erase style alive, and on every screen
+  switch. Erasing with the default background writes the blank cell and
+  interns nothing.
+- **The index** holds 4 bytes a slot: a 24-bit id and an 8-bit tag from the
+  style's hash, so a probe reads a style only when the tag matches. It is
+  at most half full, and is rebuilt from the live ids at each sweep
+  (O(table), the same order as the marking) rather than deleted from one
+  id at a time. A miss hands its empty slot to `insert`, so a new style is
+  hashed and probed once. `live` is a bitset with a running count.
+- **Ordinary sweeps never renumber.** A program painting a new style every
+  few cells (the `tui` parse case, a gradient) fills the table again and
+  again, and erasing behind it leaves few ids live, so "renumber when fewer
+  than a quarter are live" renumbered on almost every sweep. Under the
+  snapshot (§9.2) each renumbering would also change every row and send the
+  whole table. So a sweep only frees ids, and **renumbering happens when
+  the screen is cleared whole** (ED 2, or ED 0 from the top-left corner)
+  and the table holds more than 256 ids: that sweep renumbers if fewer
+  than a quarter are live, and shrinks every vector to what is left. That
+  is when the memory comes back after a gradient or a TUI exits; until
+  then the table stays at or below `sweep_at` entries.
+- **The alternate screen gets a new table** (with a new epoch) whenever it
+  is cleared whole: on entering 1049 and on leaving 1047. It isn't freed
+  on leaving 1049, since 47 can show that screen again.
+- **Resize** blocks sweeps while it runs (it interns nothing yet; reflow
+  will), updates both tables' `sweep_at`, and then sweeps each table that
+  is full. Rows pushed off the hidden primary screen go to history with
+  that screen's table.
+- **Epochs** come from `Terminal::epochs`; RIS carries it into the fresh
+  terminal, so no table epoch repeats. `check_invariants` checks that the
+  two tables' epochs differ and none is ahead of the counter.
+- **`new_ids`** is capped at half the table (at least 32); past that it is
+  cleared and the next update takes the whole table (`send_all`).
+  `take_style_updates` (a test aid until PR 8's snapshot) returns them, and
+  the property test keeps a mirror of each screen's table from them.
+- **Test aids:** `set_sweep_at(Some(n))` (sweep at n ids, at least 2),
+  `sweep_styles_now` (a renumbering sweep, then checks that exactly the
+  used ids are live and that a renumbering left them dense),
+  `style_stats`, `live_styles`, `take_style_updates`. The fuzz target and
+  half the fuzz streams run with `set_sweep_at(Some(8))`.
+- **History stays v1, with styles by value.** A run's style field keeps
+  the old eleven bits, so lines in the styles 12-byte cells could hold
+  encode byte for byte as before, and adds overline (bit 11), the
+  underline kind (bits 12–13: curly, dotted, dashed) and `OWN_IMAGE` (bit
+  14); a new tag bit carries the underline colour. Decoding gives each row
+  its own short style list, which `RowRef` reads ids from. The encoder's
+  general path now keys runs on a cell's style id and width (the look is
+  worked out only when they change) and writes UTF-8 in place; that is
+  what made the unicode case faster.
+- **Measured** (interleaved A/B against `main`, best of 5–7, busy machine):
+  - parse, `parse` (64 KB pieces) / `parse_1k`: plain 418 → 534 / 413 →
+    520 MiB/s (+28% / +26%), `seq` +29% / +28%, coloured +8.5% / +7.6%,
+    unicode +19% / +19%, `tui` (a new truecolour background every 5–45
+    cells) 0.0% / −1.5%, within noise. Before the encoder change, `tui`
+    was 4–6% slower: one intern miss per segment, about 10 ns, against
+    §5.4's estimate of +15%.
+  - PR 4's cost on unicode, measured cleanly (the commit before PR 4
+    against `main`, 7 rounds): 2.7%, not 5–9%. This PR takes unicode from
+    31.5 ms (before PR 4) to 27.4 ms.
+  - frame building (`cargo bench -p term-render --bench frame`): 80×24
+    plain 6.61 → 6.33 µs, 300×100 plain 99.3 → 93.4 µs, coloured 112.6 →
+    106.8 µs, and the new case with a different style every cell (bold red
+    and plain, alternating) 152.8 → 140.9 µs (+8.5%): `StyleKey` is now
+    the style id, one compare. A cell's style is still copied out of the
+    table at each change; caching the last two in term-render would take
+    more off.
+- **Memory:** 8 bytes a cell (was 12): 15 KB a screen at 80×24, 234 KB at
+  300×100. Style tables, measured (`StyleStats::bytes`, capacity
+  included): plain text 92 B; `ls` (8 styles) 232 B; 256 foreground
+  colours 14 KB; a TUI with 640 styles 28 KB; a truecolour gradient (a new
+  style per cell) 117 KB at 80×24 (2,880 ids) and 1.83 MB at 300×100
+  (45,000 ids), about 42 B an id, above §5.3's 36 B estimate (Vec growth).
+  After the screen is cleared the gradient table is back under 4 KB.
 
 ### 5.5 The link table (OSC 8)
 
@@ -2515,7 +2606,7 @@ in single-digit megabytes.
 | row headers (48 B) | 1.1 KB | 4.7 KB | |
 | style table, plain / coloured | < 1 KB / ≤ 1 KB | < 1 KB / ≤ 1 KB | |
 | style table, TUI with a colour scheme | ≤ 18 KB | ≤ 18 KB | |
-| style table, worst (every cell different) | 104 KB | 1.6 MB | transient; renumbering gives it back |
+| style table, worst (every cell different) | 104 KB (measured 117 KB) | 1.6 MB (measured 1.83 MB) | until the screen is cleared, which renumbers and gives it back (§5.4, Landed) |
 | cluster stores, plain / coloured / CJK | 0 | 0 | CJK characters are single scalars |
 | cluster stores, emoji-heavy (8 or 30 clusters per row) | ~6 KB | ~70 KB | ~96 B per row with clusters + ~20 B per cluster |
 | cluster stores, worst (8 KB cap per row) | ~200 KB | ~1 MB | combining-mark floods only |
@@ -2578,7 +2669,7 @@ go in order, and the font and render agents run alongside.
 | 2 | core + app + render | **view API and selection gestures at a fixed width** (§13.2): `point_at` (with its edge rules), `view_position`, `scroll_to`, `select_word`/`select_line`/`select_all`/`extend_selection` on logical lines, `cursor_in_view`, `link_at` (None until PR 9), `ViewTop`; view.rs and frame.rs stop doing line arithmetic; the double-click word rule moves into term-core | M | 1 |
 | 3 | vte | APC state, `put_slice`, OSC separators kept and size policy (§14), no-op defaults. **Landed, `0bb234d`** | S | — |
 | 4 | core | Unicode table (with the ambiguous flag) + incremental segmentation; width lookups move to the table (a test checks it equals `unicode-width` per scalar); clusters not stored yet. **Landed, `e49b27d`**, with the OSC size policy (§14) in `9f31d7e`; what changed from the design is in §6.2 and §6.3 | M | 2 |
-| 5 | core | **8-byte cells and the per-screen style table**: SGR 4:x, 21, 53/55, 58/59 stored; erase style; sweep with every holder (§5.2); renumbering; `set_sweep_at`; `check_invariants` extended. History is still v1 | M | 4 |
+| 5 | core | **8-byte cells and the per-screen style table**: SGR 4:x, 21, 53/55, 58/59 stored; erase style; sweep with every holder (§5.2); renumbering; `set_sweep_at`; `check_invariants` extended. History is still v1. **Landed**; what changed from the design is at the end of §5.4 | M | 4 |
 | 6 | core | **clusters per row and mode 2027** (the width rule of §6.3, legacy mode, REP by value, the extended `repair_wide`); `Terminal::set_ambiguous_width`; selection text and `dump()` show clusters | M | 5 |
 | 7 | core | **scrollback v2** (§11) at the written width only: `BlockData` (shared) and `BlockEntry`, meta and contiguous text, checkpoints, per-block ambiguous setting, `FILL`, `pop()` with the lowest-popped mark, the 32 MB backstop, the 64-entry slot cache; `scrollback_mem` gains emoji, placeholder, gradient and sealed figures; bench limits lowered | L | 6 |
 | 8 | core | row change counters, `terminal_id`, `history_epoch`, `popped_from`, the snapshot with highlight ranges, the screen it shows and style updates (§9) | S | 5 |
@@ -2759,10 +2850,9 @@ renumbering happen constantly:
 Alex runs builds of `main` daily (`scripts/dogfood.sh`). Three gaps show up
 in that app:
 
-- **Between PRs 5 and 7,** history still uses v1. Lines that scroll into
-  history lose underline colour and underline style (curly, dotted and
-  dashed become a single underline), and also overline and links. On the
-  screen they are correct.
+- **Between PRs 5 and 7,** history still uses v1. As built, v1 keeps
+  underline colour, underline style and overline (§5.4, Landed); only
+  links are lost, and there are none until PR 9.
 - **Between PRs 6 and 7,** clusters work on the screen, but v1 history keeps
   only each cluster's first scalar: a family emoji scrolled into history
   comes back as 👨, and `e` + U+0301 as `e`.

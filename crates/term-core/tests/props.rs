@@ -10,7 +10,7 @@ use proptest::sample::select;
 use proptest::test_runner::{Config, RngSeed};
 use term_core::scrollback::Scrollback;
 use term_core::term::GraphemeState;
-use term_core::{Cell, Color, Content, Row, RowRef, Selection, Style, Term, Width, flags};
+use term_core::{Attrs, Cell, Color, Content, Row, RowRef, Selection, Style, Term, Underline, Width};
 
 fn config() -> Config {
     Config {
@@ -535,8 +535,42 @@ fn colour() -> impl Strategy<Value = Color> {
     ]
 }
 
-fn style() -> impl Strategy<Value = u32> {
-    prop_oneof![Just(0u32), any::<u32>().prop_map(|b| b & flags::STYLE_MASK)]
+/// Every attribute SGR can set.
+const SGR_ATTRS: u16 = Attrs::BOLD.bits()
+    | Attrs::DIM.bits()
+    | Attrs::ITALIC.bits()
+    | Attrs::OVERLINE.bits()
+    | Attrs::STRIKE.bits()
+    | Attrs::INVERSE.bits()
+    | Attrs::HIDDEN.bits()
+    | Attrs::BLINK.bits();
+
+/// A style as the screen can hold it (no link yet).
+fn style() -> impl Strategy<Value = Style> {
+    let underline = select(vec![
+        Underline::None,
+        Underline::Single,
+        Underline::Double,
+        Underline::Curly,
+        Underline::Dotted,
+        Underline::Dashed,
+    ]);
+    (colour(), colour(), colour(), any::<u16>(), underline).prop_map(|(fg, bg, underline_color, attrs, underline)| Style {
+        fg,
+        bg,
+        underline_color,
+        attrs: Attrs::from_bits(attrs & SGR_ATTRS),
+        underline,
+        ..Style::DEFAULT
+    })
+}
+
+/// A row's style list: the default style first, as a table has it.
+fn styles() -> impl Strategy<Value = Vec<Style>> {
+    prop::collection::vec(prop_oneof![1 => Just(Style::DEFAULT), 4 => style()], 0..8).prop_map(|mut s| {
+        s.insert(0, Style::DEFAULT);
+        s
+    })
 }
 
 fn codepoint() -> impl Strategy<Value = u32> {
@@ -544,58 +578,58 @@ fn codepoint() -> impl Strategy<Value = u32> {
 }
 
 /// One narrow cell, or a wide cell and its spacer (which always share the
-/// wide cell's colours and style, as the terminal writes them).
-fn cells() -> impl Strategy<Value = Vec<Cell>> {
-    (any::<bool>(), codepoint(), style(), colour(), colour()).prop_map(|(wide, cp, style, fg, bg)| {
+/// wide cell's style, as the terminal writes them), in style `id` of
+/// `styles`.
+fn cells(styles: Vec<Style>) -> impl Strategy<Value = Vec<Cell>> {
+    let n = styles.len();
+    (any::<bool>(), codepoint(), 0..n).prop_map(move |(wide, cp, id)| {
+        let t = Cell::template(id as u32, styles[id].shows_empty());
+        let c = Cell::from_bits(t.bits() | cp as u64);
         if wide {
-            vec![
-                Cell {
-                    packed: cp | style | flags::WIDE,
-                    fg,
-                    bg,
-                },
-                Cell {
-                    packed: style | flags::WIDE_SPACER,
-                    fg,
-                    bg,
-                },
-            ]
+            vec![c.with_width(Width::Wide), t.with_width(Width::Spacer)]
         } else {
-            vec![Cell {
-                packed: cp | style,
-                fg,
-                bg,
-            }]
+            vec![c]
         }
     })
 }
 
-fn row() -> impl Strategy<Value = Row> {
-    (prop::collection::vec(cells(), 0..60), any::<bool>()).prop_map(|(cells, wrapped)| Row {
-        cells: cells.concat(),
-        wrapped,
+fn row() -> impl Strategy<Value = (Row, Vec<Style>)> {
+    styles().prop_flat_map(|styles| {
+        (prop::collection::vec(cells(styles.clone()), 0..60), any::<bool>(), Just(styles)).prop_map(|(cells, wrapped, styles)| {
+            (
+                Row {
+                    cells: cells.concat(),
+                    wrapped,
+                },
+                styles,
+            )
+        })
     })
 }
 
-/// What a row is expected to read back as: spaces stored as empty cells,
-/// and trailing blank cells dropped (but never half of a wide character).
-fn normalise(row: &Row) -> (Vec<Cell>, bool) {
-    let mut cells: Vec<Cell> = row
+/// What a row is expected to read back as, cell by cell (content, width,
+/// style by value): spaces stored as empty cells, and trailing blank cells
+/// dropped (but never half of a wide character).
+fn normalise(row: &Row, styles: &[Style]) -> (Vec<(u32, Width, Style)>, bool) {
+    let spaces_empty: Vec<Cell> = row
         .cells
         .iter()
-        .map(|c| {
-            let mut c = *c;
+        .map(|&c| {
             if c.codepoint() == ' ' as u32 {
-                c.packed &= !flags::CHAR_MASK;
+                c.style_part().with_width(c.width())
+            } else {
+                c
             }
-            c
         })
         .collect();
-    let mut len = cells.iter().rposition(|c| !c.is_blank()).map_or(0, |i| i + 1);
-    if len > 0 && len < cells.len() && cells[len - 1].has(flags::WIDE) {
+    let mut len = spaces_empty.iter().rposition(|c| !c.is_blank()).map_or(0, |i| i + 1);
+    if len > 0 && len < spaces_empty.len() && spaces_empty[len - 1].is_wide() {
         len += 1;
     }
-    cells.truncate(len);
+    let cells = spaces_empty[..len]
+        .iter()
+        .map(|c| (c.codepoint(), c.width(), styles[c.style_id() as usize]))
+        .collect();
     (cells, row.wrapped)
 }
 
@@ -603,7 +637,7 @@ fn numbered_row(i: usize) -> Row {
     let text = format!("line {i} {}", "x".repeat(60));
     let mut row = Row::new(80, Cell::BLANK);
     for (cell, ch) in row.cells.iter_mut().zip(text.chars()) {
-        cell.packed = ch as u32;
+        *cell = Cell::BLANK.with_char(ch);
     }
     row
 }
@@ -616,15 +650,17 @@ fn number_of(row: &Row) -> usize {
 proptest! {
     #![proptest_config(config())]
 
+    /// History stores styles by value: every cell reads back with the
+    /// same style, whatever ids the screen gave it.
     #[test]
     fn scrollback_rows_round_trip(rows in prop::collection::vec(row(), 1..8)) {
         let mut sb = Scrollback::new(100);
-        for r in &rows {
-            sb.push(r);
+        for (r, styles) in &rows {
+            sb.push(r, styles);
         }
-        for (i, r) in rows.iter().enumerate() {
-            let back = sb.get(i).expect("stored row");
-            prop_assert_eq!(normalise(&back), normalise(r));
+        for (i, (r, styles)) in rows.iter().enumerate() {
+            let (back, back_styles) = sb.get(i).expect("stored row");
+            prop_assert_eq!(normalise(&back, &back_styles), normalise(r, styles));
         }
     }
 
@@ -636,7 +672,7 @@ proptest! {
     ) {
         let mut sb = Scrollback::new(limit);
         for i in 0..pushed {
-            sb.push(&numbered_row(i));
+            sb.push(&numbered_row(i), &[Style::DEFAULT]);
         }
         let len = pushed.min(limit);
         prop_assert_eq!(sb.len(), len);
@@ -647,8 +683,231 @@ proptest! {
             let mut idx: Vec<usize> = probes.iter().map(|p| p.index(len)).collect();
             idx.extend([0, len - 1]);
             for i in idx {
-                prop_assert_eq!(number_of(&sb.get(i).unwrap()), first + i);
+                prop_assert_eq!(number_of(&sb.get(i).unwrap().0), first + i);
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Style tables with forced sweeps (§5.2, §17.3).
+
+/// SGR that sets every stored style field: colours in every form,
+/// underline styles and colours, overline, double underline, resets.
+fn sgr_style() -> impl Strategy<Value = Vec<u8>> {
+    let simple = select(vec![
+        "0", "1", "2", "3", "4", "4:0", "4:1", "4:2", "4:3", "4:4", "4:5", "5", "7", "8", "9", "21", "22", "23", "24", "25", "27", "28",
+        "29", "39", "49", "53", "55", "59", "",
+    ])
+    .prop_map(|s| format!("\x1b[{s}m").into_bytes());
+    prop_oneof![
+        3 => simple,
+        3 => sgr_colour(),
+        // A few colours only, so styles repeat and ids are reused.
+        2 => (select(vec![31u8, 32, 41, 42, 90, 100]), select(vec![1u8, 3, 4, 53]))
+            .prop_map(|(c, a)| format!("\x1b[{c};{a}m").into_bytes()),
+    ]
+}
+
+/// What makes ids change hands: styled text, erases in a coloured pen,
+/// DECSC/DECRC (and 1048), screen switches, scrolls, RIS.
+fn style_piece() -> impl Strategy<Value = Vec<u8>> {
+    let holders = select(vec![
+        "\x1b7",
+        "\x1b8",
+        "\x1b[s",
+        "\x1b[u",
+        "\x1b[?1048h",
+        "\x1b[?1048l",
+        "\x1b[?1049h",
+        "\x1b[?1049l",
+        "\x1b[?1047h",
+        "\x1b[?1047l",
+        "\x1b[?47h",
+        "\x1b[?47l",
+        "\x1bc",
+        "\x1b[!p",
+        "\x1b[K",
+        "\x1b[2J",
+        "\x1b[J",
+        "\x1b[3X",
+        "\x1b[2@",
+        "\x1b[2P",
+        "\x1b[L",
+        "\x1b[M",
+        "\x1b[S",
+        "\x1b[T",
+        "\x1bM",
+        "\x1b#8",
+        "\x1b[2;5r",
+        "\x1b[r",
+        "\x1b[4h",
+        "\x1b[4l",
+    ])
+    .prop_map(|s| s.as_bytes().to_vec());
+    prop_oneof![
+        6 => sgr_style(),
+        5 => prop::collection::vec(0x20u8..0x7f, 1..30),
+        2 => unicode(),
+        1 => cluster(),
+        4 => holders,
+        3 => movement(),
+        1 => c0(),
+    ]
+}
+
+#[derive(Clone, Debug)]
+enum StyleStep {
+    Output(Vec<u8>),
+    Resize(usize, usize),
+    /// Sweep now and check exactly the used ids are left.
+    Sweep,
+    /// Take the style updates into the mirror, as a snapshot would.
+    Snapshot,
+}
+
+fn style_step() -> impl Strategy<Value = StyleStep> {
+    prop_oneof![
+        14 => prop::collection::vec(style_piece(), 1..12).prop_map(|ps| StyleStep::Output(ps.concat())),
+        2 => (1usize..=40, 1usize..=12).prop_map(|(c, l)| StyleStep::Resize(c, l)),
+        1 => Just(StyleStep::Sweep),
+        2 => Just(StyleStep::Snapshot),
+    ]
+}
+
+/// The renderer's mirrors of the two tables (§9.2), and the epochs seen.
+#[derive(Default)]
+struct Mirrors {
+    tables: [Vec<Option<Style>>; 2],
+    epochs: [Option<u64>; 2],
+    seen: Vec<u64>,
+}
+
+impl Mirrors {
+    fn take(&mut self, t: &mut Term) -> Result<(), TestCaseError> {
+        let (alt, u) = t.state.take_style_updates();
+        let i = alt as usize;
+        if self.epochs[i] != Some(u.epoch) {
+            // A new table (renumbered, the alternate one made again, RIS):
+            // its epoch was never seen before, and it comes whole.
+            prop_assert!(!self.seen.contains(&u.epoch), "epoch {} repeats", u.epoch);
+            prop_assert!(u.all, "a new epoch {} without the whole table", u.epoch);
+            self.seen.push(u.epoch);
+            self.epochs[i] = Some(u.epoch);
+        }
+        if u.all {
+            self.tables[i].clear();
+        }
+        for (id, s) in u.styles {
+            let id = id as usize;
+            if self.tables[i].len() <= id {
+                self.tables[i].resize(id + 1, None);
+            }
+            self.tables[i][id] = Some(s);
+        }
+        // Every live id is mirrored with its style.
+        for (id, s) in t.state.live_styles().into_iter().enumerate() {
+            if let Some(s) = s {
+                prop_assert_eq!(self.tables[i].get(id).copied().flatten(), Some(s), "id {}", id);
+            }
+        }
+        Ok(())
+    }
+}
+
+proptest! {
+    #![proptest_config(config())]
+
+    /// With a table that sweeps at 8 ids, sweeps and renumberings happen
+    /// every few prints. Every holder of an id (cells, the pen and erase
+    /// templates, saved cursors, the other screen) must survive them, and
+    /// what a reader sees must be what a terminal that sweeps as usual
+    /// shows.
+    #[test]
+    fn forced_sweeps_keep_every_style(
+        cols in 1usize..=40,
+        lines in 1usize..=12,
+        limit in select(vec![0usize, 5, 100]),
+        steps in prop::collection::vec(style_step(), 1..30),
+    ) {
+        let mut swept = Term::new(cols, lines, limit);
+        swept.state.set_sweep_at(Some(8));
+        let mut plain = Term::new(cols, lines, limit);
+        let mut mirrors = Mirrors::default();
+        let mut most_cells = swept.state.cols() * swept.state.lines();
+        for step in &steps {
+            match step {
+                StyleStep::Output(bytes) => {
+                    swept.advance(bytes);
+                    plain.advance(bytes);
+                }
+                StyleStep::Resize(c, l) => {
+                    swept.state.resize(*c, *l);
+                    plain.state.resize(*c, *l);
+                }
+                StyleStep::Sweep => swept.state.sweep_styles_now().map_err(TestCaseError::fail)?,
+                StyleStep::Snapshot => mirrors.take(&mut swept)?,
+            }
+            swept.state.check_invariants().map_err(TestCaseError::fail)?;
+            prop_assert_eq!(screen_state(&swept), screen_state(&plain), "after {:?}", step);
+            let (a, b) = swept.state.style_stats();
+            // A sweep leaves at most the screen's cells + 2 ids in use, so
+            // a table holds at most that many plus the one being added (for
+            // the largest screen so far: shrinking frees nothing by itself).
+            most_cells = most_cells.max(swept.state.cols() * swept.state.lines());
+            let cap = (most_cells + 3).max(8);
+            prop_assert!(a.len <= cap && b.len <= cap, "{:?} {:?}", a, b);
+        }
+        prop_assert_eq!(history(&mut swept), history(&mut plain));
+    }
+}
+
+/// A truecolour gradient (a new colour in every cell, as lolcat and
+/// colour tests write) keeps the table bounded: it sweeps at 1.5 × the
+/// screen's cells, never holds more than that, and renumbers smaller once
+/// the gradient is gone.
+#[test]
+fn truecolour_gradient_keeps_the_table_bounded() {
+    for (cols, lines) in [(80usize, 24usize), (300, 100)] {
+        let cells = cols * lines;
+        let sweep_at = (cells * 3 / 2).max(1024);
+        let mut t = Term::new(cols, lines, 1000);
+        let mut out = Vec::new();
+        let mut n = 0u32;
+        let (mut peak, mut peak_bytes) = (0, 0);
+        for _frame in 0..10 {
+            out.clear();
+            out.extend_from_slice(b"\x1b[H");
+            for _ in 0..cells {
+                n += 1;
+                let (r, g, b) = ((n >> 16) as u8, (n >> 8) as u8, n as u8);
+                out.extend_from_slice(format!("\x1b[38;2;{r};{g};{b}m\u{2588}").as_bytes());
+            }
+            t.advance(&out);
+            let (s, _) = t.state.style_stats();
+            peak = peak.max(s.len);
+            peak_bytes = peak_bytes.max(s.bytes);
+            assert!(s.len <= sweep_at + 1, "{s:?}");
+        }
+        let (s, _) = t.state.style_stats();
+        assert!(s.sweeps >= 5, "{s:?}");
+        assert!(peak >= cells, "every cell had its own style: peak {peak}");
+        // The last cell written still reads back with its own colour.
+        let row = t.state.visible_row(lines - 1);
+        let last = row.cell(cols - 1).style().fg;
+        assert_eq!(last, Color::rgb((n >> 16) as u8, (n >> 8) as u8, n as u8));
+        eprintln!(
+            "gradient {cols}x{lines}: peak {peak} ids, {peak_bytes} bytes ({} B/id), {} sweeps",
+            peak_bytes / peak,
+            s.sweeps
+        );
+
+        // The program clears the screen and leaves: the next sweep renumbers.
+        t.advance(b"\x1b[0m\x1b[2J\x1b[H");
+        t.state.sweep_styles_now().unwrap();
+        let (s, _) = t.state.style_stats();
+        assert!(s.renumberings >= 1, "{s:?}");
+        assert!(s.len <= 2, "{s:?}");
+        assert!(s.bytes < 4096, "memory given back: {s:?}");
     }
 }

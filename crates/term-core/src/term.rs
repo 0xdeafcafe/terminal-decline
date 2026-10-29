@@ -4,7 +4,7 @@
 use std::borrow::Cow;
 use std::collections::VecDeque;
 
-use vte::{Params, Perform};
+use vte::{OscLarge, Params, Perform};
 
 use crate::cell::{Cell, Color, Row, flags};
 use crate::rows::{Content, RowRef, style_of};
@@ -1576,6 +1576,28 @@ fn dec_line_drawing(c: char) -> char {
     }
 }
 
+/// How much of an OSC string over 4 KB to keep (§14 of the cells design);
+/// `prefix` is what has arrived so far. Past its cap a string is dropped
+/// whole, not dispatched.
+/// - Clipboard copies (OSC 52) up to 4 MB, so a big yank (Neovim over SSH,
+///   say) still arrives.
+/// - iTerm2 file parts (`1337;FilePart=`) up to 1 MB each.
+/// - Whole iTerm2 files (`1337;File=`) are dropped: they will stream into
+///   the iTerm2 image reader when there is one, and nothing reads them now.
+/// - Everything else up to 64 KB (vte's default).
+fn osc_size_policy(prefix: &[u8]) -> OscLarge {
+    const KB: usize = 1024;
+    if prefix.starts_with(b"52;") {
+        OscLarge::Buffer(4 * KB * KB)
+    } else if prefix.starts_with(b"1337;FilePart=") {
+        OscLarge::Buffer(KB * KB)
+    } else if prefix.starts_with(b"1337;File=") {
+        OscLarge::Drop
+    } else {
+        OscLarge::Buffer(64 * KB)
+    }
+}
+
 /// Add a scalar to the recorded clusters: to the last one if it `joins`.
 fn log_scalar(log: &mut Vec<String>, c: char, joins: bool) {
     match log.last_mut() {
@@ -1932,6 +1954,10 @@ impl Perform for Terminal {
             _ => return,
         }
         self.touch();
+    }
+
+    fn osc_large(&mut self, prefix: &[u8]) -> OscLarge {
+        osc_size_policy(prefix)
     }
 
     fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {

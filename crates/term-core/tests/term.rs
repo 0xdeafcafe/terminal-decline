@@ -221,6 +221,70 @@ fn osc_clipboard_and_cwd() {
     assert_eq!(t.state.cwd(), Some("/Users/a b"));
 }
 
+fn base64(data: &[u8]) -> String {
+    const ABC: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let n = chunk.iter().enumerate().fold(0u32, |n, (i, &b)| n | (b as u32) << (16 - 8 * i));
+        for i in 0..4 {
+            out.push(if i <= chunk.len() {
+                ABC[(n >> (18 - 6 * i) & 63) as usize] as char
+            } else {
+                '='
+            });
+        }
+    }
+    out
+}
+
+/// A clipboard copy of `len` bytes of text, as OSC 52.
+fn osc52(len: usize) -> (String, Vec<u8>) {
+    let text: String = (0..len).map(|i| (b'a' + (i % 26) as u8) as char).collect();
+    let seq = format!("\x1b]52;c;{}\x07", base64(text.as_bytes())).into_bytes();
+    (text, seq)
+}
+
+/// Big clipboard copies (a Neovim yank over SSH) get through: OSC 52 is
+/// buffered up to 4 MB, past the 64 KB other strings get.
+#[test]
+fn osc_clipboard_of_one_megabyte() {
+    let (text, seq) = osc52(1 << 20);
+    let mut t = Term::new(10, 1, 0);
+    t.advance(&seq);
+    assert_eq!(t.state.take_clipboard().as_deref(), Some(text.as_str()));
+
+    // Arriving in PTY-sized reads.
+    for piece in seq.chunks(1024) {
+        t.advance(piece);
+    }
+    assert_eq!(t.state.take_clipboard().as_deref(), Some(text.as_str()));
+    t.advance(b"ok");
+    assert!(t.state.dump().starts_with("ok"));
+}
+
+/// Past the caps a string is dropped whole, and what follows it is
+/// handled normally.
+#[test]
+fn osc_size_caps() {
+    let mut t = Term::new(10, 1, 0);
+    // Over 4 MB of base64.
+    let (_, seq) = osc52(3 << 20);
+    assert!(seq.len() > 4 << 20);
+    t.advance(&seq);
+    assert_eq!(t.state.take_clipboard(), None);
+
+    // Other strings keep the 64 KB cap: a 60 KB title is set, a 100 KB one dropped.
+    let title = |len: usize| format!("\x1b]2;{}\x07", "t".repeat(len));
+    t.advance(title(60 << 10).as_bytes());
+    assert_eq!(t.state.title().map(str::len), Some(60 << 10));
+    t.advance(title(100 << 10).as_bytes());
+    assert_eq!(t.state.title().map(str::len), Some(60 << 10));
+
+    // A whole iTerm2 image is dropped, and output after it still prints.
+    t.advance(format!("\x1b]1337;File=inline=1:{}\x07ok", "A".repeat(200 << 10)).as_bytes());
+    assert!(t.state.dump().starts_with("ok"));
+}
+
 #[test]
 fn dump_shows_wraps_trailing_spaces_and_cursor() {
     let mut t = Term::new(6, 4, 10);

@@ -1,0 +1,16 @@
+[package]
+name = "term-pin"
+description = "The Dock pin stub and the app's launcher, and the frozen interface between a pin and the Terminal Decline library"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+# Both are built for shipping with `--profile release-stub` (the workspace
+# Cargo.toml says why); scripts/bundle.sh renames the launcher to
+# `terminal-decline` inside the bundle.
+[[bin]]
+name = "terminal-decline-pin"
+path = "src/bin/pin-stub.rs"
+
+[dependencies]
+libc.workspace = true

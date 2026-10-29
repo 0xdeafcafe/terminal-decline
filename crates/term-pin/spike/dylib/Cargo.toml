@@ -1,0 +1,28 @@
+# P-0's spike: today's Terminal Decline (term-app's main.rs, unchanged)
+# built as libterminal_decline.dylib with the two entry points, so the
+# minimal stub can load it. Not a workspace member; P-3's term-dylib
+# replaces it. Built by crates/term-pin/spike/run.sh.
+[package]
+name = "td-spike-dylib"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+terminal-decline = { path = "../../../term-app" }
+term-pin = { path = "../.." }
+
+[workspace]
+
+[patch.crates-io]
+vte = { path = "../../../../vendor/vte" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "unwind"
+debug = "line-tables-only"

@@ -672,7 +672,7 @@ Management, or remove Rush.app in Finder"), and changes nothing.
 | Signature check alone | 15–30 ms release, ~4 ms ad-hoc (measured, §3.4) | a term-pin test running the stub's check in separate processes |
 | App launch | unchanged ± 5 ms (one `dlopen`, no check) | same script on the app |
 | Footprint of a pin, idle | unchanged ± 0.5 MB; what to watch is the library's dirty data and the stub's own Rust runtime (clean library code is shared and isn't counted) | `/usr/bin/footprint -p <pid>` on a pin before/after, standard window size |
-| Disk per pin | ~300 KB stub (signing rewrites it, so the clone shares nothing) + icon 0.2–0.6 MB | `du -sk` of a new pin |
+| Disk per pin | ~300 KB stub (signing rewrites it, so the clone shares nothing) + icon ~1.2 MB (measured in P-2) | `du -sk` of a new pin |
 | App bundle | + ~600 KB (launcher and stub) | `du -sk`, zip size in the release job summary |
 | Library | ≈ today's 2.2 MB | `ls -l` |
 | Icon generation | ≤ 150 ms per pin | timed in `pin` create |
@@ -761,11 +761,14 @@ transparent outside the body. In the 1024 grid, top-down, in this order:
 
 The `.icns` is written with ImageIO's own writer (`CGImageDestination`
 of type `com.apple.icns`) from the rendered sizes 16, 32, 64, 128, 256,
-512 and 1024 px, which produces the entries macOS's `iconutil` writes
-(`ic04`, `ic05` as ARGB; `ic07`–`ic14` as PNG; measured on macOS 27). A
-test round-trips the file through `iconutil -c iconset` and checks every
-size; whether ImageIO's output is byte-for-byte the same for the same
-input is checked in P-2 (if not, the test compares pixels).
+512 and 1024 px. Each image is added once per entry with its DPI (72
+for 1×, 144 for 2×); without DPI, ImageIO drops the 64 and 1024 px
+images and writes no 2× entries. Measured in P-2 (macOS 27): the 16 and
+32 px entries come out as `is32`/`s8mk` and `il32`/`l8mk` (packed RGB
+plus mask), the rest as PNG in `ic07`–`ic14`, ~1.2 MB in all. A test
+round-trips the file through `iconutil -c iconset` and checks all ten
+sizes; ImageIO's output is byte-for-byte the same for the same input, and
+a test checks that.
 
 ### 8.5 Kept, and collisions
 

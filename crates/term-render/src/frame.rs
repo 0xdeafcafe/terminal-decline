@@ -240,6 +240,16 @@ impl CellView for CellRef<'_> {
 struct SnapCell<'a> {
     cell: Cell,
     styles: &'a [term_core::Style],
+    /// Where a cluster cell's text is. A reference, read only for cluster
+    /// cells: working the text out for every cell made full frames 17%
+    /// slower.
+    clusters: &'a SnapClusters<'a>,
+}
+
+/// A snapshot row's cluster text.
+struct SnapClusters<'a> {
+    snap: &'a term_core::Snapshot,
+    row: &'a term_core::SnapRow,
 }
 
 impl CellView for SnapCell<'_> {
@@ -252,10 +262,13 @@ impl CellView for SnapCell<'_> {
     fn style(&self) -> term_core::Style {
         self.styles.get(self.cell.style_id() as usize).copied().unwrap_or_default()
     }
-    /// As `CellRef::content` reads it. Cluster cells come with the
-    /// snapshot's cluster text (cells design PR 6).
+    /// As `CellRef::content` reads it, with a cluster cell's text from the
+    /// snapshot.
     #[inline]
     fn content(&self) -> Content<'_> {
+        if self.cell.is_cluster() {
+            return Content::Cluster(self.clusters.snap.cluster(self.clusters.row, self.cell.codepoint()));
+        }
         match self.cell.codepoint() {
             0 => Content::Empty,
             cp => char::from_u32(cp).map_or(Content::Empty, Content::Char),
@@ -471,8 +484,15 @@ impl Frame {
             entry.y = ctx.y;
             let row = &self.rows.snap.rows[i];
             let styles = self.rows.styles_for(row.flags.contains(RowFlags::HISTORY));
-            let cells = self.rows.snap.row_cells(row).unwrap_or(&[]);
-            build_row(&ctx, cells.iter().map(|&cell| SnapCell { cell, styles }), glyphs, &mut entry);
+            let snap = &self.rows.snap;
+            let cells = snap.row_cells(row).unwrap_or(&[]);
+            let clusters = SnapClusters { snap, row };
+            let cells = cells.iter().map(|&cell| SnapCell {
+                cell,
+                styles,
+                clusters: &clusters,
+            });
+            build_row(&ctx, cells, glyphs, &mut entry);
             let used = std::mem::replace(self.rows.entry_mut(slot), entry);
             debug_assert!(used.glyphs.is_empty());
         }
@@ -846,7 +866,14 @@ fn row_cells<const OVERLAY: bool, C: CellView, S: RowSink>(
         }
 
         let x = px + col as i32 * cw;
-        if let Content::Char(c) = cell.content()
+        // A cluster draws its first character until clusters are shaped
+        // (F3.2).
+        let c = match cell.content() {
+            Content::Char(c) => Some(c),
+            Content::Cluster(s) => s.chars().next(),
+            Content::Empty | Content::Placeholder { .. } => None,
+        };
+        if let Some(c) = c
             && c != ' '
             && !spacer
             && !pen.attrs.contains(Attrs::HIDDEN)

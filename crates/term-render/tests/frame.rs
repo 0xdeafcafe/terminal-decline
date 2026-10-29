@@ -536,6 +536,14 @@ fn wide_glyph_emitted_once() {
     assert_eq!(decoded(&f, 10, 1, (0, 0)), ["漢 字 😀     "]);
 }
 
+#[test]
+fn cluster_cells_draw_their_first_character() {
+    // Until clusters are shaped (F3.2), a cluster draws its base.
+    let mut t = term(10, 1, "e\u{301}❤\u{FE0F}🇬🇧x");
+    let f = build(&mut t.state);
+    assert_eq!(decoded(&f, 10, 1, (0, 0)), ["e❤ 🇬 x    "]);
+}
+
 // ---- decorations ---------------------------------------------------------
 
 #[test]

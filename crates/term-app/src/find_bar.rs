@@ -24,11 +24,11 @@ use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_se
 use objc2_app_kit::{
     NSApplication, NSAutoresizingMaskOptions, NSBox, NSBoxType, NSButton, NSColor, NSControl, NSControlSize, NSControlTextEditingDelegate,
     NSEvent, NSEventMask, NSEventModifierFlags, NSFont, NSImage, NSMenu, NSMenuItem, NSPasteboard, NSPasteboardNameFind,
-    NSPasteboardTypeString, NSResponder, NSSearchField, NSSearchFieldDelegate, NSSegmentSwitchTracking, NSSegmentedControl,
-    NSTextAlignment, NSTextField, NSTextFieldDelegate, NSTextView, NSView, NSVisualEffectBlendingMode, NSVisualEffectMaterial,
-    NSVisualEffectView,
+    NSPasteboardTypeString, NSPasteboardTypeTextFinderOptions, NSResponder, NSSearchField, NSSearchFieldDelegate, NSSegmentSwitchTracking,
+    NSSegmentedControl, NSTextAlignment, NSTextField, NSTextFieldDelegate, NSTextFinderCaseInsensitiveKey, NSTextFinderMatchingTypeKey,
+    NSTextView, NSView, NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectView,
 };
-use objc2_foundation::{NSArray, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
+use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
 use term_core::HighlightKind;
 
 use crate::pane_view::PaneView;
@@ -424,23 +424,105 @@ impl FindBar {
     }
 }
 
-/// The shared find text (the find pasteboard), as Safari, Xcode and the
-/// rest use it. Not under the test control, so smoke tests don't read or
-/// change the user's.
-pub(crate) fn shared_text() -> Option<String> {
+/// The shared find text and options (the find pasteboard), as Safari,
+/// Xcode and the rest use them. Not under the test control, so smoke
+/// tests don't read or change the user's.
+pub(crate) fn shared_query() -> Option<Query> {
     if std::env::var_os(crate::control::ENV).is_some() {
         return None;
     }
-    let pb = NSPasteboard::pasteboardWithName(unsafe { NSPasteboardNameFind });
-    pb.stringForType(unsafe { NSPasteboardTypeString }).map(|s| s.to_string())
+    read_query(&NSPasteboard::pasteboardWithName(unsafe { NSPasteboardNameFind }))
 }
 
-/// Make `text` the shared find text.
-pub(crate) fn share_text(text: &str) {
+/// Make `q` the shared find text and options.
+pub(crate) fn share_query(q: &Query) {
     if std::env::var_os(crate::control::ENV).is_some() {
         return;
     }
     let pb = NSPasteboard::pasteboardWithName(unsafe { NSPasteboardNameFind });
+    // Leave it alone if it already says this (its change count is how
+    // other apps know it changed).
+    if read_query(&pb).as_ref() != Some(q) {
+        write_query(&pb, q);
+    }
+}
+
+/// NSTextFinderMatchingType's values, as apps write them.
+fn matching_type(word: WordMatch) -> isize {
+    match word {
+        WordMatch::Contains => 0,
+        WordMatch::StartsWith => 1,
+        WordMatch::FullWord => 2,
+    }
+}
+
+/// `pb`'s find text, with the options of its text finder dictionary when
+/// it has one (Ends With, which the bar doesn't have, reads as Contains).
+fn read_query(pb: &NSPasteboard) -> Option<Query> {
+    let text = pb.stringForType(unsafe { NSPasteboardTypeString })?.to_string();
+    let mut q = Query { text, ..Query::default() };
+    let options = pb.propertyListForType(unsafe { NSPasteboardTypeTextFinderOptions });
+    if let Some(dict) = options.as_deref().and_then(|o| o.downcast_ref::<NSDictionary>()) {
+        let number = |key: &NSString| {
+            dict.objectForKey(key)
+                .and_then(|v| v.downcast_ref::<NSNumber>().map(|n| n.as_isize()))
+        };
+        if let Some(i) = number(unsafe { NSTextFinderCaseInsensitiveKey }) {
+            q.ignore_case = i != 0;
+        }
+        q.word = match number(unsafe { NSTextFinderMatchingTypeKey }) {
+            Some(1) => WordMatch::StartsWith,
+            Some(2) => WordMatch::FullWord,
+            _ => WordMatch::Contains,
+        };
+    }
+    Some(q)
+}
+
+/// Put `q`'s text and options on `pb`.
+fn write_query(pb: &NSPasteboard, q: &Query) {
     pb.clearContents();
-    pb.setString_forType(&NSString::from_str(text), unsafe { NSPasteboardTypeString });
+    pb.setString_forType(&NSString::from_str(&q.text), unsafe { NSPasteboardTypeString });
+    let ignore_case = NSNumber::new_bool(q.ignore_case);
+    let matching = NSNumber::new_isize(matching_type(q.word));
+    let options: Retained<NSDictionary<NSString, AnyObject>> = unsafe {
+        NSDictionary::from_slices(
+            &[NSTextFinderCaseInsensitiveKey, NSTextFinderMatchingTypeKey],
+            &[&*ignore_case as &AnyObject, &*matching as &AnyObject],
+        )
+    };
+    unsafe { pb.setPropertyList_forType(&options, NSPasteboardTypeTextFinderOptions) };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn options_roundtrip_through_the_pasteboard() {
+        let pb = NSPasteboard::pasteboardWithUniqueName();
+        for (ignore_case, word) in [
+            (true, WordMatch::FullWord),
+            (false, WordMatch::StartsWith),
+            (true, WordMatch::Contains),
+        ] {
+            let q = Query {
+                text: "needle".into(),
+                ignore_case,
+                word,
+            };
+            write_query(&pb, &q);
+            assert_eq!(read_query(&pb), Some(q));
+        }
+        // Another app's text with no options reads with the defaults.
+        pb.clearContents();
+        pb.setString_forType(&NSString::from_str("plain"), unsafe { NSPasteboardTypeString });
+        assert_eq!(
+            read_query(&pb),
+            Some(Query {
+                text: "plain".into(),
+                ..Query::default()
+            })
+        );
+    }
 }

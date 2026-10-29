@@ -881,8 +881,11 @@ impl PaneView {
         let mtm = MainThreadMarker::from(self);
         let Some((bar, query, opened)) = self.with(|_, p| {
             let opened = p.find.is_none();
-            if opened && p.find_query.text.is_empty() {
-                p.find_query.text = crate::find_bar::shared_text().unwrap_or_default();
+            if opened
+                && p.find_query.text.is_empty()
+                && let Some(shared) = crate::find_bar::shared_query()
+            {
+                p.find_query = shared;
             }
             (p.find.as_ref().map(|f| f.bar.clone()), p.find_query.clone(), opened)
         }) else {
@@ -976,7 +979,7 @@ impl PaneView {
             return;
         };
         if !q.text.is_empty() {
-            crate::find_bar::share_text(&q.text);
+            crate::find_bar::share_query(&q);
         }
         bar.show_status(status);
         self.request_redraw();
@@ -1022,6 +1025,23 @@ impl PaneView {
         self.find_query_changed(q);
     }
 
+    /// The app became active: if another app changed the shared find text
+    /// or options since, an open bar takes them and searches again.
+    pub(crate) fn read_shared_find(&self) {
+        let Some(shared) = crate::find_bar::shared_query().filter(|q| !q.text.is_empty()) else {
+            return;
+        };
+        let bar = self.with(|_, p| {
+            let f = p.find.as_ref()?;
+            // Not while there is typing the search hasn't caught up with.
+            (p.find_query != shared && f.bar.query() == p.find_query).then(|| f.bar.clone())
+        });
+        if let Some(Some(bar)) = bar {
+            bar.set_query(&shared);
+            self.find_query_changed(shared);
+        }
+    }
+
     /// Use Selection for Find: the selected text becomes the query.
     fn use_selection(&self) {
         let Some(Some(text)) = self.with(|_, p| p.session.lock_term().state.selection_text()) else {
@@ -1034,7 +1054,7 @@ impl PaneView {
                 ..p.find_query.clone()
             })
             .unwrap_or_default();
-        crate::find_bar::share_text(&text);
+        crate::find_bar::share_query(&q);
         let open = self.with(|_, p| p.find.as_ref().map(|f| f.bar.clone())).flatten();
         match open {
             Some(bar) => bar.set_query(&q),

@@ -971,6 +971,17 @@ impl WindowView {
         }
     }
 
+    /// The app became active: the panes with a find bar open read the
+    /// shared find text again.
+    pub(crate) fn refresh_shared_find(&self) {
+        let views: Vec<_> = self
+            .with_state(|st| st.panes.values().filter(|p| p.find.is_some()).map(|p| p.view.clone()).collect())
+            .unwrap_or_default();
+        for v in views {
+            v.read_shared_find();
+        }
+    }
+
     /// Draw every pane again soon.
     fn redraw_all(&self) {
         self.with_state(|st| {

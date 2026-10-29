@@ -1,0 +1,25 @@
+--- screen 01 ---
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+********************
+----+----1----+----2----+----3----+----4----+----5----+----6----+----7----+----8
+Test Scroll-Down (SD)
+There should be a horizontal row of *'s above, just above the message.
+Push <RETURN>

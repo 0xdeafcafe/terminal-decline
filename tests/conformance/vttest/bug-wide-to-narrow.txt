@@ -1,0 +1,2 @@
+--- screen 01 ---
+!unknown needs 132-column mode (DECCOLM), which decline doesn't have

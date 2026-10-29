@@ -1,0 +1,52 @@
+--- screen 01 ---
+Test Send/Receive mode (SRM)
+Local echo is enabled, remote echo disabled.  Press any keys, repeat to quit.
+--- screen 02 ---
+Test Send/Receive mode (SRM)
+Local echo is enabled, remote echo disabled.  Press any keys, repeat to quit.
+--- screen 03 ---
+Test Send/Receive mode (SRM)
+Local echo is enabled, remote echo disabled.  Press any keys, repeat to quit.
+
+
+
+
+
+
+
+Local echo is disabled, remote echo enabled.  Press any keys, repeat to quit.
+--- screen 04 ---
+Test Send/Receive mode (SRM)
+Local echo is enabled, remote echo disabled.  Press any keys, repeat to quit.
+
+
+
+
+
+
+
+Local echo is disabled, remote echo enabled.  Press any keys, repeat to quit.
+--- screen 05 ---
+Test Send/Receive mode (SRM)
+Local echo is enabled, remote echo disabled.  Press any keys, repeat to quit.
+
+
+
+
+
+
+
+Local echo is disabled, remote echo enabled.  Press any keys, repeat to quit.
+
+
+
+
+
+
+
+
+
+
+
+
+Push <RETURN>

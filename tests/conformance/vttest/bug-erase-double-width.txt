@@ -1,0 +1,54 @@
+--- screen 01 ---
+This is a test of what happens to the right half of double-width lines.
+A common misfeature is that the right half does not come back when a long
+single-width line is set to double-width and then reset to single-width.
+
+Now the line below should contain 80 characters in single width.
+Push <RETURN>
+
+
+
+
+
+
+
+
+This-is-a-long-line-This-is-a-long-line-This-is-a-long-line-This-is-a-long-line-
+--- screen 02 ---
+This is a test of what happens to the right half of double-width lines.
+A common misfeature is that the right half does not come back when a long
+single-width line is set to double-width and then reset to single-width.
+
+Now the line below should contain 80 characters in single width.
+Push <RETURN>
+
+Now the line below should contain 40 characters in double width.
+Push <RETURN>
+
+
+
+
+
+This-is-a-long-line-This-is-a-long-line-
+--- screen 03 ---
+This is a test of what happens to the right half of double-width lines.
+A common misfeature is that the right half does not come back when a long
+single-width line is set to double-width and then reset to single-width.
+
+Now the line below should contain 80 characters in single width.
+Push <RETURN>
+
+Now the line below should contain 40 characters in double width.
+Push <RETURN>
+
+Now the line below should contain 80 characters in single width.
+Push <RETURN>
+
+
+This-is-a-long-line-This-is-a-long-line-This-is-a-long-line-This-is-a-long-line-
+--- screen 04 ---
+!unknown needs 132-column mode (DECCOLM), which decline doesn't have
+--- screen 05 ---
+!unknown needs 132-column mode (DECCOLM), which decline doesn't have
+--- screen 06 ---
+!unknown needs 132-column mode (DECCOLM), which decline doesn't have

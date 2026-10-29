@@ -1,0 +1,21 @@
+--- screen 01 ---
+Test of LineFeed/NewLine mode.
+
+NewLine mode set. Push the RETURN key:
+--- screen 02 ---
+Test of LineFeed/NewLine mode.
+
+NewLine mode set. Push the RETURN key:
+ <13> <10>  -- OK
+
+NewLine mode reset. Push the RETURN key:
+--- screen 03 ---
+Test of LineFeed/NewLine mode.
+
+NewLine mode set. Push the RETURN key:
+ <13> <10>  -- OK
+
+NewLine mode reset. Push the RETURN key:
+ <13>  -- OK
+
+Push <RETURN>

@@ -1,0 +1,2 @@
+--- screen 01 ---
+!unknown locking shifts into GR (LS1R, LS2R, LS3R) aren't supported

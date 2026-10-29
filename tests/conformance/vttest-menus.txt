@@ -1,0 +1,68 @@
+# The vttest menus scripts/conformance/run.py runs, by title (each title
+# matches the start of a menu entry; ">" goes into a submenu). Every screen
+# a menu stops on ("Push <RETURN>") is compared with
+# tests/conformance/vttest/<name>.txt.
+#
+# Left out: the keyboard, mouse, printer and Tektronix tests (they need a
+# person), and menus that only toggle a setting.
+#
+# name                  | path
+cursor-movements        | Test of cursor movements
+screen-features         | Test of screen features
+charsets-vt100          | Test of character sets > Test VT100 Character Sets
+charsets-si-so          | Test of character sets > Test Shift In/Shift Out (SI/SO)
+charsets-vt220-locking  | Test of character sets > Test VT220 Locking Shifts
+charsets-vt220-single   | Test of character sets > Test VT220 Single Shifts
+double-size             | Test of double-sized characters
+reports-answerback      | Test of terminal reports > <ENQ> (AnswerBack Message)
+reports-lnm             | Test of terminal reports > Set/Reset Mode - LineFeed / Newline
+reports-dsr             | Test of terminal reports > Device Status Report (DSR)
+reports-da              | Test of terminal reports > Primary Device Attributes (DA)
+reports-da2             | Test of terminal reports > Secondary Device Attributes (DA)
+reports-decreqtparm     | Test of terminal reports > Request Terminal Parameters (DECREQTPARM)
+vt52                    | Test of VT52 mode
+vt102-insert-delete     | Test of VT102 features (Insert/Delete Char/Line)
+bug-smooth-scroll       | Test of known bugs > Bug A: Smooth scroll to jump scroll
+bug-scroll-region       | Test of known bugs > Bug B: Scrolling region
+bug-wide-to-narrow      | Test of known bugs > Bug C: Wide to narrow screen
+bug-narrow-to-wide      | Test of known bugs > Bug D: Narrow to wide screen
+bug-double-to-single    | Test of known bugs > Bug E: Cursor move from double- to single-wide line
+bug-column-mode         | Test of known bugs > Bug F: Column mode escape sequence
+bug-wrap-addressing     | Test of known bugs > Wrap around with cursor addressing
+bug-erase-double-width  | Test of known bugs > Erase right half of double width lines
+bug-funny-scroll        | Test of known bugs > Funny scroll regions
+decstr                  | Test of reset and self-test > Soft Terminal Reset (DECSTR)
+vt220-srm               | Test non-VT100 > Test of VT220 features > Test screen-display functions > Test Send/Receive mode (SRM)
+vt220-dectcem           | Test non-VT100 > Test of VT220 features > Test screen-display functions > Test Visible/Invisible Cursor (DECTCEM)
+vt220-ech               | Test non-VT100 > Test of VT220 features > Test screen-display functions > Test Erase Char (ECH)
+vt220-decsca            | Test non-VT100 > Test of VT220 features > Test screen-display functions > Test Protected-Areas (DECSCA)
+vt220-8bit-controls     | Test non-VT100 > Test of VT220 features > Test 8-bit controls (S7C1T/S8C1T)
+vt220-decstr            | Test non-VT100 > Test of VT220 features > Test Soft Terminal Reset (DECSTR)
+vt320-pan-down          | Test non-VT100 > Test of VT320 features > Test cursor-movement > Test Pan down (SU)
+vt320-pan-up            | Test non-VT100 > Test of VT320 features > Test cursor-movement > Test Pan up (SD)
+iso6429-hpa             | Test non-VT100 > Test ISO-6429 cursor-movement > Test Character-Position-Absolute (HPA)
+iso6429-cbt             | Test non-VT100 > Test ISO-6429 cursor-movement > Test Cursor-Back-Tab (CBT)
+iso6429-cha             | Test non-VT100 > Test ISO-6429 cursor-movement > Test Cursor-Character-Absolute (CHA)
+iso6429-cht             | Test non-VT100 > Test ISO-6429 cursor-movement > Test Cursor-Horizontal-Index (CHT)
+iso6429-hpr             | Test non-VT100 > Test ISO-6429 cursor-movement > Test Horizontal-Position-Relative (HPR)
+iso6429-vpa             | Test non-VT100 > Test ISO-6429 cursor-movement > Test Line-Position-Absolute (VPA)
+iso6429-cnl             | Test non-VT100 > Test ISO-6429 cursor-movement > Test Next-Line (CNL)
+iso6429-cpl             | Test non-VT100 > Test ISO-6429 cursor-movement > Test Previous-Line (CPL)
+iso6429-vpr             | Test non-VT100 > Test ISO-6429 cursor-movement > Test Vertical-Position-Relative (VPR)
+iso6429-color-pattern   | Test non-VT100 > Test ISO-6429 colors > Display color test-pattern
+iso6429-sgr0            | Test non-VT100 > Test ISO-6429 colors > Test SGR-0 color reset
+iso6429-bce-ed-el       | Test non-VT100 > Test ISO-6429 colors > Test BCE-style clear line/display (ED, EL)
+iso6429-bce-ech         | Test non-VT100 > Test ISO-6429 colors > Test BCE-style clear line/display (ECH, Indexing)
+iso6429-bce-cursor      | Test non-VT100 > Test ISO-6429 colors > Test of VT102-style features with BCE > Test of cursor movements
+iso6429-bce-screen-102  | Test non-VT100 > Test ISO-6429 colors > Test of VT102-style features with BCE > Test of screen features
+iso6429-bce-insdel      | Test non-VT100 > Test ISO-6429 colors > Test of VT102-style features with BCE > Test Insert/Delete Char/Line
+iso6429-bce-screen      | Test non-VT100 > Test ISO-6429 colors > Test screen features with BCE
+iso6429-sgr22-27        | Test non-VT100 > Test ISO-6429 colors > Test screen features with ISO 6429 SGR 22-27 codes
+iso6429-rep             | Test non-VT100 > Test other ISO-6429 features > Test Repeat (REP)
+iso6429-sd              | Test non-VT100 > Test other ISO-6429 features > Test Scroll-Down (SD)
+iso6429-sl              | Test non-VT100 > Test other ISO-6429 features > Test Scroll-Left (SL)
+iso6429-sr              | Test non-VT100 > Test other ISO-6429 features > Test Scroll-Right (SR)
+iso6429-su              | Test non-VT100 > Test other ISO-6429 features > Test Scroll-Up (SU)
+xterm-altscreen-47      | Test non-VT100 > Test XTERM special features > Alternate-Screen features (xterm) > Switch to/from alternate screen (xterm)
+xterm-altscreen-1047    | Test non-VT100 > Test XTERM special features > Alternate-Screen features (xterm) > Improved alternate screen (XFree86 xterm mode 1047)
+xterm-altscreen-1049    | Test non-VT100 > Test XTERM special features > Alternate-Screen features (xterm) > Better alternate screen (XFree86 xterm mode 1049)

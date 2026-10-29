@@ -1,0 +1,25 @@
+--- screen 01 ---
++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++*
+                                                                               *
+                                                                               *
+                                                                               *
+                                                                               *
+                                                                               *
+                                                                               *
+                                                                               *
+                                                                               *
+                                                                               *
+                                                                               *
+                                                                               *
+                                                                               *
+                                                                               *
+                                                                               *
+   This illustrates the "wrap around bug" which exists on a                    *
+   standard VT100. At the top of the screen there should be                    *
+   a row of +'s, and the rightmost column should be filled                     *
+   with *'s. But if the bug is present, some of the *'s may                    *
+   be placed in other places, e.g. in the leftmost column,                     *
+   and the top line of +'s may be scrolled away.                               *
+                                                                               *
+                                                                               *
+Push <RETURN>                                                                  *

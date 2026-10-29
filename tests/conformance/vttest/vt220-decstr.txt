@@ -1,0 +1,13 @@
+--- screen 01 ---
+Test Soft Terminal Reset (DECSTR)
+(VT220 & up)
+
+The terminal will now soft-reset
+Push <RETURN>
+--- screen 02 ---
+Test Soft Terminal Reset (DECSTR)
+(VT220 & up)
+
+The terminal will now soft-reset
+Push <RETURN>
+Push <RETURN>

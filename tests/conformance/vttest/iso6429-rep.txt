@@ -1,0 +1,25 @@
+--- screen 01 ---
+ ++
+  ++
+   ++
+    ++
+     ++
+      ++
+       ++
+        ++
+         ++
+          ++
+           ++
+            ++
+             ++
+              ++
+               ++
+                ++
+                 ++
+******************++************************************************************
+----+----1----+----2----+----3----+----4----+----5----+----6----+----7----+----8
+Test Repeat (REP)
+There should be a diagonal of 2 +'s down to the row of *'s above this message.
+The ++ in the row of *'s is the target.  If there are 11 +'s, ECMA-48 does
+not prohibit this, but treats it as undefined behavior (still nonstandard).
+Push <RETURN>

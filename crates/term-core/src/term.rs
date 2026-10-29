@@ -429,7 +429,7 @@ pub struct Terminal {
     /// The APC string being read (kitty graphics, images.md §3.1).
     apc: graphics::Apc,
     /// The graphics command of the chunk being read.
-    chunk: Option<term_image::kitty::Command>,
+    chunk: Option<Box<term_image::kitty::Command>>,
     /// The kitty transmission in progress (§3.2).
     upload: Option<Box<graphics::Upload>>,
     /// A command waiting for its medium's header (§3.4).
@@ -1831,7 +1831,11 @@ impl Terminal {
                 break;
             }
         }
-        let Some(r) = found else { return false };
+        let Some(r) = found else {
+            // Deleted or replaced meanwhile: no reply comes for it.
+            self.deferred_replies.retain(|(k, g, _)| (*k, *g) != (done.image, done.generation));
+            return false;
+        };
         self.job_reply(done.image, done.generation, r);
         self.generation = self.generation.wrapping_add(1);
         true

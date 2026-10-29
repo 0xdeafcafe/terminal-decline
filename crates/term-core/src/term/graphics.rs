@@ -309,7 +309,7 @@ impl Terminal {
             return;
         }
         if let Some(cmd) = self.chunk.take() {
-            self.kitty_end(cmd);
+            self.kitty_end(*cmd);
         }
     }
 
@@ -354,7 +354,7 @@ impl Terminal {
                     }
                 }
                 self.apc = Apc::Payload;
-                self.chunk = Some(cmd);
+                self.chunk = Some(Box::new(cmd));
                 return;
             }
             if cmd.action == Action::Delete || transmit {
@@ -367,7 +367,7 @@ impl Terminal {
                 self.apc = Apc::Payload;
             }
         }
-        self.chunk = Some(cmd);
+        self.chunk = Some(Box::new(cmd));
     }
 
     fn kitty_payload(&mut self, data: &[u8]) {
@@ -801,15 +801,16 @@ impl Terminal {
         let w = if w == 0 { iw - x } else { w.min(iw - x) };
         let h = if h == 0 { ih - y } else { h.min(ih - y) };
         let (cw, ch) = (self.cell_pixels.0.max(1) as u32, self.cell_pixels.1.max(1) as u32);
-        let cols = if cmd.cols != 0 {
-            cmd.cols
-        } else {
-            (w + cmd.cell_offset.0 as u32).div_ceil(cw).clamp(1, u16::MAX as u32) as u16
-        };
-        let rows = if cmd.rows != 0 {
-            cmd.rows
-        } else {
-            (h + cmd.cell_offset.1 as u32).div_ceil(ch).clamp(1, u16::MAX as u32) as u16
+        let cells = |px: u64, cell: u32| px.div_ceil(cell as u64).clamp(1, u16::MAX as u64) as u16;
+        let (cols, rows) = match (cmd.cols, cmd.rows) {
+            (0, 0) => (
+                cells((w + cmd.cell_offset.0 as u32) as u64, cw),
+                cells((h + cmd.cell_offset.1 as u32) as u64, ch),
+            ),
+            // One of them given: the other keeps the image's aspect ratio.
+            (c, 0) => (c, cells(c as u64 * cw as u64 * h.max(1) as u64 / w.max(1) as u64, ch)),
+            (0, r) => (cells(r as u64 * ch as u64 * w.max(1) as u64 / h.max(1) as u64, cw), r),
+            (c, r) => (c, r),
         };
         if cmd.virtual_ {
             self.graphics.set_virtual(VirtualPlacement {

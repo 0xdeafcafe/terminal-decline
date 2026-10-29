@@ -235,6 +235,24 @@ fn transmit_and_place_moves_the_cursor_unless_c_is_1() {
 }
 
 #[test]
+fn only_columns_or_only_rows_keep_the_aspect_ratio() {
+    let mut t = term();
+    // 40 × 40 pixels, cells 10 × 20.
+    t.advance(&apc("a=t,i=1,f=24,s=40,v=40,q=2", &rgb(40, 40)));
+    t.advance(b"\x1b_Ga=p,i=1,p=1,c=8,C=1\x1b\\\x1b_Ga=p,i=1,p=2,r=2,C=1\x1b\\");
+    let size = |t: &Term, id| {
+        let p = t.state.graphics().placements().find(|(_, p)| p.id == id).unwrap().1.clone();
+        (p.cols, p.rows, p.src)
+    };
+    assert_eq!(size(&t, 1), (8, 4, [0, 0, 40, 40]), "80 px wide: 80 px tall");
+    assert_eq!(size(&t, 2), (4, 2, [0, 0, 40, 40]), "40 px tall: 40 px wide");
+    // A source rectangle with no width or height runs to the image's edge.
+    t.advance(b"\x1b_Ga=p,i=1,p=3,x=10,y=30,C=1\x1b\\");
+    assert_eq!(size(&t, 3).2, [10, 30, 30, 10]);
+    check(&t);
+}
+
+#[test]
 fn two_unnumbered_placements_on_one_row_both_stay() {
     let mut t = term();
     t.advance(&apc("a=t,i=1,f=24,s=1,v=1,q=2", &rgb(1, 1)));

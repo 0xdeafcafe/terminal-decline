@@ -206,7 +206,7 @@ mod tests {
         let long = "x".repeat(30);
         let out = format!("{long}\r\n").repeat(6);
         for cols in [40, 12] {
-            let mut t = Term::new(20, 4, 100);
+            let mut t = Term::new(20, 4, 100, term_core::ImagePool::process());
             session(&mut t, "one", &out);
             session(&mut t, "two", &out);
             session(&mut t, "three", &out);

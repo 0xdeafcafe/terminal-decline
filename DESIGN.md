@@ -365,7 +365,67 @@ the installed `Decline.app`.
 
 `~/.config/decline/config.toml`: font family/size, colours (16 + fg/bg/cursor/
 selection), padding, opacity/blur, option-as-meta, scrollback lines, shell.
-Read once at start; later: reload on file change (FSEvents, no polling).
+
+Themes (`theme`): `theme = "name"` loads `~/.config/decline/themes/<name>.toml`,
+else the built-in theme of that name; `theme = { light = "x", dark = "y" }`
+picks by each window's macOS appearance and switches when it changes
+(`viewDidChangeEffectiveAppearance`, a notification, no polling). A theme
+file has the keys of `[colors]` (foreground, background, cursor, selection,
+`palette` of up to 16; unset ones are the defaults'), and any `[colors]` in
+the config override the theme's, one by one (`""` in `palette` keeps the
+theme's entry). Colours must be `#rrggbb`; a bad one, a bad theme file or a
+missing theme is a notice. The built-in set is embedded TOML
+(`crates/term-app/themes/`, each file naming its source and licence):
+slope-dark and slope-light (decline's own, from the Slope brand palette),
+solarized-dark/-light (MIT), gruvbox-dark (MIT), catppuccin-mocha/-latte
+(MIT), tokyo-night (MIT; colours from tokyonight.nvim, Apache-2.0). With
+no theme the colours are decline's defaults, as before. Programs aren't
+told about appearance changes yet: colour-scheme reports (mode 2031,
+`CSI ? 997 ; 1|2 n`) need term-core support first.
+
+Importers (`import`): `decline import ghostty [PATH]` reads Ghostty's config
+(default: the first of `~/.config/ghostty/config.ghostty`, `…/config` and
+the same in `~/Library/Application Support/com.mitchellh.ghostty`) and maps
+theme (a built-in decline theme by loose name, else the Ghostty theme file
+becomes `themes/<name>.toml`; `light:x,dark:y` becomes a pair), palette,
+foreground/background/cursor/selection colours, font-family (the first is
+`font_family`, the rest `font_fallback`), the bold/italic faces,
+font-size, adjust-cell-height/width percentages, background-opacity,
+background-blur, macos-option-as-alt, copy-on-select, window-padding-x,
+window-width/height and keybinds (actions with a decline equivalent,
+text:/csi:/esc:, unbind; not sequences or global ones). `decline import
+iterm FILE.itermcolors [--name NAME]` turns an iTerm2 preset (XML, or
+binary through `plutil`) into `themes/<name>.toml`, converting calibrated
+and P3 colours to sRGB with AppKit. Both print the TOML; `--write` writes
+it and refuses to replace any existing file without `--force` (nothing is
+written if one would be). Whatever doesn't map is listed as comments with
+the reason.
+
+Live reload (`watch`, `AppDelegate::reload_config`): the config files (the
+user's, a pin's, `--config`, and the theme files the config names) are
+watched with kqueue vnode watches on each file and its directory (editors save by renaming a new file over the old;
+a missing file is watched through the nearest directory that exists, a
+symlink at its target too). One thread blocks in `kevent`, so idle stays at
+0 wakeups (`top -l 2 -s 5 -stats idlew` with the watcher on: 0). After an
+event it waits 40 ms, arms the watches again and compares the files'
+contents, so only a real change reloads. A reload reads every layer again
+(`-e PROGRAM` still wins) and applies:
+
+- to every window at once: `theme` and `[colors]`, the font settings
+  (`font_family`, `font_size`, `font_fallback`, `font_bold`/`_italic`/`_bold_italic`,
+  `line_height`, `cell_width`; Fonts rebuilt as Cmd+= does; a new
+  `font_size` replaces a size set with Cmd+= / Cmd+-), `padding`,
+  `opacity`, `option_as_meta`, `copy_on_select` and `[keybind]` (the menus
+  are rebuilt);
+- to new windows only, with a notice naming them (`decline: config:
+  columns changed: it applies to new windows`): `command`, `cwd`, `env`,
+  `columns`, `lines`, `blur` (a view set up with the window), `title`, and
+  `scrollback` (term-core has no way to change a running terminal's
+  limit; once it does, the new limit can apply from the next line).
+
+Errors in the edited file are notices in every window, written after the
+program's output, as at startup; new windows show the errors of the
+config in effect.
 
 Shortcuts (`[keybind]`, `keybind`): a chord (`"cmd+k"`, `"ctrl+shift+t"`,
 `"cmd+enter"`; modifiers cmd, ctrl, alt, shift; keys by character or name)

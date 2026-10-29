@@ -1,0 +1,10 @@
+# A made-up Ghostty theme, for the importer's tests.
+palette = 0=#101418
+palette = 1=#c0392b
+palette = 2=#27ae60
+palette = 15=#fafafa
+background = 0b0f14
+foreground = d0d4d8
+cursor-color = e0e0e0
+selection-background = 2a3440
+selection-foreground = ffffff

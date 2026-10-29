@@ -706,3 +706,121 @@ fn smoke_pin_bundle_launches() {
     assert!(screen(&d[0]).starts_with(&format!("pinned {unique}|")), "{}", screen(&d[0]));
     assert_eq!(num(&d[0], "font_size"), 17.0, "the pin's own settings were used");
 }
+
+/// Themes: one named in the config but not there yet is a notice, and is
+/// used once its file is created (theme files are watched too); a
+/// light/dark pair follows the system's appearance.
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_themes_load_and_follow_the_appearance() {
+    if !have_metal() {
+        return;
+    }
+    let dir = TempDir::new("theme");
+    let conf_dir = dir.config_home().join("decline");
+    std::fs::create_dir_all(&conf_dir).unwrap();
+    let file = conf_dir.join("config.toml");
+    std::fs::write(&file, "theme = 'mine'\n").unwrap();
+    let theme = conf_dir.join("themes/mine.toml");
+    let script = format!(
+        "echo start; {dump}{wait1}\
+         mkdir -p '{dir}'; printf \"background = '#203040'\\n\" > '{theme}'; {wait2}\
+         printf \"theme = {{ light = 'slope-light', dark = 'slope-dark' }}\\n\" > '{file}'; {wait3}{quit}sleep 20",
+        dump = osc("dump"),
+        dir = theme.parent().unwrap().display(),
+        theme = theme.display(),
+        file = file.display(),
+        wait1 = dump_until(&dir, "\"seq\":1"),
+        wait2 = dump_until(&dir, "#203040"),
+        wait3 = dump_until(&dir, "#(092d2b|f3f3eb)"),
+        quit = osc("quit"),
+    );
+    let (status, _) = decline(&dir, &script, true);
+    assert!(status.success(), "{status}");
+    let d = dumps(&dir);
+    assert!(d.len() >= 3, "{d:?}");
+    assert_eq!(d[0]["background"], "#16181c", "the defaults until the theme exists");
+    assert!(
+        screen(&d[0]).starts_with("decline: config: theme: no theme named \"mine\""),
+        "{}",
+        screen(&d[0])
+    );
+    assert!(
+        d.iter().any(|x| x["background"] == "#203040" && x["foreground"] == "#d8dee9"),
+        "{d:?}"
+    );
+    let dark = Command::new("/usr/bin/defaults")
+        .args(["read", "-g", "AppleInterfaceStyle"])
+        .output()
+        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "Dark");
+    let last = d.last().unwrap();
+    let (fg, bg) = if dark { ("#f3f3eb", "#092d2b") } else { ("#092d2b", "#f3f3eb") };
+    assert_eq!(
+        (last["foreground"].as_str(), last["background"].as_str()),
+        (Some(fg), Some(bg)),
+        "dark: {dark}"
+    );
+}
+
+/// A shell loop that sends `dump` every 0.1 s (for at most 10 s) until the
+/// dump file matches `pattern` (grep -E).
+fn dump_until(dir: &TempDir, pattern: &str) -> String {
+    format!(
+        "i=0; until grep -Eq '{pattern}' '{dump}' || [ $i -ge 100 ]; do {d}sleep 0.1; i=$((i+1)); done; ",
+        dump = dir.dump_file().display(),
+        d = osc("dump"),
+    )
+}
+
+/// Editing the config while the window is open: a new background is drawn
+/// (written the way editors save, a new file renamed over the old), and an
+/// edit with a mistake becomes a notice in the window, as does a setting
+/// that waits for new windows.
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_config_reloads_when_edited() {
+    if !have_metal() {
+        return;
+    }
+    let dir = TempDir::new("reload");
+    let conf_dir = dir.config_home().join("decline");
+    std::fs::create_dir_all(&conf_dir).unwrap();
+    let file = conf_dir.join("config.toml");
+    std::fs::write(&file, "[colors]\nbackground = '#000000'\n").unwrap();
+    let f = file.display();
+    let script = format!(
+        "echo before; {dump}{wait1}\
+         printf \"[colors]\\nbackground = '#102030'\\n\" > '{f}.tmp'; mv '{f}.tmp' '{f}'; \
+         {wait2}\
+         printf \"font_sise = 3\\ncolumns = 50\\n[colors]\\nbackground = '#102030'\\n\" > '{f}'; \
+         {wait3}{quit}sleep 20",
+        dump = osc("dump"),
+        wait1 = dump_until(&dir, "\"seq\":1"),
+        wait2 = dump_until(&dir, "#102030"),
+        wait3 = dump_until(&dir, "columns changed"),
+        quit = osc("quit"),
+    );
+    let (status, _) = decline(&dir, &script, true);
+    assert!(status.success(), "{status}");
+    let d = dumps(&dir);
+    assert!(d.len() >= 3, "{d:?}");
+    check_dump(&d[0]);
+    assert_eq!(d[0]["background"], "#000000", "{}", d[0]);
+    assert_eq!(d[0]["foreground"], "#d8dee9", "{}", d[0]);
+    let recoloured = d
+        .iter()
+        .position(|x| x["background"] == "#102030")
+        .expect("the new colour was never drawn");
+    assert!(recoloured > 0);
+    let last = d.last().unwrap();
+    assert_eq!(last["background"], "#102030", "{last}");
+    let s = screen(last);
+    assert!(s.starts_with("before|"), "{s}");
+    assert!(s.contains("decline: config: font_sise: unknown field"), "{s}");
+    assert!(s.contains("decline: config: columns changed: it applies to new windows|"), "{s}");
+    assert!(
+        !screen(&d[recoloured]).contains("decline:"),
+        "a good edit shows nothing: {}",
+        screen(&d[recoloured])
+    );
+}

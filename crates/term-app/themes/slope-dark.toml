@@ -1,0 +1,11 @@
+# Slope Dark: decline's own theme, from the Slope brand palette
+# (docs/brand/README.md): paper text on spruce, a mint cursor.
+# Part of decline, MIT licence.
+foreground = "#f3f3eb"
+background = "#092d2b"
+cursor = "#b9e5cc"
+selection = "#245950"
+palette = [
+    "#143b34", "#e07a6e", "#7cc79a", "#e3c27a", "#7aa7e0", "#c79ae0", "#6cc8c0", "#cfdad3",
+    "#4e6e66", "#f09a8e", "#b9e5cc", "#f0d79a", "#9ec2ee", "#ddb8f0", "#94ddd5", "#f3f3eb",
+]

@@ -703,7 +703,7 @@ mod tests {
         // The table loads as a config.
         let path = env.dir.join("pin.toml");
         std::fs::write(&path, toml::to_string(&t).unwrap()).unwrap();
-        let (c, errors) = crate::config::load(&[&path]);
+        let (c, errors) = crate::config::load(&[&path], std::path::Path::new("/nonexistent"));
         assert_eq!(errors, Vec::<String>::new());
         assert_eq!(c.command, ["htop"]);
         assert_eq!(c.pin_app.as_deref(), app.to_str());

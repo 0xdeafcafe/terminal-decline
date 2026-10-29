@@ -40,6 +40,7 @@ use crate::layout::{self, CellSize, Padding};
 use crate::mouse;
 use crate::select::{self, Block, Gesture};
 use crate::session::{Events, Hooks, Outcome, Session};
+use crate::theme::Appearance;
 
 const BLINK_INTERVAL: Duration = Duration::from_millis(530);
 /// How long a tick waits for the echo of input before drawing without it.
@@ -53,6 +54,9 @@ struct State {
     /// The shortcuts in effect (`[keybind]`).
     binds: Keybinds,
     theme: Theme,
+    /// The window's light or dark appearance, which picks the theme of a
+    /// light/dark pair.
+    appearance: Appearance,
     scale: f64,
     font_size: f64,
     focused: bool,
@@ -341,6 +345,11 @@ define_class!(
             self.send_input(b"\x0c".to_vec());
         }
 
+        #[unsafe(method(viewDidChangeEffectiveAppearance))]
+        fn view_did_change_effective_appearance(&self) {
+            self.appearance_changed();
+        }
+
         #[unsafe(method(increaseFontSize:))]
         fn increase_font_size(&self, _sender: Option<&AnyObject>) {
             let size = self.with_state(|st| st.font_size + 1.0);
@@ -527,7 +536,8 @@ impl TerminalView {
         term_render::configure_layer(layer, renderer.device(), opaque);
         layer.setContentsScale(launch.scale);
 
-        let theme = config.theme();
+        let appearance = self.appearance();
+        let theme = config.theme(appearance);
         let m = renderer.metrics();
         let size = self.frame().size;
         let pad = padding_for(&config, self.titlebar_height(), launch.scale);
@@ -573,6 +583,7 @@ impl TerminalView {
             binds: config.keybinds(),
             config,
             theme,
+            appearance,
             scale: launch.scale,
             focused: true,
             cursor_on: true,
@@ -968,6 +979,84 @@ impl TerminalView {
         });
         if changed == Some(true) {
             self.resize();
+        }
+    }
+
+    /// A reloaded config: colours, fonts, padding, opacity and shortcuts
+    /// change at once, option-as-meta and copy-on-select from the next key
+    /// or selection; `notices` are written into the terminal. A new
+    /// `font_size` replaces a size set with Cmd+= / Cmd+-; otherwise the
+    /// window keeps its size.
+    pub fn apply_config(&self, config: Rc<Config>, notices: &[String]) {
+        let Some(window) = self.window() else { return };
+        let scale = window.backingScaleFactor();
+        let changed = self.with_state(|st| {
+            let old = std::mem::replace(&mut st.config, config.clone());
+            let old_fonts = old.font_config(st.font_size);
+            if config.font_size != old.font_size {
+                st.font_size = config.font_size;
+            }
+            let fonts = config.font_config(st.font_size);
+            if fonts != old_fonts || scale != st.scale {
+                st.scale = scale;
+                st.renderer.set_fonts(Fonts::with_config(&fonts, scale));
+            }
+            st.binds = config.keybinds();
+            st.theme = config.theme(st.appearance);
+            {
+                let mut t = st.session.lock_term();
+                t.state.set_default_colors(crate::config::query_colors(&st.theme));
+                for n in notices {
+                    crate::session::write_late_notice(&mut t, n);
+                }
+            }
+            self.ivars().layer.setOpaque(config.opacity >= 1.0);
+        });
+        if changed.is_some() {
+            // Padding or cell size may have changed the grid.
+            self.resize();
+            self.request_redraw();
+        }
+    }
+
+    /// Light or dark, as macOS draws this view.
+    fn appearance(&self) -> Appearance {
+        let names = unsafe { [objc2_app_kit::NSAppearanceNameAqua, objc2_app_kit::NSAppearanceNameDarkAqua] };
+        use objc2_app_kit::NSAppearanceCustomization;
+        let best = self
+            .effectiveAppearance()
+            .bestMatchFromAppearancesWithNames(&NSArray::from_slice(&names));
+        match best {
+            Some(name) if &*name == unsafe { objc2_app_kit::NSAppearanceNameAqua } => Appearance::Light,
+            _ => Appearance::Dark,
+        }
+    }
+
+    /// The system switched between light and dark: a light/dark theme pair
+    /// changes colours. (Colour-scheme reports to programs, mode 2031,
+    /// wait for term-core to support them.)
+    fn appearance_changed(&self) {
+        let appearance = self.appearance();
+        let changed = self.with_state(|st| {
+            if st.appearance == appearance {
+                return false;
+            }
+            st.appearance = appearance;
+            let theme = st.config.theme(appearance);
+            let recolour = theme.foreground != st.theme.foreground
+                || theme.background != st.theme.background
+                || theme.palette != st.theme.palette
+                || theme.cursor != st.theme.cursor
+                || theme.selection != st.theme.selection;
+            st.theme = theme;
+            st.session
+                .lock_term()
+                .state
+                .set_default_colors(crate::config::query_colors(&st.theme));
+            recolour
+        });
+        if changed == Some(true) {
+            self.request_redraw();
         }
     }
 
@@ -1701,6 +1790,8 @@ fn write_dump(st: &mut State, window: Window) {
         cell_height: m.cell_height,
         font_size: st.font_size,
         scale: st.scale,
+        foreground: format!("#{:06x}", crate::config::rgb_of(st.theme.foreground)),
+        background: format!("#{:06x}", crate::config::rgb_of(st.theme.background)),
         phys_footprint: control::phys_footprint(),
     };
     let line = serde_json::to_string(&dump).expect("dump serialises");

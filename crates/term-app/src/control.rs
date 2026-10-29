@@ -175,6 +175,9 @@ pub struct Dump {
     pub cell_height: u32,
     pub font_size: f64,
     pub scale: f64,
+    /// The theme's foreground and background in effect, as `#rrggbb`.
+    pub foreground: String,
+    pub background: String,
     /// `phys_footprint` from `task_info`, bytes.
     pub phys_footprint: u64,
 }

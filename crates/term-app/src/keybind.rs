@@ -24,7 +24,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::CStr;
 use std::fmt;
 
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::keys::{KeyEventType, KeyInput, flags};
 
@@ -74,10 +74,12 @@ pub enum MenuAction {
     EqualizePanes,
     /// The focused pane fills the window, or no longer does.
     TogglePaneZoom,
+    /// Terminal Decline > Settings…: the preferences in a tab.
+    Settings,
 }
 
 impl MenuAction {
-    pub const ALL: [MenuAction; 30] = [
+    pub const ALL: [MenuAction; 31] = [
         MenuAction::NewWindow,
         MenuAction::NewTab,
         MenuAction::Close,
@@ -108,6 +110,7 @@ impl MenuAction {
         MenuAction::ResizePaneDown,
         MenuAction::EqualizePanes,
         MenuAction::TogglePaneZoom,
+        MenuAction::Settings,
     ];
 
     /// The name in the config.
@@ -143,6 +146,45 @@ impl MenuAction {
             MenuAction::ResizePaneDown => "resize_pane_down",
             MenuAction::EqualizePanes => "equalize_panes",
             MenuAction::TogglePaneZoom => "toggle_pane_zoom",
+            MenuAction::Settings => "settings",
+        }
+    }
+
+    /// Its menu item, as the menus and the preferences show it. The pane
+    /// actions have no items yet; these are the names they will have.
+    pub fn label(self) -> &'static str {
+        match self {
+            MenuAction::NewWindow => "New Window",
+            MenuAction::NewTab => "New Tab",
+            MenuAction::Close => "Close",
+            MenuAction::Copy => "Copy",
+            MenuAction::Paste => "Paste",
+            MenuAction::SelectAll => "Select All",
+            MenuAction::ClearScrollback => "Clear Scrollback",
+            MenuAction::FontBigger => "Bigger",
+            MenuAction::FontSmaller => "Smaller",
+            MenuAction::FontReset => "Actual Size",
+            MenuAction::ToggleFullScreen => "Enter Full Screen",
+            MenuAction::NextTab => "Show Next Tab",
+            MenuAction::PreviousTab => "Show Previous Tab",
+            MenuAction::Find => "Find…",
+            MenuAction::SplitRight => "Split Right",
+            MenuAction::SplitDown => "Split Down",
+            MenuAction::CloseTab => "Close Tab",
+            MenuAction::CloseWindow => "Close Window",
+            MenuAction::FocusPaneLeft => "Select Pane Left",
+            MenuAction::FocusPaneRight => "Select Pane Right",
+            MenuAction::FocusPaneUp => "Select Pane Above",
+            MenuAction::FocusPaneDown => "Select Pane Below",
+            MenuAction::FocusPaneNext => "Select Next Pane",
+            MenuAction::FocusPanePrevious => "Select Previous Pane",
+            MenuAction::ResizePaneLeft => "Move Divider Left",
+            MenuAction::ResizePaneRight => "Move Divider Right",
+            MenuAction::ResizePaneUp => "Move Divider Up",
+            MenuAction::ResizePaneDown => "Move Divider Down",
+            MenuAction::EqualizePanes => "Equalize Panes",
+            MenuAction::TogglePaneZoom => "Zoom Pane",
+            MenuAction::Settings => "Settings…",
         }
     }
 
@@ -181,6 +223,7 @@ impl MenuAction {
             MenuAction::ResizePaneDown => c"resizePaneDown:",
             MenuAction::EqualizePanes => c"equalizePanes:",
             MenuAction::TogglePaneZoom => c"togglePaneZoom:",
+            MenuAction::Settings => c"showSettings:",
         }
     }
 
@@ -191,7 +234,7 @@ impl MenuAction {
 
 /// The menus' shortcuts with no config. The pane ones are iTerm2's and
 /// Ghostty's.
-pub const DEFAULTS: [(&str, MenuAction); 28] = [
+pub const DEFAULTS: [(&str, MenuAction); 29] = [
     ("cmd+n", MenuAction::NewWindow),
     ("cmd+t", MenuAction::NewTab),
     ("cmd+w", MenuAction::Close),
@@ -220,7 +263,21 @@ pub const DEFAULTS: [(&str, MenuAction); 28] = [
     ("ctrl+cmd+down", MenuAction::ResizePaneDown),
     ("ctrl+cmd+=", MenuAction::EqualizePanes),
     ("shift+cmd+enter", MenuAction::TogglePaneZoom),
+    ("cmd+,", MenuAction::Settings),
 ];
+
+/// The menus' shortcuts that `[keybind]` can't move, and their items
+/// (`build_menus`' `fixed` ones). Binding one takes it from its item.
+pub fn fixed_chords(app_name: &str) -> Vec<(String, String)> {
+    let mut out = vec![
+        ("cmd+h".to_string(), format!("Hide {app_name}")),
+        ("alt+cmd+h".to_string(), "Hide Others".to_string()),
+        ("cmd+q".to_string(), format!("Quit {app_name}")),
+        ("cmd+m".to_string(), "Minimize".to_string()),
+    ];
+    out.extend((1..=9).map(|n| (format!("cmd+{n}"), format!("Show Tab {n}"))));
+    out
+}
 
 /// Keys known by name rather than by the character they type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -471,6 +528,31 @@ impl fmt::Display for Chord {
     }
 }
 
+/// The chord a key press records, for the preferences (OSC 7771): the one
+/// `binds` matches if any, so the TUI sees the binding it would change;
+/// else the shifted character for a Shift chord on a symbol (`cmd+}`,
+/// as the menus write it) and the key with its modifiers otherwise
+/// (`shift+cmd+k`). `None` for a key with no character or name.
+pub fn recorded_chord(input: &KeyInput, binds: &Keybinds) -> Option<Chord> {
+    let chords = Chord::of_event(input);
+    if let Some(bound) = chords.iter().find(|c| binds.get(c).is_some()) {
+        return Some(*bound);
+    }
+    let symbol = chords
+        .get(1)
+        .filter(|c| matches!(c.key, ChordKey::Char(ch) if !ch.is_alphabetic() && !ch.is_whitespace()));
+    symbol.or(chords.first()).copied()
+}
+
+/// The reply to the preferences' `OSC 7771 ; record-chord`, sent as PTY
+/// input: the chord recorded, or `None` when cancelled.
+pub fn chord_reply(chord: Option<&Chord>) -> String {
+    match chord {
+        Some(c) => format!("\x1b]7771;chord;{c}\x1b\\"),
+        None => "\x1b]7771;cancelled\x1b\\".into(),
+    }
+}
+
 /// What a chord is set to in the config.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
@@ -508,6 +590,27 @@ impl<'de> Deserialize<'de> for Action {
             }),
             Raw::Text(t) => Ok(Action::Text(t.text)),
         }
+    }
+}
+
+impl Serialize for Action {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        match self {
+            Action::Menu(a) => s.serialize_str(a.name()),
+            Action::Unbind => s.serialize_str("none"),
+            Action::Text(t) => {
+                let mut m = s.serialize_map(Some(1))?;
+                m.serialize_entry("text", t)?;
+                m.end()
+            }
+        }
+    }
+}
+
+impl Serialize for KeybindConfig {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_map(self.0.iter().map(|(c, a)| (c.to_string(), a)))
     }
 }
 
@@ -811,6 +914,72 @@ mod tests {
         assert!(b.keeps_fixed("cmd+h"));
         assert!(b.keeps_fixed("alt+cmd+h"));
         assert!(Keybinds::default().keeps_fixed("cmd+q"));
+    }
+
+    #[test]
+    fn recorded_chords_and_their_replies() {
+        let binds = Keybinds::default();
+        let reply = |input: KeyInput| chord_reply(recorded_chord(&input, &binds).as_ref());
+        let russian_k = KeyInput {
+            ascii: Some('k'),
+            ascii_shifted: Some('K'),
+            ..key("л", COMMAND)
+        };
+        let rows: &[(&str, KeyInput, &str)] = &[
+            ("cmd+t", key("t", COMMAND), "\x1b]7771;chord;cmd+t\x1b\\"),
+            ("cmd+, (Settings)", key(",", COMMAND), "\x1b]7771;chord;cmd+,\x1b\\"),
+            (
+                "ctrl+alt+shift+cmd+k",
+                key("K", CONTROL | OPTION | SHIFT | COMMAND),
+                "\x1b]7771;chord;ctrl+alt+shift+cmd+k\x1b\\",
+            ),
+            (
+                "a letter with shift keeps shift",
+                key("K", SHIFT | COMMAND),
+                "\x1b]7771;chord;shift+cmd+k\x1b\\",
+            ),
+            (
+                "a symbol with shift is the character typed",
+                KeyInput {
+                    chars_unshifted: "]".into(),
+                    ..key("}", COMMAND | SHIFT)
+                },
+                "\x1b]7771;chord;cmd+}\x1b\\",
+            ),
+            ("a russian layout records the latin key", russian_k, "\x1b]7771;chord;cmd+k\x1b\\"),
+            (
+                "named keys",
+                KeyInput {
+                    keycode: 0x24,
+                    flags: SHIFT | COMMAND,
+                    ..KeyInput::default()
+                },
+                "\x1b]7771;chord;shift+cmd+enter\x1b\\",
+            ),
+            (
+                "f-keys",
+                KeyInput {
+                    keycode: 0x60,
+                    ..KeyInput::default()
+                },
+                "\x1b]7771;chord;f5\x1b\\",
+            ),
+            ("space", key(" ", CONTROL), "\x1b]7771;chord;ctrl+space\x1b\\"),
+        ];
+        for (what, input, want) in rows {
+            assert_eq!(reply(input.clone()), *want, "{what}");
+            // What it records is what the menus and `resolve` would match.
+            let c = recorded_chord(input, &binds).unwrap();
+            assert_eq!(Chord::parse(&c.to_string()), Ok(c), "{what}");
+        }
+        // A binding the config made is the one recorded.
+        let mine = Keybinds::new(&config("[keybind]\n\"shift+cmd+]\" = \"new_tab\"\n"));
+        let typed = KeyInput {
+            chars_unshifted: "]".into(),
+            ..key("}", COMMAND | SHIFT)
+        };
+        assert_eq!(recorded_chord(&typed, &mine).unwrap().to_string(), "shift+cmd+]");
+        assert_eq!(chord_reply(None), "\x1b]7771;cancelled\x1b\\");
     }
 
     #[test]

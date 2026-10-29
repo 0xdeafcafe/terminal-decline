@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use term_font::{CellWidth, FontConfig};
 use term_render::Theme;
 
@@ -14,7 +14,7 @@ use crate::theme::{self as themes, Appearance, ThemeChoice};
 /// Which Option key acts as Meta (sends ESC + key). Off by default, like
 /// Terminal.app and Ghostty, so Option still types @ [ ] { } | \\ ~ on
 /// European keyboard layouts.
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum OptionAsMeta {
     Left,
@@ -27,7 +27,7 @@ pub enum OptionAsMeta {
 /// `[colors]`, and a theme file: only what is set. Unset colours (and
 /// palette entries left out or `""`) come from the theme, else the
 /// defaults ([`Palette::DEFAULT`]).
-#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Colors {
     #[serde(deserialize_with = "colour")]
@@ -147,7 +147,9 @@ pub struct Palettes {
     pub dark: Palette,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+/// Serialized (unset values left out, `palettes` skipped) for the
+/// preferences' defaults and for comparing settings by their schema key.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub font_family: String,
@@ -164,7 +166,7 @@ pub struct Config {
     #[serde(deserialize_with = "line_height")]
     pub line_height: f64,
     /// Widens or narrows cells: `"1.5"` points or `"10%"` of the advance.
-    #[serde(deserialize_with = "cell_width")]
+    #[serde(deserialize_with = "cell_width", serialize_with = "cell_width_text")]
     pub cell_width: CellWidth,
     /// Space around the text, in points.
     pub padding: f64,
@@ -258,6 +260,14 @@ fn unit<'de, D: Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
     }
 }
 
+/// `cell_width` as the config spells it: `"1.5"` or `"10%"`.
+fn cell_width_text<S: Serializer>(w: &CellWidth, s: S) -> Result<S::Ok, S::Error> {
+    match w {
+        CellWidth::Points(p) => s.serialize_str(&p.to_string()),
+        CellWidth::Percent(p) => s.serialize_str(&format!("{p}%")),
+    }
+}
+
 /// `cell_width` as a string (`"1.5"`, `"-1"`, `"10%"`) or a plain number
 /// of points.
 fn cell_width<'de, D: Deserializer<'de>>(d: D) -> Result<CellWidth, D::Error> {
@@ -279,8 +289,12 @@ fn cell_width<'de, D: Deserializer<'de>>(d: D) -> Result<CellWidth, D::Error> {
     }
 }
 
-fn read_table(path: &Path) -> Result<toml::Table, String> {
-    match std::fs::read_to_string(path) {
+fn read_table(path: &Path, text: Option<&str>) -> Result<toml::Table, String> {
+    let read = match text {
+        Some(t) => Ok(t.to_string()),
+        None => std::fs::read_to_string(path),
+    };
+    match read {
         Ok(s) => s.parse::<toml::Table>().map_err(|e| format!("{}: {e}", path.display())),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(toml::Table::new()),
         Err(e) => Err(format!("{}: {e}", path.display())),
@@ -305,10 +319,18 @@ fn merge(base: &mut toml::Table, over: toml::Table) {
 /// typo never stops the terminal from opening. Themes are looked for in
 /// `themes_dir`, then among the built-in ones.
 pub fn load(layers: &[&Path], themes_dir: &Path) -> (Config, Vec<String>) {
+    load_replacing(layers, themes_dir, None)
+}
+
+/// [`load`], with layer `i` read from `text` instead of its file when
+/// `replace` is `Some((i, text))`: what the preferences check an edit with
+/// before writing it.
+pub fn load_replacing(layers: &[&Path], themes_dir: &Path, replace: Option<(usize, &str)>) -> (Config, Vec<String>) {
     let mut errors = Vec::new();
     let mut table = toml::Table::new();
-    for &path in layers {
-        match read_table(path) {
+    for (i, &path) in layers.iter().enumerate() {
+        let text = replace.filter(|(r, _)| *r == i).map(|(_, t)| t);
+        match read_table(path, text) {
             Ok(mut t) => {
                 // So a pin's "command+d" replaces the user's "cmd+d".
                 keybind::canonicalize(&mut t);
@@ -392,25 +414,38 @@ impl Source {
 
 /// Settings that a running window can't take on: they apply to windows
 /// opened after a reload. The rest apply to every window at once (see
-/// DESIGN.md, Config).
+/// DESIGN.md, Config). Which ones is the schema's (`term_prefs::schema`):
+/// `blur` is a view set up with the window, term-core can't change a
+/// terminal's `scrollback` limit, and the program, its folder and its
+/// environment are already running.
 pub fn new_windows_only(old: &Config, new: &Config) -> Vec<&'static str> {
-    let mut changed = Vec::new();
-    let mut check = |name, differs: bool| {
-        if differs {
-            changed.push(name);
-        }
-    };
-    check("command", old.command != new.command);
-    check("cwd", old.cwd != new.cwd);
-    check("env", old.env != new.env);
-    check("columns", old.columns != new.columns);
-    check("lines", old.lines != new.lines);
-    // term-core has no way to change a terminal's scrollback limit.
-    check("scrollback", old.scrollback != new.scrollback);
-    // The blur is a view behind the terminal's, set up with the window.
-    check("blur", old.blur != new.blur);
-    check("title", old.title != new.title);
-    changed
+    let (old, new) = (old.as_table(), new.as_table());
+    term_prefs::schema::new_windows_keys()
+        .into_iter()
+        .filter(|key| setting_of(&old, key) != setting_of(&new, key))
+        .collect()
+}
+
+/// The value at a schema key (`columns`, `colors.background`), if set.
+fn setting_of<'a>(table: &'a toml::Table, key: &str) -> Option<&'a toml::Value> {
+    let mut parts = key.split('.');
+    let mut value = table.get(parts.next()?)?;
+    for part in parts {
+        value = value.as_table()?.get(part)?;
+    }
+    Some(value)
+}
+
+impl Config {
+    /// As a TOML table, unset values left out.
+    pub fn as_table(&self) -> toml::Table {
+        toml::Table::try_from(self).unwrap_or_default()
+    }
+
+    /// `Config::default()` as a TOML document: the preferences' defaults.
+    pub fn defaults_toml() -> String {
+        toml::to_string(&Config::default()).unwrap_or_default()
+    }
 }
 
 /// The notice for settings that changed but apply to new windows only.
@@ -937,10 +972,10 @@ mod tests {
         assert!(new_windows_only(&old, &live).is_empty());
         let (later, _) = parse("columns = 80\ncommand = ['htop']\nscrollback = 5\nblur = true");
         let changed = new_windows_only(&old, &later);
-        assert_eq!(changed, ["command", "columns", "scrollback", "blur"]);
+        assert_eq!(changed, ["blur", "columns", "scrollback", "command"]);
         assert_eq!(
             new_windows_notice(&changed).unwrap(),
-            "config: command, columns, scrollback, blur changed: they apply to new windows"
+            "config: blur, columns, scrollback, command changed: they apply to new windows"
         );
         assert_eq!(
             new_windows_notice(&["lines"]).unwrap(),
@@ -992,6 +1027,152 @@ mod tests {
         // A theme can set it.
         let t = crate::theme::parse("background = '#000000'\nsplit_divider = '#ff0000'\n").unwrap();
         assert_eq!(Palette::DEFAULT.with(&t).divider(), 0xff0000);
+    }
+
+    /// The field names serde passes to `deserialize_struct`, which are the
+    /// keys `Config` and `Colors` accept (skipped fields left out).
+    fn serde_fields<'de, T: Deserialize<'de>>() -> Vec<&'static str> {
+        struct Recorder(Vec<&'static str>);
+        #[derive(Debug)]
+        struct Stop;
+        impl std::fmt::Display for Stop {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("stop")
+            }
+        }
+        impl std::error::Error for Stop {}
+        impl serde::de::Error for Stop {
+            fn custom<M: std::fmt::Display>(_: M) -> Stop {
+                Stop
+            }
+        }
+        impl<'de> Deserializer<'de> for &mut Recorder {
+            type Error = Stop;
+            fn deserialize_any<V: serde::de::Visitor<'de>>(self, _: V) -> Result<V::Value, Stop> {
+                Err(Stop)
+            }
+            fn deserialize_struct<V: serde::de::Visitor<'de>>(
+                self,
+                _: &'static str,
+                fields: &'static [&'static str],
+                _: V,
+            ) -> Result<V::Value, Stop> {
+                self.0.extend_from_slice(fields);
+                Err(Stop)
+            }
+            serde::forward_to_deserialize_any! {
+                bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
+                bytes byte_buf option unit unit_struct newtype_struct seq tuple
+                tuple_struct map enum identifier ignored_any
+            }
+        }
+        let mut r = Recorder(Vec::new());
+        let _ = T::deserialize(&mut r);
+        r.0
+    }
+
+    #[test]
+    fn the_schema_has_every_key_of_config() {
+        use term_prefs::schema;
+        let mut config = serde_fields::<Config>();
+        let mut keys = schema::top_level_keys();
+        config.sort_unstable();
+        keys.sort_unstable();
+        assert_eq!(keys, config, "term_prefs::schema::SETTINGS and Config's fields");
+        let mut colors = serde_fields::<Colors>();
+        let mut keys = schema::colors_keys();
+        colors.sort_unstable();
+        keys.sort_unstable();
+        assert_eq!(keys, colors, "the schema's colors.* and Colors' fields");
+    }
+
+    #[test]
+    fn each_default_loads_alone_with_no_errors() {
+        let defaults = Config::defaults_toml();
+        let table: toml::Table = defaults.parse().unwrap();
+        // Everything with a default value is there; unset ones aren't.
+        for key in [
+            "font_family",
+            "font_size",
+            "cell_width",
+            "keybind",
+            "colors",
+            "option_as_meta",
+            "env",
+        ] {
+            assert!(table.contains_key(key), "{key} missing from:\n{defaults}");
+        }
+        for key in ["theme", "cwd", "title", "pin_app", "font_bold"] {
+            assert!(!table.contains_key(key), "{key} has no default:\n{defaults}");
+        }
+        assert_eq!(table["cell_width"].as_str(), Some("0"));
+        let (all, errors) = parse(&defaults);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(all, Config::default());
+        for (key, value) in &table {
+            let one = toml::to_string(&toml::Table::from_iter([(key.clone(), value.clone())])).unwrap();
+            let (c, errors) = parse(&one);
+            assert!(errors.is_empty(), "{one}: {errors:?}");
+            assert_eq!(c, Config::default(), "{one}");
+        }
+        // And the TUI knows each one.
+        for key in table.keys() {
+            assert!(term_prefs::schema::get(key).is_some() || key == "colors", "{key}");
+        }
+    }
+
+    #[test]
+    fn serialized_settings_read_back() {
+        let text = "theme = { light = 'slope-light', dark = 'slope-dark' }\ncell_width = '10%'\n\
+                    [keybind]\n'cmd+d' = 'none'\n'ctrl+t' = { text = 'x' }\n'command+K' = 'new_tab'\n";
+        let (c, errors) = parse(text);
+        assert!(errors.is_empty(), "{errors:?}");
+        let (again, errors) = parse(&toml::to_string(&c).unwrap());
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(
+            again,
+            Config {
+                palettes: c.palettes,
+                ..c.clone()
+            }
+        );
+        let t = c.as_table();
+        assert_eq!(t["keybind"]["cmd+k"].as_str(), Some("new_tab"));
+        assert_eq!(t["cell_width"].as_str(), Some("10%"));
+    }
+
+    #[test]
+    fn each_new_windows_setting_is_noticed() {
+        let old = Config::default();
+        for (key, text) in [
+            ("command", "command = ['htop']"),
+            ("cwd", "cwd = '/tmp'"),
+            ("env", "env = { A = 'b' }"),
+            ("columns", "columns = 80"),
+            ("lines", "lines = 20"),
+            ("scrollback", "scrollback = 5"),
+            ("blur", "blur = true"),
+            ("title", "title = 'x'"),
+        ] {
+            let (new, errors) = parse(text);
+            assert!(errors.is_empty(), "{errors:?}");
+            assert_eq!(new_windows_only(&old, &new), [key], "{text}");
+        }
+        let mut keys = term_prefs::schema::new_windows_keys();
+        keys.sort_unstable();
+        assert_eq!(keys, ["blur", "columns", "command", "cwd", "env", "lines", "scrollback", "title"]);
+    }
+
+    #[test]
+    fn a_layer_can_be_read_from_text() {
+        let dir = TempDir::new("cfg-replace");
+        let user = dir.join("config.toml");
+        std::fs::write(&user, "font_size = 14\n").unwrap();
+        let (c, errors) = load_replacing(&[&user], Path::new("/nonexistent"), Some((0, "font_size = 18\n")));
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(c.font_size, 18.0);
+        let (c, _) = load_replacing(&[&user], Path::new("/nonexistent"), Some((1, "font_size = 18\n")));
+        assert_eq!(c.font_size, 14.0);
     }
 
     #[test]

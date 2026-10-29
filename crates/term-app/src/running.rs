@@ -1,6 +1,8 @@
 //! Whether a window is running a program, for asking before it is closed
 //! (`confirm_close = true`), and what the question says.
 
+use std::os::unix::ffi::OsStrExt;
+
 /// The name of the program in the foreground of `shell`'s terminal, if it
 /// isn't `shell` itself: `vim` while the shell runs vim, `None` at the
 /// prompt. A window started with `-e PROGRAM` runs that program as its
@@ -14,6 +16,26 @@ pub fn foreground_program(shell: libc::pid_t) -> Option<String> {
         return None;
     }
     Some(name_of(group).unwrap_or_else(|| format!("process {group}")))
+}
+
+/// Whether a process is running the executable at `exe` (a pin's, before
+/// removing it). Compared by canonical path.
+pub fn executable_running(exe: &std::path::Path) -> bool {
+    let Ok(exe) = exe.canonicalize() else { return false };
+    let n = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+    if n <= 0 {
+        return false;
+    }
+    // Room for processes started meanwhile.
+    let mut pids = vec![0 as libc::pid_t; n as usize + 64];
+    let size = (pids.len() * std::mem::size_of::<libc::pid_t>()) as libc::c_int;
+    let n = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), size) };
+    pids.truncate(n.max(0) as usize);
+    let mut buf = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    pids.into_iter().filter(|&p| p > 0).any(|pid| {
+        let len = unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr().cast(), buf.len() as u32) };
+        len > 0 && std::path::Path::new(std::ffi::OsStr::from_bytes(&buf[..len as usize])) == exe
+    })
 }
 
 fn bsd_info(pid: libc::pid_t) -> Option<libc::proc_bsdinfo> {

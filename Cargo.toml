@@ -16,6 +16,7 @@ term-core = { path = "crates/term-core" }
 term-pty = { path = "crates/term-pty" }
 term-font = { path = "crates/term-font" }
 term-render = { path = "crates/term-render" }
+term-prefs = { path = "crates/term-prefs" }
 vte = "0.15"
 libc = "0.2"
 unicode-width = "0.2"

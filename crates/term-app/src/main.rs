@@ -19,7 +19,7 @@ fn main() {
             paths.config_dir.display()
         )),
     };
-    if matches!(args.first().map(String::as_str), Some("pin" | "import"))
+    if matches!(args.first().map(String::as_str), Some("pin" | "import" | "prefs"))
         && let Some(m) = &moved
     {
         eprintln!("terminal-decline: {m}");
@@ -32,6 +32,11 @@ fn main() {
                 1
             }
         });
+    }
+
+    // Settings… (Cmd+,), or run by hand: the preferences in this terminal.
+    if args.first().map(String::as_str) == Some("prefs") {
+        std::process::exit(terminal_decline::prefs::run(&args[1..], &paths));
     }
 
     if args.first().map(String::as_str) == Some("import") {

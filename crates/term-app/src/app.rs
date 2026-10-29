@@ -174,6 +174,10 @@ define_class!(
         #[unsafe(method(applicationDidBecomeActive:))]
         fn did_become_active(&self, _n: &NSNotification) {
             secure_input::apply(self.ivars().secure.borrow_mut().set_active(true));
+            let views: Vec<_> = self.ivars().windows.borrow().iter().map(|(_, v)| v.clone()).collect();
+            for v in views {
+                v.refresh_shared_find();
+            }
         }
 
         #[unsafe(method(applicationDidResignActive:))]

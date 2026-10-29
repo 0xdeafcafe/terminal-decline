@@ -53,6 +53,8 @@
 //! - `find TEXT`: put TEXT in the focused pane's find bar (Cmd+F opens
 //!   it, as `menu find` does) and search, as typing it does once the
 //!   field's delay runs out;
+//! - `find-click N`: click the find bar's field in pane N (from 0, in tree
+//!   order), as the mouse does;
 //! - `update-check`: a background update check now, as the daily one is
 //!   (nothing while the updater is off; see [`crate::update`]);
 //! - `quit`: quit the app, without asking.
@@ -224,6 +226,8 @@ pub enum Control {
         index: usize,
         snapshot: bool,
     },
+    /// Click the find bar's field in this pane.
+    FindClick(usize),
     /// Write the windows as a restart saves them.
     Save,
     /// Terminal Decline > Settings….
@@ -305,6 +309,7 @@ impl Control {
             "close-pane" => Control::ClosePane,
             "equalize" => Control::Equalize,
             "zoom" => Control::Zoom,
+            "find-click" => Control::FindClick(words.next()?.parse().ok()?),
             "build-panic" => Control::BuildPanic {
                 index: words.next()?.parse().ok()?,
                 snapshot: match words.next() {
@@ -602,6 +607,8 @@ mod tests {
             ("split", None),
             ("split up", None),
             ("focus 2", Some(Control::Focus(FocusTarget::Index(2)))),
+            ("find-click 1", Some(Control::FindClick(1))),
+            ("find-click", None),
             ("focus next", Some(Control::Focus(FocusTarget::Next))),
             ("focus previous", Some(Control::Focus(FocusTarget::Previous))),
             ("focus left", Some(Control::Focus(FocusTarget::Towards(Direction::Left)))),

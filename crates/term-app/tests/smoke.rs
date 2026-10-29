@@ -2206,3 +2206,72 @@ fn smoke_find_bar_searches_history() {
     assert!(d[6]["find"].is_null(), "{}", d[6]);
     assert_eq!(offset(&d[6]), offset(&d[5]), "{}", d[6]);
 }
+
+/// The find bar keeps searching across a switch to the alternate screen
+/// and back (vim or less opening and closing): the hits are the screen
+/// being shown's, found again at each switch, and the current one is
+/// highlighted.
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_find_bar_restarts_on_the_alternate_screen() {
+    if !have_metal() {
+        return;
+    }
+    let dir = TempDir::new("find-alt");
+    let wait = "i=0; while [ \"$(stty size)\" != '20 80' ] && [ $i -lt 100 ]; do sleep 0.05; i=$((i+1)); done; ";
+    // Two hits on the main screen, three on the alternate one.
+    let main = "echo 'one needle'; echo 'two needle'; ";
+    let enter = "printf '\\033[?1049h\\033[Hneedle needle\\r\\nneedle'; ";
+    let leave = "printf '\\033[?1049l'; ";
+    let script = format!(
+        "{resize}{wait}{main}{find}{dump}{enter}sleep 1; {dump}{leave}sleep 1; {dump}{quit}sleep 20",
+        resize = osc("resize 80 20"),
+        find = [osc("menu find"), osc("find needle")].concat(),
+        dump = dump_and_wait(&dir),
+        quit = osc("quit"),
+    );
+    let (status, _) = decline(&dir, &script, true);
+    assert!(status.success(), "{status}");
+    let d = dumps(&dir);
+    assert_eq!(d.len(), 3, "{d:?}");
+    let hits = |i: usize| d[i]["find"]["hits"].clone();
+    assert_eq!(hits(0), 2, "{}", d[0]);
+    assert_eq!(hits(1), 3, "{}", d[1]);
+    assert!(d[1]["find"]["current"].is_u64(), "{}", d[1]);
+    assert_eq!(d[1]["find"]["highlights"], 3, "{}", d[1]);
+    assert_eq!(hits(2), 2, "{}", d[2]);
+    assert!(d[2]["find"]["current"].is_u64(), "{}", d[2]);
+    assert_eq!(d[2]["find"]["highlights"], 2, "{}", d[2]);
+}
+
+/// Clicking in the find bar of a pane that isn't focused focuses that
+/// pane, and the keys stay in the bar's field.
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_click_in_a_find_bar_focuses_its_pane() {
+    if !have_metal() {
+        return;
+    }
+    let dir = TempDir::new("find-click");
+    let script = format!(
+        "sleep 1; {split}sleep 1; {first}{find}{second}sleep 1; {dump}{click}sleep 1; {dump}{quit}sleep 20",
+        split = osc("split right"),
+        first = osc("focus 0"),
+        find = osc("menu find"),
+        second = osc("focus 1"),
+        click = osc("find-click 0"),
+        dump = dump_and_wait(&dir),
+        quit = osc("quit"),
+    );
+    let (status, _) = decline(&dir, &script, true);
+    assert!(status.success(), "{status}");
+    let d = dumps(&dir);
+    assert_eq!(d.len(), 2, "{d:?}");
+    let focused = |d: &Value| d["panes"].as_array().unwrap().iter().position(|p| p["focused"] == true);
+    // The other pane has the keys; its bar isn't the focused pane's.
+    assert_eq!(focused(&d[0]), Some(1), "{}", d[0]);
+    assert!(d[0]["find"].is_null(), "{}", d[0]);
+    // The click gave the bar's pane the focus, and the field the keys.
+    assert_eq!(focused(&d[1]), Some(0), "{}", d[1]);
+    assert_eq!(d[1]["find"]["focused"], true, "{}", d[1]);
+}

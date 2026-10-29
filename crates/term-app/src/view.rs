@@ -951,14 +951,34 @@ impl WindowView {
     /// A batch of history hits from the search worker for `pane`'s
     /// search: added under the lock, and drawn (with the bar's count).
     pub(crate) fn search_batch(&self, pane: PaneId, batch: term_core::HitBatch) {
-        let added = self.with_pane(pane, |_, p| {
-            p.find.is_some() && {
-                p.session.lock_term().state.add_search_hits(batch);
-                true
+        let titlebar = self.titlebar_height();
+        let added = self.with_pane(pane, |win, p| {
+            if p.find.is_none() {
+                return false;
             }
+            let covered = rows_under_find_bar(win, p, titlebar);
+            let mut t = p.session.lock_term();
+            let before = t.state.current_hit();
+            t.state.add_search_hits(batch);
+            // A step that waited for this batch jumped to its hit.
+            if let Some(h) = t.state.current_hit().filter(|h| before != Some(*h)) {
+                crate::search::keep_clear(&mut t.state, h.start(), covered);
+            }
+            true
         });
         if added == Some(true) {
             self.request_redraw(pane);
+        }
+    }
+
+    /// The app became active: the panes with a find bar open read the
+    /// shared find text again.
+    pub(crate) fn refresh_shared_find(&self) {
+        let views: Vec<_> = self
+            .with_state(|st| st.panes.values().filter(|p| p.find.is_some()).map(|p| p.view.clone()).collect())
+            .unwrap_or_default();
+        for v in views {
+            v.read_shared_find();
         }
     }
 
@@ -1175,9 +1195,17 @@ impl WindowView {
                 focused,
                 preedit: Some(p.marked.as_str()),
             };
-            // The find bar's search keeps up with output, and its hits in
-            // view go into the snapshot.
+            // The find bar's search keeps up with output.
+            let covered = rows_under_find_bar(win, p, titlebar);
             if let Some(f) = &mut p.find {
+                // A new terminal (after a caught panic) or a switch to or
+                // from the alternate screen leaves the hits meaning
+                // something else: search again.
+                let now = (t.state.terminal_id(), t.state.alt_screen_active());
+                if f.seen.is_some_and(|seen| seen != now) {
+                    f.search.start(&mut t.state, &p.find_query, covered);
+                    f.seen = Some(now);
+                }
                 let polled = f.search.poll(&mut t.state);
                 let status = f.search.status(&t.state);
                 if polled.changed || status != f.shown {
@@ -1187,8 +1215,6 @@ impl WindowView {
                 if let Some(after) = polled.again {
                     find_again.push((id, after));
                 }
-                f.marks.clear();
-                f.search.view_highlights(&t.state, &mut f.marks);
             }
             p.builds += 1;
             // A panic taking the snapshot stays in this pane. The
@@ -1208,7 +1234,6 @@ impl WindowView {
             }
             if let Some(f) = &mut p.find {
                 let snap = p.render.frame.snapshot_mut();
-                crate::search::add_highlights(snap, &f.marks);
                 f.drawn = snap
                     .highlights
                     .iter()
@@ -2354,6 +2379,15 @@ pub(crate) fn padding_for(config: &Config, titlebar: f64, scale: f64) -> Padding
 
 /// The padding inside a pane at `rect`: the title bar's inset on top of it
 /// only when it touches the window's top.
+/// How many of `p`'s grid rows its find bar is over.
+pub(crate) fn rows_under_find_bar(win: &Win, p: &Pane, titlebar: f64) -> usize {
+    let top = p.rect.y == 0;
+    let bottom = (if top { titlebar } else { 0.0 } + crate::find_bar::HEIGHT) * win.scale;
+    let grid_top = pane_padding(&win.config, titlebar, win.scale, p.rect).top as f64;
+    let cell = win.renderer.metrics().cell_height.max(1) as f64;
+    ((bottom - grid_top) / cell).ceil().max(0.0) as usize
+}
+
 pub(crate) fn pane_padding(config: &Config, titlebar: f64, scale: f64, rect: PxRect) -> Padding {
     padding_for(config, if rect.y == 0 { titlebar } else { 0.0 }, scale)
 }
@@ -2719,6 +2753,15 @@ impl WindowView {
                     if let Some(pane) = pane {
                         self.with_pane(pane, |_, p| p.panic_next = Some(snapshot));
                         self.request_redraw(pane);
+                    }
+                }
+                Some(Control::FindClick(index)) => {
+                    let view = self
+                        .with_state(|st| st.tree.ids().get(index).and_then(|id| st.panes.get(id)).map(|p| p.view.clone()))
+                        .flatten();
+                    match view {
+                        Some(view) => view.click_find_bar(),
+                        None => NSBeep(),
                     }
                 }
                 Some(Control::Save) => {

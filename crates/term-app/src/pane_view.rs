@@ -881,8 +881,11 @@ impl PaneView {
         let mtm = MainThreadMarker::from(self);
         let Some((bar, query, opened)) = self.with(|_, p| {
             let opened = p.find.is_none();
-            if opened && p.find_query.text.is_empty() {
-                p.find_query.text = crate::find_bar::shared_text().unwrap_or_default();
+            if opened
+                && p.find_query.text.is_empty()
+                && let Some(shared) = crate::find_bar::shared_query()
+            {
+                p.find_query = shared;
             }
             (p.find.as_ref().map(|f| f.bar.clone()), p.find_query.clone(), opened)
         }) else {
@@ -933,14 +936,7 @@ impl PaneView {
     /// How many of the grid's top rows the find bar is over.
     fn rows_under_find_bar(&self) -> usize {
         let titlebar = self.window_view().map_or(0.0, |w| w.titlebar_height());
-        self.with(|win, p| {
-            let top = p.rect.y == 0;
-            let bottom = (if top { titlebar } else { 0.0 } + crate::find_bar::HEIGHT) * win.scale;
-            let grid_top = pane_padding(&win.config, titlebar, win.scale, p.rect).top as f64;
-            let cell = win.renderer.metrics().cell_height.max(1) as f64;
-            ((bottom - grid_top) / cell).ceil().max(0.0) as usize
-        })
-        .unwrap_or(0)
+        self.with(|win, p| crate::view::rows_under_find_bar(win, p, titlebar)).unwrap_or(0)
     }
 
     /// Hide the find bar and drop its hits; the keys go back to the pane.
@@ -963,6 +959,22 @@ impl PaneView {
         self.request_redraw();
     }
 
+    /// A click landed in the find bar: this pane is the focused one, the
+    /// keys staying in the bar's field.
+    pub(crate) fn bar_clicked(&self) {
+        if let Some(w) = self.window_view() {
+            w.pane_focused(self.pane(), false);
+        }
+    }
+
+    /// The test control's `find-click`: click the find bar's field.
+    pub(crate) fn click_find_bar(&self) {
+        match self.with(|_, p| p.find.as_ref().map(|f| f.bar.clone())).flatten() {
+            Some(bar) => bar.post_click(),
+            None => NSBeep(),
+        }
+    }
+
     /// Whether `q` isn't what was last searched for.
     pub(crate) fn find_query_differs(&self, q: &Query) -> bool {
         self.with(|_, p| p.find_query != *q).unwrap_or(false)
@@ -976,13 +988,14 @@ impl PaneView {
             let f = p.find.as_mut()?;
             let mut t = p.session.lock_term();
             f.search.start(&mut t.state, &q, covered);
+            f.seen = Some((t.state.terminal_id(), t.state.alt_screen_active()));
             p.find_query = q.clone();
             Some((f.bar.clone(), f.search.status(&t.state)))
         }) else {
             return;
         };
         if !q.text.is_empty() {
-            crate::find_bar::share_text(&q.text);
+            crate::find_bar::share_query(&q);
         }
         bar.show_status(status);
         self.request_redraw();
@@ -1028,6 +1041,23 @@ impl PaneView {
         self.find_query_changed(q);
     }
 
+    /// The app became active: if another app changed the shared find text
+    /// or options since, an open bar takes them and searches again.
+    pub(crate) fn read_shared_find(&self) {
+        let Some(shared) = crate::find_bar::shared_query().filter(|q| !q.text.is_empty()) else {
+            return;
+        };
+        let bar = self.with(|_, p| {
+            let f = p.find.as_ref()?;
+            // Not while there is typing the search hasn't caught up with.
+            (p.find_query != shared && f.bar.query() == p.find_query).then(|| f.bar.clone())
+        });
+        if let Some(Some(bar)) = bar {
+            bar.set_query(&shared);
+            self.find_query_changed(shared);
+        }
+    }
+
     /// Use Selection for Find: the selected text becomes the query.
     fn use_selection(&self) {
         let Some(Some(text)) = self.with(|_, p| p.session.lock_term().state.selection_text()) else {
@@ -1040,7 +1070,7 @@ impl PaneView {
                 ..p.find_query.clone()
             })
             .unwrap_or_default();
-        crate::find_bar::share_text(&text);
+        crate::find_bar::share_query(&q);
         let open = self.with(|_, p| p.find.as_ref().map(|f| f.bar.clone())).flatten();
         match open {
             Some(bar) => bar.set_query(&q),

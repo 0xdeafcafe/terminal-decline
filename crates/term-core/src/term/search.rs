@@ -6,7 +6,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::{Point, Selection, Terminal, ViewTop};
+use super::{Point, Selection, Terminal};
 use crate::cell::Row;
 use crate::search::{Cells, HIT_CAP, Hit, HitBatch, Mapper, Matcher, Query, SearchJob, Seg, WordMatch, char_at, scan_seg};
 
@@ -339,14 +339,19 @@ impl Terminal {
         if self.view_position(p).is_some() {
             return;
         }
-        let want = p.line.saturating_sub(self.lines as u64 / 2);
-        if want >= self.top_line {
+        // Rows, not lines: history may be laid out at another width, so
+        // its row goes to the top and the view moves back half a view
+        // from there, as far as history goes.
+        let half = self.lines / 2;
+        let back = if p.line >= self.top_line {
             self.scroll_view_to_bottom();
+            half.saturating_sub((p.line - self.top_line) as usize)
         } else {
-            self.set_view_top(ViewTop::At {
-                point: Point { line: want, col: 0 },
-                offset: 0,
-            });
+            self.set_view_point(Some(p));
+            half
+        };
+        if back > 0 {
+            self.scroll_view(back as isize);
         }
     }
 

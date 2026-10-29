@@ -128,6 +128,21 @@ fn head(meta: &[u8]) -> (u8, Option<usize>, usize) {
     (flags, tlen, pos)
 }
 
+/// A stored line, as counting its rows at another width needs it (§12.3),
+/// read from its flags, style runs and text without decoding its cells.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Shape {
+    /// It soft-wraps onto the next stored line.
+    pub(crate) wrapped: bool,
+    /// The cells it decodes to, when every one is narrow and nothing but
+    /// its blank tail is trimmed (ASCII text, and no clusters, width
+    /// exceptions, edge spacer, marks or `FILL`).
+    pub(crate) cells: Option<usize>,
+    /// How many cells at its end are blank in the default style, the
+    /// ones trimming a logical line's tail drops, if that is known.
+    pub(crate) blank_tail: Option<usize>,
+}
+
 /// What a sealed block holds. It never changes, and is shared as
 /// `Arc<BlockData>`: a search or a decode cache can hold one without the
 /// lock, and a block freed from history lives until they let it go.
@@ -1072,6 +1087,44 @@ fn read_marks(meta: &[u8], mut pos: usize, mut f: impl FnMut(Mark)) {
 }
 
 impl<'a> View<'a> {
+    /// Line `n`'s [`Shape`], its text starting at `at`, and where the
+    /// next line's text starts.
+    fn shape(&self, n: usize, at: usize) -> (Shape, usize) {
+        let meta = self.meta_of(n);
+        let (flags, _, mut pos) = head(meta);
+        let stored = self.stored_len(n, at);
+        let wrapped = flags & flag::WRAPPED != 0;
+        let tlen = stored - !wrapped as usize;
+        let text = &self.text[at..at + tlen];
+        let extra_ok = flags & flag::EXTRA == 0 || meta[1] & !extra::TLEN == 0;
+        let narrow = flags & (flag::CLUSTERS | flag::WIDTHS | flag::EDGE | flag::FILL | flag::MARKS) == 0 && extra_ok && text.is_ascii();
+        let mut shape = Shape {
+            wrapped,
+            cells: None,
+            blank_tail: None,
+        };
+        if narrow {
+            // Columns the style runs cover: past the text, they are blank
+            // cells in their style.
+            let mut runs = 0;
+            if flags & flag::STYLED != 0 {
+                for _ in 0..get_varint(meta, &mut pos) {
+                    let v = get_varint(meta, &mut pos);
+                    runs += (v >> 3) as usize;
+                    if v & 7 == 7 {
+                        get_varint(meta, &mut pos);
+                    }
+                }
+            }
+            shape.cells = Some(tlen.max(runs));
+            // Spaces past the runs are blank cells in the default style;
+            // a styled tail may or may not show.
+            let spaces = text.iter().rev().take_while(|&&b| b == b' ').count();
+            shape.blank_tail = (runs <= tlen - spaces).then_some(spaces);
+        }
+        (shape, at + stored)
+    }
+
     /// Line `n`'s marks.
     fn marks(&self, n: usize, f: impl FnMut(Mark)) {
         let meta = self.meta_of(n);
@@ -2367,6 +2420,43 @@ impl Scrollback {
             let to = ((end - self.start) as usize).min(hi);
             if !f(i, to, width) {
                 return;
+            }
+            i = to;
+        }
+    }
+
+    /// The block holding line number `line` (stored, not hidden): its
+    /// first line (which may be hidden), one past its last, whether it is
+    /// the open block, and the width its lines were written at (0 if
+    /// mixed).
+    pub(crate) fn block_lines(&self, line: u64) -> (u64, u64, bool, u16) {
+        if line >= self.open.first {
+            let w = if self.open.width == u16::MAX { 0 } else { self.open.width };
+            return (self.open.first, self.end, true, w);
+        }
+        let b = &self.blocks[self.blocks.partition_point(|b| b.data.first <= line) - 1];
+        (b.data.first, b.data.first + b.len as u64, false, b.data.width)
+    }
+
+    /// The shapes of history lines `lo..hi` (0 = oldest visible), in
+    /// order, read one after another without decoding: each one's index,
+    /// the width its block was written at (0 if mixed) and its
+    /// [`Shape`]. Stops when `f` returns false.
+    pub(crate) fn shapes(&self, lo: usize, hi: usize, mut f: impl FnMut(usize, u16, Shape) -> bool) {
+        let hi = hi.min(self.len());
+        let mut i = lo;
+        while i < hi {
+            let Some((view, n0)) = self.locate(i) else { return };
+            let line = self.start + i as u64;
+            let (_, end, _, width) = self.block_lines(line);
+            let to = ((end - self.start) as usize).min(hi);
+            let mut at = view.text_span(n0).0;
+            for (k, n) in (n0..n0 + (to - i)).enumerate() {
+                let (shape, next) = view.shape(n, at);
+                at = next;
+                if !f(i + k, width, shape) {
+                    return;
+                }
             }
             i = to;
         }

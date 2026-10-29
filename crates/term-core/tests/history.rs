@@ -276,3 +276,51 @@ proptest! {
         }
     }
 }
+
+/// Row counts across many blocks at other widths (the per-block counts
+/// and the count from a line's text, §12.3) agree with the rows read
+/// through the view: styled lines, styled and plain blank tails, empty
+/// lines, long wrapped lines and wide characters, with the oldest lines
+/// hidden by the limit partway through a block.
+#[test]
+fn row_counts_agree_across_blocks() {
+    let mut t = Term::new(20, 3, 12_000);
+    let mut out = String::new();
+    for i in 0..10_000 {
+        match i % 7 {
+            0 => out.push_str(&format!("line {i}")),
+            1 => out.push_str(&format!("\x1b[1;31mred {i}\x1b[m and plain")),
+            2 => out.push_str(&format!("{i} \x1b[44m        \x1b[m")),
+            3 => {}
+            4 => out.push_str(&format!("{i} {}", "word ".repeat(i % 23))),
+            5 => out.push_str(&format!("{i} wide 中文字 and é")),
+            _ => out.push_str(&format!("{i} \x1b[42mtail\x1b[K\x1b[m")),
+        }
+        out.push_str("\r\n");
+    }
+    t.advance(out.as_bytes());
+    assert_eq!(t.state.scrollback_len(), 12_000);
+    for w in [20, 7, 33, 20, 9] {
+        t.state.resize(w, 3);
+        t.state.scroll_view(isize::MAX / 2);
+        let total = t.state.display_offset();
+        // A row at a time to the bottom, checking the count now and then.
+        let mut seen = 0;
+        while t.state.view_top() != ViewTop::Bottom {
+            if seen % 101 == 0 {
+                assert_eq!(t.state.display_offset(), total - seen, "at {w} columns, {seen} rows down");
+            }
+            t.state.scroll_view(-1);
+            seen += 1;
+        }
+        assert_eq!(seen, total, "at {w} columns");
+        // Far back and forward in one step land where steps do.
+        t.state.scroll_view(isize::MAX / 2);
+        let top = t.state.view_top();
+        t.state.scroll_view(-((total * 2 / 3) as isize));
+        assert_eq!(t.state.display_offset(), total - total * 2 / 3, "at {w} columns");
+        t.state.scroll_view((total * 2 / 3) as isize);
+        assert_eq!(t.state.view_top(), top, "at {w} columns");
+        t.state.scroll_view_to_bottom();
+    }
+}

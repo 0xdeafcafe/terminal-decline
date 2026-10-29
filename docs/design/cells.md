@@ -2648,10 +2648,28 @@ differs from the above:
 - **Counting rows.** A unit whose blocks were all written at the current
   width takes a row per stored line, with no decoding. Any other is
   decoded and split again with the screen reflow's own helpers, so wide
-  characters, clusters, marks and `FILL` tails behave as in §12.2. Not
-  built yet: the ASCII count from the text length, and the per-block
-  `rows_at` cache. Laid-out units (up to 512) and the view's rows are kept
-  between reads until the width, history's ends or its epoch change.
+  characters, clusters, marks and `FILL` tails behave as in §12.2. Laid-out
+  units (up to 512) and the view's rows are kept between reads until the
+  width, history's ends or its epoch change.
+- **Row counts** (landed after PR 12). Counting a unit's rows doesn't lay
+  it out when it can be avoided: a unit written at the current width takes
+  a row per stored line; one whose lines are all narrow ASCII (no
+  clusters, width exceptions, edge spacer, marks or `FILL`; styled runs
+  allowed) takes `max(1, ⌈n / cols⌉)` rows, `n` from the text lengths and
+  style runs with the blank tail trimmed; only the others are laid out
+  (non-ASCII text without width exceptions could be counted from its
+  scalars too, and isn't yet). Each sealed block's count, the rows of the
+  units starting in it, is kept per width (`rows_at`), except for the
+  first block (hidden lines can move where its first unit starts) and the
+  open one; output arriving keeps them, and a width change, lines popped
+  by a reflow or a new epoch drop them. `display_offset()` adds up the
+  block counts, and scrolling more than 256 rows skips whole blocks. With
+  100k stored lines (`history_at_width` in the resize bench),
+  `display_offset()` went from 6.7 ms to 12 µs at the written width and
+  from 115 ms to 25 µs at another (counts kept; the first count after a
+  width change works out every block once). A page scroll is unchanged
+  (45 µs at the written width, 124 µs at another): it lays out what it
+  shows.
 - **The view** is the Point of its first cell (`view: Option<Point>`),
   replacing `display_offset`. Output arriving underneath changes nothing;
   a width change rounds it down to the start of its row at the new width.
@@ -2667,10 +2685,13 @@ differs from the above:
   `RowKey::History { line, col }`, the stored line and column it starts
   at. A row whose line goes on in a stored line not yet written is always
   copied, since it can still grow.
-- **Not changed:** term-app still does line arithmetic with
-  `display_offset()` in `prompts.rs` (prompt jumps) and `search.rs`
-  (`scroll_to`, `each_logical_line`), which is right only while history is
-  at the current width.
+- **term-app** (after PR 12) goes through the view rather than line
+  arithmetic with `display_offset()`: prompt jumps set
+  `ViewTop::At { point: prompt }` and compare view positions; the find
+  bar's `scroll_to` (the fallback search and term-core's) puts the hit's
+  row at the top and scrolls back half a view in rows; the fallback
+  search reads history a page of the view at a time, taking each cell's
+  Point from the view.
 - **Tests:** `tests/history.rs` (a line at half the width, Points and
   selection, the view across width changes, output underneath, `FILL`,
   wide characters, links, snapshot keys and highlights) and a property

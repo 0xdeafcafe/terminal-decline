@@ -16,6 +16,14 @@ fn profile_dir() -> PathBuf {
     std::env::current_exe().unwrap().parent().unwrap().parent().unwrap().to_path_buf()
 }
 
+/// The target dir the parts are built in: `target/bundle-test`, apart
+/// from the one the tests run from. A build there, with its own set of
+/// packages and features, would rebuild binaries other tests (the smoke
+/// tests) are running at the same time. CI keeps it in its cache too.
+pub fn bundle_target_dir() -> PathBuf {
+    profile_dir().parent().unwrap().join("bundle-test")
+}
+
 /// The three parts, built (once per test process) in this test's profile:
 /// cargo doesn't build other packages' cdylibs and binaries for a test.
 pub struct Parts {
@@ -27,13 +35,16 @@ pub struct Parts {
 pub fn parts() -> &'static Parts {
     static PARTS: std::sync::OnceLock<Parts> = std::sync::OnceLock::new();
     PARTS.get_or_init(|| {
-        let dir = profile_dir();
+        let profile = profile_dir();
+        let release = profile.file_name().is_some_and(|n| n == "release");
+        let target = bundle_target_dir();
+        let dir = target.join(if release { "release" } else { "debug" });
         let mut cmd = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
         cmd.args(["build", "-p", "term-dylib", "-p", "term-pin", "--lib", "--bins"]);
-        if dir.file_name().is_some_and(|n| n == "release") {
+        if release {
             cmd.arg("--release");
         }
-        let status = cmd.current_dir(repo()).status().unwrap();
+        let status = cmd.env("CARGO_TARGET_DIR", &target).current_dir(repo()).status().unwrap();
         assert!(status.success(), "building the library, launcher and stub");
         let parts = Parts {
             lib: dir.join("libterminal_decline.dylib"),

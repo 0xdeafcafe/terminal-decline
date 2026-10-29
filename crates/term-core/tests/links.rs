@@ -154,6 +154,45 @@ fn hovered_link_is_highlighted_in_every_piece() {
 }
 
 #[test]
+fn plain_urls_are_found_across_wraps_and_hovered_like_links() {
+    let mut t = Term::new(12, 4, 10);
+    // Soft-wrapped onto a second row, then a full stop that isn't part of it.
+    t.advance(b"go https://example.com/x. ok");
+    let url = |t: &Term, line, col| t.state.url_at(t.state.point_at(line, col));
+    let (a, b, u) = url(&t, 1, 3).unwrap();
+    assert_eq!(u, "https://example.com/x");
+    assert_eq!((a, b), (t.state.point_at(0, 3), t.state.point_at(1, 11)));
+    assert_eq!(url(&t, 0, 4).map(|x| x.2), Some(u.clone()), "from either row");
+    assert_eq!(url(&t, 0, 1), None, "not on the URL");
+    assert_eq!(url(&t, 2, 0), None);
+
+    let mut snap = Snapshot::default();
+    t.state.set_hover(Some(t.state.point_at(1, 0)));
+    t.state.snapshot(&mut snap, |_| true);
+    let rows: Vec<Vec<(std::ops::Range<u16>, HighlightKind)>> = snap
+        .rows
+        .iter()
+        .map(|r| snap.row_highlights(r).iter().map(|h| (h.cols.clone(), h.kind)).collect())
+        .collect();
+    use HighlightKind::HoveredLink;
+    assert_eq!(rows, vec![vec![(3..12, HoveredLink)], vec![(0..12, HoveredLink)], vec![], vec![]]);
+
+    // An OSC 8 link wins over the URL text it shows.
+    let mut t = Term::new(40, 2, 0);
+    t.advance(b"\x1b]8;;https://real\x1b\\https://shown\x1b]8;;\x1b\\");
+    t.state.set_hover(Some(t.state.point_at(0, 2)));
+    t.state.snapshot(&mut snap, |_| true);
+    assert_eq!(snap.row_highlights(&snap.rows[0]).len(), 1);
+    assert_eq!(snap.row_highlights(&snap.rows[0])[0].cols, 0..13);
+
+    // History rows are text too.
+    let mut t = Term::new(20, 2, 10);
+    t.advance(b"see http://old.ex\r\n\r\nnew");
+    t.state.scroll_view(1);
+    assert_eq!(url(&t, 0, 6).map(|x| x.2).as_deref(), Some("http://old.ex"));
+}
+
+#[test]
 fn a_saved_cursor_holds_its_link_by_value() {
     let mut t = Term::new(20, 3, 0);
     t.advance(b"\x1b]8;;https://saved\x1b\\\x1b7\x1b]8;;\x1b\\a\x1b8b");

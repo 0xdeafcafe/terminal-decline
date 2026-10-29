@@ -931,9 +931,30 @@ impl Terminal {
     /// The first and last cell of the word at `p` on its logical line, or
     /// `(p, p)` when `p` isn't on a word.
     fn word_span(&self, p: Point) -> (Point, Point) {
+        let (text, cells, at) = self.logical_text(p);
+        match at.and_then(|i| crate::word::word_at(&text, i)) {
+            Some((a, b)) => (cells[a].0, cells[b].1),
+            None => (p, p),
+        }
+    }
+
+    /// The plain URL at `p` (one written without OSC 8, starting
+    /// `https://`, `http://`, `file://` or `mailto:`; see
+    /// [`crate::word::url_at`]), on its logical line, so a URL that a soft
+    /// wrap splits across rows is found whole: its first and last cell,
+    /// and its text.
+    pub fn url_at(&self, p: Point) -> Option<(Point, Point, String)> {
+        let (text, cells, at) = self.logical_text(p);
+        let (a, b) = crate::word::url_at(&text, at?)?;
+        Some((cells[a].0, cells[b].1, text[a..=b].iter().collect()))
+    }
+
+    /// The text of the logical line `p` is on, one entry per character,
+    /// with each character's first and last cell (a wide character's last
+    /// cell is its spacer), and which character `p` is on.
+    #[allow(clippy::type_complexity)]
+    fn logical_text(&self, p: Point) -> (Vec<char>, Vec<(Point, Point)>, Option<usize>) {
         let (start, end) = self.logical_line(p.line);
-        // One entry per character: the character, and its first and last
-        // cell (a wide character's last cell is its spacer).
         let mut text = Vec::new();
         let mut cells: Vec<(Point, Point)> = Vec::new();
         let mut at = None;
@@ -971,10 +992,7 @@ impl Terminal {
                 cells.push((here, here));
             }
         }
-        match at.and_then(|i| crate::word::word_at(&text, i)) {
-            Some((a, b)) => (cells[a].0, cells[b].1),
-            None => (p, p),
-        }
+        (text, cells, at)
     }
 
     /// The row at buffer line `line`, or None if it is not stored (any more).

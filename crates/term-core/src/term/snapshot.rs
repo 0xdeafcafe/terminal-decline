@@ -251,6 +251,13 @@ impl Terminal {
         // The hovered link's id in the screen's table: cells are compared
         // with it, which is comparing by value within one table.
         let hovered = self.hover.and_then(|p| self.link_at(p)).and_then(|l| self.styles.links().find(&l));
+        // Off an OSC 8 link, a plain URL there is highlighted the same way
+        // (on history rows too: it is read from the text).
+        let hovered_url = self
+            .hover
+            .filter(|&p| self.link_at(p).is_none())
+            .and_then(|p| self.url_at(p))
+            .map(|(a, b, _)| (a, b));
         let history = self.scrollback.len();
         let first = history - self.display_offset;
         for view_line in 0..self.lines {
@@ -292,6 +299,17 @@ impl Terminal {
                     }
                 }
                 // Left to right, the selection's range among them.
+                out.highlights[highlights as usize..].sort_by_key(|h| h.cols.start);
+            }
+            if let Some((a, b)) = hovered_url
+                && (a.line..=b.line).contains(&line)
+            {
+                let start = if line == a.line { a.col } else { 0 };
+                let end = if line == b.line { b.col + 1 } else { self.cols };
+                out.highlights.push(Highlight {
+                    cols: to_u16(start)..to_u16(end.min(self.cols)),
+                    kind: HighlightKind::HoveredLink,
+                });
                 out.highlights[highlights as usize..].sort_by_key(|h| h.cols.start);
             }
             let highlights = highlights..out.highlights.len() as u32;

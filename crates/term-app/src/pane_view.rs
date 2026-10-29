@@ -732,6 +732,26 @@ impl PaneView {
     }
 
     /// The link at visible `line`, `col`: OSC 8, else a plain URL.
+    /// Option-click on view cell (`line`, `col`): if it is on the shell's
+    /// command line ([`crate::prompts::input_steps`]), type the arrow keys
+    /// that take the shell's cursor there. False if it isn't, and nothing
+    /// was typed.
+    pub(crate) fn move_shell_cursor(&self, line: usize, col: usize) -> bool {
+        let Some((steps, app_cursor)) = self
+            .with(|_, p| {
+                let t = p.session.lock_term();
+                crate::prompts::input_steps(&t.state, line, col).map(|s| (s, t.state.modes().app_cursor))
+            })
+            .flatten()
+        else {
+            return false;
+        };
+        if steps != 0 {
+            self.send_input(crate::prompts::arrows(steps, app_cursor));
+        }
+        true
+    }
+
     fn link_at_cell(&self, line: usize, col: usize) -> Option<String> {
         self.with(|_, p| {
             let t = p.session.lock_term();
@@ -890,6 +910,18 @@ impl PaneView {
         if let Some((_, sgr)) = self.reporting(event) {
             self.with(|_, p| p.mouse_button = press.then_some(button));
             self.send_mouse(button + Self::mods_of(event), line, col, press, sgr);
+            return;
+        }
+        // Option-click on the shell's command line moves its cursor there;
+        // the rest of the click (drag, release) goes nowhere.
+        let flags = event.modifierFlags();
+        if button == mouse::LEFT
+            && press
+            && flags.contains(NSEventModifierFlags::Option)
+            && !flags.intersects(NSEventModifierFlags::Shift | NSEventModifierFlags::Command | NSEventModifierFlags::Control)
+            && self.move_shell_cursor(line, col)
+        {
+            self.with(|_, p| p.swallow_click = true);
             return;
         }
         if press && mouse::opens_menu(false, button, event.modifierFlags().contains(NSEventModifierFlags::Control)) {

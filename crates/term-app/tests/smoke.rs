@@ -1195,6 +1195,49 @@ fn smoke_jump_to_prompts_and_select_output() {
     assert_eq!(offset(&d[6]), 0, "{}", d[6]);
 }
 
+/// Option-click on the shell's command line (after the OSC 133 B mark)
+/// types the arrow keys that move the shell's cursor to the cell, as the
+/// program asked for them (application cursor mode: `ESC O`); on the
+/// prompt, or with no marks, it types nothing.
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_option_click_moves_the_shell_cursor() {
+    if !have_metal() {
+        return;
+    }
+    let dir = TempDir::new("optclick");
+    let wait = "i=0; while [ \"$(stty size)\" != '20 80' ] && [ $i -lt 100 ]; do sleep 0.05; i=$((i+1)); done; ";
+    // The prompt, marked, with `echo hello` typed (the cursor after it, at
+    // column 12) and the screen cleared before it.
+    let line = "printf '\\033[H\\033[J\\033]133;A\\007$ \\033]133;B\\007echo hello'; ";
+    // What a click typed is read with the terminal in raw mode.
+    let script = format!(
+        "{resize}{wait}stty raw -echo; \
+         {line}{click_a}a=$(dd bs=1 count=24 2>/dev/null); \
+         {line}printf '\\033[?1h\\033[8G'; {click_b}b=$(dd bs=1 count=9 2>/dev/null); \
+         {line}{click_prompt}{click_far}stty min 0 time 10; c=$(dd bs=1 count=1 2>/dev/null); \
+         printf '\\033[H\\033[J'; printf 'a=%s b=%s c=[%s]\\n' \"$a\" \"$b\" \"$c\" | tr -d '\\033'; \
+         {dump}{quit}sleep 20",
+        resize = osc("resize 80 20"),
+        // The cursor is at column 12: 8 characters left to column 4.
+        click_a = osc("click 0 4 option"),
+        // Cursor at column 7, application cursor mode: 3 right.
+        click_b = osc("click 0 10 option"),
+        // The prompt (column 1) and another row type nothing.
+        click_prompt = osc("click 0 1 option"),
+        click_far = osc("click 5 3 option"),
+        dump = osc("dump"),
+        quit = osc("quit"),
+    );
+    let (status, _) = decline(&dir, &script, true);
+    assert!(status.success(), "{status}");
+    let d = dumps(&dir);
+    assert_eq!(d.len(), 1, "{d:?}");
+    let s = screen(&d[0]);
+    let want = format!("a={} b={} c=[]", "[D".repeat(8), "OC".repeat(3));
+    assert!(s.starts_with(&want), "{s}");
+}
+
 /// Colours a program sets are drawn: OSC 11 changes the background and
 /// OSC 10 the foreground, OSC 4 a palette entry, and the resets go back
 /// to the theme. The program reads the theme's palette with OSC 4 ?.

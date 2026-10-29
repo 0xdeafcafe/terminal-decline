@@ -42,8 +42,10 @@
 //! - `hover LINE COL` / `hover off`: the pointer is over that visible cell
 //!   of the focused pane with Cmd held, as a mouse move there would be, or
 //!   Cmd is let go;
-//! - `click LINE COL`: Cmd-click that cell. A link that may open isn't
-//!   opened while this control is on: it is listed in the dump's `opened`;
+//! - `click LINE COL [option]`: Cmd-click that cell. A link that may open
+//!   isn't opened while this control is on: it is listed in the dump's
+//!   `opened`. With `option`, Option-click it instead: on the shell's
+//!   command line that types the arrow keys to the cell;
 //! - `scroll N`: scroll the focused pane's view N lines back into history
 //!   (negative: towards the bottom), as the scroll wheel does;
 //! - `menu ACTION`: send a menu item's action (a `[keybind]` action name,
@@ -215,8 +217,9 @@ pub enum Control {
     /// The pointer over a visible cell (line, column) with Cmd held, or
     /// Cmd let go.
     Hover(Option<(usize, usize)>),
-    /// Cmd-click on a visible cell (line, column).
-    Click(usize, usize),
+    /// Cmd-click on a visible cell (line, column), or, with the flag,
+    /// Option-click.
+    Click(usize, usize, bool),
     /// Scroll the view this many lines back.
     Scroll(isize),
     /// A menu item's action, as choosing the item sends it.
@@ -316,7 +319,15 @@ impl Control {
                 "off" => None,
                 line => Some((line.parse().ok()?, words.next()?.parse().ok()?)),
             }),
-            "click" => Control::Click(words.next()?.parse().ok()?, words.next()?.parse().ok()?),
+            "click" => Control::Click(
+                words.next()?.parse().ok()?,
+                words.next()?.parse().ok()?,
+                match words.next() {
+                    None => false,
+                    Some("option") => true,
+                    Some(_) => return None,
+                },
+            ),
             "scroll" => Control::Scroll(words.next()?.parse().ok()?),
             "menu" => Control::Menu(crate::keybind::MenuAction::from_name(words.next()?)?),
             "key" => {
@@ -578,7 +589,9 @@ mod tests {
             ("hover 2 10", Some(Control::Hover(Some((2, 10))))),
             ("hover off", Some(Control::Hover(None))),
             ("hover 2", None),
-            ("click 0 3", Some(Control::Click(0, 3))),
+            ("click 0 3", Some(Control::Click(0, 3, false))),
+            ("click 0 3 option", Some(Control::Click(0, 3, true))),
+            ("click 0 3 cmd", None),
             ("click 0", None),
             ("scroll -4", Some(Control::Scroll(-4))),
             ("scroll", None),

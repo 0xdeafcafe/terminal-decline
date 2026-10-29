@@ -77,7 +77,7 @@ Design: docs/design/pins.md.
 | E.2 | OSC 8 links + Cmd-click; plain URLs | M |
 | E.3 | Keyboard: non-Latin layouts for Ctrl/Meta; kitty protocol levels Neovim/Helix use (table tests from the spec + real-app checks); `keybind` config (remap/unbind/send text; per pin) | M |
 | E.4 | Fonts: fallback list, bold/italic overrides, Nerd Font icon fitting, line height / cell width adjust | M |
-| E.5 | Shell integration (OSC 133) via documented snippets for zsh/bash/fish (not injected): jump between prompts, select output, Option-click to move the cursor | M |
+| E.5 | Shell integration (OSC 133) via documented snippets for zsh/bash/fish (not injected): ~~jump between prompts, select output, Option-click to move the cursor~~ (all done) | M |
 | E.6 | Notifications: OSC 9/777 and bell when unfocused (named: what Claude Code sends); guarded for the bare binary; Dock progress (OSC 9;4) | S |
 | E.7 | Search: Cmd+F with our own native-style find bar (standard search field, previous/next, count, options; Edit > Find, Cmd+G/Cmd+E and the shared find text work as usual) over all of history; in-view hits first, then history outwards, using fast block search (SIMD substring search plus a per-block filter so most blocks are skipped) | M |
 | E.8 | Selection: auto-scroll past the edge, rectangular (Option-drag), copy-on-select option | S |

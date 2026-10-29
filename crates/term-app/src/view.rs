@@ -2610,7 +2610,12 @@ impl WindowView {
                         view.set_hover(cell);
                     }
                 }
-                Some(Control::Click(line, col)) => {
+                Some(Control::Click(line, col, true)) => {
+                    if !self.focused_view().is_some_and(|view| view.move_shell_cursor(line, col)) {
+                        NSBeep();
+                    }
+                }
+                Some(Control::Click(line, col, false)) => {
                     let pane = self.focused_pane();
                     let uri = pane.and_then(|pane| {
                         self.with_pane(pane, |_, p| {

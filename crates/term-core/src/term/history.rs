@@ -17,6 +17,7 @@
 //! links, marks, search hits) is mapped through the unit's layout.
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use super::reflow::{Flat, emit_row, split};
@@ -98,6 +99,7 @@ pub(super) struct Layouts {
     key: Option<CacheKey>,
     units: Vec<Arc<Unit>>,
     view: Option<(Option<Point>, usize, Vec<ViewRow>)>,
+    counts: RowCounts,
 }
 
 impl Unit {
@@ -239,10 +241,50 @@ impl Unit {
 }
 
 impl Layouts {
+    /// Drop everything, the row counts too.
     pub(super) fn clear(&mut self) {
         *self = Layouts::default();
     }
+
+    /// Drop the laid-out units and the view's rows, keeping the row
+    /// counts (output arriving doesn't change a sealed block's).
+    fn clear_layouts(&mut self) {
+        self.key = None;
+        self.units.clear();
+        self.view = None;
+    }
 }
+
+/// The row count of one sealed block at the current width (§12.3
+/// `rows_at`): the rows of the units starting in it.
+#[derive(Clone, Copy, Debug)]
+struct BlockRows {
+    /// The first unit starting in it (past its end if none does).
+    start: u64,
+    /// One past its last line, when counted.
+    end: u64,
+    /// The first unit starting after it.
+    next: u64,
+    rows: usize,
+}
+
+/// Row counts per sealed block, by its first line, for one width and
+/// history epoch. Kept while output arrives; dropped with the layouts
+/// when lines are popped (a reflow) or the width changes.
+#[derive(Default)]
+struct RowCounts {
+    key: Option<(usize, u64)>,
+    blocks: HashMap<u64, BlockRows>,
+}
+
+/// Units at least this many rows past the target are skipped a block at
+/// a time when scrolling (a short scroll walks units, and doesn't count
+/// a whole block it won't leave).
+const SKIP_BLOCKS_PAST: usize = 256;
+
+/// Block row counts kept before those of freed blocks are dropped (the
+/// 32 MB backstop holds about 512 blocks).
+const KEPT_COUNTS: usize = 1024;
 
 impl Terminal {
     /// The line number of history's first stored line (on the primary
@@ -328,7 +370,7 @@ impl Terminal {
         let key = self.cache_key();
         let mut cache = self.layouts.lock().expect("layouts");
         if cache.key != Some(key) {
-            cache.clear();
+            cache.clear_layouts();
             cache.key = Some(key);
         }
         if let Some(u) = cache.units.iter().find(|u| u.lo == lo && u.hi == hi) {
@@ -404,7 +446,7 @@ impl Terminal {
         let rows = self.walk_view(self.lines);
         let mut cache = self.layouts.lock().expect("layouts");
         if cache.key != Some(key) {
-            cache.clear();
+            cache.clear_layouts();
             cache.key = Some(key);
         }
         cache.view = Some((self.view, self.lines, rows.clone()));
@@ -473,95 +515,215 @@ impl Terminal {
 
     /// Rows from row `r` of unit `u` to the end of history.
     pub(super) fn rows_below(&self, u: &Unit, r: usize) -> usize {
-        let mut n = u.rows() - r;
-        let mut line = u.hi;
+        u.rows() - r + self.rows_from(u.hi)
+    }
+
+    /// Rows from the unit starting at `line` to the end of history: a
+    /// block at a time from the row counts, where `line` starts a block's
+    /// first unit.
+    fn rows_from(&self, mut line: u64) -> usize {
+        let mut n = 0;
         while line < self.top_line {
-            // Units wholly inside a block written at this width take a row
-            // per line: skip to the one holding the block's last line.
-            let mut skip = None;
-            self.scrollback.widths(self.idx(line), self.idx(line) + 1, |_, hi, w| {
-                skip = (w as usize == self.cols).then_some(hi);
-                false
-            });
-            if let Some(hi) = skip {
-                let last = self.history_first() + hi as u64 - 1;
-                let (lo, _) = self.unit_bounds(last);
-                if lo > line {
-                    n += (lo - line) as usize;
-                    line = lo;
-                    continue;
-                }
+            if let Some(e) = self.block_rows(line).filter(|e| e.start == line) {
+                n += e.rows;
+                line = e.next;
+                continue;
             }
-            let u = self.unit_at(line);
-            n += u.rows();
-            line = u.hi;
+            let (_, end, _, _) = self.scrollback.block_lines(line);
+            let (rows, next) = self.count_in_block(line, end);
+            n += rows;
+            line = next;
         }
         n
     }
 
-    /// Move the view `d` rows back from row `r` of `u`, stopping at the
-    /// first row of history.
-    pub(super) fn rows_back(&self, mut u: Arc<Unit>, mut r: usize, mut d: usize) -> (Arc<Unit>, usize) {
+    /// The row count of the sealed block holding `line`, worked out and
+    /// kept if it isn't yet. `None` for the open block and the first
+    /// block (which may hold hidden lines, so where its first unit
+    /// starts can change).
+    fn block_rows(&self, line: u64) -> Option<BlockRows> {
+        let (first, end, open, _) = self.scrollback.block_lines(line);
+        if open || first <= self.history_first() {
+            return None;
+        }
+        let key = (self.cols, self.history_epoch);
+        {
+            let cache = self.layouts.lock().expect("layouts");
+            if cache.counts.key == Some(key)
+                && let Some(e) = cache.counts.blocks.get(&first)
+                && e.end == end
+            {
+                return Some(*e);
+            }
+        }
+        let (lo, hi) = self.unit_bounds(first);
+        let start = if lo == first { first } else { hi };
+        let (rows, next) = if start < end { self.count_in_block(start, end) } else { (0, start) };
+        let e = BlockRows { start, end, next, rows };
+        // The last unit is still growing if it reaches the screen: kept
+        // only once it ends in history.
+        if next < self.top_line {
+            let mut cache = self.layouts.lock().expect("layouts");
+            if cache.counts.key != Some(key) {
+                cache.counts = RowCounts {
+                    key: Some(key),
+                    ..RowCounts::default()
+                };
+            }
+            if cache.counts.blocks.len() >= KEPT_COUNTS {
+                // Blocks freed from the oldest end.
+                let oldest = self.history_first();
+                cache.counts.blocks.retain(|&f, _| f >= oldest);
+            }
+            cache.counts.blocks.insert(first, e);
+        }
+        Some(e)
+    }
+
+    /// Rows of the units starting from `line` (a unit's first line) up to
+    /// `end`, the end of the block holding `line`, and the first unit
+    /// starting at or after `end`. In a block written at the current
+    /// width every unit wholly inside takes a row per line.
+    fn count_in_block(&self, line: u64, end: u64) -> (usize, u64) {
+        let (_, _, _, w) = self.scrollback.block_lines(line);
+        if w as usize == self.cols && end > line {
+            let (last, _) = self.unit_bounds(end - 1);
+            if last >= line {
+                let (rows, next) = self.count_units(last, last + 1);
+                return ((last - line) as usize + rows, next);
+            }
+        }
+        self.count_units(line, end)
+    }
+
+    /// Rows of the units starting from `from` (a unit's first line) up to
+    /// `until`, and the first unit starting at or after `until`. A unit
+    /// written at the current width takes a row per line; one of narrow
+    /// ASCII is counted from its text's length; any other is laid out.
+    fn count_units(&self, from: u64, until: u64) -> (usize, u64) {
+        let (mut rows, mut next) = (0, from);
+        if from >= until {
+            return (0, from);
+        }
         let first = self.history_first();
-        loop {
-            if r >= d {
-                return (u, r - d);
+        let mut lo = from;
+        let mut at_width = true;
+        let mut shapes: Vec<(Option<usize>, Option<usize>)> = Vec::new();
+        self.scrollback.shapes(self.idx(from), self.idx(self.top_line), |i, w, s| {
+            let line = first + i as u64;
+            at_width &= w as usize == self.cols;
+            shapes.push((s.cells, s.blank_tail));
+            let hi = line + 1;
+            if s.wrapped && !hi.is_multiple_of(UNIT) && hi < self.top_line {
+                return true;
             }
-            if u.lo <= first {
-                return (u, 0);
-            }
-            d -= r + 1;
-            // Through a block written at this width a line at a time.
-            let mut skip = None;
-            let i = self.idx(u.lo - 1);
-            self.scrollback.widths(i, i + 1, |_, _, w| {
-                skip = Some(w as usize == self.cols);
-                false
-            });
-            if skip == Some(true) && d > 0 {
-                let mut lo_block = 0;
-                self.scrollback.widths(0, i + 1, |lo, hi, _| {
-                    if hi > i {
-                        lo_block = lo;
-                        return false;
+            rows += if at_width {
+                (hi - lo) as usize
+            } else {
+                match self.text_rows(&shapes, s.wrapped) {
+                    Some(n) => {
+                        debug_assert_eq!(n, self.lay_out(lo, hi).rows(), "rows of lines {lo}..{hi} from their text");
+                        n
                     }
-                    true
-                });
-                // The first unit wholly inside the block.
-                let bl = first + lo_block as u64;
-                let (ulo, uhi) = self.unit_bounds(bl);
-                let s = if ulo == bl { bl } else { uhi };
-                // Units from `s` up to `u.lo` take a row per line.
-                if s + 1 < u.lo {
-                    let can = (u.lo - 1 - s) as usize;
-                    let step = can.min(d);
-                    // Land on the unit holding line `u.lo - 1 - step`.
-                    let target = u.lo - 1 - step as u64;
-                    d -= step;
-                    u = self.unit_at(target);
-                    r = u.row_of(Point { line: target, col: 0 }, self.cols).0;
-                    continue;
+                    None => self.unit(lo, hi).rows(),
+                }
+            };
+            (lo, next, at_width) = (hi, hi, true);
+            shapes.clear();
+            hi < until
+        });
+        (rows, next)
+    }
+
+    /// The rows a unit of narrow cells takes, from its lines' shapes
+    /// (`None` unless every line is narrow and the trimmed tail is
+    /// known): `max(1, ⌈n / cols⌉)` for its `n` cells.
+    fn text_rows(&self, shapes: &[(Option<usize>, Option<usize>)], continues: bool) -> Option<usize> {
+        let mut n = 0;
+        for &(cells, _) in shapes {
+            n += cells?;
+        }
+        if !continues {
+            // Trailing blanks are trimmed, back through lines that are
+            // all blank.
+            for &(cells, tail) in shapes.iter().rev() {
+                let tail = tail?;
+                n -= tail;
+                if tail < cells? {
+                    break;
                 }
             }
-            u = self.unit_at(u.lo - 1);
-            r = u.rows() - 1;
         }
+        Some(n.div_ceil(self.cols).max(1))
+    }
+
+    /// The rows of the unit starting at `line`, and where it ends.
+    fn unit_rows(&self, line: u64) -> (usize, u64) {
+        self.count_units(line, line + 1)
+    }
+
+    /// Move the view `d` rows back from row `r` of `u`, stopping at the
+    /// first row of history.
+    pub(super) fn rows_back(&self, u: Arc<Unit>, r: usize, d: usize) -> (Arc<Unit>, usize) {
+        if r >= d {
+            return (u, r - d);
+        }
+        let first = self.history_first();
+        if u.lo <= first {
+            return (u, 0);
+        }
+        // Rows still to go above the first row of the unit at `line`.
+        let mut need = d - r;
+        let mut line = u.lo;
+        while line > first {
+            if need > SKIP_BLOCKS_PAST
+                && let Some(e) = self.block_rows(line - 1)
+                && e.next == line
+                && e.start < line
+                && e.rows < need
+            {
+                need -= e.rows;
+                line = e.start;
+                continue;
+            }
+            let (lo, hi) = self.unit_bounds(line - 1);
+            let (rows, _) = self.unit_rows(lo);
+            if rows >= need {
+                let u = self.unit(lo, hi);
+                let r = u.rows().saturating_sub(need);
+                return (u, r);
+            }
+            need -= rows;
+            line = lo;
+        }
+        (self.unit_at(first), 0)
     }
 
     /// Move the view `d` rows forward from row `r` of `u`; `None` once it
     /// reaches the screen.
-    pub(super) fn rows_forward(&self, mut u: Arc<Unit>, mut r: usize, mut d: usize) -> Option<(Arc<Unit>, usize)> {
-        loop {
-            if r + d < u.rows() {
-                return Some((u, r + d));
-            }
-            d -= u.rows() - r;
-            if u.hi >= self.top_line {
-                return None;
-            }
-            u = self.unit_at(u.hi);
-            r = 0;
+    pub(super) fn rows_forward(&self, u: Arc<Unit>, r: usize, d: usize) -> Option<(Arc<Unit>, usize)> {
+        if r + d < u.rows() {
+            return Some((u, r + d));
         }
+        let mut d = d - (u.rows() - r);
+        let mut line = u.hi;
+        while line < self.top_line {
+            if d > SKIP_BLOCKS_PAST
+                && let Some(e) = self.block_rows(line).filter(|e| e.start == line)
+                && e.rows <= d
+            {
+                d -= e.rows;
+                line = e.next;
+                continue;
+            }
+            let (rows, hi) = self.unit_rows(line);
+            if d < rows {
+                return Some((self.unit(line, hi), d));
+            }
+            d -= rows;
+            line = hi;
+        }
+        None
     }
 
     /// Put the view's first row at the row of history holding `p`

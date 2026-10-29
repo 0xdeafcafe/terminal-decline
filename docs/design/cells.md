@@ -2608,10 +2608,28 @@ differs from the above:
 - **Counting rows.** A unit whose blocks were all written at the current
   width takes a row per stored line, with no decoding. Any other is
   decoded and split again with the screen reflow's own helpers, so wide
-  characters, clusters, marks and `FILL` tails behave as in §12.2. Not
-  built yet: the ASCII count from the text length, and the per-block
-  `rows_at` cache. Laid-out units (up to 512) and the view's rows are kept
-  between reads until the width, history's ends or its epoch change.
+  characters, clusters, marks and `FILL` tails behave as in §12.2. Laid-out
+  units (up to 512) and the view's rows are kept between reads until the
+  width, history's ends or its epoch change.
+- **Row counts** (landed after PR 12). Counting a unit's rows doesn't lay
+  it out when it can be avoided: a unit written at the current width takes
+  a row per stored line; one whose lines are all narrow ASCII (no
+  clusters, width exceptions, edge spacer, marks or `FILL`; styled runs
+  allowed) takes `max(1, ⌈n / cols⌉)` rows, `n` from the text lengths and
+  style runs with the blank tail trimmed; only the others are laid out
+  (non-ASCII text without width exceptions could be counted from its
+  scalars too, and isn't yet). Each sealed block's count, the rows of the
+  units starting in it, is kept per width (`rows_at`), except for the
+  first block (hidden lines can move where its first unit starts) and the
+  open one; output arriving keeps them, and a width change, lines popped
+  by a reflow or a new epoch drop them. `display_offset()` adds up the
+  block counts, and scrolling more than 256 rows skips whole blocks. With
+  100k stored lines (`history_at_width` in the resize bench),
+  `display_offset()` went from 6.7 ms to 12 µs at the written width and
+  from 115 ms to 25 µs at another (counts kept; the first count after a
+  width change works out every block once). A page scroll is unchanged
+  (45 µs at the written width, 124 µs at another): it lays out what it
+  shows.
 - **The view** is the Point of its first cell (`view: Option<Point>`),
   replacing `display_offset`. Output arriving underneath changes nothing;
   a width change rounds it down to the start of its row at the new width.

@@ -1006,17 +1006,30 @@ fn smoke_settings_records_a_chord_before_the_menus() {
     let dir = TempDir::new("record");
     let file = dir.config_home().join("terminal-decline/config.toml");
     let (f, d) = (file.display(), dir.path().display());
-    let prefs = "pgrep -f 'terminal-decline[ ]prefs --layer'";
-    let wait_prefs = format!("i=0; until {prefs} > '{d}/pid' || [ $i -ge 200 ]; do sleep 0.05; i=$((i+1)); done; sleep 1; ");
     let wait_file =
         |what: &str| format!("i=0; until grep -q '{what}' '{f}' 2>/dev/null || [ $i -ge 100 ]; do sleep 0.1; i=$((i+1)); done; ");
+    // Waits on the app itself, through this window's dumps, never on
+    // time: until the preferences read keys (they set the tty raw with
+    // TCSAFLUSH, which drops keys typed before), until they ask for a
+    // chord, and until it was recorded.
+    let dump_path = dir.dump_file();
+    let wait_dump = |what: &str| {
+        format!(
+            "i=0; until {dump}sleep 0.1; tail -n 1 '{}' | grep -q '{what}' || [ $i -ge 150 ]; do i=$((i+1)); done; ",
+            dump_path.display(),
+            dump = osc("dump"),
+        )
+    };
     // In mkdir order: only the first window runs the test, so a window
     // Cmd+N opened by mistake shows up as a second dumper.
     let script = format!(
-        "if mkdir '{d}/first' 2>/dev/null; then echo first; {settings}{wait_prefs}\
-         {select}sleep 1; {key}sleep 1; {yes}{wait}echo done; {dump}sleep 1; {quit}\
+        "if mkdir '{d}/first' 2>/dev/null; then echo first; {settings}{ready}\
+         {select}{recording}{key}{recorded}{yes}{wait}echo done; {dump}sleep 1; {quit}\
          else echo extra; {dump}fi; sleep 20",
         settings = osc("settings"),
+        ready = wait_dump("\"settings_ready\":true"),
+        recording = wait_dump("\"settings_recording\":true"),
+        recorded = wait_dump("\"settings_recording\":false"),
         select = osc("type-settings \\\\e[C\\\\e[C\\\\e[B\\\\e[Bc"),
         key = osc("key 45 cmd"),
         yes = osc("type-settings y"),
@@ -1034,8 +1047,9 @@ fn smoke_settings_records_a_chord_before_the_menus() {
         all.iter().all(|x| !screen(x).starts_with("extra|")),
         "Cmd+N reached the menus: {all:?}"
     );
-    assert_eq!(all.len(), 1, "{all:?}");
-    assert_eq!(num(&all[0], "tabs"), 2.0, "{}", all[0]);
+    let last = all.last().expect("dumps");
+    assert!(screen(last).contains("done|"), "{last}");
+    assert_eq!(num(last, "tabs"), 2.0, "{last}");
 }
 
 /// Files dropped on the window are typed in as a paste: each path quoted

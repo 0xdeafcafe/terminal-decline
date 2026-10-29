@@ -865,6 +865,17 @@ pub(crate) fn show_settings_now() {
     }
 }
 
+/// Whether the Settings tab's preferences read keys, and whether it is
+/// recording a chord (for test dumps).
+pub(crate) fn settings_status() -> (bool, bool) {
+    let delegate = DELEGATE.with(|d| d.borrow().as_ref().and_then(|w| w.load()));
+    let Some(delegate) = delegate else { return (false, false) };
+    let window = delegate.ivars().settings.borrow().clone();
+    window
+        .and_then(|w| delegate.view_of(&w))
+        .map_or((false, false), |v| v.settings_status())
+}
+
 /// Type into the Settings tab (the test-only `type-settings` command).
 pub(crate) fn type_into_settings(bytes: Vec<u8>) {
     let delegate = DELEGATE.with(|d| d.borrow().as_ref().and_then(|w| w.load()));

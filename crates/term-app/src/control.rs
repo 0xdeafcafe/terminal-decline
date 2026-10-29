@@ -249,6 +249,12 @@ pub struct Dump {
     /// Entry (only while active, when turned on).
     pub active: bool,
     pub secure_input: bool,
+    /// Whether the Settings tab's preferences have started and read keys
+    /// (its terminal is on the alternate screen, which they switch to once
+    /// the tty is raw), and whether it is recording a chord. False with no
+    /// Settings tab. For the whole app, like `notifications`.
+    pub settings_ready: bool,
+    pub settings_recording: bool,
     /// `Terminal::dump()`: the visible rows and a status line.
     pub screen: String,
     pub cols: usize,

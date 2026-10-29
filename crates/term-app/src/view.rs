@@ -1254,6 +1254,17 @@ impl WindowView {
         });
     }
 
+    /// Whether the program in the focused pane is on the alternate screen,
+    /// and whether a chord is being recorded (see [`crate::app::settings_status`]).
+    pub(crate) fn settings_status(&self) -> (bool, bool) {
+        self.with_state(|st| {
+            let recording = st.win.recording.is_some();
+            let alt = st.focused().is_some_and(|p| p.session.lock_term().state.alt_screen_active());
+            (alt, recording)
+        })
+        .unwrap_or((false, false))
+    }
+
     /// Whether this is the Settings tab.
     pub fn is_settings(&self) -> bool {
         self.with_state(|st| st.win.settings).unwrap_or(false)
@@ -1591,6 +1602,9 @@ impl WindowView {
                         .map(|b| b.to_string()),
                     active: objc2_app_kit::NSApplication::sharedApplication(MainThreadMarker::from(self)).isActive(),
                     secure_input: crate::app::secure_input_held(),
+                    // Read before this window's state is borrowed: it may
+                    // be the Settings tab.
+                    settings: crate::app::settings_status(),
                 };
                 self.with_state(|st| write_dump(st, window));
                 self.run_controls();
@@ -1644,6 +1658,7 @@ struct Window {
     badge: Option<String>,
     active: bool,
     secure_input: bool,
+    settings: (bool, bool),
 }
 
 /// One line of JSON about the window and its focused pane.
@@ -1675,6 +1690,8 @@ fn write_dump(st: &mut State, window: Window) {
         badge: window.badge,
         active: window.active,
         secure_input: window.secure_input,
+        settings_ready: window.settings.0,
+        settings_recording: window.settings.1,
         screen,
         cols,
         lines,

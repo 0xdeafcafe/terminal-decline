@@ -152,6 +152,10 @@ pub(crate) struct Registry {
     /// Every other character looked up, per style: the cmap lookup and,
     /// when the face lacks it, Core Text's fallback search happen once.
     other: HashMap<(char, Style), Resolved>,
+    /// Faces with OpenType features set: characters are looked up through
+    /// a one-character CTLine, so single-glyph features (`zero`, `ss01`,
+    /// `cv05`) pick their glyphs (ligatures design §1).
+    pub line_lookup: [bool; 4],
 }
 
 impl Registry {
@@ -162,6 +166,7 @@ impl Registry {
             by_face: HashMap::new(),
             ascii: [[None; 128]; 4],
             other: HashMap::new(),
+            line_lookup: [false; 4],
         };
         // Ids 0–3 are the four faces even when two are the same font (a
         // family with no bold); lookups by font find the first.
@@ -210,7 +215,13 @@ impl Registry {
         if let Some(r) = cached {
             return r;
         }
-        let r = crate::glyph_for(&self.faces[style as usize].font, ch).and_then(|(font, glyph)| Some((self.id(&font)?, glyph)));
+        let face = &self.faces[style as usize].font;
+        let found = if self.line_lookup[style as usize] {
+            crate::glyph_by_line(face, ch).or_else(|| crate::glyph_for(face, ch))
+        } else {
+            crate::glyph_for(face, ch)
+        };
+        let r = found.and_then(|(font, glyph)| Some((self.id(&font)?, glyph)));
         if ch.is_ascii() {
             self.ascii[style as usize][ch as usize] = Some(r);
         } else {

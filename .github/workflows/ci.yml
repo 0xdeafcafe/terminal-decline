@@ -5,8 +5,10 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # `ci/**`: a branch to try a fix on the runners without opening a PR.
+    branches: [main, "ci/**"]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read

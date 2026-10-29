@@ -107,6 +107,9 @@ pub(crate) struct Pane {
     pub(crate) view: Retained<PaneView>,
     pub(crate) session: Session,
     pub(crate) render: PaneRender,
+    /// The window's theme with the colours its program set (OSC 4,
+    /// 10–12) on top; `None` while it has set none.
+    theme: Option<Theme>,
     /// Where it is in the window, in pixels.
     pub(crate) rect: PxRect,
     pub(crate) cursor_on: bool,
@@ -1028,9 +1031,14 @@ impl WindowView {
                 p.blink_scheduled = true;
                 blinking.push(id);
             }
+            // Colours a program set are drawn from the next frame on; the
+            // theme changing in the row cache's key builds every row again.
+            if t.state.take_colors_changed() {
+                p.theme = crate::config::program_theme(&win.theme, &t.state);
+            }
             let pad = pane_padding(&win.config, titlebar, win.scale, p.rect);
             let input = FrameInput {
-                theme: &win.theme,
+                theme: p.theme.as_ref().unwrap_or(&win.theme),
                 metrics: win.renderer.metrics(),
                 padding: (pad.x, pad.top),
                 cursor_on: p.cursor_on || !focused,
@@ -1255,7 +1263,7 @@ impl WindowView {
             win.divider = divider_colour(&config, win.appearance);
             for p in st.panes.values() {
                 let mut t = p.session.lock_term();
-                t.state.set_default_colors(crate::config::query_colors(&win.theme));
+                crate::config::set_term_colors(&mut t.state, &win.theme);
                 if t.state.ambiguous_width() != config.ambiguous_width {
                     // For output from now on; what is on screen stays.
                     t.state.set_ambiguous_width(config.ambiguous_width);
@@ -1312,10 +1320,7 @@ impl WindowView {
             win.theme = theme;
             win.divider = divider;
             for p in st.panes.values() {
-                p.session
-                    .lock_term()
-                    .state
-                    .set_default_colors(crate::config::query_colors(&win.theme));
+                crate::config::set_term_colors(&mut p.session.lock_term().state, &win.theme);
             }
             recolour
         });
@@ -1963,7 +1968,7 @@ fn spawn_pane(window: usize, config: &Config, theme: &Theme, m: term_font::Metri
     let (cols, lines) = n.grid;
     let mut t = Term::new(cols, lines, config.scrollback);
     t.state.set_ambiguous_width(config.ambiguous_width);
-    t.state.set_default_colors(crate::config::query_colors(theme));
+    crate::config::set_term_colors(&mut t.state, theme);
     for notice in n.notices {
         crate::session::write_notice(&mut t, notice);
     }
@@ -1973,6 +1978,7 @@ fn spawn_pane(window: usize, config: &Config, theme: &Theme, m: term_font::Metri
         view: n.view,
         session,
         render: PaneRender::new(),
+        theme: None,
         rect: PxRect::default(),
         cursor_on: true,
         blink_scheduled: false,
@@ -2353,6 +2359,8 @@ fn write_dump(st: &mut State, window: Window) {
     let dividers = st.dividers.len();
     let State { win, panes, .. } = st;
     let Some(p) = panes.get(&focused) else { return };
+    // The focused pane's colours, a program's included.
+    let theme = p.theme.as_ref().unwrap_or(&win.theme);
     let pad_top = pane_padding(&win.config, window.top_inset, win.scale, p.rect).top;
     let Some(test) = &mut win.test else { return };
     test.seq += 1;
@@ -2403,8 +2411,8 @@ fn write_dump(st: &mut State, window: Window) {
         cell_height: m.cell_height,
         font_size: win.font_size,
         scale: win.scale,
-        foreground: format!("#{:06x}", crate::config::rgb_of(win.theme.foreground)),
-        background: format!("#{:06x}", crate::config::rgb_of(win.theme.background)),
+        foreground: format!("#{:06x}", crate::config::rgb_of(theme.foreground)),
+        background: format!("#{:06x}", crate::config::rgb_of(theme.background)),
         phys_footprint: control::phys_footprint(),
     };
     let line = serde_json::to_string(&dump).expect("dump serialises");

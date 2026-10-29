@@ -199,6 +199,7 @@ fn parse(term: &Mutex<Term>, bytes: &[u8], on_parsed: Option<&(dyn Fn() + Send)>
 fn replace_term(t: &mut Term) {
     let mut fresh = Term::new(t.state.cols(), t.state.lines(), 0);
     fresh.state.set_default_colors(t.state.default_colors());
+    fresh.state.set_default_palette(t.state.default_palette());
     fresh.state.set_cell_pixels(t.state.cell_pixels());
     *t = fresh;
 }

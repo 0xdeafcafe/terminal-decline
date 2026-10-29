@@ -132,6 +132,11 @@ impl Terminal {
         self.colors.current[..PALETTE].try_into().unwrap()
     }
 
+    /// The theme's palette, the defaults OSC 104 goes back to.
+    pub fn default_palette(&self) -> &[u32; PALETTE] {
+        self.colors.base[..PALETTE].try_into().unwrap()
+    }
+
     /// The theme's palette, the defaults OSC 104 goes back to. Entries a
     /// program set keep the program's colour.
     pub fn set_default_palette(&mut self, palette: &[u32; PALETTE]) {

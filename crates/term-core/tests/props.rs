@@ -10,7 +10,7 @@ use proptest::sample::select;
 use proptest::test_runner::{Config, RngSeed};
 use term_core::scrollback::Scrollback;
 use term_core::term::GraphemeState;
-use term_core::{Cell, Color, Content, Row, RowRef, Selection, Style, Term, Width, flags};
+use term_core::{Attrs, Cell, Color, Content, Row, RowRef, Selection, Style, Term, Underline, Width};
 
 fn config() -> Config {
     Config {
@@ -535,8 +535,42 @@ fn colour() -> impl Strategy<Value = Color> {
     ]
 }
 
-fn style() -> impl Strategy<Value = u32> {
-    prop_oneof![Just(0u32), any::<u32>().prop_map(|b| b & flags::STYLE_MASK)]
+/// Every attribute SGR can set.
+const SGR_ATTRS: u16 = Attrs::BOLD.bits()
+    | Attrs::DIM.bits()
+    | Attrs::ITALIC.bits()
+    | Attrs::OVERLINE.bits()
+    | Attrs::STRIKE.bits()
+    | Attrs::INVERSE.bits()
+    | Attrs::HIDDEN.bits()
+    | Attrs::BLINK.bits();
+
+/// A style as the screen can hold it (no link yet).
+fn style() -> impl Strategy<Value = Style> {
+    let underline = select(vec![
+        Underline::None,
+        Underline::Single,
+        Underline::Double,
+        Underline::Curly,
+        Underline::Dotted,
+        Underline::Dashed,
+    ]);
+    (colour(), colour(), colour(), any::<u16>(), underline).prop_map(|(fg, bg, underline_color, attrs, underline)| Style {
+        fg,
+        bg,
+        underline_color,
+        attrs: Attrs::from_bits(attrs & SGR_ATTRS),
+        underline,
+        ..Style::DEFAULT
+    })
+}
+
+/// A row's style list: the default style first, as a table has it.
+fn styles() -> impl Strategy<Value = Vec<Style>> {
+    prop::collection::vec(prop_oneof![1 => Just(Style::DEFAULT), 4 => style()], 0..8).prop_map(|mut s| {
+        s.insert(0, Style::DEFAULT);
+        s
+    })
 }
 
 fn codepoint() -> impl Strategy<Value = u32> {
@@ -544,58 +578,58 @@ fn codepoint() -> impl Strategy<Value = u32> {
 }
 
 /// One narrow cell, or a wide cell and its spacer (which always share the
-/// wide cell's colours and style, as the terminal writes them).
-fn cells() -> impl Strategy<Value = Vec<Cell>> {
-    (any::<bool>(), codepoint(), style(), colour(), colour()).prop_map(|(wide, cp, style, fg, bg)| {
+/// wide cell's style, as the terminal writes them), in style `id` of
+/// `styles`.
+fn cells(styles: Vec<Style>) -> impl Strategy<Value = Vec<Cell>> {
+    let n = styles.len();
+    (any::<bool>(), codepoint(), 0..n).prop_map(move |(wide, cp, id)| {
+        let t = Cell::template(id as u32, styles[id].shows_empty());
+        let c = Cell::from_bits(t.bits() | cp as u64);
         if wide {
-            vec![
-                Cell {
-                    packed: cp | style | flags::WIDE,
-                    fg,
-                    bg,
-                },
-                Cell {
-                    packed: style | flags::WIDE_SPACER,
-                    fg,
-                    bg,
-                },
-            ]
+            vec![c.with_width(Width::Wide), t.with_width(Width::Spacer)]
         } else {
-            vec![Cell {
-                packed: cp | style,
-                fg,
-                bg,
-            }]
+            vec![c]
         }
     })
 }
 
-fn row() -> impl Strategy<Value = Row> {
-    (prop::collection::vec(cells(), 0..60), any::<bool>()).prop_map(|(cells, wrapped)| Row {
-        cells: cells.concat(),
-        wrapped,
+fn row() -> impl Strategy<Value = (Row, Vec<Style>)> {
+    styles().prop_flat_map(|styles| {
+        (prop::collection::vec(cells(styles.clone()), 0..60), any::<bool>(), Just(styles)).prop_map(|(cells, wrapped, styles)| {
+            (
+                Row {
+                    cells: cells.concat(),
+                    wrapped,
+                },
+                styles,
+            )
+        })
     })
 }
 
-/// What a row is expected to read back as: spaces stored as empty cells,
-/// and trailing blank cells dropped (but never half of a wide character).
-fn normalise(row: &Row) -> (Vec<Cell>, bool) {
-    let mut cells: Vec<Cell> = row
+/// What a row is expected to read back as, cell by cell (content, width,
+/// style by value): spaces stored as empty cells, and trailing blank cells
+/// dropped (but never half of a wide character).
+fn normalise(row: &Row, styles: &[Style]) -> (Vec<(u32, Width, Style)>, bool) {
+    let spaces_empty: Vec<Cell> = row
         .cells
         .iter()
-        .map(|c| {
-            let mut c = *c;
+        .map(|&c| {
             if c.codepoint() == ' ' as u32 {
-                c.packed &= !flags::CHAR_MASK;
+                c.style_part().with_width(c.width())
+            } else {
+                c
             }
-            c
         })
         .collect();
-    let mut len = cells.iter().rposition(|c| !c.is_blank()).map_or(0, |i| i + 1);
-    if len > 0 && len < cells.len() && cells[len - 1].has(flags::WIDE) {
+    let mut len = spaces_empty.iter().rposition(|c| !c.is_blank()).map_or(0, |i| i + 1);
+    if len > 0 && len < spaces_empty.len() && spaces_empty[len - 1].is_wide() {
         len += 1;
     }
-    cells.truncate(len);
+    let cells = spaces_empty[..len]
+        .iter()
+        .map(|c| (c.codepoint(), c.width(), styles[c.style_id() as usize]))
+        .collect();
     (cells, row.wrapped)
 }
 
@@ -603,7 +637,7 @@ fn numbered_row(i: usize) -> Row {
     let text = format!("line {i} {}", "x".repeat(60));
     let mut row = Row::new(80, Cell::BLANK);
     for (cell, ch) in row.cells.iter_mut().zip(text.chars()) {
-        cell.packed = ch as u32;
+        *cell = Cell::BLANK.with_char(ch);
     }
     row
 }
@@ -616,15 +650,17 @@ fn number_of(row: &Row) -> usize {
 proptest! {
     #![proptest_config(config())]
 
+    /// History stores styles by value: every cell reads back with the
+    /// same style, whatever ids the screen gave it.
     #[test]
     fn scrollback_rows_round_trip(rows in prop::collection::vec(row(), 1..8)) {
         let mut sb = Scrollback::new(100);
-        for r in &rows {
-            sb.push(r);
+        for (r, styles) in &rows {
+            sb.push(r, styles);
         }
-        for (i, r) in rows.iter().enumerate() {
-            let back = sb.get(i).expect("stored row");
-            prop_assert_eq!(normalise(&back), normalise(r));
+        for (i, (r, styles)) in rows.iter().enumerate() {
+            let (back, back_styles) = sb.get(i).expect("stored row");
+            prop_assert_eq!(normalise(&back, &back_styles), normalise(r, styles));
         }
     }
 
@@ -636,7 +672,7 @@ proptest! {
     ) {
         let mut sb = Scrollback::new(limit);
         for i in 0..pushed {
-            sb.push(&numbered_row(i));
+            sb.push(&numbered_row(i), &[Style::DEFAULT]);
         }
         let len = pushed.min(limit);
         prop_assert_eq!(sb.len(), len);
@@ -647,7 +683,7 @@ proptest! {
             let mut idx: Vec<usize> = probes.iter().map(|p| p.index(len)).collect();
             idx.extend([0, len - 1]);
             for i in idx {
-                prop_assert_eq!(number_of(&sb.get(i).unwrap()), first + i);
+                prop_assert_eq!(number_of(&sb.get(i).unwrap().0), first + i);
             }
         }
     }

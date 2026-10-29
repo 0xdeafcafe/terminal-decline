@@ -4,19 +4,23 @@
 //!
 //! Line layout inside a block:
 //! `[line flags u8][text len varint][text][run count varint][runs...]`
-//! A run is `[tag u8][char count varint][fg u32]?[bg u32]?[style varint]?`,
-//! where the tag says which of the optional fields follow (absent = default).
-//! A run count of 0 means the whole line has the default style.
+//! A run is `[tag u8][char count varint][fg u32]?[bg u32]?[style varint]?
+//! [underline colour u32]?`, where the tag says which of the optional fields
+//! follow (absent = default). A run count of 0 means the whole line has the
+//! default style. Styles are stored by value, so history holds no style ids
+//! and the screen's style table never has to keep an id alive for it.
 
 use std::collections::VecDeque;
 
-use crate::cell::{Cell, Color, Row, flags};
+use crate::cell::{Cell, Color, Row, Width};
+use crate::style::{Attrs, Style, Underline};
 
 const BLOCK_BYTES: usize = 64 * 1024;
 const WRAPPED: u8 = 1;
 const HAS_FG: u8 = 1;
 const HAS_BG: u8 = 2;
 const HAS_STYLE: u8 = 4;
+const HAS_UNDERLINE_COLOR: u8 = 8;
 
 struct Block {
     data: Vec<u8>,
@@ -82,8 +86,9 @@ impl Scrollback {
         self.start = self.end;
     }
 
-    /// Store a row (trailing blank cells dropped).
-    pub fn push(&mut self, row: &Row) {
+    /// Store a row (trailing blank cells dropped); its cells' style ids
+    /// index `styles`.
+    pub fn push(&mut self, row: &Row, styles: &[Style]) {
         if self.limit == 0 {
             return;
         }
@@ -104,7 +109,7 @@ impl Scrollback {
         }
         let block = self.blocks.back_mut().unwrap();
         block.starts.push(block.data.len() as u32);
-        encode(row, &mut block.data, &mut self.text, &mut self.runs);
+        encode(row, styles, &mut block.data, &mut self.text, &mut self.runs);
         self.end += 1;
 
         if self.len() > self.limit {
@@ -116,8 +121,9 @@ impl Scrollback {
         }
     }
 
-    /// Line `i` counting from the oldest visible line (0..len).
-    pub fn get(&self, i: usize) -> Option<Row> {
+    /// Line `i` counting from the oldest visible line (0..len), and the
+    /// styles its cells' ids index.
+    pub fn get(&self, i: usize) -> Option<(Row, Vec<Style>)> {
         if i >= self.len() {
             return None;
         }
@@ -128,8 +134,9 @@ impl Scrollback {
         let n = (line - block.first) as usize;
         let from = block.starts[n] as usize;
         let mut row = Row::default();
-        decode(&block.data[from..], &mut row);
-        Some(row)
+        let mut styles = Vec::new();
+        decode(&block.data[from..], &mut row, &mut styles);
+        Some((row, styles))
     }
 }
 
@@ -161,48 +168,146 @@ fn get_u32(data: &[u8], pos: &mut usize) -> u32 {
     u32::from_le_bytes(b)
 }
 
-/// The parts of a cell's look that runs record (style flags include WIDE so
-/// spacers can be rebuilt).
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// The bits of a run's style field. The first eleven are the 12-byte
+/// cell's old flags, so lines in the styles those cells could hold encode
+/// exactly as before; the rest hold what they couldn't.
+mod look {
+    pub const BOLD: u32 = 1 << 0;
+    pub const DIM: u32 = 1 << 1;
+    pub const ITALIC: u32 = 1 << 2;
+    pub const UNDERLINE: u32 = 1 << 3;
+    pub const STRIKE: u32 = 1 << 4;
+    pub const INVERSE: u32 = 1 << 5;
+    pub const HIDDEN: u32 = 1 << 6;
+    /// The characters are wide: a spacer follows each.
+    pub const WIDE: u32 = 1 << 7;
+    pub const BLINK: u32 = 1 << 9;
+    pub const DOUBLE_UNDERLINE: u32 = 1 << 10;
+    pub const OVERLINE: u32 = 1 << 11;
+    /// With UNDERLINE: 1 curly, 2 dotted, 3 dashed.
+    pub const UNDERLINE_KIND_SHIFT: u32 = 12;
+    pub const OWN_IMAGE: u32 = 1 << 14;
+}
+
+/// The attributes kept at the same bit in [`Attrs`] and in a run's style
+/// field.
+const SAME_BITS: u16 = Attrs::BOLD.bits()
+    | Attrs::DIM.bits()
+    | Attrs::ITALIC.bits()
+    | Attrs::STRIKE.bits()
+    | Attrs::INVERSE.bits()
+    | Attrs::HIDDEN.bits()
+    | Attrs::BLINK.bits();
+
+const _: () = {
+    assert!(Attrs::BOLD.bits() as u32 == look::BOLD);
+    assert!(Attrs::DIM.bits() as u32 == look::DIM);
+    assert!(Attrs::ITALIC.bits() as u32 == look::ITALIC);
+    assert!(Attrs::STRIKE.bits() as u32 == look::STRIKE);
+    assert!(Attrs::INVERSE.bits() as u32 == look::INVERSE);
+    assert!(Attrs::HIDDEN.bits() as u32 == look::HIDDEN);
+    assert!(Attrs::BLINK.bits() as u32 == look::BLINK);
+};
+
+/// What a run records about its cells: the style by value (all of it but
+/// the link, which has no table yet, and the image id's high byte, which
+/// only placeholders use) and whether the characters are wide.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 struct Look {
     fg: Color,
     bg: Color,
+    underline_color: Color,
     style: u32,
 }
 
 const DEFAULT_LOOK: Look = Look {
     fg: Color::DEFAULT,
     bg: Color::DEFAULT,
+    underline_color: Color::DEFAULT,
     style: 0,
 };
+
+impl Look {
+    fn of(s: &Style) -> Look {
+        let a = s.attrs;
+        let mut style = (a.bits() & SAME_BITS) as u32;
+        if a.contains(Attrs::OVERLINE) {
+            style |= look::OVERLINE;
+        }
+        if a.contains(Attrs::OWN_IMAGE) {
+            style |= look::OWN_IMAGE;
+        }
+        style |= match s.underline {
+            Underline::None => 0,
+            Underline::Single => look::UNDERLINE,
+            Underline::Double => look::DOUBLE_UNDERLINE,
+            Underline::Curly => look::UNDERLINE | 1 << look::UNDERLINE_KIND_SHIFT,
+            Underline::Dotted => look::UNDERLINE | 2 << look::UNDERLINE_KIND_SHIFT,
+            Underline::Dashed => look::UNDERLINE | 3 << look::UNDERLINE_KIND_SHIFT,
+        };
+        Look {
+            fg: s.fg,
+            bg: s.bg,
+            underline_color: s.underline_color,
+            style,
+        }
+    }
+
+    fn style(&self) -> Style {
+        let st = self.style;
+        let mut attrs = Attrs::from_bits(st as u16 & SAME_BITS);
+        attrs.set(Attrs::OVERLINE, st & look::OVERLINE != 0);
+        attrs.set(Attrs::OWN_IMAGE, st & look::OWN_IMAGE != 0);
+        let underline = if st & look::DOUBLE_UNDERLINE != 0 {
+            Underline::Double
+        } else if st & look::UNDERLINE != 0 {
+            match (st >> look::UNDERLINE_KIND_SHIFT) & 3 {
+                1 => Underline::Curly,
+                2 => Underline::Dotted,
+                3 => Underline::Dashed,
+                _ => Underline::Single,
+            }
+        } else {
+            Underline::None
+        };
+        Style {
+            fg: self.fg,
+            bg: self.bg,
+            underline_color: self.underline_color,
+            attrs,
+            underline,
+            ..Style::DEFAULT
+        }
+    }
+}
 
 /// How many cells of `cells` to store: up to and including the last one
 /// that isn't blank ([`Cell::is_blank`]).
 fn stored_len(cells: &[Cell]) -> usize {
-    // Most trailing cells are all zero (never written, or erased with the
-    // default background): skip those with a cheap check first, 8 cells at
-    // a time (an OR over 96 bytes, which vectorises), then one at a time.
-    let zero = |c: &[Cell]| c.iter().fold(0, |a, c| a | c.packed | c.fg.0 | c.bg.0) == 0;
+    // Most trailing cells are blank (never written, or erased with the
+    // default background): skip them 8 at a time (an OR over 64 bytes,
+    // which vectorises), then one at a time.
+    let blank = |c: &[Cell]| c.iter().fold(0, |a, c| a | c.bits()) & Cell::NOT_BLANK == 0;
     let mut len = cells.len();
-    while len >= 8 && zero(&cells[len - 8..len]) {
+    while len >= 8 && blank(&cells[len - 8..len]) {
         len -= 8;
     }
-    while len > 0 && zero(&cells[len - 1..len]) {
+    while len > 0 && cells[len - 1].is_blank() {
         len -= 1;
     }
-    cells[..len].iter().rposition(|c| !c.is_blank()).map_or(0, |i| i + 1)
+    len
 }
 
-fn encode(row: &Row, out: &mut Vec<u8>, body: &mut Vec<u8>, runs: &mut Vec<(Look, u32)>) {
+fn encode(row: &Row, styles: &[Style], out: &mut Vec<u8>, body: &mut Vec<u8>, runs: &mut Vec<(Look, u32)>) {
     let cells = &row.cells[..stored_len(&row.cells)];
     out.push(if row.wrapped { WRAPPED } else { 0 });
 
-    // Common case: every cell is ASCII in the default style (no flags, no
-    // colours), so the text is a byte copy and there are no runs.
-    if cells.iter().fold(0, |a, c| a | (c.packed & !0x7F) | c.fg.0 | c.bg.0) == 0 {
+    // Common case: every cell is narrow ASCII (or empty) in the default
+    // style, so the text is a byte copy and there are no runs.
+    if cells.iter().fold(0, |a, c| a | c.bits()) & !0x7F == 0 {
         put_varint(out, cells.len() as u32);
         out.reserve(cells.len() + 1);
-        out.extend(cells.iter().map(|c| if c.packed == 0 { b' ' } else { c.packed as u8 }));
+        out.extend(cells.iter().map(|c| if c.bits() == 0 { b' ' } else { c.bits() as u8 }));
         put_varint(out, 0);
         return;
     }
@@ -210,8 +315,11 @@ fn encode(row: &Row, out: &mut Vec<u8>, body: &mut Vec<u8>, runs: &mut Vec<(Look
     body.clear();
     runs.clear();
     let mut utf8 = [0u8; 4];
-    for c in cells {
-        if c.has(flags::WIDE_SPACER) {
+    // Neighbouring cells mostly share a style id: look each run's up once.
+    let mut last_id = 0;
+    let mut base = DEFAULT_LOOK;
+    for &c in cells {
+        if c.is_spacer() {
             continue;
         }
         let cp = c.codepoint();
@@ -220,11 +328,14 @@ fn encode(row: &Row, out: &mut Vec<u8>, body: &mut Vec<u8>, runs: &mut Vec<(Look
         } else {
             body.extend_from_slice(c.ch().encode_utf8(&mut utf8).as_bytes());
         }
-        let look = Look {
-            fg: c.fg,
-            bg: c.bg,
-            style: c.flags() >> 21,
-        };
+        if c.style_id() != last_id {
+            last_id = c.style_id();
+            base = styles.get(last_id as usize).map_or(DEFAULT_LOOK, Look::of);
+        }
+        let mut look = base;
+        if c.is_wide() {
+            look.style |= look::WIDE;
+        }
         match runs.last_mut() {
             Some((l, n)) if *l == look => *n += 1,
             _ => runs.push((look, 1)),
@@ -232,7 +343,10 @@ fn encode(row: &Row, out: &mut Vec<u8>, body: &mut Vec<u8>, runs: &mut Vec<(Look
     }
     put_varint(out, body.len() as u32);
     out.extend_from_slice(body);
+    put_runs(out, runs);
+}
 
+fn put_runs(out: &mut Vec<u8>, runs: &[(Look, u32)]) {
     if runs.iter().all(|(l, _)| *l == DEFAULT_LOOK) {
         put_varint(out, 0);
         return;
@@ -241,7 +355,8 @@ fn encode(row: &Row, out: &mut Vec<u8>, body: &mut Vec<u8>, runs: &mut Vec<(Look
     for &(look, n) in runs.iter() {
         let tag = ((look.fg != Color::DEFAULT) as u8 * HAS_FG)
             | ((look.bg != Color::DEFAULT) as u8 * HAS_BG)
-            | ((look.style != 0) as u8 * HAS_STYLE);
+            | ((look.style != 0) as u8 * HAS_STYLE)
+            | ((look.underline_color != Color::DEFAULT) as u8 * HAS_UNDERLINE_COLOR);
         out.push(tag);
         put_varint(out, n);
         if tag & HAS_FG != 0 {
@@ -253,10 +368,15 @@ fn encode(row: &Row, out: &mut Vec<u8>, body: &mut Vec<u8>, runs: &mut Vec<(Look
         if tag & HAS_STYLE != 0 {
             put_varint(out, look.style);
         }
+        if tag & HAS_UNDERLINE_COLOR != 0 {
+            out.extend_from_slice(&look.underline_color.0.to_le_bytes());
+        }
     }
 }
 
-fn decode(data: &[u8], row: &mut Row) {
+/// Expand a stored line into `row`, its cells' style ids indexing
+/// `styles` (which starts with the default style, id 0).
+fn decode(data: &[u8], row: &mut Row, styles: &mut Vec<Style>) {
     let mut pos = 0;
     let line_flags = data.first().copied().unwrap_or(0);
     pos += 1;
@@ -266,7 +386,10 @@ fn decode(data: &[u8], row: &mut Row) {
     pos += text_len;
     let mut run_count = get_varint(data, &mut pos);
 
-    let mut look = DEFAULT_LOOK;
+    styles.clear();
+    styles.push(Style::DEFAULT);
+    let mut template = Cell::BLANK;
+    let mut wide = false;
     let mut left = u32::MAX; // chars left in the current run
     if run_count > 0 {
         left = 0;
@@ -278,7 +401,7 @@ fn decode(data: &[u8], row: &mut Row) {
             let tag = data.get(pos).copied().unwrap_or(0);
             pos += 1;
             left = get_varint(data, &mut pos);
-            look = DEFAULT_LOOK;
+            let mut look = DEFAULT_LOOK;
             if tag & HAS_FG != 0 {
                 look.fg = Color(get_u32(data, &mut pos));
             }
@@ -288,22 +411,31 @@ fn decode(data: &[u8], row: &mut Row) {
             if tag & HAS_STYLE != 0 {
                 look.style = get_varint(data, &mut pos);
             }
+            if tag & HAS_UNDERLINE_COLOR != 0 {
+                look.underline_color = Color(get_u32(data, &mut pos));
+            }
             run_count -= 1;
+            wide = look.style & look::WIDE != 0;
+            let style = look.style();
+            // Runs next to each other differ, but often only in width.
+            let id = if style == Style::DEFAULT {
+                0
+            } else if styles.last() == Some(&style) {
+                styles.len() - 1
+            } else {
+                styles.push(style);
+                styles.len() - 1
+            };
+            template = Cell::template(id as u32, style.shows_empty());
         }
         left = left.saturating_sub(1);
-        let style = look.style << 21;
-        let cp = if ch == ' ' && style & flags::WIDE == 0 { 0 } else { ch as u32 };
-        row.cells.push(Cell {
-            packed: cp | style,
-            fg: look.fg,
-            bg: look.bg,
-        });
-        if style & flags::WIDE != 0 {
-            row.cells.push(Cell {
-                packed: (style & !flags::WIDE) | flags::WIDE_SPACER,
-                fg: look.fg,
-                bg: look.bg,
-            });
+        if wide {
+            row.cells.push(template.with_char(ch).with_width(Width::Wide));
+            row.cells.push(template.with_width(Width::Spacer));
+        } else if ch == ' ' {
+            row.cells.push(template);
+        } else {
+            row.cells.push(template.with_char(ch));
         }
     }
 }
@@ -314,7 +446,7 @@ mod tests {
 
     /// The encoder as it was before its fast paths, kept to check that they
     /// write exactly the same bytes.
-    fn encode_reference(row: &Row, out: &mut Vec<u8>) {
+    fn encode_reference(row: &Row, styles: &[Style], out: &mut Vec<u8>) {
         let len = row.cells.iter().rposition(|c| !c.is_blank()).map_or(0, |i| i + 1);
         let cells = &row.cells[..len];
         out.push(if row.wrapped { WRAPPED } else { 0 });
@@ -323,7 +455,7 @@ mod tests {
         let mut runs: Vec<(Look, u32)> = Vec::new();
         let mut utf8 = [0u8; 4];
         for c in cells {
-            if c.has(flags::WIDE_SPACER) {
+            if c.is_spacer() {
                 continue;
             }
             let cp = c.codepoint();
@@ -332,11 +464,10 @@ mod tests {
             } else {
                 body.extend_from_slice(c.ch().encode_utf8(&mut utf8).as_bytes());
             }
-            let look = Look {
-                fg: c.fg,
-                bg: c.bg,
-                style: c.flags() >> 21,
-            };
+            let mut look = Look::of(&styles[c.style_id() as usize]);
+            if c.is_wide() {
+                look.style |= look::WIDE;
+            }
             match runs.last_mut() {
                 Some((l, n)) if *l == look => *n += 1,
                 _ => runs.push((look, 1)),
@@ -344,28 +475,7 @@ mod tests {
         }
         put_varint(out, body.len() as u32);
         out.extend_from_slice(&body);
-
-        if runs.iter().all(|(l, _)| *l == DEFAULT_LOOK) {
-            put_varint(out, 0);
-            return;
-        }
-        put_varint(out, runs.len() as u32);
-        for &(look, n) in runs.iter() {
-            let tag = ((look.fg != Color::DEFAULT) as u8 * HAS_FG)
-                | ((look.bg != Color::DEFAULT) as u8 * HAS_BG)
-                | ((look.style != 0) as u8 * HAS_STYLE);
-            out.push(tag);
-            put_varint(out, n);
-            if tag & HAS_FG != 0 {
-                out.extend_from_slice(&look.fg.0.to_le_bytes());
-            }
-            if tag & HAS_BG != 0 {
-                out.extend_from_slice(&look.bg.0.to_le_bytes());
-            }
-            if tag & HAS_STYLE != 0 {
-                put_varint(out, look.style);
-            }
-        }
+        put_runs(out, &runs);
     }
 
     struct Rng(u64);
@@ -381,86 +491,78 @@ mod tests {
         }
     }
 
+    fn colour(r: &mut Rng) -> Color {
+        match r.below(3) {
+            0 => Color::DEFAULT,
+            1 => Color::indexed(r.below(256) as u8),
+            _ => Color::rgb(r.below(256) as u8, 0, r.below(256) as u8),
+        }
+    }
+
+    /// A table of styles, the default first: foreground only, background,
+    /// attributes, every underline, underline colours.
+    fn random_styles(r: &mut Rng) -> Vec<Style> {
+        let mut styles = vec![Style::DEFAULT];
+        for _ in 0..20 {
+            let underline = [
+                Underline::None,
+                Underline::None,
+                Underline::Single,
+                Underline::Double,
+                Underline::Curly,
+                Underline::Dotted,
+                Underline::Dashed,
+            ][r.below(7) as usize];
+            styles.push(Style {
+                fg: colour(r),
+                bg: if r.below(2) == 0 { Color::DEFAULT } else { colour(r) },
+                underline_color: if r.below(3) == 0 { colour(r) } else { Color::DEFAULT },
+                attrs: Attrs::from_bits(r.next() as u16 & (SAME_BITS | Attrs::OVERLINE.bits())),
+                underline,
+                ..Style::DEFAULT
+            });
+        }
+        styles
+    }
+
+    fn template(styles: &[Style], id: usize) -> Cell {
+        Cell::template(id as u32, styles[id].shows_empty())
+    }
+
     /// A random row, mostly the kinds of cells the encoder treats specially:
-    /// empty, default-style ASCII, typed spaces, styled or coloured cells,
-    /// blanks that still show (background, inverse, underline), non-ASCII
-    /// and wide characters.
-    fn random_row(r: &mut Rng) -> Row {
+    /// empty, default-style ASCII, typed spaces, styled cells, blanks that
+    /// still show (background, inverse, underline), non-ASCII and wide
+    /// characters.
+    fn random_row(r: &mut Rng, styles: &[Style]) -> Row {
         let len = r.below(90) as usize;
         let ascii_only = r.below(3) == 0;
         let mut cells = Vec::with_capacity(len + 1);
         while cells.len() < len {
-            let ch = 0x20 + r.below(95) as u32;
-            let colour = |r: &mut Rng| match r.below(3) {
-                0 => Color::DEFAULT,
-                1 => Color::indexed(r.below(256) as u8),
-                _ => Color::rgb(r.below(256) as u8, 0, r.below(256) as u8),
-            };
-            let kind = if ascii_only { r.below(3) } else { r.below(12) };
+            let ch = (0x20 + r.below(95) as u8) as char;
+            let any = template(styles, r.below(styles.len() as u64) as usize);
+            let kind = if ascii_only { r.below(3) } else { r.below(10) };
             let cell = match kind {
                 0 => Cell::BLANK,
-                1 => Cell { packed: ch, ..Cell::BLANK },
-                2 => Cell {
-                    packed: ' ' as u32,
-                    ..Cell::BLANK
-                },
-                3 => Cell {
-                    packed: ch | flags::BOLD,
-                    ..Cell::BLANK
-                },
-                4 => Cell {
-                    packed: ch,
-                    fg: colour(r),
-                    bg: Color::DEFAULT,
-                },
-                5 => Cell::erased(colour(r)),
-                6 => Cell {
-                    packed: [flags::INVERSE, flags::UNDERLINE, flags::STRIKE, flags::ITALIC][r.below(4) as usize],
-                    ..Cell::BLANK
-                },
-                7 => Cell {
-                    packed: 0,
-                    fg: colour(r),
-                    bg: Color::DEFAULT,
-                },
-                8 => Cell {
-                    packed: ['é', 'Ω', '─', '\u{10FFFD}'][r.below(4) as usize] as u32,
-                    ..Cell::BLANK
-                },
-                9 => Cell {
-                    packed: 0x7F,
-                    ..Cell::BLANK
-                },
+                1 => Cell::BLANK.with_char(ch),
+                2 => Cell::BLANK.with_char(' '),
+                3 => any.with_char(ch),
+                4 => any,
+                5 => any.with_char(['é', 'Ω', '─', '\u{10FFFD}'][r.below(4) as usize]),
+                6 => Cell::BLANK.with_char('\u{7F}'),
                 _ => {
-                    let (fg, bg) = (colour(r), colour(r));
-                    let style = if r.below(2) == 0 { 0 } else { flags::UNDERLINE };
-                    cells.push(Cell {
-                        packed: '漢' as u32 | style | flags::WIDE,
-                        fg,
-                        bg,
-                    });
-                    Cell {
-                        packed: style | flags::WIDE_SPACER,
-                        fg,
-                        bg,
-                    }
+                    cells.push(any.with_char('漢').with_width(Width::Wide));
+                    any.with_width(Width::Spacer)
                 }
             };
             cells.push(cell);
         }
         // Trailing blanks of every kind.
         for _ in 0..r.below(40) {
-            cells.push(match r.below(4) {
+            let id = r.below(styles.len() as u64) as usize;
+            cells.push(match r.below(3) {
                 0 | 1 => Cell::BLANK,
-                2 => Cell {
-                    packed: flags::BOLD,
-                    ..Cell::BLANK
-                },
-                _ => Cell {
-                    packed: 0,
-                    fg: Color::indexed(3),
-                    bg: Color::DEFAULT,
-                },
+                _ if !styles[id].shows_empty() => template(styles, id),
+                _ => Cell::BLANK,
             });
         }
         Row {
@@ -474,12 +576,78 @@ mod tests {
         let mut r = Rng(0x5EED_1234_ABCD_0001);
         let (mut body, mut runs) = (Vec::new(), Vec::new());
         for i in 0..200_000 {
-            let row = random_row(&mut r);
+            if i % 1000 == 0 {
+                r.next();
+            }
+            let styles = random_styles(&mut Rng(1 + i as u64 / 1000));
+            let row = random_row(&mut r, &styles);
             let (mut fast, mut slow) = (vec![0xEE], vec![0xEE]);
-            encode(&row, &mut fast, &mut body, &mut runs);
-            encode_reference(&row, &mut slow);
+            encode(&row, &styles, &mut fast, &mut body, &mut runs);
+            encode_reference(&row, &styles, &mut slow);
             assert_eq!(fast, slow, "row {i}: {row:?}");
         }
+    }
+
+    #[test]
+    fn styles_round_trip_by_value() {
+        let mut r = Rng(7);
+        for _ in 0..2000 {
+            let styles = random_styles(&mut r);
+            let row = random_row(&mut r, &styles);
+            let mut sb = Scrollback::new(10);
+            sb.push(&row, &styles);
+            let (back, back_styles) = sb.get(0).unwrap();
+            assert_eq!(back.wrapped, row.wrapped);
+            let mut len = stored_len(&row.cells);
+            // A wide character's spacer may be blank: it comes back too.
+            if len > 0 && row.cells[len - 1].is_wide() {
+                len += 1;
+            }
+            assert_eq!(back.cells.len(), len);
+            for (a, b) in row.cells[..len].iter().zip(&back.cells) {
+                assert_eq!(styles[a.style_id() as usize], back_styles[b.style_id() as usize]);
+                assert_eq!(a.shows_empty(), b.shows_empty());
+                assert_eq!(a.width(), b.width());
+                let cp = if a.codepoint() == ' ' as u32 && !a.is_wide() {
+                    0
+                } else {
+                    a.codepoint()
+                };
+                assert_eq!(cp, b.codepoint());
+            }
+        }
+    }
+
+    /// Lines in the styles the 12-byte cells could hold encode as they did
+    /// then: these are the bytes the old encoder wrote.
+    #[test]
+    fn old_styles_keep_their_bytes() {
+        let styles = vec![
+            Style::DEFAULT,
+            Style {
+                fg: Color::indexed(1),
+                attrs: Attrs::BOLD,
+                ..Style::DEFAULT
+            },
+            Style {
+                bg: Color::indexed(2),
+                underline: Underline::Single,
+                ..Style::DEFAULT
+            },
+        ];
+        let mut row = Row::new(6, Cell::BLANK);
+        row.cells[0] = template(&styles, 1).with_char('a');
+        row.cells[1] = template(&styles, 2).with_char('漢').with_width(Width::Wide);
+        row.cells[2] = template(&styles, 2).with_width(Width::Spacer);
+        let mut out = Vec::new();
+        encode(&row, &styles, &mut out, &mut Vec::new(), &mut Vec::new());
+        #[rustfmt::skip]
+        let old = [
+            0, 4, b'a', 0xE6, 0xBC, 0xA2, 2,
+            HAS_FG | HAS_STYLE, 1, 1, 0, 0, 1, 1,
+            HAS_BG | HAS_STYLE, 1, 2, 0, 0, 1, 0x88, 1,
+        ];
+        assert_eq!(out, old);
     }
 
     fn row_of(cells: Vec<Cell>, wrapped: bool) -> Row {
@@ -487,57 +655,18 @@ mod tests {
     }
 
     #[test]
-    fn round_trip_styles_and_wide() {
-        let red = Color::indexed(1);
-        let rgb = Color::rgb(1, 2, 3);
-        let cells = vec![
-            Cell {
-                packed: 'a' as u32,
-                ..Cell::BLANK
-            },
-            Cell {
-                packed: 'b' as u32 | flags::BOLD,
-                fg: red,
-                bg: Color::DEFAULT,
-            },
-            Cell {
-                packed: '漢' as u32 | flags::WIDE,
-                fg: red,
-                bg: rgb,
-            },
-            Cell {
-                packed: flags::WIDE_SPACER,
-                fg: red,
-                bg: rgb,
-            },
-            Cell::BLANK,
-            Cell {
-                packed: 'z' as u32 | flags::UNDERLINE,
-                ..Cell::BLANK
-            },
-            Cell::BLANK,
-            Cell::BLANK,
-        ];
-        let mut sb = Scrollback::new(10);
-        sb.push(&row_of(cells.clone(), true));
-        let back = sb.get(0).unwrap();
-        assert!(back.wrapped);
-        assert_eq!(back.cells, cells[..6].to_vec());
-    }
-
-    #[test]
     fn plain_lines_are_small() {
         let mut sb = Scrollback::new(100_000);
         let mut row = Row::new(200, Cell::BLANK);
         for (i, c) in "the quick brown fox jumps over the lazy dog".chars().enumerate() {
-            row.cells[i].packed = c as u32;
+            row.cells[i] = Cell::BLANK.with_char(c);
         }
         for _ in 0..10_000 {
-            sb.push(&row);
+            sb.push(&row, &[Style::DEFAULT]);
         }
         let per_line = sb.memory_bytes() / 10_000;
         assert!(per_line < 60, "{per_line} bytes per line");
-        assert_eq!(sb.get(9_999).unwrap().cells.len(), 43);
+        assert_eq!(sb.get(9_999).unwrap().0.cells.len(), 43);
     }
 
     #[test]
@@ -588,12 +717,9 @@ mod tests {
     #[test]
     fn freeing_keeps_at_most_one_spare_block_and_clear_frees_all() {
         let mut sb = Scrollback::new(500);
-        let mut row = Row::new(200, Cell::BLANK);
-        for c in &mut row.cells {
-            c.packed = 'x' as u32;
-        }
+        let row = row_of(vec![Cell::BLANK.with_char('x'); 200], false);
         for _ in 0..20_000 {
-            sb.push(&row);
+            sb.push(&row, &[Style::DEFAULT]);
             // 500 lines of ~205 bytes span two blocks; a third may be filling.
             assert!(sb.blocks.len() <= 3, "{} blocks", sb.blocks.len());
         }
@@ -602,9 +728,9 @@ mod tests {
         assert!(sb.is_empty());
         assert_eq!(sb.memory_bytes(), 0);
         assert!(sb.get(0).is_none());
-        sb.push(&row);
+        sb.push(&row, &[Style::DEFAULT]);
         assert_eq!(sb.len(), 1);
-        assert_eq!(sb.get(0).unwrap().cells.len(), 200);
+        assert_eq!(sb.get(0).unwrap().0.cells.len(), 200);
     }
 
     #[test]
@@ -614,12 +740,12 @@ mod tests {
         for i in 0..100_000u32 {
             let s = i.to_string();
             for (j, c) in s.chars().enumerate() {
-                row.cells[j].packed = c as u32;
+                row.cells[j] = Cell::BLANK.with_char(c);
             }
-            sb.push(&row);
+            sb.push(&row, &[Style::DEFAULT]);
         }
         assert_eq!(sb.len(), 1000);
-        let first: String = sb.get(0).unwrap().cells.iter().map(|c| c.ch()).collect();
+        let first: String = sb.get(0).unwrap().0.cells.iter().map(|c| c.ch()).collect();
         assert_eq!(first, "99000");
         assert!(sb.blocks.len() <= 2, "old blocks freed");
     }

@@ -13,9 +13,9 @@ pub type LinkId = u32;
 pub struct Attrs(u16);
 
 impl Attrs {
-    // The bits follow today's cell flags (`cell::flags`, shifted down by
-    // 21) so a 12-byte cell's attributes are read with one shift and mask.
-    // The gaps (3, 7, 8, 10) are the flags that aren't attributes there.
+    // The bits follow the old 12-byte cell's flags (shifted down by 21),
+    // which history (v1) still stores at the same bits, so most attributes
+    // go into a stored run with one mask (`scrollback::SAME_BITS`).
     pub const BOLD: Attrs = Attrs(1 << 0);
     pub const DIM: Attrs = Attrs(1 << 1);
     pub const ITALIC: Attrs = Attrs(1 << 2);

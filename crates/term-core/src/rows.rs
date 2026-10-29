@@ -1,13 +1,13 @@
 //! Reading the screen and history: [`RowRef`] for a row as it is shown and
 //! [`CellRef`] for one of its cells. These are the only way term-render and
-//! term-app read cells, so the storage behind them (today 12-byte cells with
-//! the style inline) can change without touching those crates.
+//! term-app read cells, so the storage behind them (8-byte cells holding an
+//! id in a style table) can change without touching those crates.
 
 use std::borrow::Cow;
-use std::marker::PhantomData;
 
-use crate::cell::{Cell, Row, flags};
-use crate::style::{Attrs, Style, Underline};
+pub use crate::cell::Width;
+use crate::cell::{Cell, Row};
+use crate::style::Style;
 
 /// What a cell shows.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -22,38 +22,26 @@ pub enum Content<'a> {
     Placeholder { row: u16, col: u16 },
 }
 
-/// How much of a row a cell's content takes.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-#[repr(u8)]
-pub enum Width {
-    /// One cell.
-    Narrow = 0,
-    /// The left half of a two-cell character.
-    Wide = 1,
-    /// The right half of a two-cell character; draws nothing itself.
-    Spacer = 2,
-    /// The last column of a row whose next wide character didn't fit and
-    /// moved to the next row.
-    EdgeSpacer = 3,
-}
-
 /// One cell, read from a [`RowRef`].
 #[derive(Clone, Copy, Debug)]
 pub struct CellRef<'a> {
     cell: Cell,
-    _row: PhantomData<&'a Row>,
+    /// The styles its row's style ids index: the screen's table, or a
+    /// history row's own list.
+    styles: &'a [Style],
 }
 
-/// Identifies a cell's style cheaply: two cells with equal keys have equal
-/// [`Style`]s. Frame building uses it to reuse the previous cell's resolved
-/// colours across runs of same-styled text.
+/// Identifies a cell's style cheaply: two cells **of the same row** with
+/// equal keys have equal [`Style`]s. Frame building uses it to reuse the
+/// previous cell's resolved colours across runs of same-styled text. It is
+/// the cell's style id, so comparing keys is one compare.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct StyleKey(u64, u32);
+pub struct StyleKey(u32);
 
 impl<'a> CellRef<'a> {
     #[inline]
-    fn new(cell: Cell) -> CellRef<'a> {
-        CellRef { cell, _row: PhantomData }
+    pub(crate) fn new(cell: Cell, styles: &'a [Style]) -> CellRef<'a> {
+        CellRef { cell, styles }
     }
 
     #[inline]
@@ -70,25 +58,18 @@ impl<'a> CellRef<'a> {
 
     #[inline]
     pub fn width(&self) -> Width {
-        if self.cell.has(flags::WIDE) {
-            Width::Wide
-        } else if self.cell.has(flags::WIDE_SPACER) {
-            Width::Spacer
-        } else {
-            Width::Narrow
-        }
+        self.cell.width()
     }
 
     #[inline]
     pub fn style(&self) -> Style {
-        style_of(self.cell)
+        self.styles.get(self.cell.style_id() as usize).copied().unwrap_or_default()
     }
 
     /// See [`StyleKey`].
     #[inline]
     pub fn style_key(&self) -> StyleKey {
-        let style_bits = self.cell.packed & !(flags::CHAR_MASK | flags::WIDE | flags::WIDE_SPACER);
-        StyleKey(self.cell.fg.0 as u64 | (self.cell.bg.0 as u64) << 32, style_bits)
+        StyleKey(self.cell.style_id())
     }
 
     /// Nothing would be drawn here if the row ended at this cell: no
@@ -103,7 +84,7 @@ impl<'a> CellRef<'a> {
     /// an edge spacer) and draws nothing of its own.
     #[inline]
     pub fn is_spacer(&self) -> bool {
-        matches!(self.width(), Width::Spacer | Width::EdgeSpacer)
+        self.cell.is_spacer()
     }
 
     /// The content as text: a space for empty cells and placeholders.
@@ -127,68 +108,18 @@ impl<'a> CellRef<'a> {
     }
 }
 
-/// Where the style flags start in a 12-byte cell's `packed`.
-const FLAG_SHIFT: u32 = 21;
-/// The attributes a 12-byte cell can hold, as `Attrs` bits.
-const CELL_ATTRS: u32 = (Attrs::BOLD.bits()
-    | Attrs::DIM.bits()
-    | Attrs::ITALIC.bits()
-    | Attrs::STRIKE.bits()
-    | Attrs::INVERSE.bits()
-    | Attrs::HIDDEN.bits()
-    | Attrs::BLINK.bits()) as u32;
-
-// Each of those attributes sits at its flag's bit, shifted down.
-const _: () = {
-    let pairs = [
-        (flags::BOLD, Attrs::BOLD),
-        (flags::DIM, Attrs::DIM),
-        (flags::ITALIC, Attrs::ITALIC),
-        (flags::STRIKE, Attrs::STRIKE),
-        (flags::INVERSE, Attrs::INVERSE),
-        (flags::HIDDEN, Attrs::HIDDEN),
-        (flags::BLINK, Attrs::BLINK),
-    ];
-    let mut i = 0;
-    while i < pairs.len() {
-        assert!(pairs[i].0 >> FLAG_SHIFT == pairs[i].1.bits() as u32);
-        i += 1;
-    }
-};
-
-/// The style a 12-byte cell carries inline.
-#[inline]
-pub(crate) fn style_of(cell: Cell) -> Style {
-    let p = cell.packed;
-    // Attrs' bits are the cell's flag bits shifted down (see `Attrs`), so
-    // this is one shift and one mask: it runs for every cell of every frame.
-    let attrs = Attrs::from_bits(((p >> FLAG_SHIFT) & CELL_ATTRS) as u16);
-    let underline = if p & (flags::UNDERLINE | flags::DOUBLE_UNDERLINE) == 0 {
-        Underline::None
-    } else if p & flags::DOUBLE_UNDERLINE != 0 {
-        Underline::Double
-    } else {
-        Underline::Single
-    };
-    Style {
-        fg: cell.fg,
-        bg: cell.bg,
-        attrs,
-        underline,
-        ..Style::DEFAULT
-    }
-}
-
 /// One row as shown: a screen row, or a history row expanded from its
 /// stored form. History rows may be shorter than the screen is wide; cells
 /// past the end read as blank.
 pub struct RowRef<'a> {
     row: Cow<'a, Row>,
+    styles: Cow<'a, [Style]>,
 }
 
 impl<'a> RowRef<'a> {
-    pub(crate) fn new(row: Cow<'a, Row>) -> RowRef<'a> {
-        RowRef { row }
+    /// `row`'s style ids index `styles`.
+    pub(crate) fn new(row: Cow<'a, Row>, styles: Cow<'a, [Style]>) -> RowRef<'a> {
+        RowRef { row, styles }
     }
 
     /// Cells stored in this row.
@@ -205,12 +136,13 @@ impl<'a> RowRef<'a> {
     /// The cell at `col`; blank past the end of the row.
     #[inline]
     pub fn cell(&self, col: usize) -> CellRef<'_> {
-        CellRef::new(self.row.cells.get(col).copied().unwrap_or(Cell::BLANK))
+        CellRef::new(self.row.cells.get(col).copied().unwrap_or(Cell::BLANK), &self.styles)
     }
 
     /// The stored cells, left to right.
     pub fn cells(&self) -> impl DoubleEndedIterator<Item = CellRef<'_>> + ExactSizeIterator + '_ {
-        self.row.cells.iter().map(|&c| CellRef::new(c))
+        let styles: &[Style] = &self.styles;
+        self.row.cells.iter().map(move |&c| CellRef::new(c, styles))
     }
 
     /// The line continues onto the next row (soft wrap).
@@ -234,52 +166,49 @@ impl<'a> RowRef<'a> {
 mod tests {
     use super::*;
     use crate::cell::Color;
+    use crate::style::{Attrs, Underline};
 
-    fn cell(packed: u32) -> Cell {
-        Cell {
-            packed,
-            fg: Color::indexed(3),
-            bg: Color::rgb(1, 2, 3),
-        }
+    fn styles() -> Vec<Style> {
+        vec![
+            Style::DEFAULT,
+            Style {
+                fg: Color::indexed(3),
+                bg: Color::rgb(1, 2, 3),
+                underline: Underline::Curly,
+                attrs: Attrs::BOLD,
+                ..Style::DEFAULT
+            },
+        ]
     }
 
     #[test]
-    fn every_flag_reads_as_its_attribute() {
-        for (flag, attr) in [
-            (flags::BOLD, Attrs::BOLD),
-            (flags::DIM, Attrs::DIM),
-            (flags::ITALIC, Attrs::ITALIC),
-            (flags::INVERSE, Attrs::INVERSE),
-            (flags::HIDDEN, Attrs::HIDDEN),
-            (flags::STRIKE, Attrs::STRIKE),
-            (flags::BLINK, Attrs::BLINK),
-        ] {
-            let s = style_of(cell('a' as u32 | flag));
-            assert_eq!(s.attrs, attr, "{flag:#x}");
-            assert_eq!(s.underline, Underline::None);
-            assert_eq!((s.fg, s.bg), (Color::indexed(3), Color::rgb(1, 2, 3)));
-        }
-        let s = style_of(cell(flags::STYLE_MASK));
-        assert_eq!(s.underline, Underline::Double, "double wins over single");
-        assert_eq!(style_of(cell(flags::UNDERLINE)).underline, Underline::Single);
-        assert_eq!(style_of(Cell::BLANK), Style::DEFAULT);
+    fn style_comes_from_the_rows_table() {
+        let styles = styles();
+        let c = CellRef::new(Cell::template(1, true).with_char('a'), &styles);
+        assert_eq!(c.style(), styles[1]);
+        assert_eq!(c.style_key(), StyleKey(1));
+        let plain = CellRef::new(Cell::BLANK.with_char('a'), &styles);
+        assert_eq!(plain.style(), Style::DEFAULT);
+        assert_ne!(plain.style_key(), c.style_key());
+        // An id the list doesn't have reads as the default (never stored).
+        assert_eq!(CellRef::new(Cell::template(9, false), &styles).style(), Style::DEFAULT);
     }
 
     #[test]
     fn content_and_width() {
-        let wide = CellRef::new(cell('漢' as u32 | flags::WIDE));
+        let styles = styles();
+        let t = Cell::template(1, true);
+        let wide = CellRef::new(t.with_char('漢').with_width(Width::Wide), &styles);
         assert_eq!((wide.content(), wide.width()), (Content::Char('漢'), Width::Wide));
-        let spacer = CellRef::new(cell(flags::WIDE_SPACER));
+        let spacer = CellRef::new(t.with_width(Width::Spacer), &styles);
         assert_eq!((spacer.content(), spacer.width()), (Content::Empty, Width::Spacer));
         assert!(spacer.is_spacer() && !wide.is_spacer());
-        let blank = CellRef::new(Cell::BLANK);
+        assert!(!spacer.is_blank(), "a spacer with a background shows");
+        let blank = CellRef::new(Cell::BLANK, &styles);
         assert_eq!(blank.content(), Content::Empty);
         assert_eq!(blank.ch(), ' ');
         assert!(blank.is_blank());
-        let space = CellRef::new(Cell {
-            packed: ' ' as u32,
-            ..Cell::BLANK
-        });
+        let space = CellRef::new(Cell::BLANK.with_char(' '), &styles);
         assert_eq!(space.content(), Content::Char(' '));
         assert!(!space.is_blank(), "a typed space is not blank");
     }
@@ -287,15 +216,17 @@ mod tests {
     #[test]
     fn row_ref_reads_past_the_end_as_blank() {
         let mut row = Row::new(3, Cell::BLANK);
-        row.cells[0] = cell('a' as u32);
-        row.cells[1] = cell('漢' as u32 | flags::WIDE);
-        row.cells[2] = cell(flags::WIDE_SPACER);
+        let t = Cell::template(1, true);
+        row.cells[0] = t.with_char('a');
+        row.cells[1] = t.with_char('漢').with_width(Width::Wide);
+        row.cells[2] = t.with_width(Width::Spacer);
         row.wrapped = true;
-        let r = RowRef::new(Cow::Owned(row));
+        let r = RowRef::new(Cow::Owned(row), Cow::Owned(styles()));
         assert_eq!(r.len(), 3);
         assert!(r.wrapped());
         assert_eq!(r.text(), "a漢");
         assert!(r.cell(10).is_blank());
         assert_eq!(r.cells().count(), 3);
+        assert_eq!(r.cell(2).style(), styles()[1]);
     }
 }

@@ -26,9 +26,11 @@
 //!   one cell, as Cmd+Ctrl+arrows do;
 //! - `equalize`: equal shares (Cmd+Ctrl+=);
 //! - `zoom`: zoom the focused pane, or end the zoom (Cmd+Shift+Enter);
-//! - `build-panic N`: with the `test-hooks` feature, the next build of
-//!   pane N's frame (from 0, in tree order) panics, to test that the
-//!   panic stays in that pane; without it, nothing;
+//! - `build-panic N [snapshot]`: with the `test-hooks` feature, the next
+//!   build of pane N's frame (from 0, in tree order) panics, to test that
+//!   the panic stays in that pane: while it is built unlocked, or with
+//!   `snapshot` while its snapshot is taken with the terminal locked;
+//!   without the feature, nothing;
 //! - `save`: write what a restart would save (every window, its tabs and
 //!   panes) to the dump file's path with `.saved` added, as JSON;
 //! - `settings`: Terminal Decline > Settings… (Cmd+,);
@@ -184,8 +186,12 @@ pub enum Control {
     Equalize,
     /// Window > Zoom Pane.
     Zoom,
-    /// The next build of this pane's frame panics (`test-hooks` only).
-    BuildPanic(usize),
+    /// The next build of this pane's frame panics (`test-hooks` only),
+    /// taking the snapshot or building from it.
+    BuildPanic {
+        index: usize,
+        snapshot: bool,
+    },
     /// Write the windows as a restart saves them.
     Save,
     /// Terminal Decline > Settings….
@@ -248,7 +254,14 @@ impl Control {
             "close-pane" => Control::ClosePane,
             "equalize" => Control::Equalize,
             "zoom" => Control::Zoom,
-            "build-panic" => Control::BuildPanic(words.next()?.parse().ok()?),
+            "build-panic" => Control::BuildPanic {
+                index: words.next()?.parse().ok()?,
+                snapshot: match words.next() {
+                    None => false,
+                    Some("snapshot") => true,
+                    Some(_) => return None,
+                },
+            },
             "drag" => Control::Drag {
                 index: words.next()?.parse().ok()?,
                 to: words.next()?.parse().ok()?,
@@ -497,7 +510,9 @@ mod tests {
             ("equalize", Some(Control::Equalize)),
             ("zoom", Some(Control::Zoom)),
             ("zoom 1", None),
-            ("build-panic 1", Some(Control::BuildPanic(1))),
+            ("build-panic 1", Some(Control::BuildPanic { index: 1, snapshot: false })),
+            ("build-panic 0 snapshot", Some(Control::BuildPanic { index: 0, snapshot: true })),
+            ("build-panic 0 x", None),
             ("build-panic", None),
             ("save", Some(Control::Save)),
             ("split right", Some(Control::Split(Dir::Right))),

@@ -4,7 +4,9 @@
 //! texture that grows keeps every pane's pixels without a rebuild, and one
 //! emptied at its cap makes them rebuild; scissors are clamped to the
 //! target; two windows draw correctly while glyphs are uploaded between
-//! their frames; closing a window gives its glyph space back. Without a
+//! their frames; closing a window gives its glyph space back; a pane
+//! built from its snapshot once the terminal is unlocked draws as one
+//! built with it. Without a
 //! Metal device the tests are skipped locally and fail on CI (the `CI` env
 //! var is set).
 
@@ -452,6 +454,47 @@ fn forgetting_glyphs_makes_every_pane_rebuild() {
     r1.build_pane(&mut a, &mut ta.state, &input);
     assert!(r1.is_current(&a));
     assert!(alone(&mut r1, &a, size) == before, "rebuilt, it draws as before");
+}
+
+/// A pane snapshotted with its terminal locked is built after the lock
+/// is let go, as `build_pane` builds it; when another window empties the
+/// glyph textures in between, building from the snapshot refuses, and the
+/// pane is built again with the terminal.
+#[test]
+fn panes_build_from_a_snapshot_unless_the_textures_were_emptied() {
+    if !have_gpu() {
+        return;
+    }
+    term_render::set_glyph_texture_sizes((256, 256), (64, 64));
+    let theme = theme();
+    let mut r1 = Renderer::new(Fonts::new("Menlo", 24.0));
+    let m = r1.metrics();
+    let size = (6 * m.cell_width as usize, m.cell_height as usize);
+    let (mut a, mut ta) = built(&mut r1, &theme, 6, 1, "abc");
+    let input = input(&r1, &theme);
+
+    ta.advance(b"xyz");
+    r1.snapshot_pane(&mut a, &mut ta.state, &input);
+    assert!(r1.build_from_snapshot(&mut a, &input));
+    assert!(r1.is_current(&a));
+    let (mut b, _tb) = built(&mut r1, &theme, 6, 1, "abcxyz");
+    assert!(alone(&mut r1, &a, size) == alone(&mut r1, &b, size), "as build_pane builds it");
+
+    ta.advance(b"\rABC");
+    r1.snapshot_pane(&mut a, &mut ta.state, &input);
+    let mut r2 = Renderer::new(Fonts::new("Menlo", 64.0));
+    let text: String = (0x21u8..0x7F).map(|c| c as char).collect();
+    let (_c, _tc) = built(&mut r2, &theme, 94, 1, &text);
+    assert!(!r1.build_from_snapshot(&mut a, &input), "emptied since the snapshot");
+    r1.build_pane(&mut a, &mut ta.state, &input);
+    assert!(r1.is_current(&a));
+    let mut tb = Term::new(6, 1, 0);
+    tb.advance(b"\x1b[?25lABCxyz");
+    r1.build_pane(&mut b, &mut tb.state, &input);
+    assert!(
+        alone(&mut r1, &a, size) == alone(&mut r1, &b, size),
+        "built again, it draws its new text"
+    );
 }
 
 /// Two windows with their own fonts share the glyph textures: each draws

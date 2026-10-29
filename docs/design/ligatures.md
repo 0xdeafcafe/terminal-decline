@@ -198,6 +198,83 @@ FxHash, sized by entries to two screens at the largest grid seen. B1.4
 measures the hit rate in Claude Code and tmux, and the LRU stays only if
 their frame build drops by ≥ 20%.
 
+### 4.3 Landed (B1.2)
+
+Ligatures draw, and `FontSet::add` turns `allow_runs` on for every
+renderer's fonts. What was built, and where it differs from the above:
+
+- **Pieces** (`frame.rs`, `draw_subs`): as §4.1. A row's substituted
+  glyphs are drawn after its cells, which skip their own glyph where a
+  substitution covers them. Each piece records its column (F3.3's spare
+  bits), so the block cursor over a cached row recolours only its cell's
+  pieces and input-method text hides only the pieces under it; selection
+  is a background and changes no glyph. Blinking text isn't drawn by the
+  renderer yet, so pieces have no blink to follow.
+- **Only stretches that can ligate are shaped** (`shape_cache.rs`).
+  term-font now reads which glyphs the `GSUB` lookups of the features
+  that are on can match (`detect::lookup_glyphs`: coverage, class
+  definitions, ligature components, rule sequences, extension lookups)
+  and maps them to characters once per face (`Fonts::ligates`, ~2 ms per
+  face at construction). A row is cut into stretches of such characters
+  in one face, joined across up to four blanks, each shaped with up to
+  two blanks of context either side and, past those, one stand-in letter
+  (`Fonts::plain_char`) for a neighbour that can't ligate: no rule tells
+  such characters apart, so a stretch shapes the same wherever it is.
+  Other faces, wide characters, clusters and code-drawn characters end a
+  stretch. `morx` faces, unreadable tables and class rules that take any
+  glyph count every character as ligating (whole runs). A test checks
+  that stretches give exactly the glyphs of whole runs for rows of code
+  and every operator pair and triple in JetBrains Mono. Known limit: a
+  class rule whose context reaches past a non-ligating neighbour to a
+  ligating glyph would see the stand-in instead; JetBrains Mono has
+  none that matter, other fonts are unchecked.
+- **Two caches, both in the pane's `Frame` (so in `PaneRender`)**: by
+  row key, the substitutions of the visible rows (only glyphs that differ
+  from the per-character path; most rows of code have none), dropped as
+  above, checked against the fonts by `GlyphSource::fonts_key` (the
+  `FontsId`); and by stretch text, what each stretch shaped into, up to
+  1024 stretches per pane (~120 KB when full; a 300×100 screen of code
+  has 50 to 90), emptied when full or when the fonts change. This is the
+  text cache §4.2 left to B1.4, at stretch level rather than run level:
+  without it every changed row pays one CTLine per stretch.
+- **Shaping is outside the terminal lock.** `Renderer::snapshot_pane`
+  takes the snapshot with the terminal locked; `build_from_snapshot`
+  shapes and builds from it after the lock is let go. It refuses (false)
+  when the glyph textures were emptied since the snapshot (another pane's
+  build reached the cap), and the pane is then built with `build_pane`,
+  locked again. A texture that grows while building keeps every glyph,
+  so this frame's rows are rebuilt from the same snapshot; one emptied
+  makes the build refuse. The window view snapshots every pane, unlocks,
+  then builds them. For R.1 this leaves only the snapshot under the lock;
+  what R.1 still has to move is the snapshot off the main thread.
+
+Measured on a busy machine (other agents' load tests, load average
+30 to 50 on 10 cores): `cargo bench -p term-render --bench frame`,
+5 interleaved runs against `a2e0276`, the fastest of each; JetBrains
+Mono and Menlo at 13 pt × 2 (16 × 34 px cells), syntax-coloured code:
+
+| case | Menlo | JetBrains Mono | limit (§5) |
+|---|---|---|---|
+| 100×30 full change, stretches seen before | 14 µs | 64 µs | ≤ 0.5 ms: met |
+| 100×30 full change, nothing shaped before | 14 µs | 2.5 ms (1.2 ms alone: 51 stretches × 24 µs) | ≤ 0.5 ms: **not met** |
+| 300×100 full change, stretches seen before | 153 µs | 515 µs | ≤ 2 ms: met |
+| 300×100 full change, nothing shaped before | 142 µs | 4.1 ms (2.4 ms alone: 87 stretches) | ≤ 2 ms: **not met** |
+| 300×100 rows rebuilt, shaping kept | 147 µs | 214 µs | — |
+| 300×100 nothing changed | 18.0 µs | 17.7 µs | ≤ +5%: met |
+| 300×100 one row (spinner) | 19.9 µs | 23.0 µs | ≤ +30 µs: met |
+| 300×100 a line scrolled in | 35.2 µs | 40.7 µs | — |
+
+Menlo against the commit before: full-change frames within noise
+(−15% to +3%); frames with nothing changed came out 10% to 50% slower
+(+0.6 µs at 80×24, +3 µs at 300×100) though their code path only gains
+two comparisons, so this needs a quiet machine before it is believed.
+The first sight of new code is over the limit by 2.5×: each stretch is
+its own CTLine, ~24 µs of fixed cost. Measured: 50 stretches in one
+CTLine take 0.39 ms against 1.64 ms apart, so B1.4 should shape a row's
+(or frame's) new stretches in one CTLine, separated so they can't
+interact. Not measured here: `cat` CPU, key latency, footprint (the
+machine was busy; B1.4 runs them on a quiet one).
+
 ## 5. Cost
 
 **Measured in B1.1 (29 Oct 2026): no-go for shaping under the lock.**
@@ -340,7 +417,7 @@ Code, the cursor moving through `=>`, a visual selection over a ligature.
 |---|---|---|---|---|
 | B1.0 | font | `feat(font): add the ligature api, switched off`: `ShapedGlyph::split`, `Fonts::features` (always off), `FontConfig::features`, `GlyphKey::SCALED`; `shape()` source-compatible | S | — |
 | B1.1 | font | `feat(font): shape runs for faces with ligatures`: the cost measurement first (go/no-go above), detection, features applied, one CTLine per run with spaces, `split`, scaling, scratch buffers, test font, tests, bench. **Lands switched off**: `Fonts::features` reports runs only when the renderer asks with `allow_runs` (B1.2 sets it), so dogfood builds never show half-drawn ligatures | M | B1.0 |
-| B1.2 | render | `feat(render): draw ligatures in pieces and cache shaping by row`: pieces, cursor/selection/IME/hidden over pieces, `ShapeCache` in `PaneRender`, shaping outside the lock if B1.1 says so, frame bench cases, pixel test; turns `allow_runs` on | M | B1.0, F3.3, PR 8, B2.1 |
+| B1.2 | render | `feat(render): draw ligatures in pieces and cache shaping by row`: pieces, cursor/selection/IME/hidden over pieces, `ShapeCache` in `PaneRender`, shaping outside the lock if B1.1 says so, frame bench cases, pixel test; turns `allow_runs` on. **Landed** (§4.3) | M | B1.0, F3.3, PR 8, B2.1 |
 | B1.3 | app | `feat(app): add the font_features setting`: config key, notices, live reload, Ghostty importer. Done by the main session between B2.2 and B2.3a (splits.md §10), so no two agents are in term-app | S | B1.0 |
 | B1.4 | font + docs | second-level cache by text, kept only on the §4.2 numbers; DESIGN.md "Rendering" and "Measured", Menlo vs JetBrains Mono | S | B1.2 |
 

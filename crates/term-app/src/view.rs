@@ -169,8 +169,9 @@ pub(crate) struct Pane {
     builds: u64,
     /// Building its frame panicked (splits design §7).
     crash: Option<Crash>,
-    /// The test-only `build-panic`: its next build panics.
-    panic_next: bool,
+    /// The test-only `build-panic`: its next build panics, taking the
+    /// snapshot (`Some(true)`) or building from it.
+    panic_next: Option<bool>,
 }
 
 /// Building a pane's frame panicked: when last, how many times, and
@@ -1107,6 +1108,10 @@ impl WindowView {
         }
         let mut clipboard = None;
         let mut blinking = Vec::new();
+        // The panes whose snapshots were taken, shaped and built once the
+        // terminals are unlocked (ligatures design §5).
+        let mut snapped = Vec::new();
+        // The panes whose snapshot or build panicked (splits design §7).
         let mut crashed = Vec::new();
         for ((id, frame, t), (_, term)) in ticks.iter_mut().zip(&terms) {
             let (id, frame) = (*id, *frame);
@@ -1129,33 +1134,74 @@ impl WindowView {
                 blinking.push(id);
             }
             let pad = pane_padding(&win.config, titlebar, win.scale, p.rect);
+            let (padding, cursor_on) = ((pad.x, pad.top), p.cursor_on || !focused);
             let input = FrameInput {
                 theme: &win.theme,
                 metrics: win.renderer.metrics(),
-                padding: (pad.x, pad.top),
-                cursor_on: p.cursor_on || !focused,
+                padding,
+                cursor_on,
                 focused,
                 preedit: Some(p.marked.as_str()),
             };
             p.builds += 1;
-            let panic_now = std::mem::take(&mut p.panic_next);
-            // A panic here stays in this pane (splits design §7). The
+            // A panic taking the snapshot stays in this pane. The
             // terminal's guard is held outside the catch, and a terminal
             // that may be half-updated is replaced before it is released,
             // so its reader never parses into it.
-            let built = crate::crash::contain(|| {
-                test_build_panic(panic_now);
-                win.renderer.build_pane(&mut p.render, &mut t.state, &input);
+            let panic_snapshot = p.panic_next.take_if(|snapshot| *snapshot).is_some();
+            let snap = crate::crash::contain(|| {
+                test_build_panic(panic_snapshot);
+                win.renderer.snapshot_pane(&mut p.render, &mut t.state, &input)
             });
-            if built.is_err() {
+            if snap.is_err() {
                 crate::session::replace_term(t);
                 p.render.forget();
                 crashed.push(id);
+                continue;
             }
+            snapped.push((id, padding, cursor_on, focused));
         }
         // With the terminals still locked: the keys whose output this frame shows.
         let timed = latency::get().map(|l| (l, l.take_for_frame(self.ivars().id, rate)));
         drop(ticks);
+        // Shaping and building, unlocked. Rarely the glyph textures were
+        // emptied since a pane's snapshot (by another pane's build): that
+        // pane is built again with its terminal locked. A panic in either
+        // stays in its pane.
+        for (id, padding, cursor_on, focused) in snapped {
+            let p = panes.get_mut(&id).expect("shown pane");
+            // The input the snapshot was taken with.
+            let input = FrameInput {
+                theme: &win.theme,
+                metrics: win.renderer.metrics(),
+                padding,
+                cursor_on,
+                focused,
+                preedit: Some(p.marked.as_str()),
+            };
+            let panic_now = p.panic_next.take().is_some();
+            // Unlocked, the terminal is untouched by a panic here.
+            let built = crate::crash::contain(|| {
+                test_build_panic(panic_now);
+                win.renderer.build_from_snapshot(&mut p.render, &input)
+            });
+            let ok = match built {
+                Ok(true) => true,
+                Ok(false) => {
+                    let mut t = crate::session::lock(p.session.term());
+                    let built = crate::crash::contain(|| win.renderer.build_pane(&mut p.render, &mut t.state, &input));
+                    if built.is_err() {
+                        crate::session::replace_term(&mut t);
+                    }
+                    built.is_ok()
+                }
+                Err(_) => false,
+            };
+            if !ok {
+                p.render.forget();
+                crashed.push(id);
+            }
+        }
         if !crashed.is_empty() {
             crash_panes(win, panes, &crashed);
         }
@@ -2325,7 +2371,7 @@ fn spawn_pane(window: usize, config: &Config, theme: &Theme, m: term_font::Metri
         swallow_click: false,
         builds: 0,
         crash: None,
-        panic_next: false,
+        panic_next: None,
     })
 }
 
@@ -2386,9 +2432,9 @@ fn geometry_of(config: &Config, m: term_font::Metrics, scale: f64, size: NSSize,
     }
 }
 
-/// Panes whose frame build panicked this frame (their terminals already
-/// replaced): each program is killed and its pane holds with the crash's
-/// message, as a parse panic does; the glyph textures and the fonts'
+/// Panes whose snapshot or frame build panicked this frame: each program
+/// is killed and its pane holds with the crash's message in a fresh
+/// terminal, as a parse panic does; the glyph textures and the fonts'
 /// shaping are forgotten, so every pane is built again; a second panic in
 /// the same pane within [`CRASH_REPEAT`] stops it being built.
 fn crash_panes(win: &mut Win, panes: &mut HashMap<PaneId, Pane>, crashed: &[PaneId]) {
@@ -2405,7 +2451,13 @@ fn crash_panes(win: &mut Win, panes: &mut HashMap<PaneId, Pane>, crashed: &[Pane
         });
         p.held = true;
         p.session.stop_for_bug();
-        crate::session::write_bug(&mut p.session.lock_term(), crate::crash::take_last_log());
+        // A fresh terminal with the message only, also after a panic that
+        // left the terminal untouched (building unlocked): what it shows
+        // likely led to the panic, and drawing it again would only panic
+        // again, hiding the message behind the repeat limit.
+        let mut t = p.session.lock_term();
+        crate::session::replace_term(&mut t);
+        crate::session::write_bug(&mut t, crate::crash::take_last_log());
     }
     for p in panes.values() {
         p.session.mark_dirty();
@@ -2548,10 +2600,10 @@ impl WindowView {
                 Some(Control::ResizePane(dir)) => self.resize_pane(dir),
                 Some(Control::Equalize) => self.equalize(),
                 Some(Control::Zoom) => self.toggle_zoom(),
-                Some(Control::BuildPanic(n)) => {
-                    let pane = self.with_state(|st| st.tree.ids().get(n).copied()).flatten();
+                Some(Control::BuildPanic { index, snapshot }) => {
+                    let pane = self.with_state(|st| st.tree.ids().get(index).copied()).flatten();
                     if let Some(pane) = pane {
-                        self.with_pane(pane, |_, p| p.panic_next = true);
+                        self.with_pane(pane, |_, p| p.panic_next = Some(snapshot));
                         self.request_redraw(pane);
                     }
                 }

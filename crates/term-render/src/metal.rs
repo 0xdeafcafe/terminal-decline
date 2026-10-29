@@ -146,10 +146,13 @@ pub struct FontSet {
 }
 
 impl FontSet {
-    /// Add fonts made elsewhere; never shared with another caller.
-    fn add(&mut self, fonts: Fonts, config: Option<(FontConfig, f64)>) -> (FontsId, Rc<Fonts>) {
+    /// Add fonts made elsewhere; never shared with another caller. Faces
+    /// with ligatures shape runs from here on (`Fonts::allow_runs`), as
+    /// frames draw them in pieces (ligatures design §4.1).
+    fn add(&mut self, mut fonts: Fonts, config: Option<(FontConfig, f64)>) -> (FontsId, Rc<Fonts>) {
         let id = FontsId(self.next);
         self.next += 1;
+        fonts.allow_runs(true);
         let fonts = Rc::new(fonts);
         self.slots.push(FontSlot {
             id,
@@ -424,22 +427,23 @@ impl GlyphCache {
     /// Grow each texture that ran out of room, keeping its glyphs; at the
     /// cap, empty it instead (it refills with what's on screen) and forget
     /// the glyphs that were in it. The other texture keeps its glyphs.
-    /// Returns whether any texture grew.
+    /// Returns whether every glyph was kept: false when a texture was
+    /// emptied (with both full, even if the other grew), so instances
+    /// built before are wrong.
     fn make_room(&mut self, gpu: &Gpu) -> bool {
-        let mut grew = false;
+        let mut kept = true;
         for color in [false, true] {
             let atlas = if color { &mut self.color } else { &mut self.mask };
             if !atlas.packer.is_full() {
                 continue;
             }
-            if atlas.grow(gpu) {
-                grew = true;
-            } else {
+            if !atlas.grow(gpu) {
                 atlas.packer.clear();
                 self.forget(|slot| slot.is_some_and(|s| s.color == color));
+                kept = false;
             }
         }
-        grew
+        kept
     }
 
     /// Forget every glyph and empty both textures (keeping their sizes).
@@ -589,6 +593,19 @@ impl GlyphSource for PaneGlyphs<'_> {
     fn generation(&self) -> u64 {
         self.generation << 32 ^ self.id.0 as u64
     }
+
+    #[inline]
+    fn glyph_key(&mut self, key: GlyphKey) -> Option<GlyphSlot> {
+        self.by_key(key).flatten()
+    }
+
+    fn fonts(&self) -> Option<&Fonts> {
+        Some(self.fonts)
+    }
+
+    fn fonts_key(&self) -> u64 {
+        self.id.0 as u64 + 1
+    }
 }
 
 /// What one process shares between its windows, on the main thread.
@@ -622,9 +639,10 @@ fn shared() -> Rc<Shared> {
 }
 
 /// Everything the renderer keeps for one terminal between frames: its
-/// instances, placed relative to the pane's top-left corner, and the row
-/// cache they are built with (cells design §9.3). B.1's shaping cache
-/// (ligatures design §4.2) goes here too.
+/// instances, placed relative to the pane's top-left corner, the row
+/// cache they are built with (cells design §9.3) and, in the frame, the
+/// shaping cache of its rows in faces with ligatures (ligatures design
+/// §4.2), checked against its fonts by `FontsId`.
 #[derive(Default)]
 pub struct PaneRender {
     pub frame: Frame,
@@ -1089,11 +1107,32 @@ impl Renderer {
     }
 
     /// Build `pane`'s instances from a snapshot of `term` (cells design
-    /// §9), relative to the pane's top-left corner. Call with the terminal
-    /// locked; it touches no GPU state except new glyphs (and, rarely, a
-    /// glyph texture that grows).
+    /// §9), relative to the pane's top-left corner, all with the terminal
+    /// locked: [`snapshot_pane`](Self::snapshot_pane) then
+    /// [`build_from_snapshot`](Self::build_from_snapshot). It touches no
+    /// GPU state except new glyphs (and, rarely, a glyph texture that
+    /// grows).
     pub fn build_pane(&mut self, pane: &mut PaneRender, term: &mut Terminal, input: &FrameInput) {
         build(&self.shared, self.fonts_id, &self.fonts, pane, term, input);
+    }
+
+    /// The part of building `pane` that needs `term` locked: the snapshot,
+    /// copying the rows it has no instances for. Then, with the lock let
+    /// go, [`build_from_snapshot`](Self::build_from_snapshot), which
+    /// shapes and builds them (ligatures design §5: shaping is outside the
+    /// lock).
+    pub fn snapshot_pane(&mut self, pane: &mut PaneRender, term: &mut Terminal, input: &FrameInput) {
+        let generation = self.shared.glyphs.borrow_mut().source(self.fonts_id, &self.fonts).generation();
+        pane.frame.snapshot(term, input, generation);
+    }
+
+    /// Build `pane` from its last [`snapshot_pane`](Self::snapshot_pane),
+    /// with the same `input`, without the terminal. False when that can't
+    /// be done (the glyph textures were emptied since, so its cached rows
+    /// must be copied again): build it with
+    /// [`build_pane`](Self::build_pane), with the terminal locked.
+    pub fn build_from_snapshot(&mut self, pane: &mut PaneRender, input: &FrameInput) -> bool {
+        finish(&self.shared, self.fonts_id, &self.fonts, pane, input)
     }
 
     /// Build the full-window pane's instances ([`build_pane`](Self::build_pane)
@@ -1190,23 +1229,42 @@ impl Drop for Renderer {
 
 /// [`Renderer::build_pane`].
 fn build(shared: &Shared, id: FontsId, fonts: &Fonts, pane: &mut PaneRender, term: &mut Terminal, input: &FrameInput) {
+    let generation = shared.glyphs.borrow_mut().source(id, fonts).generation();
+    pane.frame.snapshot(term, input, generation);
+    if finish(shared, id, fonts, pane, input) {
+        return;
+    }
+    // A glyph texture was emptied at its cap (by this build or another
+    // pane's since the snapshot): the cached rows are wrong, so copy every
+    // row again and draw what fits.
     let mut cache = shared.glyphs.borrow_mut();
-    pane.frame.build(term, input, &mut cache.source(id, fonts));
-    // Out of glyph texture space: grow the texture that filled up and
-    // build again. This ends: each pass either grows a texture (a few
-    // doublings to the cap) or, at the cap, empties it once and draws
-    // what fits.
+    pane.frame.forget_rows();
+    let mut glyphs = cache.source(id, fonts);
+    pane.frame.snapshot(term, input, glyphs.generation());
+    pane.frame.build_snapshot(input, &mut glyphs);
+    pane.built_with = Some(cache.built_with(id));
+}
+
+/// [`Renderer::build_from_snapshot`]: false when a glyph texture was
+/// emptied since the snapshot or while building, and the pane needs every
+/// row copied again.
+fn finish(shared: &Shared, id: FontsId, fonts: &Fonts, pane: &mut PaneRender, input: &FrameInput) -> bool {
+    let mut cache = shared.glyphs.borrow_mut();
+    if !pane.frame.build_snapshot(input, &mut cache.source(id, fonts)) {
+        return false;
+    }
+    // Out of glyph texture space: grow the texture that filled up, which
+    // keeps every glyph where it was, and build this frame's rows again
+    // from the same snapshot. This ends: each pass grows a texture (a few
+    // doublings to the cap), and at the cap it is emptied instead.
     while cache.needs_room() {
-        let grew = cache.make_room(&shared.gpu);
-        // The rows built with the glyphs that didn't fit are cached: drop
-        // them, so this snapshot copies every row again.
-        pane.frame.forget_rows();
-        pane.frame.build(term, input, &mut cache.source(id, fonts));
-        if !grew {
-            break;
+        if !cache.make_room(&shared.gpu) {
+            return false;
         }
+        pane.frame.redraw(input, &mut cache.source(id, fonts));
     }
     pane.built_with = Some(cache.built_with(id));
+    true
 }
 
 /// Rasterise printable ASCII for new fonts, so first frames don't.

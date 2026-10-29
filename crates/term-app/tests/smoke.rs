@@ -1607,10 +1607,13 @@ fn smoke_a_crash_while_drawing_stays_in_its_pane() {
     let d = dir.path().display();
     let zshrc = format!("PS1='%% '\ntouch '{d}/two-ready'\nsleep 30\n");
     let script = format!(
-        "{split}{wait_two}{panic}{wait_crash}{dump}echo still here; {dump}\
+        "{split}{wait_two}{panic_locked}{wait_crash}{dump}echo still here; {dump}\
          {panic}{wait_twice}{dump}echo and again; {dump}{quit}sleep 20",
         split = osc("split right"),
         wait_two = wait_for(&format!("[ -e '{d}/two-ready' ]")),
+        // First while its snapshot is taken (terminal locked), then while
+        // it is built (unlocked).
+        panic_locked = osc("build-panic 1 snapshot"),
         panic = osc("build-panic 1"),
         // Dumps until the split's crash shows in one (at most 50).
         wait_crash = until_dumped(&dir, "\"crashes\":1"),

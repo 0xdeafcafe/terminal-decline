@@ -517,12 +517,13 @@ and where it differs from §4 and §5.1–5.4:
   two tables' epochs differ and none is ahead of the counter.
 - **`new_ids`** is capped at half the table (at least 32); past that it is
   cleared and the next update takes the whole table (`send_all`).
-  `take_style_updates` (a test aid until PR 8's snapshot) returns them, and
-  the property test keeps a mirror of each screen's table from them.
+  The snapshot takes them (PR 8; until then the `take_style_updates` test
+  aid did), and the property test keeps a mirror of each screen's table
+  from snapshots.
 - **Test aids:** `set_sweep_at(Some(n))` (sweep at n ids, at least 2),
   `sweep_styles_now` (a renumbering sweep, then checks that exactly the
   used ids are live and that a renumbering left them dense),
-  `style_stats`, `live_styles`, `take_style_updates`. The fuzz target and
+  `style_stats`, `live_styles`. The fuzz target and
   half the fuzz streams run with `set_sweep_at(Some(8))`.
 - **History stays v1, with styles by value.** A run's style field keeps
   the old eleven bits, so lines in the styles 12-byte cells could hold
@@ -1210,6 +1211,88 @@ pub enum HighlightKind { Selection, SearchHit, CurrentSearchHit, HoveredLink }
 - **Outside the lock:** building instances, shaping and rasterising. Until
   R.1 lands, the renderer builds from the snapshot while still holding the
   lock, so switching over is a matter of moving one call.
+
+**Landed (PR 8).** What changed from the design above:
+
+- **The batch starts at each snapshot, not each `advance`.**
+  `batch_start = counter + 1` is set at the end of `snapshot()`, so a row
+  gets at most one new counter between two snapshots, whatever changed it
+  (parsing, resize, a test aid's sweep), and no entry point can forget to
+  start a batch. Rows made new (a new terminal, RIS, resize) always get new
+  counters. `check_invariants` checks that both screens' rows have
+  distinct, non-zero counters no later than `counter`.
+- **Where rows are touched:** `put_char` (every print path, REP
+  included), `write_ascii` per row segment, `erase_cells`, `repair_wide`
+  (ICH, DCH, insert mode), `widen_previous` (VS16), the rows a scroll,
+  region scroll, IL or DL blanks, DECALN, clearing the alternate screen, a
+  renumbering sweep, resize and RIS. Setting the `wrapped` flag doesn't
+  touch: flags go in every `SnapRow`. **For PR 6:** a scalar that joins
+  the previous cell's cluster changes the row without writing a cell, so
+  that path must touch the row too.
+- **The touch costs one compare, but where it goes matters.** In
+  `write_ascii` a separate `touch_row(row)` call made `seq` (short lines
+  and scrolling) 30% slower; touching through the same `&mut Row` the
+  cells are written through costs nothing measurable. The full-screen
+  scroll touches the recycled row before it goes back on the ring.
+- **`have` is never asked about rows the renderer must drop.** The
+  renderer passes the same `Snapshot` back each frame, and the terminal
+  compares against the values in it: after a new `terminal_id` every
+  screen row is copied; after a new `history_epoch`, another width or a
+  `popped_from` mark, the history rows concerned are copied. So the
+  renderer can apply §9.1's rules after taking the snapshot, and a fresh
+  `Snapshot::default()` copies everything.
+- **What is in it now:** `terminal_id`, `history_epoch`, `popped_from`
+  (always `None` until pull-back lands with PR 7/11), `screen`,
+  `styles_epoch`, `counter`, `cols`, `lines`, `rows` (`key`, `flags` =
+  `WRAPPED` and `HISTORY`, `cells`, `highlights`), `cells`,
+  `style_updates`, `history_styles`, `highlights` and `cursor` (view
+  position, shape, visible, blinking, wide). History rows copied bring
+  their own style list, appended to `history_styles`, with their cells'
+  ids moved up to index it. Highlights are the selection only, with the
+  columns the frame builder uses today; `HighlightKind` already has
+  `SearchHit`, `CurrentSearchHit` and `HoveredLink`.
+- **Not in it yet, and why:** `cluster_text`/`cluster_spans` and
+  `SnapRow::clusters` come with clusters (PR 6, whichever of the two
+  merges second adds them); `palette` and `reverse_video` with OSC 4 and
+  DECSCNM, which term-core doesn't handle yet; placements and images with
+  PR 14; the `FILL`, placeholder and blinking row flags with PRs 7, 10 and
+  F3.3.
+- **API:** `Terminal::snapshot(&mut self, &mut Snapshot, impl Fn(RowKey)
+  -> bool)`, `terminal_id()`, `history_epoch()`; `Snapshot::row_cells`
+  and `row_highlights`. `Row` has a `seq`. `Scrollback` gained
+  `get_into` (decode into reused buffers) and `wrapped(i)` (no decode),
+  and `StyleTable::drain_updates` appends into the snapshot's list. The
+  `take_style_updates` test aid is gone; `row_seqs` and `change_counter`
+  are new ones.
+- **Tests:** `tests/snapshot.rs` (which operations change which rows'
+  counters, what a caching renderer is sent, a spinner copying one row,
+  RIS and ED 3, a new terminal's id, style updates per screen, history
+  styles, highlights, cursor). The forced-sweep property test now keeps
+  its style mirrors from snapshots, scrolls the view, and keeps a row cache
+  filled only from snapshots: every visible row, cached or copied, must
+  equal what the terminal shows (invariant 6's property and the core half
+  of 7). The caught-panic check (a new `terminal_id`) is a term-core unit
+  test for now; the pipeline test gains it with F3.3.
+- **Measured:** interleaved A/B against `main` (`1e909b4`), prebuilt
+  bench binaries run base, PR, base, PR… 5 rounds (3 for frames), on a
+  shared machine once its load had dropped:
+  - parse, `parse_1k` medians: plain +1.6%, coloured +0.7%, `tui` +0.9%,
+    `seq` +1.6%, unicode −0.3% (best of 5: +1.8%, +2.2%, +2.2%, +3.4%,
+    +1.6%); `parse` (64 KB pieces) medians +2.6%, +3.2%, −0.2%, +0.8%,
+    +1.6%. Within the 3% gate on `parse_1k`. Before the touches in
+    `write_ascii` and `put_char` went through the existing row borrow,
+    `seq` was 30% slower and unicode 3%.
+  - frame building (`cargo bench -p term-render --bench frame`, which
+    still reads the live terminal), best of 3: 80×24 plain 6.4 → 6.4 µs,
+    300×100 plain 96.6 → 94.8 µs, coloured 109.4 → 111.5 µs,
+    alternating styles 142.5 → 143.1 µs: unchanged, within noise.
+  - the snapshot itself (`cargo bench -p term-core --bench snapshot`, a
+    coloured screen): a full copy 0.37 µs at 80×24 and 6.9 µs at 300×100
+    (§9.2 estimated 15–25 µs); nothing changed 0.49 / 1.98 µs and a
+    spinner (one row, plus the `advance`) 0.98 / 2.3 µs, both mostly the
+    bench's own `HashSet` lookups (SipHash, about 20 ns a row); 100 history
+    rows copied at 300×100 66 µs, all of it v1 decoding, which the R.3
+    decode cache and v2 history (PR 7) take on.
 
 ### 9.3 The renderer's row cache (R.2)
 
@@ -2672,7 +2755,7 @@ go in order, and the font and render agents run alongside.
 | 5 | core | **8-byte cells and the per-screen style table**: SGR 4:x, 21, 53/55, 58/59 stored; erase style; sweep with every holder (§5.2); renumbering; `set_sweep_at`; `check_invariants` extended. History is still v1. **Landed**; what changed from the design is at the end of §5.4 | M | 4 |
 | 6 | core | **clusters per row and mode 2027** (the width rule of §6.3, legacy mode, REP by value, the extended `repair_wide`); `Terminal::set_ambiguous_width`; selection text and `dump()` show clusters | M | 5 |
 | 7 | core | **scrollback v2** (§11) at the written width only: `BlockData` (shared) and `BlockEntry`, meta and contiguous text, checkpoints, per-block ambiguous setting, `FILL`, `pop()` with the lowest-popped mark, the 32 MB backstop, the 64-entry slot cache; `scrollback_mem` gains emoji, placeholder, gradient and sealed figures; bench limits lowered | L | 6 |
-| 8 | core | row change counters, `terminal_id`, `history_epoch`, `popped_from`, the snapshot with highlight ranges, the screen it shows and style updates (§9) | S | 5 |
+| 8 | core | row change counters, `terminal_id`, `history_epoch`, `popped_from`, the snapshot with highlight ranges, the screen it shows and style updates (§9). **Landed**; what changed from the design is at the end of §9.2 | S | 5 |
 | 9 | core | OSC 8 link table and OSC 133 prompt marks, on the screen and in v2 | S | 7 |
 | 10 | core | kitty placeholders (cell kind, diacritic table, step-by-step inference, v2 list) | S | 7 |
 | 11 | core | **screen reflow, pull-back and tracked positions** (F.4, §12.2): the two ignored resize tests settled (§19) | L | 7, 8 |

@@ -105,7 +105,9 @@ pub struct StyleStats {
 }
 
 /// Styles interned since the last call, for a mirror of the table (§9.2).
-#[doc(hidden)]
+/// The snapshot takes them with [`StyleTable::drain_updates`]; this form
+/// is for the table's own tests.
+#[cfg(test)]
 #[derive(Clone, Debug, PartialEq)]
 pub struct StyleUpdates {
     pub epoch: u64,
@@ -428,23 +430,33 @@ impl StyleTable {
 
     /// The styles interned since the last call (all of them after a
     /// renumbering, for a new table, or when there were too many).
+    #[cfg(test)]
     pub fn take_updates(&mut self) -> StyleUpdates {
-        let all = std::mem::take(&mut self.send_all);
-        let styles = if all {
-            self.new_ids.clear();
-            (0..self.styles.len() as u32)
-                .filter(|&id| bit(&self.live, id))
-                .map(|id| (id, self.styles[id as usize]))
-                .collect()
-        } else {
-            let ids = std::mem::take(&mut self.new_ids);
-            ids.into_iter().map(|id| (id, self.styles[id as usize])).collect()
-        };
+        let mut styles = Vec::new();
+        let all = self.drain_updates(&mut styles);
         StyleUpdates {
             epoch: self.epoch,
             all,
             styles,
         }
+    }
+
+    /// [`StyleTable::take_updates`] appended to `out`, keeping the list's
+    /// memory, so a snapshot allocates nothing in steady state. Returns
+    /// whether `out` got the whole table.
+    pub fn drain_updates(&mut self, out: &mut Vec<(u32, Style)>) -> bool {
+        let all = std::mem::take(&mut self.send_all);
+        if all {
+            self.new_ids.clear();
+            out.extend(
+                (0..self.styles.len() as u32)
+                    .filter(|&id| bit(&self.live, id))
+                    .map(|id| (id, self.styles[id as usize])),
+            );
+        } else {
+            out.extend(self.new_ids.drain(..).map(|id| (id, self.styles[id as usize])));
+        }
+        all
     }
 
     pub fn is_live(&self, id: u32) -> bool {

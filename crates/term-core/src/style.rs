@@ -13,16 +13,19 @@ pub type LinkId = u32;
 pub struct Attrs(u16);
 
 impl Attrs {
+    // The bits follow today's cell flags (`cell::flags`, shifted down by
+    // 21) so a 12-byte cell's attributes are read with one shift and mask.
+    // The gaps (3, 7, 8, 10) are the flags that aren't attributes there.
     pub const BOLD: Attrs = Attrs(1 << 0);
     pub const DIM: Attrs = Attrs(1 << 1);
     pub const ITALIC: Attrs = Attrs(1 << 2);
-    pub const INVERSE: Attrs = Attrs(1 << 3);
-    pub const HIDDEN: Attrs = Attrs(1 << 4);
-    pub const STRIKE: Attrs = Attrs(1 << 5);
-    pub const BLINK: Attrs = Attrs(1 << 6);
-    pub const OVERLINE: Attrs = Attrs(1 << 7);
+    pub const OVERLINE: Attrs = Attrs(1 << 3);
+    pub const STRIKE: Attrs = Attrs(1 << 4);
+    pub const INVERSE: Attrs = Attrs(1 << 5);
+    pub const HIDDEN: Attrs = Attrs(1 << 6);
     /// Placeholder cells of decline's own images (Sixel, iTerm2).
-    pub const OWN_IMAGE: Attrs = Attrs(1 << 8);
+    pub const OWN_IMAGE: Attrs = Attrs(1 << 7);
+    pub const BLINK: Attrs = Attrs(1 << 9);
 
     pub const fn empty() -> Attrs {
         Attrs(0)

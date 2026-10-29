@@ -221,15 +221,25 @@ impl Frame {
 
             let mut run_start = 0usize;
             let mut run_color = default_bg;
+            // Runs of same-styled cells reuse the previous cell's style and
+            // resolved colours: the style is only built when it changes.
+            let mut last_key = None;
+            let mut style = term_core::Style::DEFAULT;
+            let (mut base_fg, mut base_bg) = (theme.foreground, default_bg);
             for col in 0..term.cols() {
                 let cell = row.cell(col);
-                let style = cell.style();
-                let spacer = cell.width() == Width::Spacer;
-                let mut fg = theme.resolve(style.fg, theme.foreground);
-                let mut bg = theme.resolve(style.bg, default_bg);
-                if style.attrs.contains(Attrs::INVERSE) {
-                    std::mem::swap(&mut fg, &mut bg);
+                let key = cell.style_key();
+                if last_key != Some(key) {
+                    last_key = Some(key);
+                    style = cell.style();
+                    base_fg = theme.resolve(style.fg, theme.foreground);
+                    base_bg = theme.resolve(style.bg, default_bg);
+                    if style.attrs.contains(Attrs::INVERSE) {
+                        std::mem::swap(&mut base_fg, &mut base_bg);
+                    }
                 }
+                let spacer = cell.is_spacer();
+                let (mut fg, mut bg) = (base_fg, base_bg);
                 if sel.as_ref().is_some_and(|r| r.contains(&col)) {
                     bg = theme.selection;
                 }

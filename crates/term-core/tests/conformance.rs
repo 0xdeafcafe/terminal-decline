@@ -729,7 +729,7 @@ fn sgr_empty_and_zero_reset() {
 fn sgr_attributes_and_individual_resets() {
     let mut t = new(20, 1);
     t.advance(b"\x1b[1;2;3;4;5;7;8;9mA");
-    let all = *t.state.visible_row(0).cell(0).style();
+    let all = t.state.visible_row(0).cell(0).style();
     assert_eq!(all.underline, Underline::Single);
     for a in [
         Attrs::BOLD,
@@ -749,7 +749,7 @@ fn sgr_attributes_and_individual_resets() {
     assert!(!c.style().attrs.contains(Attrs::BOLD) && !c.style().attrs.contains(Attrs::DIM));
     assert!(c.style().attrs.contains(Attrs::ITALIC));
     t.advance(b"\x1b[23;24;25;27;28;29mC");
-    assert_eq!(*t.state.visible_row(0).cell(2).style(), Style::DEFAULT, "all attributes reset");
+    assert_eq!(t.state.visible_row(0).cell(2).style(), Style::DEFAULT, "all attributes reset");
 }
 
 #[test]
@@ -1091,7 +1091,7 @@ fn ris_full_reset() {
     t.advance(b"z");
     let row = t.state.visible_row(0);
     let c = row.cell(0);
-    assert_eq!(*c.style(), Style::DEFAULT);
+    assert_eq!(c.style(), Style::DEFAULT);
     assert_eq!(c.style().fg, Color::DEFAULT);
     // margins gone: linefeed on the last row scrolls the whole screen
     let before = t.state.scrollback_len();

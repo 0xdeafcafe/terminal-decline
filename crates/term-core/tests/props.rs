@@ -415,7 +415,7 @@ type CellState = (bool, char, Width, Style);
 fn row_state(r: &RowRef) -> (Vec<CellState>, bool) {
     let cells = r
         .cells()
-        .map(|c| (c.content() == Content::Empty, c.ch(), c.width(), *c.style()))
+        .map(|c| (c.content() == Content::Empty, c.ch(), c.width(), c.style()))
         .collect();
     (cells, r.wrapped())
 }

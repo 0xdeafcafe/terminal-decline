@@ -41,25 +41,30 @@ pub enum Width {
 #[derive(Clone, Copy, Debug)]
 pub struct CellRef<'a> {
     cell: Cell,
-    style: Style,
     _row: PhantomData<&'a Row>,
 }
+
+/// Identifies a cell's style cheaply: two cells with equal keys have equal
+/// [`Style`]s. Frame building uses it to reuse the previous cell's resolved
+/// colours across runs of same-styled text.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct StyleKey(u64, u32);
 
 impl<'a> CellRef<'a> {
     #[inline]
     fn new(cell: Cell) -> CellRef<'a> {
-        CellRef {
-            cell,
-            style: style_of(cell),
-            _row: PhantomData,
-        }
+        CellRef { cell, _row: PhantomData }
     }
 
     #[inline]
     pub fn content(&self) -> Content<'a> {
-        match char::from_u32(self.cell.codepoint()) {
-            Some(c) if c != '\0' => Content::Char(c),
-            _ => Content::Empty,
+        let cp = self.cell.codepoint();
+        if cp == 0 {
+            return Content::Empty;
+        }
+        match char::from_u32(cp) {
+            Some(c) => Content::Char(c),
+            None => Content::Empty,
         }
     }
 
@@ -75,8 +80,15 @@ impl<'a> CellRef<'a> {
     }
 
     #[inline]
-    pub fn style(&self) -> &Style {
-        &self.style
+    pub fn style(&self) -> Style {
+        style_of(self.cell)
+    }
+
+    /// See [`StyleKey`].
+    #[inline]
+    pub fn style_key(&self) -> StyleKey {
+        let style_bits = self.cell.packed & !(flags::CHAR_MASK | flags::WIDE | flags::WIDE_SPACER);
+        StyleKey(self.cell.fg.0 as u64 | (self.cell.bg.0 as u64) << 32, style_bits)
     }
 
     /// Nothing would be drawn here if the row ended at this cell: no
@@ -115,30 +127,48 @@ impl<'a> CellRef<'a> {
     }
 }
 
+/// Where the style flags start in a 12-byte cell's `packed`.
+const FLAG_SHIFT: u32 = 21;
+/// The attributes a 12-byte cell can hold, as `Attrs` bits.
+const CELL_ATTRS: u32 = (Attrs::BOLD.bits()
+    | Attrs::DIM.bits()
+    | Attrs::ITALIC.bits()
+    | Attrs::STRIKE.bits()
+    | Attrs::INVERSE.bits()
+    | Attrs::HIDDEN.bits()
+    | Attrs::BLINK.bits()) as u32;
+
+// Each of those attributes sits at its flag's bit, shifted down.
+const _: () = {
+    let pairs = [
+        (flags::BOLD, Attrs::BOLD),
+        (flags::DIM, Attrs::DIM),
+        (flags::ITALIC, Attrs::ITALIC),
+        (flags::STRIKE, Attrs::STRIKE),
+        (flags::INVERSE, Attrs::INVERSE),
+        (flags::HIDDEN, Attrs::HIDDEN),
+        (flags::BLINK, Attrs::BLINK),
+    ];
+    let mut i = 0;
+    while i < pairs.len() {
+        assert!(pairs[i].0 >> FLAG_SHIFT == pairs[i].1.bits() as u32);
+        i += 1;
+    }
+};
+
 /// The style a 12-byte cell carries inline.
 #[inline]
 pub(crate) fn style_of(cell: Cell) -> Style {
     let p = cell.packed;
-    let mut attrs = Attrs::empty();
-    for (flag, attr) in [
-        (flags::BOLD, Attrs::BOLD),
-        (flags::DIM, Attrs::DIM),
-        (flags::ITALIC, Attrs::ITALIC),
-        (flags::INVERSE, Attrs::INVERSE),
-        (flags::HIDDEN, Attrs::HIDDEN),
-        (flags::STRIKE, Attrs::STRIKE),
-        (flags::BLINK, Attrs::BLINK),
-    ] {
-        if p & flag != 0 {
-            attrs |= attr;
-        }
-    }
-    let underline = if p & flags::DOUBLE_UNDERLINE != 0 {
-        Underline::Double
-    } else if p & flags::UNDERLINE != 0 {
-        Underline::Single
-    } else {
+    // Attrs' bits are the cell's flag bits shifted down (see `Attrs`), so
+    // this is one shift and one mask: it runs for every cell of every frame.
+    let attrs = Attrs::from_bits(((p >> FLAG_SHIFT) & CELL_ATTRS) as u16);
+    let underline = if p & (flags::UNDERLINE | flags::DOUBLE_UNDERLINE) == 0 {
         Underline::None
+    } else if p & flags::DOUBLE_UNDERLINE != 0 {
+        Underline::Double
+    } else {
+        Underline::Single
     };
     Style {
         fg: cell.fg,
@@ -175,7 +205,7 @@ impl<'a> RowRef<'a> {
     /// The cell at `col`; blank past the end of the row.
     #[inline]
     pub fn cell(&self, col: usize) -> CellRef<'_> {
-        CellRef::new(self.row.get(col))
+        CellRef::new(self.row.cells.get(col).copied().unwrap_or(Cell::BLANK))
     }
 
     /// The stored cells, left to right.

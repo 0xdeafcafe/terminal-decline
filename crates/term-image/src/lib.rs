@@ -5,12 +5,12 @@
 //! - [`base64`]: a streaming base64 decoder (kitty payloads, iTerm2 files);
 //! - [`inflate`]: zlib inflate with a cap on the output (kitty `o=z`);
 //! - [`probe`]: format sniffing and sizes of PNG, JPEG (with EXIF
-//!   orientation) and GIF from their headers;
+//!   orientation), GIF and WebP from their headers;
 //! - [`iterm`]: the arguments of iTerm2's `OSC 1337;File=`;
 //! - [`sixel`]: a streaming Sixel decoder;
 //! - [`convert`]: raw RGB / RGBA pixels to premultiplied BGRA;
-//! - [`decode`]: PNG, JPEG and GIF (first frame), decoded at the size
-//!   they are drawn.
+//! - [`decode`]: PNG, JPEG, GIF and WebP (first frame of animated ones),
+//!   decoded at the size they are drawn.
 //!
 //! Pixels are written into a [`PixelTarget`] that someone else allocates
 //! (in the terminal, a Metal buffer counted against the image budget), so

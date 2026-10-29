@@ -1,6 +1,6 @@
 [package]
 name = "term-image"
-description = "Parsers and decoders for terminal images: kitty graphics keys, base64, zlib, iTerm2 arguments, Sixel, PNG/JPEG/GIF"
+description = "Parsers and decoders for terminal images: kitty graphics keys, base64, zlib, iTerm2 arguments, Sixel, PNG/JPEG/GIF/WebP"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
@@ -8,10 +8,12 @@ license.workspace = true
 [dependencies]
 miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
 # Pure-Rust decoders for images from programs (images.md §6.1). Defaults
-# off: no rayon threads for JPEG, no GIF encoder.
+# off: no rayon threads for JPEG, no GIF encoder. image-webp has no
+# features to turn off; its lossless encoder is only used by tests.
 png = "0.18"
 jpeg-decoder = { version = "0.3", default-features = false }
 gif = { version = "0.14", default-features = false, features = ["std"] }
+image-webp = "0.2"
 
 [dev-dependencies]
 criterion = { version = "0.7", default-features = false }

@@ -1,6 +1,6 @@
-//! Image header sniffing and sizes (term-image): never panics; a size it
-//! reports is non-zero, and a header that parses still parses with more
-//! bytes after it.
+//! Image header sniffing and sizes (term-image: PNG, JPEG, GIF, WebP):
+//! never panics; a size it reports is non-zero, and a header that parses
+//! still parses with more bytes after it.
 //!
 //! Run with `cargo +nightly fuzz run sniff`.
 

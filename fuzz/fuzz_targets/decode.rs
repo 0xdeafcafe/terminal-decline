@@ -1,9 +1,12 @@
-//! The pure-Rust PNG, JPEG and GIF decoding (term-image) on arbitrary
-//! bytes, into a target of a size taken from the input: never panics, and
-//! stays within its transient limit (the decoders' own checks; a crash
-//! here is also a bug to report upstream).
+//! The pure-Rust PNG, JPEG, GIF and WebP decoding (term-image) on
+//! arbitrary bytes, into a target of a size taken from the input (its
+//! first byte): never panics, and stays within its transient limit (the
+//! decoders' own checks, and term-image's estimate for WebP; a crash here
+//! is also a bug to report upstream).
 //!
-//! Run with `cargo +nightly fuzz run decode`.
+//! Run with `cargo +nightly fuzz run decode fuzz/corpus/decode --
+//! -dict=fuzz/decode.dict`. The seeds are the small test fixtures, each
+//! after a size byte.
 
 #![no_main]
 

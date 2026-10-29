@@ -1,16 +1,17 @@
 //! Pure-Rust decoding of images from programs (images.md §9: a 1624 × 1018
 //! screenshot PNG in 5–15 ms expected; it runs on the decode queue, off
 //! the lock): PNG at its own size and halved, JPEG at its own size and at
-//! a quarter (DCT scaling), GIF.
+//! a quarter (DCT scaling), GIF, and WebP: the same screenshot lossless,
+//! a lossy 1600 × 1200 photo (the JPEG's, through cwebp -q 80).
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
 use term_image::VecPixels;
 use term_image::decode::{Options, decode};
 
-/// A screenshot-like 1624 × 1018 RGBA PNG: flat areas with text-like
-/// stripes.
-fn screenshot() -> Vec<u8> {
+/// A screenshot-like 1624 × 1018 RGBA image, as PNG and lossless WebP:
+/// flat areas with text-like stripes.
+fn screenshot() -> (Vec<u8>, Vec<u8>) {
     let (w, h) = (1624u32, 1018u32);
     let mut data = Vec::with_capacity((w * h * 4) as usize);
     for y in 0..h {
@@ -33,11 +34,16 @@ fn screenshot() -> Vec<u8> {
         e.set_depth(png::BitDepth::Eight);
         e.write_header().unwrap().write_image_data(&data).unwrap();
     }
-    out
+    let mut webp = Vec::new();
+    image_webp::WebPEncoder::new(&mut webp)
+        .encode(&data, w, h, image_webp::ColorType::Rgba8)
+        .unwrap();
+    (out, webp)
 }
 
 fn bench(c: &mut Criterion) {
-    let png = screenshot();
+    let (png, webp_lossless) = screenshot();
+    let webp = include_bytes!("../tests/fixtures/photo-1600x1200.webp");
     let jpeg = include_bytes!("../tests/fixtures/photo-1600x1200.jpg");
     let gif = include_bytes!("../tests/fixtures/quadrants-64x48.gif");
     let l = Options::default();
@@ -49,6 +55,10 @@ fn bench(c: &mut Criterion) {
         ("jpeg_1600x1200", &jpeg[..], (1600, 1200)),
         ("jpeg_1600x1200_to_400x300", &jpeg[..], (400, 300)),
         ("gif_64x48", &gif[..], (64, 48)),
+        ("webp_lossless_1624x1018", &webp_lossless[..], (1624, 1018)),
+        ("webp_lossless_1624x1018_to_812x509", &webp_lossless[..], (812, 509)),
+        ("webp_1600x1200", &webp[..], (1600, 1200)),
+        ("webp_1600x1200_to_400x300", &webp[..], (400, 300)),
     ] {
         let mut t = VecPixels::new(w, h);
         decode(bytes, &mut t, &l).unwrap();

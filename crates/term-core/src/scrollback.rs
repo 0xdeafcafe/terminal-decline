@@ -655,6 +655,11 @@ impl OpenBlock {
             entry += 1;
         }
         self.text.truncate(text_start + at);
+        if self.text.capacity() > PART + 1 && self.text.len() <= PART {
+            // The room for the longest form went past 64 KB and the text
+            // itself didn't: give the rest back.
+            self.text.shrink_to(PART + 1);
+        }
         let tlen = at;
         if !wrapped {
             self.text.push(END);

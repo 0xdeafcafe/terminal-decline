@@ -5,15 +5,16 @@
 //! It turns those events into the inputs of the pure modules (`keys`,
 //! `mouse`, `select`, `layout`) for its pane's session.
 
+use std::cell::{Cell, RefCell};
 use std::time::Instant;
 
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, ProtocolObject, Sel};
 use objc2::{AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSApplication, NSCursor, NSDragOperation, NSDraggingInfo, NSEvent, NSEventModifierFlags, NSEventType, NSMenu, NSMenuItem, NSPasteboard,
-    NSPasteboardTypeFileURL, NSPasteboardTypeString, NSPasteboardTypeURL, NSResponder, NSTextInputClient, NSTrackingArea,
-    NSTrackingAreaOptions, NSView,
+    NSApplication, NSBeep, NSCursor, NSDragOperation, NSDraggingInfo, NSEvent, NSEventModifierFlags, NSEventType, NSMenu, NSMenuItem,
+    NSPasteboard, NSPasteboardTypeFileURL, NSPasteboardTypeString, NSPasteboardTypeURL, NSResponder, NSTextInputClient, NSTrackingArea,
+    NSTrackingAreaOptions, NSView, NSWorkspace,
 };
 use objc2_foundation::{
     NSArray, NSAttributedString, NSAttributedStringKey, NSNotFound, NSObjectProtocol, NSPoint, NSRange, NSRect, NSSize, NSString, NSURL,
@@ -33,6 +34,11 @@ pub struct Ivars {
     /// The window view this pane is laid over.
     window: Weak<WindowView>,
     pane: PaneId,
+    /// The link the right-click menu was opened on, for Open Link and
+    /// Copy Link.
+    menu_link: RefCell<Option<String>>,
+    /// The pointer is the pointing hand, over a link with Cmd held.
+    hand: Cell<bool>,
 }
 
 define_class!(
@@ -140,6 +146,27 @@ define_class!(
         #[unsafe(method(mouseMoved:))]
         fn mouse_moved(&self, event: &NSEvent) {
             self.mouse_motion(event, None);
+        }
+
+        #[unsafe(method(mouseExited:))]
+        fn mouse_exited(&self, _event: &NSEvent) {
+            self.set_hover(None);
+        }
+
+        #[unsafe(method(openLink:))]
+        fn open_link_item(&self, _sender: Option<&AnyObject>) {
+            if let Some(uri) = self.ivars().menu_link.take() {
+                self.open_link(&uri);
+            }
+        }
+
+        #[unsafe(method(copyLink:))]
+        fn copy_link_item(&self, _sender: Option<&AnyObject>) {
+            if let Some(uri) = self.ivars().menu_link.take() {
+                let pb = NSPasteboard::generalPasteboard();
+                pb.clearContents();
+                pb.setString_forType(&NSString::from_str(&uri), unsafe { NSPasteboardTypeString });
+            }
         }
 
         #[unsafe(method(scrollWheel:))]
@@ -313,13 +340,19 @@ impl PaneView {
         let this = Self::alloc(mtm).set_ivars(Ivars {
             window: Weak::new(window),
             pane,
+            menu_link: RefCell::new(None),
+            hand: Cell::new(false),
         });
         let view: Retained<PaneView> = unsafe { msg_send![super(this), initWithFrame: frame] };
         let types = unsafe { [NSPasteboardTypeFileURL, NSPasteboardTypeURL, NSPasteboardTypeString] };
         view.registerForDraggedTypes(&NSArray::from_slice(&types));
-        // Mouse moves over this pane, for mode 1003 (the window's
-        // `acceptsMouseMovedEvents` is off). Its rect follows the view.
-        let options = NSTrackingAreaOptions::MouseMoved | NSTrackingAreaOptions::ActiveInKeyWindow | NSTrackingAreaOptions::InVisibleRect;
+        // Mouse moves over this pane, for mode 1003 and links under Cmd
+        // (the window's `acceptsMouseMovedEvents` is off), and leaving it,
+        // which ends a link's hover. Its rect follows the view.
+        let options = NSTrackingAreaOptions::MouseMoved
+            | NSTrackingAreaOptions::MouseEnteredAndExited
+            | NSTrackingAreaOptions::ActiveInKeyWindow
+            | NSTrackingAreaOptions::InVisibleRect;
         let area = unsafe {
             NSTrackingArea::initWithRect_options_owner_userInfo(NSTrackingArea::alloc(), NSRect::ZERO, options, Some(&view), None)
         };
@@ -481,10 +514,13 @@ impl PaneView {
         true
     }
 
-    /// The right-click (or Control-click) menu: Copy, Paste, Select All and
-    /// Clear Scrollback, for when the program isn't taking the mouse.
+    /// The right-click (or Control-click) menu: Open Link and Copy Link
+    /// on a link, Copy, Paste, Select All and Clear Scrollback, for when
+    /// the program isn't taking the mouse.
     fn show_context_menu(&self, event: &NSEvent) {
         let mtm = MainThreadMarker::from(self);
+        let link = self.cell_at(event).and_then(|(line, col)| self.link_at_cell(line, col));
+        self.ivars().menu_link.replace(link.clone());
         let has_selection = self
             .with(|_, p| p.session.lock_term().state.selection_text().is_some_and(|t| !t.is_empty()))
             .unwrap_or(false);
@@ -504,6 +540,11 @@ impl PaneView {
             item.setEnabled(enabled);
             menu.addItem(&item);
         };
+        if link.is_some() {
+            add("Open Link", sel!(openLink:), true);
+            add("Copy Link", sel!(copyLink:), true);
+            menu.addItem(&NSMenuItem::separatorItem(mtm));
+        }
         add("Copy", sel!(copy:), has_selection);
         add("Paste", sel!(paste:), can_paste);
         add("Select All", sel!(selectAll:), true);
@@ -609,6 +650,7 @@ impl PaneView {
     /// asked for every key (kitty flag 8). A release is dropped if this
     /// pane didn't see the press (it went to another pane).
     fn handle_flags_changed(&self, event: &NSEvent) {
+        self.hover_with_cmd(event.modifierFlags().contains(NSEventModifierFlags::Command));
         let Some(modes) = self.key_modes() else { return };
         // `flagsChanged` events have no characters.
         let input = KeyInput {
@@ -634,7 +676,11 @@ impl PaneView {
 
     /// Visible line and column under the mouse, clamped to the grid.
     fn cell_at(&self, event: &NSEvent) -> Option<(usize, usize)> {
-        let at = self.convertPoint_fromView(event.locationInWindow(), None);
+        self.cell_at_point(self.convertPoint_fromView(event.locationInWindow(), None))
+    }
+
+    /// Visible line and column at `at` (in this view), clamped to the grid.
+    fn cell_at_point(&self, at: NSPoint) -> Option<(usize, usize)> {
         let titlebar = self.window_view().map_or(0.0, |w| w.titlebar_height());
         self.with(|win, p| {
             let m = win.renderer.metrics();
@@ -642,6 +688,91 @@ impl PaneView {
             let t = p.session.lock_term();
             layout::cell_at((at.x, at.y), win.scale, m.into(), pad, t.state.cols(), t.state.lines())
         })
+    }
+
+    /// The link at visible `line`, `col`: OSC 8, else a plain URL.
+    fn link_at_cell(&self, line: usize, col: usize) -> Option<String> {
+        self.with(|_, p| {
+            let t = p.session.lock_term();
+            crate::links::under(&t.state, t.state.point_at(line, col))
+        })
+        .flatten()
+    }
+
+    /// The pointer is over visible `cell` with Cmd held, or `None`: the
+    /// link there (every piece of it) is underlined, and the pointer is a
+    /// pointing hand while it is over one.
+    pub(crate) fn set_hover(&self, cell: Option<(usize, usize)>) {
+        let Some((changed, on_link)) = self.with(|_, p| {
+            let mut t = p.session.lock_term();
+            let point = cell.map(|(line, col)| t.state.point_at(line, col));
+            let changed = t.state.hover() != point;
+            t.state.set_hover(point);
+            (changed, point.is_some_and(|at| crate::links::under(&t.state, at).is_some()))
+        }) else {
+            return;
+        };
+        if changed {
+            self.request_redraw();
+        }
+        if on_link != self.ivars().hand.replace(on_link) {
+            if on_link {
+                NSCursor::pointingHandCursor().set();
+            } else {
+                NSCursor::IBeamCursor().set();
+            }
+        }
+    }
+
+    /// Cmd went down or up: every pane of the window hovers what is under
+    /// the pointer, or stops (the key goes to the focused pane only).
+    fn hover_with_cmd(&self, cmd: bool) {
+        let views = match self.window_view() {
+            Some(w) => w.with_state(|st| st.panes.values().map(|p| p.view.clone()).collect::<Vec<_>>()),
+            None => None,
+        };
+        let Some(loc) = self.window().map(|w| w.mouseLocationOutsideOfEventStream()) else {
+            return;
+        };
+        for view in views.unwrap_or_default() {
+            let at = view.convertPoint_fromView(loc, None);
+            let b = view.bounds();
+            let inside = at.x >= b.origin.x && at.y >= b.origin.y && at.x < b.origin.x + b.size.width && at.y < b.origin.y + b.size.height;
+            view.set_hover(if cmd && inside { view.cell_at_point(at) } else { None });
+        }
+    }
+
+    /// Cmd-click or Open Link: open `uri` if it is a link that may open
+    /// ([`crate::links::to_open`]); else say why not in the terminal.
+    pub(crate) fn open_link(&self, uri: &str) {
+        let url = match crate::links::to_open(uri, &crate::links::host_name()) {
+            Ok(url) => url,
+            Err(why) => return self.notice(&why.notice(uri)),
+        };
+        if self.window_view().is_some_and(|w| w.opened_in_test(&url)) {
+            return;
+        }
+        let opened = NSURL::URLWithString(&NSString::from_str(&url)).is_some_and(|u| NSWorkspace::sharedWorkspace().openURL(&u));
+        if !opened {
+            self.notice(&format!("couldn't open {url}"));
+        }
+    }
+
+    /// A notice from Terminal Decline in the terminal, on a line of its
+    /// own; a beep instead over a full-screen program.
+    fn notice(&self, text: &str) {
+        let written = self.with(|_, p| {
+            let mut t = p.session.lock_term();
+            let full_screen = t.state.alt_screen_active();
+            if !full_screen {
+                crate::session::write_late_notice(&mut t, text);
+            }
+            !full_screen
+        });
+        match written {
+            Some(true) => self.request_redraw(),
+            _ => NSBeep(),
+        }
     }
 
     fn mods_of(event: &NSEvent) -> u8 {
@@ -672,6 +803,17 @@ impl PaneView {
     fn mouse_button_event(&self, event: &NSEvent, button: u8, press: bool) {
         self.with(|win, _| win.last_input = Instant::now());
         let Some((line, col)) = self.cell_at(event) else { return };
+        // Cmd-click on a link opens it, even while the program takes the
+        // mouse; the rest of the click (drag, release) goes nowhere.
+        if button == mouse::LEFT
+            && press
+            && event.modifierFlags().contains(NSEventModifierFlags::Command)
+            && let Some(uri) = self.link_at_cell(line, col)
+        {
+            self.with(|_, p| p.swallow_click = true);
+            self.open_link(&uri);
+            return;
+        }
         // A selection being made ends on its own button's release, even
         // if Shift (which kept the program from the mouse) is let go first.
         if button == mouse::LEFT && !press && self.with(|_, p| p.selecting.is_some()) == Some(true) {
@@ -849,6 +991,8 @@ impl PaneView {
 
     fn mouse_motion(&self, event: &NSEvent, button: Option<u8>) {
         let Some((line, col)) = self.cell_at(event) else { return };
+        let cmd = event.modifierFlags().contains(NSEventModifierFlags::Command);
+        self.set_hover((cmd && button.is_none()).then_some((line, col)));
         let selecting = self.with(|_, p| p.selecting.is_some()) == Some(true);
         if !selecting && let Some((mode, sgr)) = self.reporting(event) {
             let held = self.with(|_, p| p.mouse_button).flatten();

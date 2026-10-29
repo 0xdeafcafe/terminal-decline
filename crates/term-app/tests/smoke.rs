@@ -1091,6 +1091,64 @@ fn smoke_dropped_files_are_typed_as_a_paste() {
     assert_eq!(plain, "/Users/me/it\\ is\\ \\~here");
 }
 
+/// Cmd held over a link underlines it, OSC 8 or a plain URL, and stops
+/// when Cmd is let go; Cmd-click opens http(s) links (stubbed under test
+/// control, so they are listed in the dump) and refuses others with a
+/// notice in the terminal.
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_links_hover_and_open() {
+    if !have_metal() {
+        return;
+    }
+    let dir = TempDir::new("links");
+    let script = format!(
+        "printf '\\033[?25lsee https://example.com/x now\\n\\033]8;;https://osc8.example/p\\007click me\\033]8;;\\007\\n'; \
+         printf '\\033]8;;ssh://host\\007bad\\033]8;;\\007\\n'; {}{}{}{}{}{}{}{}{}{}{}{}sleep 20",
+        osc("dump"),
+        osc("hover 0 6"),
+        osc("dump"),
+        osc("hover 1 2"),
+        osc("dump"),
+        osc("hover off"),
+        osc("dump"),
+        osc("click 0 6"),
+        osc("click 1 2"),
+        osc("click 2 1"),
+        osc("dump"),
+        osc("quit"),
+    );
+    let (status, _) = decline(&dir, &script, true);
+    assert!(status.success(), "{status}");
+    let d = dumps(&dir);
+    assert_eq!(d.len(), 5, "{d:?}");
+    let hovered: Vec<&Value> = d.iter().map(|x| &x["hovered_link"]).collect();
+    assert_eq!(
+        hovered,
+        [
+            &Value::Null,
+            &"https://example.com/x".into(),
+            &"https://osc8.example/p".into(),
+            &Value::Null,
+            &Value::Null
+        ]
+    );
+    // One underline while a link is hovered.
+    let rects = |x: &Value| num(x, "rects");
+    assert_eq!(rects(&d[1]), rects(&d[0]) + 1.0, "{}", d[1]);
+    assert_eq!(rects(&d[2]), rects(&d[0]) + 1.0, "{}", d[2]);
+    assert_eq!(rects(&d[3]), rects(&d[0]));
+    assert_eq!(
+        d[4]["opened"],
+        serde_json::json!(["https://example.com/x", "https://osc8.example/p"])
+    );
+    let s = screen(&d[4]);
+    assert!(
+        s.contains("terminal-decline: not opening ssh://host: only http, https, mailto and file links open"),
+        "{s}"
+    );
+}
+
 /// A folder opened with the app (`open -a`, as a folder dropped on its
 /// Dock icon is): an app that isn't running starts with a window there
 /// and no other, and a running one opens another window (or a tab, as the

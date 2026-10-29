@@ -17,6 +17,7 @@ pub mod keybind;
 pub mod keys;
 pub mod latency;
 pub mod layout;
+pub mod links;
 pub mod mouse;
 pub mod notify;
 mod pane_view;

@@ -210,6 +210,8 @@ struct TestControl {
     queue: VecDeque<Control>,
     dump: DumpState,
     seq: u64,
+    /// Links that would have been opened.
+    opened: Vec<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -586,6 +588,7 @@ impl WindowView {
             queue: VecDeque::new(),
             dump: DumpState::Idle,
             seq: 0,
+            opened: Vec::new(),
         });
         let spawn = |n: NewPane| spawn_pane(id, &config, &theme, m, test.is_some(), n);
         let mut panes = HashMap::new();
@@ -2132,6 +2135,30 @@ impl WindowView {
                 Some(Control::Settings) => crate::app::show_settings_now(),
                 Some(Control::TypeSettings(bytes)) => crate::app::type_into_settings(bytes),
                 Some(Control::Key { keycode, flags }) => post_key(MainThreadMarker::from(self), keycode, flags),
+                Some(Control::Hover(cell)) => {
+                    if let Some(view) = self.focused_view() {
+                        view.set_hover(cell);
+                    }
+                }
+                Some(Control::Click(line, col)) => {
+                    let pane = self.focused_pane();
+                    let uri = pane.and_then(|pane| {
+                        self.with_pane(pane, |_, p| {
+                            let t = p.session.lock_term();
+                            crate::links::under(&t.state, t.state.point_at(line, col))
+                        })
+                    });
+                    match (self.focused_view(), uri.flatten()) {
+                        (Some(view), Some(uri)) => view.open_link(&uri),
+                        _ => NSBeep(),
+                    }
+                }
+                Some(Control::Scroll(lines)) => {
+                    if let Some(pane) = self.focused_pane() {
+                        self.with_pane(pane, |_, p| p.session.lock_term().state.scroll_view(lines));
+                        self.request_redraw(pane);
+                    }
+                }
                 Some(Control::Close) => {
                     if let Some(window) = self.window() {
                         window.performClose(None);
@@ -2162,6 +2189,19 @@ impl WindowView {
                 }
             }
         }
+    }
+
+    /// Under test control, a link that would be opened is listed in the
+    /// dump instead: whether it was.
+    pub(crate) fn opened_in_test(&self, url: &str) -> bool {
+        self.with_state(|st| match &mut st.win.test {
+            Some(test) => {
+                test.opened.push(url.to_string());
+                true
+            }
+            None => false,
+        })
+        .unwrap_or(false)
     }
 
     /// Resize the window to show `cols` × `lines` (in its one pane).
@@ -2296,9 +2336,16 @@ fn write_dump(st: &mut State, window: Window) {
     let Some(test) = &mut win.test else { return };
     test.seq += 1;
     test.dump = DumpState::Idle;
-    let (screen, cols, lines) = {
+    let (screen, cols, lines, hovered_link, view_offset, selection) = {
         let t = p.session.lock_term();
-        (t.state.dump(), t.state.cols(), t.state.lines())
+        (
+            t.state.dump(),
+            t.state.cols(),
+            t.state.lines(),
+            t.state.hover().and_then(|at| crate::links::under(&t.state, at)),
+            t.state.display_offset(),
+            t.state.selection_text(),
+        )
     };
     let m = win.renderer.metrics();
     let (mask_texture, color_texture) = win.renderer.glyph_texture_sizes();
@@ -2321,6 +2368,10 @@ fn write_dump(st: &mut State, window: Window) {
         cols,
         lines,
         panes: every,
+        hovered_link,
+        opened: test.opened.clone(),
+        view_offset,
+        selection,
         dividers,
         frames: win.renderer.frames_completed(),
         glyphs: p.render.frame.glyphs.len(),

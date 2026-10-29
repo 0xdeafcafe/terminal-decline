@@ -27,6 +27,13 @@
 //! - `key CODE [MODS]`: put a key press on the app's event queue, where a
 //!   real key arrives: monitors and menus first (MODS: `cmd`, `ctrl`, `alt`,
 //!   `shift` joined by `+`);
+//! - `hover LINE COL` / `hover off`: the pointer is over that visible cell
+//!   of the focused pane with Cmd held, as a mouse move there would be, or
+//!   Cmd is let go;
+//! - `click LINE COL`: Cmd-click that cell. A link that may open isn't
+//!   opened while this control is on: it is listed in the dump's `opened`;
+//! - `scroll N`: scroll the focused pane's view N lines back into history
+//!   (negative: towards the bottom), as the scroll wheel does;
 //! - `quit`: quit the app, without asking.
 //!
 //! While this is on, the window draws even when covered by other windows,
@@ -173,6 +180,13 @@ pub enum Control {
         keycode: u16,
         flags: u64,
     },
+    /// The pointer over a visible cell (line, column) with Cmd held, or
+    /// Cmd let go.
+    Hover(Option<(usize, usize)>),
+    /// Cmd-click on a visible cell (line, column).
+    Click(usize, usize),
+    /// Scroll the view this many lines back.
+    Scroll(isize),
     Quit,
 }
 
@@ -243,6 +257,12 @@ impl Control {
                 lines: words.next()?.parse().ok().filter(|&l| l > 0)?,
             },
             "font" => Control::Font(words.next()?.parse().ok()?),
+            "hover" => Control::Hover(match words.next()? {
+                "off" => None,
+                line => Some((line.parse().ok()?, words.next()?.parse().ok()?)),
+            }),
+            "click" => Control::Click(words.next()?.parse().ok()?, words.next()?.parse().ok()?),
+            "scroll" => Control::Scroll(words.next()?.parse().ok()?),
             "key" => {
                 let keycode = words.next()?.parse().ok()?;
                 let mut flags = 0;
@@ -306,6 +326,16 @@ pub struct Dump {
     pub lines: usize,
     /// Every pane, in tree order (left to right, top to bottom).
     pub panes: Vec<PaneDump>,
+    /// The focused pane's hovered link (OSC 8 or a plain URL), if the
+    /// pointer is over one with Cmd held.
+    pub hovered_link: Option<String>,
+    /// Links opened so far in this window, as they would be opened
+    /// (opening is stubbed under test control).
+    pub opened: Vec<String>,
+    /// How many lines the focused pane's view is scrolled back.
+    pub view_offset: usize,
+    /// The focused pane's selected text.
+    pub selection: Option<String>,
     /// The dividers drawn between them.
     pub dividers: usize,
     /// Frames the GPU has finished drawing.
@@ -468,6 +498,13 @@ mod tests {
             ),
             ("key 53", Some(Control::Key { keycode: 53, flags: 0 })),
             ("key 45 hyper", None),
+            ("hover 2 10", Some(Control::Hover(Some((2, 10))))),
+            ("hover off", Some(Control::Hover(None))),
+            ("hover 2", None),
+            ("click 0 3", Some(Control::Click(0, 3))),
+            ("click 0", None),
+            ("scroll -4", Some(Control::Scroll(-4))),
+            ("scroll", None),
             (
                 "type-settings /fg\\r\\e\\\\x",
                 Some(Control::TypeSettings(b"/fg\r\x1b\\x".to_vec())),

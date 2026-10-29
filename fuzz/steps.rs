@@ -13,6 +13,8 @@
 //! | `FF 'S' al ac hl hc` | select from visible (al, ac) to (hl, hc)        |
 //! | `FF 'C'`             | clear the selection                             |
 //! | `FF 'A' w`           | set the ambiguous width to `w % 2 + 1` cells    |
+//! | `FF 'P' n`           | pull `n % 8` history lines back onto the screen |
+//! | `FF 'L' n`           | set the scrollback limit to `n` lines           |
 //! | `FF` anything else   | a literal 0xFF byte; the next byte is read again |
 //!
 //! A command cut short by the end of the input is dropped. Other bytes are fed
@@ -42,6 +44,10 @@ pub enum Step {
     ClearSelection,
     /// The ambiguous-width setting: 1 or 2.
     Ambiguous(u8),
+    /// Pull this many history lines back (0..8).
+    PullBack(u8),
+    /// The scrollback limit in lines.
+    Limit(u8),
 }
 
 impl fmt::Debug for Step {
@@ -53,6 +59,8 @@ impl fmt::Debug for Step {
             Step::Select(al, ac, hl, hc) => write!(f, "Select({al}, {ac}, {hl}, {hc})"),
             Step::ClearSelection => write!(f, "ClearSelection"),
             Step::Ambiguous(w) => write!(f, "Ambiguous({w})"),
+            Step::PullBack(n) => write!(f, "PullBack({n})"),
+            Step::Limit(n) => write!(f, "Limit({n})"),
         }
     }
 }
@@ -81,8 +89,10 @@ pub fn decode(data: &[u8]) -> Vec<Step> {
             [b'S', al, ac, hl, hc, ..] => (Some(Step::Select(*al, *ac, *hl, *hc)), 5),
             [b'C', ..] => (Some(Step::ClearSelection), 1),
             [b'A', w, ..] => (Some(Step::Ambiguous(w % 2 + 1)), 2),
+            [b'P', n, ..] => (Some(Step::PullBack(n % 8)), 2),
+            [b'L', n, ..] => (Some(Step::Limit(*n)), 2),
             // A known command without all its operands: drop it.
-            [b'R' | b'V' | b'S' | b'A', ..] => break,
+            [b'R' | b'V' | b'S' | b'A' | b'P' | b'L', ..] => break,
             _ => {
                 run.push(CMD);
                 continue;
@@ -119,6 +129,8 @@ pub fn apply(term: &mut Term, step: &Step) {
         }
         Step::ClearSelection => t.set_selection(None),
         Step::Ambiguous(w) => t.set_ambiguous_width(w),
+        Step::PullBack(n) => t.pull_back_for_test(usize::from(n)),
+        Step::Limit(n) => t.set_scrollback_limit(usize::from(n)),
     }
 }
 
@@ -133,4 +145,8 @@ pub fn read_back(term: &Term) {
         let _ = t.visible_row(line);
     }
     let _ = t.selection_text();
+    // Every stored line reads through: sections, text, checkpoints.
+    if let Err(e) = t.check_history() {
+        panic!("history broken: {e}");
+    }
 }

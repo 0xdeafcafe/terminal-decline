@@ -25,6 +25,9 @@ cmd_view_down="\xffV\x80"
 cmd_select="\xffS"
 cmd_clear="\xffC"
 cmd_ambiguous="\xffA\x01"
+cmd_pull_back="\xffP\x03"
+cmd_limit_small="\xffL\x05"
+cmd_limit_none="\xffL\x00"
 
 # Private / intermediate markers and parameter bytes
 p_q="\x1b[?"

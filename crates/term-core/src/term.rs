@@ -2537,6 +2537,61 @@ impl Terminal {
         self.bulk_ascii = on;
     }
 
+    /// Test aid: every stored history line read through (its sections,
+    /// text and the block's checkpoints), a pass over all of history.
+    #[doc(hidden)]
+    pub fn check_history(&self) -> Result<(), String> {
+        self.scrollback.check_all()
+    }
+
+    /// Test aid: pull the newest `n` history lines back onto the top of
+    /// the primary screen, as they were stored (no reflow; that comes with
+    /// PR 11), dropping as many rows from the bottom. Their line numbers
+    /// are handed out again as output pushes them back, which is what the
+    /// snapshot's `popped_from` is for.
+    #[doc(hidden)]
+    pub fn pull_back_for_test(&mut self, n: usize) {
+        if self.alt_active {
+            return;
+        }
+        self.clear_grapheme();
+        self.styles.set_sweeps_blocked(true);
+        let (mut row, mut styles) = (Row::default(), Vec::new());
+        for _ in 0..n {
+            if !self.scrollback.pop_into(self.cols, &mut row, &mut styles) {
+                break;
+            }
+            let ids: Vec<Cell> = styles
+                .iter()
+                .map(|s| if *s == Style::DEFAULT { Cell::BLANK } else { self.intern(*s) })
+                .collect();
+            for c in &mut row.cells {
+                *c = c.with_style(ids[c.style_id() as usize]);
+            }
+            // To the screen's width, as a resize without reflow does.
+            let mut one = VecDeque::from([std::mem::take(&mut row)]);
+            resize_screen(&mut one, &mut Cursor::default(), self.cols, 1);
+            let mut back = one.pop_front().expect("one row");
+            if back.cells.last().is_some_and(|c| c.width() == Width::EdgeSpacer) && !back.wrapped {
+                let last = back.cells.len() - 1;
+                back.cells[last] = back.cells[last].style_part();
+            }
+            back.seq = 0;
+            snapshot::touch(&mut back, &mut self.counter, self.batch_start);
+            self.screen.pop_back();
+            self.screen.push_front(back);
+            self.top_line -= 1;
+            self.cursor.row = (self.cursor.row + 1).min(self.lines - 1);
+        }
+        self.styles.set_sweeps_blocked(false);
+        if self.styles.needs_sweep() {
+            self.sweep_styles(false);
+        }
+        self.display_offset = self.display_offset.min(self.scrollback.len());
+        self.selection = None;
+        self.touch();
+    }
+
     /// Test aid: sweep the style tables once they hold `n` ids (at least
     /// 2), instead of 1.5 × the screen's cells; `None` goes back to that.
     /// With a small `n` sweeps and renumberings happen every few prints, so

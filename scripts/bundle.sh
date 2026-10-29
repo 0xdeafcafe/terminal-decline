@@ -111,6 +111,13 @@ if [[ -d "$sparkle_dir/Sparkle.framework" ]]; then
     "$fw/Versions/B/Modules" "$fw/Modules" \
     "$fw/Versions/B/_CodeSignature"
   find "$fw/Versions/B/Resources" -maxdepth 1 -name '*.lproj' ! -name 'en.lproj' ! -name 'Base.lproj' -exec rm -rf {} +
+  # Sparkle's licence (and those of the code it bundles) goes with it;
+  # a new Sparkle version needs its licence checked there too.
+  if ! grep -qx "## Sparkle $sparkle_version" "$repo_root/THIRD-PARTY-NOTICES.md"; then
+    echo "THIRD-PARTY-NOTICES.md has no section for Sparkle $sparkle_version" >&2
+    exit 1
+  fi
+  cp "$repo_root/THIRD-PARTY-NOTICES.md" "$contents/Resources/THIRD-PARTY-NOTICES.md"
   arch=$(lipo -archs "$lib" 2>/dev/null || true)
   if [[ "$arch" == "arm64" || "$arch" == "x86_64" ]]; then
     for bin in "$fw/Versions/B/Sparkle" "$fw/Versions/B/Autoupdate" "$fw/Versions/B/Updater.app/Contents/MacOS/Updater"; do

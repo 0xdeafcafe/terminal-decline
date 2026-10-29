@@ -273,6 +273,8 @@ fn sparkle_is_embedded_thinned_and_signed() {
         assert!(d.contains("(adhoc,runtime)"), "{}: {d}", part.display());
     }
     run_ok(Command::new("/usr/bin/codesign").args(["--verify", "--strict", "--deep"]).arg(&app));
+    let notices = std::fs::read_to_string(app.join("Contents/Resources/THIRD-PARTY-NOTICES.md")).unwrap();
+    assert!(notices.contains("## Sparkle") && notices.contains("Andy Matuschak"), "{notices}");
     let plist = app.join("Contents/Info.plist");
     let key = std::fs::read_to_string(support::repo().join("packaging/sparkle-public-key")).unwrap();
     assert_eq!(extract(&plist, "SUPublicEDKey"), key.trim());

@@ -100,6 +100,9 @@ jobs:
           echo "identity=$identity" >> "$GITHUB_OUTPUT"
           rm -f "$RUNNER_TEMP/cert.p12"
 
+      - name: Fetch Sparkle
+        run: scripts/sparkle.sh
+
       - name: Bundle and sign Terminal Decline.app
         env:
           SIGN_IDENTITY: ${{ steps.cert.outputs.identity }}

@@ -482,12 +482,14 @@ impl AppDelegate {
         };
         let save = |w: &NSWindow, tab_group, selected| {
             let f = w.frame();
+            let view = ours(w);
             SavedWindow {
-                cwd: ours(w).and_then(|v| v.foreground_cwd()),
+                cwd: view.as_ref().and_then(|v| v.foreground_cwd()),
                 frame: [f.origin.x, f.origin.y, f.size.width, f.size.height],
                 tab_group,
                 selected,
                 panes: None,
+                command: view.as_ref().and_then(|v| v.command_to_restore()),
             }
         };
         let mut saved = Vec::new();
@@ -513,7 +515,8 @@ impl AppDelegate {
         saved
     }
 
-    /// Reopen saved windows, tabs as tabs, with the same tab in front.
+    /// Reopen saved windows, tabs as tabs, with the same tab in front, and
+    /// type the command each was running at its shell's prompt.
     fn restore(&self, saved: Vec<SavedWindow>) {
         for group in crate::reload::tab_groups(saved) {
             let mut first: Option<Retained<NSWindow>> = None;
@@ -527,6 +530,9 @@ impl AppDelegate {
                     }
                 };
                 let opened = self.open_window(w.cwd, place, None);
+                if let (Some(command), Some(view)) = (w.command, opened.as_ref().and_then(|o| self.view_of(o))) {
+                    view.type_at_prompt(command);
+                }
                 if w.selected {
                     front = opened.clone();
                 }

@@ -313,6 +313,44 @@ build from before the rename to Terminal Decline, removed by the dogfood
 script), it restarts into `Terminal Decline.app` in the same folder
 (`reload::relaunch_target`).
 
+A tab whose shell was running a program (`claude`, `nvim foo.rs`,
+`ssh host`) also saves that program's command line
+(`SavedWindow::command`, and per pane in `SavedPanes`; absent in older
+files and for tabs at their prompt). After the restart it is typed at the
+new shell's prompt but not run, so Enter starts it again. Only tabs
+running the login shell save one: not a window started with `-e PROGRAM`,
+a pin's or one with `command` in the config (they run their program again
+anyway), nor the Settings tab.
+
+- What is saved (`running::foreground_command`): the arguments of the
+  terminal's foreground process group's programs, read with sysctl
+  `KERN_PROCARGS2`. A pipeline is its programs that the shell started, in
+  the order they started, joined with ` | `. A script run through its
+  `#!` interpreter is saved as the script (`/opt/homebrew/bin/vite dev`,
+  not `node /opt/homebrew/bin/vite dev`). Each argument is quoted for the
+  tab's shell (`running::quote`): as it is when no shell gives it a
+  meaning, else in single quotes, with control characters as escapes
+  (`$'…'`, or for fish unquoted `\n`), so the line has none and can't
+  run before Enter. Tests read the quoted line back through sh, bash 3.2,
+  bash 5 and zsh. Nothing is saved when the arguments can't be read
+  (another user's process, such as `sudo`'s), aren't UTF-8, or come to
+  over 64 KB. macOS 27 leaves the environment out of `KERN_PROCARGS2`, so
+  `FOO=1 cmd` comes back as `cmd`.
+- When it is typed (`Session::type_at_prompt`): typed as soon as the shell
+  starts, the terminal echoes it before the prompt and the line editor
+  then shows it again (seen with zsh and both bashes). So a thread waits
+  until the shell has written something and has the terminal reading keys
+  unechoed (canonical mode and echo off, read from the PTY's termios:
+  `term_pty::Modes`), with the output quiet for 50 ms, looking every
+  50 ms for at most 30 s. zsh, bash and fish all set that mode at their
+  prompt; OSC 133 isn't needed. It is sent as a paste when the shell has
+  bracketed paste on (zsh, bash 5.1+, fish), so key bindings and fish
+  abbreviations don't act on it; Enter runs a paste as it does typed text.
+  Anything typed into the tab first cancels it. Tested on a PTY with zsh
+  5.9, bash 3.2 and bash 5 (fish isn't installed here, so its test is
+  skipped), with oh-my-zsh's `.zshrc` (shown after about 0.8 s), and in
+  the app (`smoke_restore_types_the_command_at_the_prompt`).
+
 Splits (docs/design/splits.md) are being built. In place so far, with no
 AppKit yet: the pane tree (`panes`: layout in whole device pixels with a
 1 pt divider and a minimum pane size, focus by direction and in order,

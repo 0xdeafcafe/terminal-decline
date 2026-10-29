@@ -6,7 +6,9 @@
 //! replaced it saves each window's directory and frame, starts the new build
 //! with `--restore <file>`, and quits. Tabs are saved in order with the
 //! index of their tab group, and reopen as tabs of one window. A window
-//! with several panes also saves their layout ([`SavedPanes`]).
+//! with several panes also saves their layout ([`SavedPanes`]). A tab (or
+//! pane) whose shell was running a program saves its command line, which
+//! the new build types at the shell's prompt without running it.
 
 use std::os::fd::RawFd;
 use std::path::{Path, PathBuf};
@@ -31,6 +33,15 @@ pub struct SavedWindow {
     /// pane's). `None` (and files from builds before splits): one pane.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub panes: Option<SavedPanes>,
+    /// The program that was running in its shell's foreground, as a
+    /// command line quoted for that shell (`nvim 'my file.rs'`), typed at
+    /// the new shell's prompt but not run (see
+    /// [`crate::running::foreground_command`]). `None` at the prompt, for
+    /// a window started with `-e PROGRAM` or a pin's (they run their
+    /// program again anyway), for the Settings tab, and in files from
+    /// builds before this. With panes, the focused pane's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
 }
 
 /// A window's panes as saved: the tree with its shares, each pane's
@@ -47,9 +58,8 @@ pub struct SavedPanes {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum SavedNode {
-    Pane {
-        cwd: Option<String>,
-    },
+    /// Written as `{"pane": {"cwd": …}}`, as before panes saved commands.
+    Pane(SavedPane),
     Split {
         dir: crate::panes::Dir,
         /// `a`'s share.
@@ -57,6 +67,15 @@ pub enum SavedNode {
         a: Box<SavedNode>,
         b: Box<SavedNode>,
     },
+}
+
+/// One pane as saved: its working directory, and the command it was
+/// running (as [`SavedWindow::command`]).
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct SavedPane {
+    pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
 }
 
 /// Saved windows as they reopen: one list per window, its tabs in order.
@@ -232,6 +251,7 @@ mod tests {
                 tab_group: None,
                 selected: false,
                 panes: None,
+                command: None,
             },
             SavedWindow {
                 cwd: None,
@@ -239,6 +259,7 @@ mod tests {
                 tab_group: Some(1),
                 selected: true,
                 panes: None,
+                command: None,
             },
             SavedWindow {
                 cwd: Some("/b".into()),
@@ -249,17 +270,24 @@ mod tests {
                     root: SavedNode::Split {
                         dir: crate::panes::Dir::Right,
                         ratio: 0.25,
-                        a: Box::new(SavedNode::Pane { cwd: Some("/a".into()) }),
+                        a: Box::new(SavedNode::Pane(SavedPane {
+                            cwd: Some("/a".into()),
+                            command: None,
+                        })),
                         b: Box::new(SavedNode::Split {
                             dir: crate::panes::Dir::Down,
                             ratio: 0.5,
-                            a: Box::new(SavedNode::Pane { cwd: Some("/b".into()) }),
-                            b: Box::new(SavedNode::Pane { cwd: None }),
+                            a: Box::new(SavedNode::Pane(SavedPane {
+                                cwd: Some("/b".into()),
+                                command: None,
+                            })),
+                            b: Box::new(SavedNode::Pane(SavedPane { cwd: None, command: None })),
                         }),
                     },
                     focused: 1,
                     zoomed: None,
                 }),
+                command: None,
             },
         ];
         std::fs::write(&path, serde_json::to_vec(&w).unwrap()).unwrap();
@@ -275,6 +303,7 @@ mod tests {
             tab_group,
             selected,
             panes: None,
+            command: None,
         }
     }
 
@@ -290,6 +319,55 @@ mod tests {
         // Plain windows are written as before.
         let json = serde_json::to_string(&window("/a", None, false)).unwrap();
         assert_eq!(json, r#"{"cwd":"/a","frame":[0.0,0.0,300.0,200.0]}"#);
+    }
+
+    /// Commands saved for tabs and panes come back as they were, and a
+    /// file from a build before commands were saved still restores, with
+    /// none: the field is left out when there is nothing to save, so such
+    /// a file is what this build writes for tabs at their prompt.
+    #[test]
+    fn commands_round_trip_and_old_files_have_none() {
+        let old = br#"[{"cwd":"/a","frame":[1.0,2.0,3.0,4.0],"tab_group":0,"selected":true,
+            "panes":{"root":{"split":{"dir":"right","ratio":0.5,"a":{"pane":{"cwd":"/a"}},"b":{"pane":{"cwd":null}}}},"focused":0}},
+            {"cwd":null,"frame":[5.0,6.0,7.0,8.0]}]"#;
+        let list: Vec<SavedWindow> = serde_json::from_slice(old).unwrap();
+        assert_eq!(list.len(), 2);
+        assert!(list.iter().all(|w| w.command.is_none()));
+        let Some(SavedNode::Split { a, b, .. }) = list[0].panes.as_ref().map(|p| &p.root) else {
+            panic!("{list:?}")
+        };
+        assert_eq!(
+            **a,
+            SavedNode::Pane(SavedPane {
+                cwd: Some("/a".into()),
+                command: None
+            })
+        );
+        assert_eq!(**b, SavedNode::Pane(SavedPane::default()));
+        // Written back the same way.
+        let json = serde_json::to_string(&list[0].panes).unwrap();
+        assert!(json.contains(r#""a":{"pane":{"cwd":"/a"}},"b":{"pane":{"cwd":null}}"#), "{json}");
+
+        let mut w = window("/a", Some(0), true);
+        w.command = Some("nvim 'my file.rs'".into());
+        w.panes = Some(SavedPanes {
+            root: SavedNode::Split {
+                dir: crate::panes::Dir::Down,
+                ratio: 0.5,
+                a: Box::new(SavedNode::Pane(SavedPane {
+                    cwd: Some("/a".into()),
+                    command: Some("ssh host".into()),
+                })),
+                b: Box::new(SavedNode::Pane(SavedPane::default())),
+            },
+            focused: 0,
+            zoomed: None,
+        });
+        let json = serde_json::to_string(&[w.clone(), window("/b", None, false)]).unwrap();
+        assert!(json.contains(r#""command":"nvim 'my file.rs'""#), "{json}");
+        assert!(json.contains(r#"{"pane":{"cwd":"/a","command":"ssh host"}}"#), "{json}");
+        let back: Vec<SavedWindow> = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, [w, window("/b", None, false)]);
     }
 
     #[test]

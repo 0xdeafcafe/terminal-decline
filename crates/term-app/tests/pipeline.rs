@@ -406,6 +406,105 @@ fn events_arrive_without_drawing() {
     session.shut_down();
 }
 
+/// A login shell `shell` with nothing of the user's: HOME, ZDOTDIR and
+/// XDG_CONFIG_HOME at `home`, whose startup files set the prompt to
+/// [`PROMPT`] for zsh, bash and fish.
+fn login_shell(shell: &str, home: &Path) -> Command {
+    let prompt = format!("PS1='{PROMPT} '\n");
+    std::fs::write(home.join(".zshrc"), &prompt).unwrap();
+    std::fs::write(home.join(".bash_profile"), &prompt).unwrap();
+    std::fs::create_dir_all(home.join("fish")).unwrap();
+    std::fs::write(
+        home.join("fish/config.fish"),
+        format!("function fish_prompt; echo -n '{PROMPT} '; end\nfunction fish_greeting; end\n"),
+    )
+    .unwrap();
+    let h = home.to_str().unwrap().to_string();
+    Command {
+        argv: Vec::new(),
+        cwd: Some(h.clone()),
+        env: vec![
+            ("HOME".into(), h.clone()),
+            ("ZDOTDIR".into(), h.clone()),
+            ("XDG_CONFIG_HOME".into(), h),
+            ("BASH_SILENCE_DEPRECATION_WARNING".into(), "1".into()),
+        ],
+        shell: Some(shell.into()),
+        direct: false,
+    }
+}
+
+/// A restored tab's command, typed into a shell that has only just
+/// started (as on a restart), shows at the prompt once, unrun, and Enter
+/// runs it: for each of zsh, bash (3.2 types it; 5 has bracketed paste, so
+/// it is a paste) and fish here.
+#[test]
+fn a_restored_command_waits_at_the_prompt() {
+    let shells = [
+        "/bin/zsh",
+        "/bin/bash",
+        "/opt/homebrew/bin/bash",
+        "/opt/homebrew/bin/fish",
+        "/usr/local/bin/fish",
+    ];
+    let mut tried = Vec::new();
+    for shell in shells.into_iter().filter(|s| Path::new(s).exists()) {
+        tried.push(shell);
+        let home = TempDir::new(&format!("at-prompt-{}", shell.replace('/', "-")));
+        let cmd = login_shell(shell, home.path());
+        let signal = Arc::new(Signal::default());
+        let session = Session::spawn(&cmd, size(100, 24), Term::new(100, 24, 1000), signal.hooks()).expect("spawn");
+        // At once, long before the shell's line editor has started.
+        let line = "touch 'ran here' \"$HOME/also\"";
+        session.type_at_prompt(line.into());
+        let h = Harness {
+            session: Some(session),
+            signal,
+            _home: home,
+        };
+        let shown = format!("{PROMPT} {line}");
+        let d = h.wait_for(&format!("the command at {shell}'s prompt"), |d| d.contains(&shown));
+        // Nothing else typed, and nothing running it: give it time to.
+        std::thread::sleep(Duration::from_millis(300));
+        let d2 = h.dump();
+        assert_eq!(d2.matches("touch").count(), 1, "{shell}: shown once\n{d2}");
+        assert_eq!(prompts(&d), 1, "{shell}\n{d}");
+        assert_eq!(prompts(&d2), 1, "{shell}\n{d2}");
+        let ran = h._home.path().join("ran here");
+        assert!(!ran.exists(), "{shell} ran it without Enter");
+        // Enter runs it, paste or not.
+        h.key(RETURN);
+        h.wait_for(&format!("{shell}'s next prompt"), |d| prompts(d) == 2);
+        assert!(
+            ran.exists() && h._home.path().join("also").exists(),
+            "{shell} didn't run it:\n{}",
+            h.dump()
+        );
+    }
+    assert!(tried.len() >= 2, "{tried:?}");
+}
+
+/// A restored command isn't typed once something else has been: it would
+/// be mixed into what the user typed.
+#[test]
+fn typing_first_drops_the_restored_command() {
+    let home = TempDir::new("at-prompt-typed");
+    let cmd = login_shell("/bin/zsh", home.path());
+    let signal = Arc::new(Signal::default());
+    let session = Session::spawn(&cmd, size(80, 24), Term::new(80, 24, 1000), signal.hooks()).expect("spawn");
+    session.type_at_prompt("echo restored".into());
+    let h = Harness {
+        session: Some(session),
+        signal,
+        _home: home,
+    };
+    h.type_text("echo typed\n");
+    h.wait_for("typed", |d| has_line(d, "typed") && prompts(d) == 2);
+    std::thread::sleep(Duration::from_millis(300));
+    let d = h.dump();
+    assert!(!d.contains("restored"), "{d}");
+}
+
 // --- Failures shown in the window -------------------------------------------
 
 /// Run `argv` on a `cols`-wide terminal until the session ends; the outcome

@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use serde::{Deserialize, Serialize};
 
-use crate::reload::{SavedNode, SavedPanes};
+use crate::reload::{SavedNode, SavedPane, SavedPanes};
 
 /// A pane's id: unique in the process, never reused, so a session hook for
 /// a pane that has closed can't reach another one.
@@ -376,23 +376,23 @@ impl Node {
         }
     }
 
-    fn save(&self, cwd: &mut impl FnMut(PaneId) -> Option<String>) -> SavedNode {
+    fn save(&self, pane: &mut impl FnMut(PaneId) -> SavedPane) -> SavedNode {
         match self {
-            Node::Leaf(id) => SavedNode::Pane { cwd: cwd(*id) },
+            Node::Leaf(id) => SavedNode::Pane(pane(*id)),
             Node::Split { dir, ratio, a, b } => SavedNode::Split {
                 dir: *dir,
                 ratio: *ratio,
-                a: Box::new(a.save(cwd)),
-                b: Box::new(b.save(cwd)),
+                a: Box::new(a.save(pane)),
+                b: Box::new(b.save(pane)),
             },
         }
     }
 
-    fn restore(saved: &SavedNode, out: &mut Vec<(PaneId, Option<String>)>) -> Node {
+    fn restore(saved: &SavedNode, out: &mut Vec<(PaneId, SavedPane)>) -> Node {
         match saved {
-            SavedNode::Pane { cwd } => {
+            SavedNode::Pane(pane) => {
                 let id = new_id();
-                out.push((id, cwd.clone()));
+                out.push((id, pane.clone()));
                 Node::Leaf(id)
             }
             SavedNode::Split { dir, ratio, a, b } => Node::Split {
@@ -698,21 +698,21 @@ impl Panes {
     }
 
     /// The layout to save for a restart, with each pane's working
-    /// directory.
-    pub fn save(&self, mut cwd: impl FnMut(PaneId) -> Option<String>) -> SavedPanes {
+    /// directory and command.
+    pub fn save(&self, mut pane: impl FnMut(PaneId) -> SavedPane) -> SavedPanes {
         let ids = self.ids();
         let index = |id: PaneId| ids.iter().position(|&p| p == id);
         SavedPanes {
-            root: self.root.save(&mut cwd),
+            root: self.root.save(&mut pane),
             focused: index(self.focused).unwrap_or(0),
             zoomed: self.zoomed.and_then(index),
         }
     }
 
     /// Panes laid out as saved, with fresh ids, and each pane's working
-    /// directory in tree order. A focused or zoomed index out of range is
-    /// the first pane, or no zoom.
-    pub fn restore(saved: &SavedPanes) -> (Panes, Vec<(PaneId, Option<String>)>) {
+    /// directory and command in tree order. A focused or zoomed index out
+    /// of range is the first pane, or no zoom.
+    pub fn restore(saved: &SavedPanes) -> (Panes, Vec<(PaneId, SavedPane)>) {
         let mut panes = Vec::new();
         let root = Node::restore(&saved.root, &mut panes);
         let focused = panes.get(saved.focused).unwrap_or(&panes[0]).0;
@@ -1054,7 +1054,10 @@ mod tests {
         p.drag(&SplitPath(vec![]), 300, &g);
         p.focus(4);
         p.toggle_zoom();
-        let saved = p.save(|id| Some(format!("/p{id}")));
+        let saved = p.save(|id| SavedPane {
+            cwd: Some(format!("/p{id}")),
+            command: (id == 2).then(|| "nvim 'a b.rs'".into()),
+        });
         assert_eq!((saved.focused, saved.zoomed), (3, Some(3)));
         let json = serde_json::to_string(&saved).unwrap();
         let back: SavedPanes = serde_json::from_str(&json).unwrap();
@@ -1064,8 +1067,10 @@ mod tests {
         // runs alone in its own process).
         NEXT_ID.fetch_max(5, Ordering::Relaxed);
         let (r, cwds) = Panes::restore(&back);
-        let dirs: Vec<&str> = cwds.iter().map(|(_, c)| c.as_deref().unwrap()).collect();
+        let dirs: Vec<&str> = cwds.iter().map(|(_, c)| c.cwd.as_deref().unwrap()).collect();
         assert_eq!(dirs, ["/p1", "/p3", "/p2", "/p4"]);
+        let commands: Vec<Option<&str>> = cwds.iter().map(|(_, c)| c.command.as_deref()).collect();
+        assert_eq!(commands, [None, None, Some("nvim 'a b.rs'"), None]);
         assert_eq!(r.focused(), cwds[3].0);
         assert_eq!(r.zoomed(), Some(cwds[3].0));
         assert!(cwds.iter().all(|(id, _)| !p.contains(*id)), "fresh ids");
@@ -1080,8 +1085,8 @@ mod tests {
             root: SavedNode::Split {
                 dir: Dir::Down,
                 ratio: f32::NAN,
-                a: Box::new(SavedNode::Pane { cwd: None }),
-                b: Box::new(SavedNode::Pane { cwd: None }),
+                a: Box::new(SavedNode::Pane(SavedPane { cwd: None, command: None })),
+                b: Box::new(SavedNode::Pane(SavedPane { cwd: None, command: None })),
             },
             focused: 7,
             zoomed: Some(9),
@@ -1313,7 +1318,7 @@ mod tests {
                     p.drag(&d.path.clone(), to.rem_euclid(3000), &g);
                 }
             }
-            let json = serde_json::to_string(&p.save(|_| None)).unwrap();
+            let json = serde_json::to_string(&p.save(|_| SavedPane::default())).unwrap();
             let (r, _) = Panes::restore(&serde_json::from_str(&json).unwrap());
             let rects = |p: &Panes| p.layout(&g).panes.into_iter().map(|(_, r)| r).collect::<Vec<_>>();
             prop_assert_eq!(rects(&r), rects(&p));

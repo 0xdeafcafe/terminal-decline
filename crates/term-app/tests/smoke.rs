@@ -338,6 +338,58 @@ fn smoke_restore_reopens_tabs_as_tabs() {
     assert!(id("tab-a") < id("tab-b") && id("tab-b") < id("solo"), "{all:?}");
 }
 
+/// A restored tab whose shell was running a program gets its command line
+/// typed at the new shell's prompt, not run. Needs zsh as the login shell
+/// (its startup files come from a temp `ZDOTDIR`): once the command is in
+/// zsh's line, `zle-line-pre-redraw` asks for a dump and then quits.
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_restore_types_the_command_at_the_prompt() {
+    if !have_metal() {
+        return;
+    }
+    if !term_pty::login_shell().ends_with("/zsh") {
+        eprintln!("skipped: the login shell isn't zsh");
+        return;
+    }
+    let dir = TempDir::new("restore-command");
+    let work = dir.path().join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    let zshrc = format!(
+        r#"PS1='READY> '
+td_seen=
+td-line-pre-redraw() {{
+  [[ -n $BUFFER && -z $td_seen ]] || return 0
+  td_seen=1
+  {{ sleep 0.5; {dump}i=0; while [ ! -s "$DECLINE_TEST_DUMP" ] && [ $i -lt 200 ]; do sleep 0.05; i=$((i+1)); done; {quit}}} > /dev/tty 2>&1 &!
+}}
+zle -N zle-line-pre-redraw td-line-pre-redraw
+"#,
+        dump = osc("dump"),
+        quit = osc("quit"),
+    );
+    std::fs::write(dir.path().join(".zshrc"), zshrc).unwrap();
+    let restore = dir.path().join("restore.json");
+    let saved = serde_json::json!([
+        {"cwd": work, "frame": [100.0, 100.0, 700.0, 500.0], "command": "touch 'ran here'"},
+    ]);
+    std::fs::write(&restore, saved.to_string()).unwrap();
+    let mut cmd = Command::new(APP);
+    cmd.arg("--restore")
+        .arg(&restore)
+        .env("XDG_CONFIG_HOME", dir.config_home())
+        .env("ZDOTDIR", dir.path())
+        .env("DECLINE_TEST_DUMP", dir.dump_file())
+        .current_dir(dir.path());
+    let (status, _) = run(&mut cmd);
+    assert!(status.success(), "{status}");
+    let all = dumps(&dir);
+    assert_eq!(all.len(), 1, "{all:?}");
+    let shown = screen(&all[0]);
+    assert!(shown.starts_with("READY> touch 'ran here'|"), "{shown}");
+    assert!(!work.join("ran here").exists(), "it ran without Enter");
+}
+
 /// The bare binary (no app bundle) can't use the notification center,
 /// which would throw: OSC 9 and 777 fall back to the bell's Dock bounce,
 /// and OSC 9;4 progress still shows on the Dock icon.

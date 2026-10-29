@@ -114,6 +114,11 @@ struct State {
     /// title, always opaque, not a running program for `confirm_close`,
     /// and the only session whose chord recording is honoured.
     settings: bool,
+    /// It runs the login shell, not a program of its own (`-e PROGRAM`, a
+    /// pin's, `command` in the config) or the Settings: only then is the
+    /// program in the shell's foreground saved for a restart and typed at
+    /// the prompt after it (see [`crate::reload::SavedWindow::command`]).
+    runs_shell: bool,
     /// A chord being recorded for the preferences (OSC 7771).
     recording: Option<Recording>,
     /// Bumped by each recording, so a timeout cancels only its own.
@@ -609,6 +614,7 @@ impl TerminalView {
         let layer = &self.ivars().layer;
         let renderer = Renderer::new(launch.fonts);
         let settings = launch.settings;
+        let runs_shell = !settings && launch.command.argv.is_empty();
         let opaque = config.opacity >= 1.0 || settings;
         term_render::configure_layer(layer, renderer.device(), opaque);
         layer.setContentsScale(launch.scale);
@@ -693,6 +699,7 @@ impl TerminalView {
             hidden: 0,
             shown: true,
             settings,
+            runs_shell,
             recording: None,
             recordings: 0,
         });
@@ -1276,6 +1283,26 @@ impl TerminalView {
     pub fn running_program(&self) -> Option<String> {
         let pid = self.with_state(|st| (!st.settings).then(|| st.session.pid()).flatten()).flatten()?;
         crate::running::foreground_program(pid)
+    }
+
+    /// The command line of the program in the shell's foreground, to save
+    /// for a restart (see [`crate::running::foreground_command`]). Only
+    /// for a window running the login shell.
+    pub fn command_to_restore(&self) -> Option<String> {
+        let pid = self.with_state(|st| st.runs_shell.then(|| st.session.pid()).flatten()).flatten()?;
+        crate::running::foreground_command(pid)
+    }
+
+    /// Type a restored tab's `command` at its shell's prompt once the
+    /// shell is reading, without running it (see
+    /// [`Session::type_at_prompt`]). Only for a window running the login
+    /// shell.
+    pub fn type_at_prompt(&self, command: String) {
+        self.with_state(|st| {
+            if st.runs_shell {
+                st.session.type_at_prompt(command);
+            }
+        });
     }
 
     /// Whether this is the Settings tab.

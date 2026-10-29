@@ -9,6 +9,9 @@
 //!   the program has exited it calls `on_exit`.
 //! - writer: writes typed input and query replies to the PTY, waiting for
 //!   room there rather than on the main thread.
+//! - prompt-wait, only for a command typed for a restored tab
+//!   ([`Session::type_at_prompt`]): waits for the shell's line editor,
+//!   types the command and ends.
 //!
 //! Failures are shown in the terminal, since an app started from the Dock
 //! has no stderr. A program that can't start, or that fails within
@@ -21,7 +24,7 @@
 
 use std::io;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
@@ -43,6 +46,13 @@ pub const QUICK_EXIT: Duration = Duration::from_secs(1);
 const STATUS_WAIT: Duration = Duration::from_millis(500);
 
 pub const PRESS_ANY_KEY: &str = "press any key to close";
+
+/// How often [`Session::type_at_prompt`] looks whether the shell's line
+/// editor is reading, and how long the output must have been quiet.
+const PROMPT_CHECK: Duration = Duration::from_millis(50);
+
+/// How long [`Session::type_at_prompt`] waits for a prompt before giving up.
+const PROMPT_WAIT: Duration = Duration::from_secs(30);
 
 /// With the `test-hooks` feature (used only by tests), output containing
 /// this makes the parse step panic, to test that the panic is contained.
@@ -211,6 +221,12 @@ pub struct Session {
     input: Option<Sender<Vec<u8>>>,
     reader: Option<JoinHandle<()>>,
     writer: Option<JoinHandle<()>>,
+    /// Batches of output read so far.
+    batches: Arc<AtomicU64>,
+    /// Where a command waiting for the prompt is sent
+    /// ([`Session::type_at_prompt`]); taken when it is sent or given up
+    /// on, or when something else is typed first.
+    at_prompt: Arc<Mutex<Option<Sender<Vec<u8>>>>>,
 }
 
 impl Session {
@@ -241,6 +257,8 @@ impl Session {
                     input: None,
                     reader: None,
                     writer: None,
+                    batches: Arc::default(),
+                    at_prompt: Arc::default(),
                 });
             }
         };
@@ -258,6 +276,8 @@ impl Session {
         let mut reader = pty.reader()?;
         let child = pty.child();
         let (term2, dirty2, tx2) = (term.clone(), dirty.clone(), tx.clone());
+        let batches = Arc::new(AtomicU64::new(0));
+        let batches2 = batches.clone();
         let Hooks {
             wake,
             on_exit,
@@ -294,6 +314,7 @@ impl Session {
                     if n == 0 {
                         return Ok(());
                     }
+                    batches2.fetch_add(1, Ordering::Relaxed);
                     let mut start = 0;
                     if let (Some(scanner), Some(control)) = (&mut scanner, &mut on_control) {
                         scanner.feed(&buf[..n], &mut found);
@@ -343,7 +364,58 @@ impl Session {
             input: Some(tx),
             reader: Some(reader),
             writer: Some(writer),
+            batches,
+            at_prompt: Arc::default(),
         })
+    }
+
+    /// Type `text` at the shell's prompt once its line editor is reading,
+    /// without pressing Enter (a restored tab's command, for the user to
+    /// start again). Typed before then, a shell may drop it or show it
+    /// twice (the terminal echoes it, then the line editor draws it
+    /// again). So this waits until the shell has written something and
+    /// has the terminal reading keys unechoed ([`term_pty::Modes`]), with
+    /// the output quiet for [`PROMPT_CHECK`]: zsh, bash and fish all do
+    /// that at their prompt. It goes as a paste when the shell asked for
+    /// bracketed paste (Enter still runs it), so key bindings and
+    /// abbreviations don't act on it. Given up after [`PROMPT_WAIT`], or
+    /// when anything else is typed first.
+    ///
+    /// `text` must have no control characters (quote them, as
+    /// [`crate::running::quote`] does): they would be dropped.
+    pub fn type_at_prompt(&self, text: String) {
+        let (Some(pty), Some(tx)) = (&self.pty, &self.input) else { return };
+        let Ok(modes) = pty.modes() else { return };
+        *lock_slot(&self.at_prompt) = Some(tx.clone());
+        let (slot, batches, term) = (self.at_prompt.clone(), self.batches.clone(), self.term.clone());
+        let started = Instant::now();
+        let spawned = std::thread::Builder::new().name("prompt-wait".into()).spawn(move || {
+            let mut seen = 0;
+            loop {
+                std::thread::sleep(PROMPT_CHECK);
+                let mut slot = lock_slot(&slot);
+                if slot.is_none() {
+                    return;
+                }
+                if started.elapsed() > PROMPT_WAIT {
+                    *slot = None;
+                    return;
+                }
+                let now = batches.load(Ordering::Relaxed);
+                let quiet = now > 0 && now == seen;
+                seen = now;
+                if quiet && modes.reading_keys() {
+                    let bracketed = lock(&term).state.modes().bracketed_paste;
+                    if let Some(tx) = slot.take() {
+                        let _ = tx.send(crate::keys::paste_bytes(&text, bracketed));
+                    }
+                    return;
+                }
+            }
+        });
+        if spawned.is_err() {
+            *lock_slot(&self.at_prompt) = None;
+        }
     }
 
     pub fn term(&self) -> &Arc<Mutex<Term>> {
@@ -365,8 +437,10 @@ impl Session {
         self.dirty.store(true, Ordering::Release);
     }
 
-    /// Send bytes to the program (in order, on the writer thread).
+    /// Send bytes to the program (in order, on the writer thread). A
+    /// command waiting for the prompt isn't typed any more.
     pub fn send(&self, bytes: Vec<u8>) {
+        *lock_slot(&self.at_prompt) = None;
         if let Some(tx) = &self.input {
             let _ = tx.send(bytes);
         }
@@ -429,7 +503,12 @@ impl Session {
     fn release(&mut self) {
         self.pty = None;
         self.input = None;
+        *lock_slot(&self.at_prompt) = None;
     }
+}
+
+fn lock_slot<T>(slot: &Mutex<T>) -> MutexGuard<'_, T> {
+    slot.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// The output has ended. A program that failed within [`QUICK_EXIT`] keeps

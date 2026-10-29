@@ -594,6 +594,54 @@ With mode 2027 off ("legacy"), only zero-width scalars join the previous
 cell: combining marks, ZWJ, variation selectors and default-ignorables.
 Every other scalar starts a cell.
 
+**Landed (PR 4).** What was built, and where it differs from the above:
+- **The table** is `crates/term-core/src/unicode/table.rs`, made by
+  `crates/term-core/unicode/generate.py` from the Unicode **18.0.0** files
+  (`unicode-width` 0.2.3 is on 18.0.0). It is **33 KB**, not 60–80: only 39
+  distinct entries exist, so a scalar's entry is a 16-bit value reached
+  through a byte-sized root (one slot per 128 scalars) and 192 leaves of
+  128 bytes. The 128-entry ASCII table is checked against it.
+- **Widths** follow `unicode-width`'s per-character rules, and a test checks
+  every scalar against `width` and `width_cjk`. One exception: U+17D8
+  KHMER SIGN BEYYAL is 1, where `unicode-width` says 3 (a cell is 1 or 2,
+  and `string-width` says 1). C0 and C1 controls are marked as controls
+  and never printed, as before.
+- **Unicode 18 changed rule GB9c**: it no longer needs a consonant before
+  the linker (`Linker Extend* × Consonant`), and U+1CF5 and U+17D2 (Khmer)
+  became linkers. GraphemeBreakTest.txt 18.0.0 (checked in, comments
+  removed) is the reference. `unicode-segmentation` 1.13 is still on
+  Unicode 17, so the random-string comparison with it keeps viramas
+  straight after a consonant, where both versions agree.
+- **The terminal segments what it prints but doesn't store clusters yet**
+  (PR 6). `GraphemeState` is `at` plus a `Segmenter` holding the fields
+  above. Cells are written as before: a joining scalar with a width still
+  takes its own cell, and zero-width ones are dropped apart from VS16's
+  widening. A cluster that starts with a zero-width scalar (after a cursor
+  move, say) has no cell, so `at` is None until a scalar with a width
+  arrives.
+- **After `write_ascii`** only the run's first byte (which can join a
+  Prepend scalar before it: U+0600 + `1`) and last byte (the cluster still
+  open, a keycap base say) matter. In the usual case (nothing Prepend
+  before the run) the terminal just stores the last byte, one store per
+  run; the full state (`at` is the cell before the cursor) is worked out
+  from it when the next scalar arrives. `print` does the same for any
+  plain character (below) with a width, with autowrap on: most CJK,
+  Cyrillic and box-drawing text never touches the segmenter. The bulk-versus-one-character
+  property test compares the grapheme state too, with pieces like `e` +
+  U+0301, `1` + VS16 + U+20E3, a lone U+0301 or VS16 after a run, and
+  U+0600 + `1`.
+- **Plain characters:** a scalar of break class Other with no pictograph
+  or conjunct role (CJK, Cyrillic, box drawing; one mask test on its
+  entry) starts a cluster unless a Prepend scalar came before, so it
+  skips the rules. Measured alone, the table lookup costs the same as
+  `unicode-width`'s (2.2 ns per scalar in a loop) and the short path adds
+  0.5 ns; the full rules cost 3.2 ns.
+- **What clears it:** every `Perform` callback other than `print` (`execute`,
+  CSI, ESC, OSC, DCS `hook`, `apc_start`) and `resize`. Clearing is two
+  small stores (the segmenter keeps stale fields that its next push
+  rewrites). REP prints, so it sets the state again after its CSI cleared
+  it.
+
 ### 6.3 Width
 
 **Mode 2027 on (the default).** A cluster's width is:
@@ -619,7 +667,24 @@ both libraries when the test is written):
 | U+0600 (Arabic number sign) + `1` | 2 | 1 | 1 |
 | `e` + U+0301 | 1 | 1 | 1 |
 | 👨‍👩‍👧, 👍🏽, 🇬🇧, `1️⃣`, ❤️ | 2 | 2 | 2 |
-| ⌚ + VS15 | 1 | 1 | 1 |
+| ⌚ + VS15 | 1 | **2** | 1 |
+| ❤ + ZWJ + 🔥 (no VS16) | **3** | 2 | 2 |
+| `1` + U+20E3 (no VS16) | **1** | 2 | 2 |
+| `1` + VS16 (no U+20E3) | 2 | 1 | **1** |
+| U+0600 alone | 1 | 0 | 1 |
+
+Checked when PR 4's test was written (`tests/unicode.rs`,
+`cluster_width_table`), against `unicode-width` 0.2.3 and `string-width`
+8.3.0. Three things differ from what the table said before:
+- **`string-width` ignores VS15**: ⌚ + VS15 is 2 there, and so is any
+  ambiguous character + VS15 with ambiguous characters wide (↔ + VS15).
+  decline keeps rule 2 (VS15 gives 1), which is `unicode-width`'s answer
+  and what VS15 asks for, so on these decline and `string-width` differ.
+- **A keycap base + VS16 without U+20E3 is 1**, as in `string-width`, not 2
+  as rule 1 read literally gives (digits, `#` and `*` are
+  variation-sequence bases). It becomes 2 when U+20E3 arrives.
+- `unicode-width` counts only fully qualified ZWJ sequences, so ❤ + ZWJ +
+  🔥 is 3 there; decline counts any sequence GB11 joins as 2.
 
 **Mode 2027 off.** The cell keeps its first scalar's width; joined
 zero-width scalars change nothing, VS16 included. Today's always-on VS16
@@ -642,15 +707,19 @@ set). Ghostty enables the mode by default through its
 
 **The ambiguous-width setting (Alex's decision: in 1.0).**
 `ambiguous_width = 1 | 2`, default 1, applies to characters whose East
-Asian Width is Ambiguous (Greek and Cyrillic letters, `§`, `°`, `±`, `①`,
-and most box drawing). The set is the one `unicode-width`'s `width_cjk`
-uses; the Unicode table carries that flag next to the width.
+Asian Width is Ambiguous (`§`, `°`, `±`, `①`, most box drawing and the
+private use area). The set is the one `unicode-width`'s `width_cjk` uses;
+the Unicode table carries that flag next to the width. **That set leaves
+out letters** (general category L and Sk), so Greek and Cyrillic letters,
+though Ambiguous in EastAsianWidth.txt, stay one cell at either setting
+(found in PR 4; the table's test pins it).
 
 - **The width rule.** Step 3 uses 2 for an ambiguous first scalar when the
   setting is 2. Emoji sequences stay 2 and VS15 sequences 1, whatever the
   setting. That includes VS15 after an ambiguous character with the setting
-  at 2, on purpose: VS15 asks for text presentation, and `string-width`
-  gives 1 too. Mode 2027 off uses the setting the same way. With 2, box
+  at 2 (↔ + VS15), on purpose: VS15 asks for text presentation.
+  `string-width` gives 2 there, since it ignores VS15 (checked in PR 4);
+  `unicode-width` gives 1. Mode 2027 off uses the setting the same way. With 2, box
   drawing is two cells wide too: that is what CJK-mode terminals and
   `wcwidth_cjk`-based programs do, and why it is a setting. Keeping box
   drawing narrow under setting 2, as some terminals offer, is later work.
@@ -2184,6 +2253,13 @@ pub enum OscLarge {
   | `1337;FilePart=` chunks | `Buffer(1 MB)` each |
   | `52;` (clipboard) | `Buffer(4 MB)` |
   | anything else | `Buffer(64 KB)` |
+
+  **Landed with PR 4** (`osc_size_policy` in term.rs), except that
+  `1337;File=` is answered `Drop` until the iTerm2 image reader exists
+  (B.5): nothing reads those strings yet, and streaming them byte by byte
+  into a reader that throws them away costs more than dropping them. A
+  1 MB OSC 52 copy now arrives whole; before, PR 3's 64 KB default dropped
+  anything over about 48 KB of text.
 - **kitty graphics in term-core:**
   - control keys up to the `;`, at most 4 KB;
   - the payload is base64-decoded as it streams into the image being
@@ -2303,7 +2379,7 @@ go in order, and the font and render agents run alongside.
 | 1 | core + render + app | `refactor(core)!: read cells through RowRef/CellRef and a Style value`: content (empty, char, cluster text, placeholder), width, `&Style`; `Style`, `Underline`, `Attrs` defined; implemented on today's 12-byte cells. **`Terminal`'s public fields (`cursor` and its pen, `selection`, `modes`, …) become private behind accessors.** Every caller moves over (frame.rs, view.rs, the conformance/term/props tests, the pipeline test). No behaviour change | **M** | — |
 | 2 | core + app + render | **view API and selection gestures at a fixed width** (§13.2): `point_at` (with its edge rules), `view_position`, `scroll_to`, `select_word`/`select_line`/`select_all`/`extend_selection` on logical lines, `cursor_in_view`, `link_at` (None until PR 9), `ViewTop`; view.rs and frame.rs stop doing line arithmetic; the double-click word rule moves into term-core | M | 1 |
 | 3 | vte | APC state, `put_slice`, OSC separators kept and size policy (§14), no-op defaults. **Landed, `0bb234d`** | S | — |
-| 4 | core | Unicode table (with the ambiguous flag) + incremental segmentation; width lookups move to the table (a test checks it equals `unicode-width` per scalar); clusters not stored yet | M | 2 |
+| 4 | core | Unicode table (with the ambiguous flag) + incremental segmentation; width lookups move to the table (a test checks it equals `unicode-width` per scalar); clusters not stored yet. **Landed, `e49b27d`**, with the OSC size policy (§14) in `9f31d7e`; what changed from the design is in §6.2 and §6.3 | M | 2 |
 | 5 | core | **8-byte cells and the per-screen style table**: SGR 4:x, 21, 53/55, 58/59 stored; erase style; sweep with every holder (§5.2); renumbering; `set_sweep_at`; `check_invariants` extended. History is still v1 | M | 4 |
 | 6 | core | **clusters per row and mode 2027** (the width rule of §6.3, legacy mode, REP by value, the extended `repair_wide`); `Terminal::set_ambiguous_width`; selection text and `dump()` show clusters | M | 5 |
 | 7 | core | **scrollback v2** (§11) at the written width only: `BlockData` (shared) and `BlockEntry`, meta and contiguous text, checkpoints, per-block ambiguous setting, `FILL`, `pop()` with the lowest-popped mark, the 32 MB backstop, the 64-entry slot cache; `scrollback_mem` gains emoji, placeholder, gradient and sealed figures; bench limits lowered | L | 6 |

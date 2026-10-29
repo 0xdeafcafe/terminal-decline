@@ -86,9 +86,13 @@ only with `DECLINE_TEST_DUMP=<file>` set) that writes JSON dumps.
   segment ends). Segments over part of a wide character, insert mode, DEC line
   drawing and autowrap off go one character at a time. A property test checks
   the bulk path against one character at a time, fed one byte per call.
+- Widths come from term-core's own Unicode table (`src/unicode`, generated
+  from the Unicode 18.0.0 files; equal to `unicode-width` per scalar but
+  for U+17D8). The terminal segments printed text into grapheme clusters
+  (UAX #29) as it arrives, including after a bulk ASCII run.
 - Known gap for the first milestone: combining marks / grapheme clusters are
-  dropped (needs a side table for multi-codepoint cells). Resize does not
-  re-wrap lines yet.
+  still dropped from the cells (needs a side table for multi-codepoint cells;
+  cells design PR 6). Resize does not re-wrap lines yet.
 
 ## Threads
 

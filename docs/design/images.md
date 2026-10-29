@@ -1328,6 +1328,42 @@ from §3.4, §4.2 and §5.5:
   is on, the budget follows windows only), the dump's `images` section,
   and the `MNT_LOCAL` refusal tested against a real non-local volume.
 
+**Landed (I.3).** iTerm2 and Sixel as own images
+(`term-core/src/term/own_images.rs`, tests in `tests/own_images.rs`);
+where it differs from §7 and §8:
+- **iTerm2**: `osc_large` answers `Stream` for `1337;File=` and also for
+  `1337;FilePart=` over 4 KB (streamed into the multipart reader rather
+  than buffered); a part with no `MultipartFile` before it is dropped.
+  Image pixels count as points (§12, 7): `Terminal::set_image_scale`
+  (device pixels per point, default 1) is what the app must set from the
+  window's backing scale; until it does, images are drawn one image
+  pixel per device pixel. Box widths are capped at the screen's width.
+  `preserveAspectRatio=1` uses a new `Fit::ContainTopLeft` (term-render
+  draws it as `Contain` with no centring offset). A JPEG whose size isn't
+  in the first 64 KB is sniffed from a copy of all of it.
+- **Sixel**: colour registers carried over (1070 reset) are kept per
+  screen. The decoder's width limit is the screen's width in pixels (and
+  its height too in display mode, mode 80), so data past the right edge is
+  clipped rather than allocated. One pool entry per string: each growth
+  is `grow`n first, and `set_pixels` at ST settles it.
+- **Freeing** (§4.3): instead of counting `screen_styles` and
+  `history_blocks`, `collect_own_images` looks for live styles naming own
+  images and the blocks' lists, after a style sweep or when history
+  blocks are freed (run from `take_image_jobs` and before each new own
+  image); `Refs` stays zero for own images.
+- **XTSMGRAPHICS** replies `Ps = 2` for an unknown action and `Ps = 1`
+  for `Pi = 3` and others; nothing is answered while images are off.
+- **Not done**: the cursor rules weren't checked against a real xterm
+  or a recording of iTerm2 3.5 (they follow §7.2 and §8.2 as written); no
+  fixture from a real img2sixel or chafa run (the round trip uses
+  term-image's img2sixel-style encoder); placeholder rows and columns are
+  capped at 512 (a cell's 9 bits); reflow of image rows (open question
+  11); the app doesn't call `set_image_scale` yet.
+- **Measured** (`cargo bench -p term-core --bench parse`, before and
+  after binaries alternated on a machine at load 10–19): the quietest
+  paired round was plain 7.93 → 8.01 ms, coloured 25.80 → 25.63 ms, tui
+  15.80 → 15.45 ms; no change to the text path itself.
+
 V.1 and I.1 can start now. After I.0: I.2 (core), I.4 (render) at once,
 then I.5a (app) once I.4's `MetalPixels` is in; I.3 follows I.2. B.3 is
 done with I.2 + I.4 + I.5 (+ the iTerm2 half of I.3); B.5 with the Sixel

@@ -8,6 +8,7 @@
 //! - `resize C L`: resize the window to C columns × L lines;
 //! - `font +1` / `font -1`: change the font size by one point;
 //! - `tab`: open a new tab beside this window, running the same program;
+//! - `front`: bring this window or tab to the front;
 //! - `quit`: quit the app.
 //!
 //! While this is on, the window draws even when covered by other windows,
@@ -107,6 +108,8 @@ pub enum Control {
     Font(i32),
     /// Open a tab beside this window (Shell > New Tab).
     Tab,
+    /// Bring this window or tab to the front (as a notification click does).
+    Front,
     Quit,
 }
 
@@ -117,6 +120,7 @@ impl Control {
             "dump" => Control::Dump,
             "quit" => Control::Quit,
             "tab" => Control::Tab,
+            "front" => Control::Front,
             "resize" => Control::Resize {
                 cols: words.next()?.parse().ok().filter(|&c| c > 0)?,
                 lines: words.next()?.parse().ok().filter(|&l| l > 0)?,
@@ -261,6 +265,7 @@ mod tests {
             ("font", None),
             ("tab", Some(Control::Tab)),
             ("tab 2", None),
+            ("front", Some(Control::Front)),
             ("dump now", None),
             ("rm -rf", None),
             ("", None),

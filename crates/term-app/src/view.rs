@@ -94,6 +94,9 @@ struct State {
     top_inset: f64,
     /// Times the window was hidden or covered and gave back its drawables.
     hidden: u64,
+    /// Whether the window could be seen when last checked
+    /// (`sync_visibility`), so hiding and showing happen once each.
+    shown: bool,
 }
 
 struct AutoScroll {
@@ -147,6 +150,18 @@ fn with_view(id: usize, f: impl FnOnce(&TerminalView)) {
     }
 }
 
+/// On the next turn of the main queue, hide or show every window as it
+/// can now be seen: a tab switch changes the key window, but the group's
+/// selected tab may change after the key notifications are sent.
+pub(crate) fn sync_visibility_soon() {
+    DispatchQueue::main().exec_async(|| {
+        let views: Vec<_> = VIEWS.with(|v| v.borrow().values().filter_map(|w| w.load()).collect());
+        for v in views {
+            v.sync_visibility();
+        }
+    });
+}
+
 /// Bring view `id`'s window or tab to the front (a click on its
 /// notification).
 pub(crate) fn bring_to_front(id: usize) {
@@ -154,6 +169,8 @@ pub(crate) fn bring_to_front(id: usize) {
         if let Some(window) = v.window() {
             window.makeKeyAndOrderFront(None);
             objc2_app_kit::NSApplication::sharedApplication(MainThreadMarker::from(v)).activate();
+            // An inactive app gets no key notifications to notice the switch.
+            sync_visibility_soon();
         }
     });
 }
@@ -329,27 +346,25 @@ define_class!(
     unsafe impl NSWindowDelegate for TerminalView {
         #[unsafe(method(windowDidBecomeKey:))]
         fn window_did_become_key(&self, _n: &NSNotification) {
+            // A tab brought to the front becomes key: show it now, so its
+            // first frame is drawn before it reaches the screen.
+            self.sync_visibility();
             self.set_focus(true);
+            sync_visibility_soon();
         }
 
         #[unsafe(method(windowDidResignKey:))]
         fn window_did_resign_key(&self, _n: &NSNotification) {
             self.set_focus(false);
+            // The tab put behind resigns key before its group selects
+            // another tab; look again once that has happened.
+            sync_visibility_soon();
         }
 
         #[unsafe(method(windowDidChangeOcclusionState:))]
         fn window_did_change_occlusion(&self, _n: &NSNotification) {
-            if self.visible() {
+            if self.sync_visibility() {
                 self.request_redraw();
-            } else {
-                // Free what can be rebuilt while nothing can be seen. A
-                // background tab is a hidden window, so it lands here too.
-                let minimised = self.window().is_some_and(|w| w.isMiniaturized());
-                self.with_state(|st| {
-                    st.hidden += 1;
-                    st.renderer.hide(minimised)
-                });
-                self.trim_drawables();
             }
         }
 
@@ -551,6 +566,7 @@ impl TerminalView {
             awaiting_echo: None,
             top_inset: self.titlebar_height(),
             hidden: 0,
+            shown: true,
         });
         if let Some(window) = self.window() {
             unsafe {
@@ -668,9 +684,44 @@ impl TerminalView {
         self.unpause();
     }
 
+    /// Whether the window can be seen. A tab behind another tab of its
+    /// group can't, whatever its occlusion state says: macOS doesn't
+    /// reliably report a background tab as covered. The key window can,
+    /// even before its occlusion state catches up with a tab switch.
     fn visible(&self) -> bool {
-        self.window()
-            .is_some_and(|w| w.occlusionState().contains(objc2_app_kit::NSWindowOcclusionState::Visible))
+        self.window().is_some_and(|w| {
+            let behind = w
+                .tabGroup()
+                .and_then(|g| g.selectedWindow())
+                .is_some_and(|front| !std::ptr::eq::<NSWindow>(&*front, &*w));
+            !behind && (w.isKeyWindow() || w.occlusionState().contains(objc2_app_kit::NSWindowOcclusionState::Visible))
+        })
+    }
+
+    /// Hide or show after the window was covered, uncovered, or its tab put
+    /// behind or brought to the front. Hiding frees what can be rebuilt
+    /// while nothing can be seen; showing draws at once, so the window
+    /// never shows a stale frame. Returns whether the window can be seen.
+    fn sync_visibility(&self) -> bool {
+        let visible = self.visible();
+        let minimised = self.window().is_some_and(|w| w.isMiniaturized());
+        let changed = self.with_state(|st| {
+            let changed = st.shown != visible;
+            st.shown = visible;
+            if changed && !visible {
+                st.hidden += 1;
+                st.renderer.hide(minimised);
+            }
+            changed
+        });
+        if changed == Some(true) {
+            if visible {
+                self.request_redraw();
+            } else {
+                self.trim_drawables();
+            }
+        }
+        visible
     }
 
     fn draw(&self) {
@@ -1430,6 +1481,7 @@ impl TerminalView {
                         crate::app::open_tab_beside(&window);
                     }
                 }
+                Some(Control::Front) => bring_to_front(self.ivars().id),
                 Some(Control::Quit) => {
                     objc2_app_kit::NSApplication::sharedApplication(MainThreadMarker::from(self)).terminate(None);
                     return;

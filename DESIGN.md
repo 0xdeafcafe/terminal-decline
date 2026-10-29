@@ -245,8 +245,18 @@ height less that rect's height: the title bar, plus the tab bar while it
 shows, 36 pt on macOS 27) changes, the top padding follows and the grid
 shrinks or grows, and the program gets a resize (`layout::top_inset`).
 
-A background tab is a hidden window: it gets the occlusion event, stops
-drawing and gives back its drawables like a covered window. Since it is
+A background tab is a hidden window: it stops drawing and gives back its
+drawables like a covered window. macOS doesn't reliably send a background
+tab the occlusion event, so a window that isn't its tab group's selected
+window counts as hidden whatever its occlusion state, and a tab switch is
+noticed through the key window changing: the tab brought to the front
+becomes key and is shown (and drawn) at once, and on the next turn of the
+main queue, once the group has selected it, every window hides or shows to
+match (as it does after a window opens or is brought to the front, which
+an inactive app gets no key notifications for). (Watching the group's `selectedWindow` by KVO would need
+re-registering each time a window moves between groups, and AppKit doesn't
+document that property as observable.) The key window counts as seen even
+before its occlusion state catches up. Nothing polls. Since it is
 never drawn, what a program asks for that must happen anyway (a new title,
 shown in the tab bar; the bell) is taken out of the terminal by the reader
 thread as it parses (`session::Events`) and handed to the main thread,

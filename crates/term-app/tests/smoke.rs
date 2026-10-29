@@ -211,7 +211,8 @@ fn smoke_font_bigger_changes_the_cells() {
 /// A second tab through the `tab` control command: both tabs run their
 /// program, the tab bar that appears costs both of them lines at the top,
 /// the first tab's program is told its new size, and the first tab, now in
-/// the background, is hidden and gives back its drawables.
+/// the background, is hidden and gives back its drawables; brought back to
+/// the front (the `front` control command), it shows again.
 #[test]
 #[ignore = "opens a window; run with --run-ignored"]
 fn smoke_second_tab_shrinks_the_grid() {
@@ -221,19 +222,18 @@ fn smoke_second_tab_shrinks_the_grid() {
     let dir = TempDir::new("tab");
     let d = dir.path().display();
     // The same program runs in both tabs; the first to make the directory
-    // is the first tab. macOS reports the first tab as covered (which is
-    // what frees its memory) asynchronously, after the tab switch; the
-    // script can't see that, so it gives it a second before the last dump.
+    // is the first tab.
     let wait = |cond: &str| format!("i=0; while ! {{ {cond}; }} && [ $i -lt 200 ]; do sleep 0.05; i=$((i+1)); done; ");
     let script = format!(
         "if mkdir '{d}/first' 2>/dev/null; then \
            s0=$(stty size); echo one; {dump}{tab}\
-           {wait_two}{wait_size}stty size; sleep 1; {dump}{quit}\
+           {wait_two}{wait_size}stty size; {dump}{front}{dump}{quit}\
          else \
            echo two; {dump}{wait_dump}touch '{d}/two-done'; \
          fi; sleep 20",
         dump = osc("dump"),
         tab = osc("tab"),
+        front = osc("front"),
         quit = osc("quit"),
         wait_two = wait(&format!("[ -e '{d}/two-done' ]")),
         wait_size = wait("[ \"$(stty size)\" != \"$s0\" ]"),
@@ -247,8 +247,8 @@ fn smoke_second_tab_shrinks_the_grid() {
     }
     let of = |w: u64| all.iter().filter(|x| x["window"] == w).collect::<Vec<_>>();
     let (one, two) = (of(1), of(2));
-    assert_eq!((one.len(), two.len()), (2, 1), "{all:?}");
-    let (before, after, two) = (one[0], one[1], two[0]);
+    assert_eq!((one.len(), two.len()), (3, 1), "{all:?}");
+    let (before, after, back, two) = (one[0], one[1], one[2], two[0]);
     assert!(screen(before).starts_with("one|"), "{}", screen(before));
     assert!(screen(two).starts_with("two|"), "{}", screen(two));
     assert_eq!(num(before, "tabs"), 1.0, "{before}");
@@ -266,6 +266,14 @@ fn smoke_second_tab_shrinks_the_grid() {
     // The first tab is behind the second: hidden, and it gave back memory.
     assert_eq!(after["visible"], false, "{after}");
     assert!(num(after, "hidden") >= 1.0, "{after}");
+    // In front again: not hidden again, and, as the key window, shown at
+    // once. (If the app isn't active, as when another test's app has just
+    // quit, it has no key window: it is shown when macOS reports it
+    // uncovered, which may come after this dump.)
+    assert_eq!(num(back, "hidden"), num(after, "hidden"), "{back}");
+    if back["active"] == true {
+        assert_eq!(back["visible"], true, "{back}");
+    }
 }
 
 /// What a dogfood build does after a restart (`--restore <file>`): two

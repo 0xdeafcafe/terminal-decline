@@ -451,6 +451,9 @@ impl AppDelegate {
             }
         }
         window.makeKeyAndOrderFront(None);
+        // A new tab puts the one in front behind it, without key
+        // notifications while the app is inactive.
+        crate::view::sync_visibility_soon();
         window.setTabbingMode(NSWindowTabbingMode::Automatic);
         if std::env::var_os("DECLINE_DEBUG").is_some() {
             // Test tooling uses this to screenshot the window.

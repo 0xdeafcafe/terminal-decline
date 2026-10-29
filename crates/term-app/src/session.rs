@@ -265,6 +265,7 @@ pub(crate) fn replace_term(t: &mut Term) {
     fresh.state.set_default_colors(t.state.default_colors());
     fresh.state.set_default_palette(t.state.default_palette());
     fresh.state.set_cell_pixels(t.state.cell_pixels());
+    fresh.state.set_image_scale(t.state.image_scale());
     // The same host: the app's.
     fresh.state.set_image_host(t.state.image_host().clone());
     fresh.state.set_reads_off_lock(true);
@@ -570,6 +571,12 @@ impl Session {
         if let Some(tx) = &self.input {
             let _ = tx.send(bytes);
         }
+    }
+
+    /// Device pixels per point of the window the terminal is in (2 on a
+    /// Retina display), so iTerm2 images count their sizes as points.
+    pub fn set_image_scale(&self, scale: f32) {
+        lock(&self.term).state.set_image_scale(scale);
     }
 
     /// Resize the terminal and tell the program (SIGWINCH).

@@ -345,6 +345,21 @@ fn shell_prompt_and_output() {
 }
 
 #[test]
+fn image_scale_reaches_the_terminal_and_follows_changes() {
+    let h = Harness::shell("image-scale");
+    assert_eq!(h.session().lock_term().state.image_scale(), 1.0);
+    // At start on a Retina display, then moving to a non-Retina one.
+    h.session().set_image_scale(2.0);
+    assert_eq!(h.session().lock_term().state.image_scale(), 2.0);
+    h.session().set_image_scale(1.0);
+    assert_eq!(h.session().lock_term().state.image_scale(), 1.0);
+    // A resize (a layout pass) leaves it alone.
+    h.session().set_image_scale(2.0);
+    h.session().resize(size(60, 20)).unwrap();
+    assert_eq!(h.session().lock_term().state.image_scale(), 2.0);
+}
+
+#[test]
 fn typing_through_translate_with_line_editing() {
     let h = Harness::shell("typing");
     // "echo hx", Backspace, "i", Return.

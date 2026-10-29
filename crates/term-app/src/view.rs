@@ -161,6 +161,9 @@ pub(crate) struct Pane {
     /// pixels): the PTY is resized only when that changes, not for every
     /// pixel of a divider drag or window resize.
     told: Option<(u16, u16, u16, u16)>,
+    /// The backing scale its terminal was last given, for iTerm2 image
+    /// sizes in points; set again when the window moves between displays.
+    image_scale: f64,
     /// It runs the preferences (the Settings tab's first pane): not a
     /// running program for `confirm_close`, the only pane whose chord
     /// recording is honoured, and titled "Settings".
@@ -1510,6 +1513,10 @@ impl WindowView {
                 if let Some(f) = &p.find {
                     f.bar.place(frame.size.width, if rect.y == 0 { titlebar } else { 0.0 });
                 }
+                if p.image_scale != scale {
+                    p.image_scale = scale;
+                    p.session.set_image_scale(scale as f32);
+                }
                 let pad = pane_padding(&st.win.config, titlebar, scale, rect);
                 let (cols, lines) = layout::grid_size((frame.size.width, frame.size.height), scale, m.into(), pad);
                 let size = pty_size(cols, lines, m);
@@ -2512,6 +2519,7 @@ fn spawn_pane(window: usize, config: &Config, theme: &Theme, m: term_font::Metri
         runs_shell: !n.settings && n.command.argv.is_empty(),
         program: n.program,
         told: Some(told(&pty_size(cols, lines, m))),
+        image_scale: 0.0,
         settings: n.settings,
         title: None,
         swallow_click: false,

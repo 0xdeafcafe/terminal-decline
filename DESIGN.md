@@ -72,14 +72,19 @@ only with `DECLINE_TEST_DUMP=<file>` set: `dump`, `resize`, `font`, `tab`,
   scroll regions rotate just their rows. A row is `Vec<Cell>` plus a
   soft-wrap flag, and is cleared with a memset when the fill is the default
   blank (all zero).
-- Scrollback (`term-core/src/scrollback.rs`) stores each line as UTF-8 text
-  plus style runs (only non-default colours/styles are written), packed into
-  ~64 KB blocks that are freed whole from the oldest end. Lines are expanded
-  back into cells only when shown or copied. Measured per line: plain 52 B,
-  `ls` colours 93 B, compiler errors 81 B, full-width background 183 B, CJK
-  90 B (was 518 / 674 / – / ~1500 / – with full cell rows): 10k lines take
-  0.5–1.8 MB. Encoding finds a line's end by skipping all-zero cells 8 at a
-  time, and lines of plain default-style ASCII are a byte copy.
+- Scrollback (`term-core/src/scrollback.rs`, scrollback v2, cells design
+  §11) stores lines as written, in blocks whose text is contiguous apart
+  from each line's flags, style runs (slots in a per-block style
+  dictionary, with its own OSC 8 link table), whole grapheme clusters,
+  width exceptions and OSC 133 prompt marks. Blocks are
+  sealed before any part passes 64 KB (16-bit offsets) and are then
+  immutable and shared (`Arc`); whole blocks are freed from the oldest end
+  at the `scrollback` line limit (changeable on a running terminal) or a
+  hidden 32 MB backstop. Lines are expanded back into cells only when
+  shown, copied or pulled back. Measured per line at 160 columns,
+  everything held: plain 44 B, `ls` colours 61 B, compiler errors 67 B,
+  full-width background 30 B, CJK 69 B, emoji 81 B (v1: 52 / 93 / 81 /
+  183 / 90 B, emoji lossy): 10k lines take 0.3–0.8 MB.
 - term-render and term-app read cells only through `RowRef` and `CellRef`
   (content: empty, a character, cluster text or an image placeholder; width;
   and a `&Style` with colours, attributes, underline style and link), and
@@ -112,9 +117,8 @@ only with `DECLINE_TEST_DUMP=<file>` set: `dump`, `resize`, `font`, `tab`,
   program can turn it off for the old per-character rule. East Asian
   Ambiguous characters are 1 or 2 cells by `Terminal::set_ambiguous_width`
   (the app's setting comes with cells design PR 15). Selection text and
-  `dump()` give whole clusters; history keeps only a cluster's first
-  character until scrollback v2 (PR 7), and the renderer draws a cluster's
-  first character until clusters are shaped (F3.2).
+  `dump()` give whole clusters, and so does history (PR 7); the renderer
+  draws a cluster's first character until clusters are shaped (F3.2).
 - Known gap for the first milestone: resize does not re-wrap lines yet.
 
 ## Threads

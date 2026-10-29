@@ -4,8 +4,10 @@ Status: **accepted with changes** by two Opus (xhigh) reviews, and revised
 on 29 Oct 2026 with those changes and with Alex's decisions (§0). Two
 pieces have landed: the code-drawn glyphs (F.6, in term-font) and the vte
 parser changes (PR 3, `0bb234d`). Since then the Unicode table (PR 4) and
-the 8-byte cells with their style tables (PR 5, §5.4) have landed too.
-Everything else is still to be built. The
+the 8-byte cells with their style tables (PR 5, §5.4) have landed too,
+and since then clusters (PR 6), the snapshot (PR 8), links and prompt
+marks (PR 9) and scrollback v2 (PR 7, end of §11.8). The rest is still
+to be built. The
 design builds on the parser work now on `main`: vendored vte
 with `print_ascii`, `write_ascii` row-segment writes, the screen as a ring
 of rows, the memset row reset and the faster scrollback encoder. Every
@@ -2248,6 +2250,122 @@ decompresses a block only when its filter lets it through (§13.6). R.7's
 target, 100k lines of `ls`/log output ≤ 3 MB, starts from 5.9 MB instead of
 9.3.
 
+**Landed (PR 7).** What was built (`scrollback.rs` and its tests in
+`scrollback/tests.rs`, with hooks in `term.rs`, `snapshot.rs` and
+`style_table.rs`), and where it differs from §11.1–§11.7:
+- **Blocks** are as in §11.2: `BlockData` (meta, starts, contiguous
+  text, checkpoints, the style dictionary and its offsets, links,
+  `first`, `width`, `ambiguous`, `head_continues`, `has_marks`), sealed
+  into an `Arc` and never changed again, and a `BlockEntry` of the data
+  and `len`. The open block is the same parts as vectors; each part
+  grows by doubling but never past 64 KB of capacity, and a line that
+  would take a part past 65,535 bytes is undone and written again into
+  a new block. A row too wide even for an empty block (past 4096
+  columns, which nothing clamps yet) is cut to 4096 cells. Not built
+  yet, as the plan has it: `utf16_len` and UTF-16 checkpoints (13a),
+  `rows_at` (12), the filter (13c), placeholders and the image list
+  (10). Checkpoints are text offsets only for now.
+- **The line format** is §11.3's, with these changes:
+  - a cluster's entry is `gap` and `extra << 1 | wide`: its width is
+    stored rather than worked out again from the 2027 rule, so neither
+    writing nor reading segments it (about 40 ns a cluster each way).
+    Width exceptions are then only for single scalars (a row written
+    before an ambiguous-width change);
+  - a width exception's `gap` counts text entries (characters and
+    clusters), not cells;
+  - marks are `count:u8`, then per mark `kind:u8` (bit 7: an exit
+    status follows), `col:varint`, `[status:varint]`;
+  - an empty wide cell (no character, two cells) is stored as a space
+    with a width exception;
+  - `FILL` is set when the row's last column is an empty cell whose
+    style shows; the decoder carries that style to the width it is
+    asked for (`get_at_width(i, cols, …)`), which the terminal and the
+    snapshot pass as the screen's width. History rows in a snapshot
+    with it have `RowFlags::FILL`.
+- **The dictionary** is §11.5's encoding; `more` bit 1 is the link, as
+  an index (1 onwards) in the block's link table. That table holds the
+  screen's own `Arc<LinkValue>`s, each once, rather than encoded bytes:
+  decoding is an `Arc` clone and nothing is copied, and the backstop
+  counts each link's URI and id per block. The map from style to slot
+  uses FxHash. In front of it, the 64-entry slot cache is kept from
+  line to line while the screen table's `version()` (its epoch and
+  sweep count) stays the same: ids are only reused after a sweep, and
+  the primary screen's rows pushed while the alternate screen is shown
+  come from the other table.
+- **Line numbers** are the screen's: the scrollback counts every row
+  that leaves the primary screen, kept or not (a limit of 0 keeps none
+  but still counts), so `total()` equals the primary screen's first
+  line and `check_invariants` checks it.
+- **`pop()`** (`pop_into`) decodes the newest line, truncates the open
+  block or lowers a sealed entry's `len` (dropping an entry that
+  reaches 0, and starting a new open block there), records the lowest
+  line popped, and lets lines hidden by the limit show again. The
+  snapshot's `popped_from` now comes from that mark
+  (`take_popped_from`). Nothing in the terminal pops yet (reflow is PR
+  11); a test aid, `pull_back_for_test`, puts popped lines back on top
+  of the primary screen so the property and fuzz tests can exercise
+  it.
+- **Limits:** the line limit hides lines and frees whole blocks as
+  before; `Terminal::set_scrollback_limit` changes it on a running
+  terminal (for live config reload): smaller frees at once, 0 frees
+  everything, larger brings back lines still stored. The 32 MB
+  backstop counts every byte a block holds and is checked when a block
+  is sealed (the open block grows by at most 64 KB a part in between);
+  `set_byte_limit` is a test aid.
+- **Ambiguous width:** `set_ambiguous_width` seals the open block if it
+  holds lines, as §6.3 says.
+- **Links and marks** (PR 9's history half): `push_keyed` takes the
+  screen's link table with its styles; decoding gives each row its own
+  link list (`RowRef::with_links`). `link_at`, the hovered-link
+  highlight (history rows compared by value), `marks_at`, the prompt
+  jumps and `command_output` cover history; marked lines are found
+  from flags bytes, skipping blocks without `has_marks`.
+- **Tests:** in `scrollback/tests.rs` the worked examples of §11.4 byte
+  for byte (plain, `ls`, full-width background, compiler error, CJK,
+  emoji, wrapped, a prompt line), the dictionary encoding, decode of
+  encode for random rows (clusters, wide and ambiguous cells, edge
+  spacers, FILL, every style field, both settings, with and without the
+  slot cache), through sealed blocks, pop (rows back newest first, the
+  shared data unchanged, the mark), limits, the backstop, sealing
+  before 64 KB, per-block ambiguous settings, checkpoints, links and
+  marks. `check_all` reads every stored line through (sections, text,
+  checkpoints, slots, links); `check_invariants` runs the cheap
+  structural check. The forced-sweep property test pulls lines back,
+  changes the limit and the setting and reads history through after
+  every step, with its snapshot-fed row cache; `tests/snapshot.rs`
+  checks `popped_from` and FILL; `tests/links.rs` links and marks in
+  history; the fuzz input gains `FF 'P' n` and `FF 'L' n` and a seed.
+- **Measured:** bytes per line at 160 columns (`scrollback_mem`,
+  everything held / sealed blocks only), v1 → v2: plain 52 → 44 / 43,
+  `ls` 93 → 61 / 59, compiler error 81 → 67 / 63, full-width
+  background 183 → 30 / 12, CJK 90 → 69 / 66, emoji (v1 lossy) 84 →
+  81 / 79, gradient 1,454 → 1,979 / 1,926. The gradient is above
+  §11.4's ~1,600 because its cells are `█`, three bytes of UTF-8, not
+  one. `bench-limits.json` is lowered to plain 50, `ls` 70, compiler
+  75, background 35, CJK 75, emoji 95, gradient 2,100. (No placeholder
+  figure until PR 10.)
+- **Speed, busy machine** (another agent's load test ran at the same
+  time, load average 25–45 on 10 cores; interleaved A/B, prebuilt
+  binaries, 3 rounds, best of 3; to be run again on a quiet machine):
+  - `history` bench (new, 10k lines of 160 columns), v1 → v2 per 10k
+    lines: push plain 334 → 435 µs, `ls` 1.24 → 1.75 ms, CJK 1.44 →
+    2.66 ms, emoji 1.49 → 1.30 ms, gradient 18.0 → 34.9 ms; decode
+    plain 1.01 → 0.98 ms, `ls` 1.50 → 1.50 ms, CJK 2.23 → 2.29 ms,
+    background 2.47 → 0.90 ms, emoji 1.12 → 2.28 ms, gradient 11.4 →
+    26.7 ms. Storing pays for the dictionary (one hash per new style
+    in a block) and for a Unicode table lookup per non-ASCII cell (the
+    width check); reading pays for walking up to 15 lines from a
+    checkpoint and for building cluster stores.
+  - `parse_1k` (before the last speed-ups, which the history numbers
+    include): plain −0.6%, coloured +10%, `tui` −1%, `seq` +25%,
+    unicode +50%, clusters +41–72% (medians; the best-of figures
+    disagree by up to 20 points). These are over the 3% gate and need
+    the quiet-machine run before this is merged; a second run during
+    the load test was unusable (base and PR both 3–10 times slower).
+  - the snapshot with 100 history rows at 300×100 69 → 136 µs, frames
+    built from history rows 300×100 plain 171 → 154 µs, coloured 205
+    → 305 µs, unicode 242 → 508 µs (first run).
+
 ---
 
 ## 12. Reflow on resize
@@ -3023,9 +3141,9 @@ go in order, and the font and render agents run alongside.
 | 4 | core | Unicode table (with the ambiguous flag) + incremental segmentation; width lookups move to the table (a test checks it equals `unicode-width` per scalar); clusters not stored yet. **Landed, `e49b27d`**, with the OSC size policy (§14) in `9f31d7e`; what changed from the design is in §6.2 and §6.3 | M | 2 |
 | 5 | core | **8-byte cells and the per-screen style table**: SGR 4:x, 21, 53/55, 58/59 stored; erase style; sweep with every holder (§5.2); renumbering; `set_sweep_at`; `check_invariants` extended. History is still v1. **Landed**; what changed from the design is at the end of §5.4 | M | 4 |
 | 6 | core | **clusters per row and mode 2027** (the width rule of §6.3, legacy mode, REP by value, the extended `repair_wide`); `Terminal::set_ambiguous_width`; selection text and `dump()` show clusters. **Landed**; what changed from the design is at the end of §6.4 | M | 5 |
-| 7 | core | **scrollback v2** (§11) at the written width only: `BlockData` (shared) and `BlockEntry`, meta and contiguous text, checkpoints, per-block ambiguous setting, `FILL`, `pop()` with the lowest-popped mark, the 32 MB backstop, the 64-entry slot cache; `scrollback_mem` gains emoji, placeholder, gradient and sealed figures; bench limits lowered | L | 6 |
+| 7 | core | **scrollback v2** (§11) at the written width only: `BlockData` (shared) and `BlockEntry`, meta and contiguous text, checkpoints, per-block ambiguous setting, `FILL`, `pop()` with the lowest-popped mark, the 32 MB backstop, the 64-entry slot cache; `scrollback_mem` gains emoji, placeholder, gradient and sealed figures; bench limits lowered. **Landed**, with PR 9's history half and `set_scrollback_limit`; what changed from the design is at the end of §11.8 | L | 6 |
 | 8 | core | row change counters, `terminal_id`, `history_epoch`, `popped_from`, the snapshot with highlight ranges, the screen it shows and style updates (§9). **Landed**; what changed from the design is at the end of §9.2 | S | 5 |
-| 9 | core | OSC 8 link table and OSC 133 prompt marks, on the screen and in v2. **Landed on the screen**; history waits for PR 7 (end of §5.5) | S | 7 |
+| 9 | core | OSC 8 link table and OSC 133 prompt marks, on the screen and in v2. **Landed** on the screen (end of §5.5), and in history with PR 7 (end of §11.8) | S | 7 |
 | 10 | core | kitty placeholders (cell kind, diacritic table, step-by-step inference, v2 list) | S | 7 |
 | 11 | core | **screen reflow, pull-back and tracked positions** (F.4, §12.2): the two ignored resize tests settled (§19) | L | 7, 8 |
 | 12 | core | **history at another width** (§12.3): rows-at-width counts, `ViewTop::At { point, offset }` across width changes, `FILL` at another width | M | 11 |
@@ -3207,10 +3325,11 @@ in that app:
   links are lost. With PR 9 before PR 7, OSC 8 links and OSC 133 marks
   work on the screen and are dropped when their lines scroll into
   history, so prompt jumps and selecting output reach only the screen.
+  (Closed by PR 7: history keeps links, marks and whole clusters.)
 
 - **Between PRs 6 and 7,** clusters work on the screen, but v1 history keeps
   only each cluster's first scalar: a family emoji scrolled into history
-  comes back as 👨, and `e` + U+0301 as `e`.
+  comes back as 👨, and `e` + U+0301 as `e`. (Closed by PR 7.)
 - **Between PR 6 and F3.2,** cluster cells draw at least their first
   character (the renderer draws the base scalar). Widths and cursor
   positions are already right, so text lines up; only the joined glyph is

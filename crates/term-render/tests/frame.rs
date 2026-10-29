@@ -358,6 +358,24 @@ fn underline_positions_from_metrics() {
 }
 
 #[test]
+fn decorations_take_the_text_colour_as_drawn() {
+    // Red underline; inverse strike (the text colour is the background);
+    // a dim underline (the text colour's alpha). Underline colours set
+    // with SGR 58 are tested in frame.rs until term-core keeps them.
+    let t = term(10, 1, &format!("{NO_CURSOR}\x1b[31;4ma\x1b[0;7;9mb\x1b[0;2;4mc"));
+    let theme = Theme::default();
+    let f = build(&t.state);
+    let thin: Vec<_> = f
+        .rects
+        .iter()
+        .filter(|r| r.h == M.underline_thickness as u16)
+        .map(|r| (r.x / CW, r.color))
+        .collect();
+    let dim = (theme.foreground & 0x00FF_FFFF) | 160 << 24;
+    assert_eq!(thin, [(0, theme.palette[1]), (1, theme.background), (2, dim)]);
+}
+
+#[test]
 fn decorations_follow_thicker_metrics() {
     let m = Metrics {
         underline_thickness: 3,

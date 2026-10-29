@@ -149,6 +149,11 @@ impl Theme {
     }
 }
 
+/// Steps in a curly underline's wave per cell, and each step's offset from
+/// the underline in thicknesses (a coarse sine: up, back, down, back).
+const CURLY_SEGMENTS: i32 = 8;
+const CURLY_WAVE: [i32; CURLY_SEGMENTS as usize] = [0, -1, -1, 0, 0, 1, 1, 0];
+
 /// What a row needs from the frame around it.
 struct RowCtx<'a> {
     theme: &'a Theme,
@@ -199,7 +204,7 @@ impl CellView for CellRef<'_> {
 
 /// A style resolved against the theme, worked out once per run of
 /// same-styled cells. Kept small, as a coloured screen changes style every
-/// few cells.
+/// few cells: the underline colour is only resolved for underlined cells.
 #[derive(Clone, Copy)]
 struct Pen {
     /// Text colour and background, after inverse.
@@ -207,7 +212,9 @@ struct Pen {
     bg: Rgba,
     attrs: Attrs,
     underline: Underline,
-    /// Underlined or struck through.
+    /// Unresolved: the default draws underlines in the text colour.
+    underline_color: term_core::Color,
+    /// Any of underline, overline or strike.
     decorated: bool,
 }
 
@@ -225,7 +232,8 @@ impl Pen {
             bg,
             attrs: a,
             underline: style.underline,
-            decorated: style.underline != Underline::None || a.contains(Attrs::STRIKE),
+            underline_color: style.underline_color,
+            decorated: style.underline != Underline::None || a.intersects(Attrs::OVERLINE | Attrs::STRIKE),
         }
     }
 
@@ -427,7 +435,7 @@ impl Frame {
                 });
             }
             if pen.decorated {
-                self.decorate(pen, fg, x, y, m);
+                self.decorate(pen, theme, fg, x, y, m);
             }
             end = col + 1;
         }
@@ -459,10 +467,11 @@ impl Frame {
         self.push_run(run_color, default_bg, run_start, ctx.cols, px, y, cw, ch);
     }
 
-    /// Underline and strike for one cell whose top-left corner is
+    /// Underline, overline and strike for one cell whose top-left corner is
     /// (`x`, `y`). `fg` is the text colour as drawn (after inverse, the
-    /// block cursor and dim).
-    fn decorate(&mut self, pen: Pen, fg: Rgba, x: i32, y: i32, m: Metrics) {
+    /// block cursor and dim). Underlines take the style's underline colour
+    /// when it has one (§10.5).
+    fn decorate(&mut self, pen: Pen, theme: &Theme, fg: Rgba, x: i32, y: i32, m: Metrics) {
         let cw = m.cell_width as i32;
         let t = m.underline_thickness.max(1) as i32;
         let mut rect = |x: i32, y: i32, w: i32, color: Rgba| {
@@ -476,10 +485,46 @@ impl Frame {
         };
         if pen.underline != Underline::None {
             let uy = y + (m.baseline + m.underline_offset) as i32;
-            rect(x, uy, cw, fg);
-            if pen.underline == Underline::Double {
-                rect(x, uy + 2 * t, cw, fg);
+            let color = theme.resolve(pen.underline_color, fg);
+            // Curly, dotted and dashed are drawn from rectangles until
+            // term-font's pattern sprites land (F2.3, §10.5). Then each of
+            // them becomes one sprite quad per cell, pushed here.
+            match pen.underline {
+                Underline::None => {}
+                Underline::Single => rect(x, uy, cw, color),
+                Underline::Double => {
+                    rect(x, uy, cw, color);
+                    rect(x, uy + 2 * t, cw, color);
+                }
+                Underline::Dotted => {
+                    // Square dots a thickness wide, a thickness apart.
+                    let mut dx = 0;
+                    while dx < cw {
+                        rect(x + dx, uy, t.min(cw - dx), color);
+                        dx += 2 * t;
+                    }
+                }
+                Underline::Dashed => {
+                    // One dash per cell, centred so the gaps line up across
+                    // cells: three quarters of the cell, then a gap.
+                    let gap = (cw / 4).max(1);
+                    rect(x + gap / 2, uy, cw - gap, color);
+                }
+                Underline::Curly => {
+                    // One period of a wave per cell, in steps a thickness
+                    // above and below the underline.
+                    for (i, dy) in CURLY_WAVE.iter().enumerate() {
+                        let x0 = i as i32 * cw / CURLY_SEGMENTS;
+                        let x1 = (i as i32 + 1) * cw / CURLY_SEGMENTS;
+                        if x1 > x0 {
+                            rect(x + x0, uy + dy * t, x1 - x0, color);
+                        }
+                    }
+                }
             }
+        }
+        if pen.attrs.contains(Attrs::OVERLINE) {
+            rect(x, y, cw, fg);
         }
         if pen.attrs.contains(Attrs::STRIKE) {
             rect(x, y + m.baseline as i32 - m.strike_offset as i32, cw, fg);
@@ -546,5 +591,218 @@ impl Frame {
             h: ch as u16,
             color,
         });
+    }
+}
+
+/// Rows built from `Style`s directly, for what term-core can't set yet
+/// (underline colour, curly, dotted and dashed underlines, overline). The
+/// rest of frame building is tested through term-core in `tests/frame.rs`.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use term_core::{Color, Style};
+
+    const M: Metrics = Metrics {
+        cell_width: 16,
+        cell_height: 20,
+        baseline: 14,
+        underline_offset: 2,
+        underline_thickness: 2,
+        strike_offset: 4,
+    };
+    /// Where underlines start: the top of the underline in row 0.
+    const UY: i16 = (M.baseline + M.underline_offset) as i16;
+    const T: u16 = M.underline_thickness as u16;
+
+    #[derive(Clone, Copy)]
+    struct TestCell(char, Style);
+
+    impl CellView for TestCell {
+        type Key = Style;
+        fn key(&self) -> Style {
+            self.1
+        }
+        fn style(&self) -> Style {
+            self.1
+        }
+        fn content(&self) -> Content<'_> {
+            Content::Char(self.0)
+        }
+        fn is_spacer(&self) -> bool {
+            false
+        }
+    }
+
+    struct NoGlyphs;
+    impl GlyphSource for NoGlyphs {
+        fn glyph(&mut self, _: u32, _: FontStyle) -> Option<GlyphSlot> {
+            None
+        }
+    }
+
+    /// The decorations of one row of `cells` at the top-left of the grid.
+    fn decorations(theme: &Theme, cells: &[TestCell]) -> Vec<RectInstance> {
+        let ctx = RowCtx {
+            theme,
+            m: M,
+            px: 0,
+            y: 0,
+            cols: cells.len(),
+            sel: 0..0,
+            block_cursor: None,
+            covered: 0..0,
+        };
+        let mut f = Frame::default();
+        f.build_row(&ctx, cells.iter().copied(), &mut NoGlyphs);
+        f.decorations
+    }
+
+    fn styled(f: impl FnOnce(&mut Style)) -> Style {
+        let mut s = Style::DEFAULT;
+        f(&mut s);
+        s
+    }
+
+    fn line(x: i16, y: i16, w: u16, color: Rgba) -> RectInstance {
+        RectInstance { x, y, w, h: T, color }
+    }
+
+    #[test]
+    fn plain_text_draws_no_decorations() {
+        assert_eq!(decorations(&Theme::default(), &[TestCell('a', Style::DEFAULT)]), []);
+    }
+
+    #[test]
+    fn underline_takes_its_own_colour_when_set() {
+        let theme = Theme::default();
+        let red = styled(|s| {
+            s.underline = Underline::Single;
+            s.underline_color = Color::rgb(255, 0, 0);
+        });
+        let palette = styled(|s| {
+            s.underline = Underline::Double;
+            s.underline_color = Color::indexed(4);
+        });
+        assert_eq!(
+            decorations(&theme, &[TestCell('a', red), TestCell('b', palette)]),
+            [
+                line(0, UY, 16, rgb(0xff0000)),
+                line(16, UY, 16, theme.palette[4]),
+                line(16, UY + 2 * T as i16, 16, theme.palette[4]),
+            ]
+        );
+    }
+
+    #[test]
+    fn underline_without_a_colour_takes_the_text_colour() {
+        let theme = Theme::default();
+        let green = styled(|s| {
+            s.underline = Underline::Single;
+            s.fg = Color::indexed(2);
+        });
+        // Inverse: the text colour is the default background.
+        let inverse = styled(|s| {
+            s.underline = Underline::Single;
+            s.attrs = Attrs::INVERSE;
+        });
+        let dim = styled(|s| {
+            s.underline = Underline::Single;
+            s.attrs = Attrs::DIM;
+        });
+        assert_eq!(
+            decorations(&theme, &[TestCell('a', green), TestCell('b', inverse), TestCell('c', dim)]),
+            [
+                line(0, UY, 16, theme.palette[2]),
+                line(16, UY, 16, theme.background),
+                line(32, UY, 16, with_alpha(theme.foreground, 160)),
+            ]
+        );
+    }
+
+    #[test]
+    fn dotted_underline_is_square_dots_a_thickness_apart() {
+        let theme = Theme::default();
+        let s = styled(|s| s.underline = Underline::Dotted);
+        let fg = theme.foreground;
+        // 16 pixels, dots 2 wide every 4: at 0, 4, 8 and 12.
+        let want: Vec<_> = (0..4).map(|i| line(i * 4, UY, T, fg)).collect();
+        assert_eq!(decorations(&theme, &[TestCell('a', s)]), want);
+    }
+
+    #[test]
+    fn dashed_underline_is_one_centred_dash_per_cell() {
+        let theme = Theme::default();
+        let s = styled(|s| s.underline = Underline::Dashed);
+        let fg = theme.foreground;
+        assert_eq!(
+            decorations(&theme, &[TestCell('a', s), TestCell('b', s)]),
+            [line(2, UY, 12, fg), line(18, UY, 12, fg)]
+        );
+    }
+
+    #[test]
+    fn curly_underline_is_a_wave_across_the_cell() {
+        let theme = Theme::default();
+        let blue = Color::rgb(0, 0, 255);
+        let s = styled(|s| {
+            s.underline = Underline::Curly;
+            s.underline_color = blue;
+        });
+        let d = decorations(&theme, &[TestCell('a', s)]);
+        // Eight steps of 2 pixels, edge to edge, in the underline colour.
+        assert_eq!(d.len(), 8);
+        assert!(d.iter().all(|r| r.w == 2 && r.h == T && r.color == rgb(0x0000ff)));
+        let xs: Vec<_> = d.iter().map(|r| r.x).collect();
+        assert_eq!(xs, [0, 2, 4, 6, 8, 10, 12, 14]);
+        // Up a thickness, back, down a thickness, back; inside the cell.
+        let ys: Vec<_> = d.iter().map(|r| r.y - UY).collect();
+        let t = T as i16;
+        assert_eq!(ys, [0, -t, -t, 0, 0, t, t, 0]);
+        assert!(d.iter().all(|r| r.y >= 0 && r.y + r.h as i16 <= M.cell_height as i16));
+    }
+
+    #[test]
+    fn curly_underline_on_narrow_cells_skips_empty_steps() {
+        let theme = Theme::default();
+        let m = Metrics { cell_width: 5, ..M };
+        let s = styled(|s| s.underline = Underline::Curly);
+        let ctx = RowCtx {
+            theme: &theme,
+            m,
+            px: 0,
+            y: 0,
+            cols: 1,
+            sel: 0..0,
+            block_cursor: None,
+            covered: 0..0,
+        };
+        let mut f = Frame::default();
+        f.build_row(&ctx, [TestCell('a', s)].into_iter(), &mut NoGlyphs);
+        assert!(f.decorations.iter().all(|r| r.w > 0));
+        assert_eq!(f.decorations.iter().map(|r| r.w).sum::<u16>(), 5);
+    }
+
+    #[test]
+    fn overline_and_strike_take_the_text_colour_not_the_underline_colour() {
+        let theme = Theme::default();
+        let s = styled(|s| {
+            s.attrs = Attrs::OVERLINE | Attrs::STRIKE;
+            s.underline = Underline::Single;
+            s.underline_color = Color::rgb(255, 0, 0);
+            s.fg = Color::indexed(3);
+        });
+        let fg = theme.palette[3];
+        let strike_y = (M.baseline - M.strike_offset) as i16;
+        assert_eq!(
+            decorations(&theme, &[TestCell('a', s)]),
+            [line(0, UY, 16, rgb(0xff0000)), line(0, 0, 16, fg), line(0, strike_y, 16, fg)]
+        );
+    }
+
+    #[test]
+    fn overline_alone_on_an_empty_cell() {
+        let theme = Theme::default();
+        let s = styled(|s| s.attrs = Attrs::OVERLINE);
+        assert_eq!(decorations(&theme, &[TestCell(' ', s)]), [line(0, 0, 16, theme.foreground)]);
     }
 }

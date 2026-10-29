@@ -200,72 +200,102 @@ fn mentions(line: &str, path: &[String], chord_of: Option<&str>) -> bool {
     }
 }
 
+/// One random file and edit, from `seed`.
+fn check(seed: u64) -> Result<(), TestCaseError> {
+    let mut r = Rng(seed | 1);
+    let text = random_file(&mut r);
+    let fake = Fake::new(PathBuf::from("/nonexistent/config.toml"));
+    let layers = [fake.user_config()];
+    prop_assert_eq!(fake.check(&layers, 0, &text).notices, Vec::<String>::new(), "{:?}", text);
+    let (edit, path, want, chord_of) = random_edit(&mut r);
+    let p = file::prepare(&text, &edit, &chord).map_err(|e| TestCaseError::fail(format!("{e}\n{text:?}\n{edit:?}")))?;
+    let doc = file::parse(&p.text).map_err(TestCaseError::fail)?;
+    prop_assert_eq!(fake.check(&layers, 0, &p.text).notices, Vec::<String>::new(), "{:?}", p.text);
+
+    // The value is the one asked for.
+    let got = match chord_of {
+        Some(c) => doc.get("keybind").and_then(|t| t.as_table_like()).and_then(|t| {
+            t.iter()
+                .filter(|(k, _)| fake_chord(k).ok().as_deref() == Some(c))
+                .last()
+                .map(|(_, v)| v.clone())
+        }),
+        None => get(doc.as_table(), &path).cloned(),
+    };
+    let got = got.and_then(|i| i.as_value().cloned()).map(|mut v| {
+        v.decor_mut().clear();
+        v.to_string()
+    });
+    let want = want.map(|v| {
+        let mut v = v;
+        v.decor_mut().clear();
+        v.to_string()
+    });
+    let removing = want.is_none();
+    prop_assert_eq!(got, want, "{:?} -> {:?}", text, p.text);
+
+    // The other lines are untouched, in order.
+    let crlf = text.contains("\r\n");
+    if crlf {
+        prop_assert!(!p.text.replace("\r\n", "").contains('\n'), "LF in a CRLF file: {:?}", p.text);
+    }
+    prop_assert_eq!(p.text.starts_with('\u{feff}'), text.starts_with('\u{feff}'));
+    let new_lines: Vec<&str> = p.text.trim_start_matches('\u{feff}').split('\n').collect();
+    let mut at = 0;
+    // The edited key's lines: its own, and the rest of a multi-line list.
+    // A removed key takes the comment lines right above it.
+    let lines: Vec<&str> = text.trim_start_matches('\u{feff}').split('\n').collect();
+    let mut gone = vec![false; lines.len()];
+    let mut in_list = false;
+    for (i, l) in lines.iter().enumerate() {
+        if in_list {
+            gone[i] = true;
+            in_list = !l.starts_with(']');
+        } else if mentions(l, &path, chord_of) {
+            gone[i] = true;
+            in_list = l.trim_end().ends_with('[');
+            let mut j = i;
+            while removing && j > 0 && lines[j - 1].trim_start_matches('\u{feff}').trim_start().starts_with('#') {
+                j -= 1;
+                gone[j] = true;
+            }
+        }
+    }
+    let kept: Vec<&str> = lines.iter().zip(&gone).filter(|(_, g)| !**g).map(|(l, _)| *l).collect();
+    for line in kept {
+        match new_lines[at..]
+            .iter()
+            .position(|n| n.trim_end_matches('\r') == line.trim_end_matches('\r'))
+        {
+            Some(i) => at += i + 1,
+            None => prop_assert!(false, "line {line:?} changed or moved:\n{text:?}\n->\n{:?}", p.text),
+        }
+    }
+
+    // Undo gives the file back byte for byte, and redo the edited file.
+    let back = file::prepare(&p.text, &p.undo, &chord).map_err(TestCaseError::fail)?;
+    prop_assert_eq!(&back.text, &text, "undo of {:?}", edit);
+    let redo = file::prepare(&back.text, &back.undo, &chord).map_err(TestCaseError::fail)?;
+    prop_assert_eq!(&redo.text, &p.text, "redo of {:?}", edit);
+    Ok(())
+}
+
+/// Seeds that found bugs, run every time (the regressions file only
+/// keeps the shrunk inputs proptest persisted itself).
+#[test]
+fn known_seeds() {
+    for seed in [8796317076710775082] {
+        if let Err(e) = check(seed) {
+            panic!("seed {seed}: {e}");
+        }
+    }
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(2000))]
 
     #[test]
     fn random_edits_on_random_files(seed in any::<u64>()) {
-        let mut r = Rng(seed | 1);
-        let text = random_file(&mut r);
-        let fake = Fake::new(PathBuf::from("/nonexistent/config.toml"));
-        let layers = [fake.user_config()];
-        prop_assert_eq!(fake.check(&layers, 0, &text).notices, Vec::<String>::new(), "{:?}", text);
-        let (edit, path, want, chord_of) = random_edit(&mut r);
-        let p = file::prepare(&text, &edit, &chord).map_err(|e| TestCaseError::fail(format!("{e}\n{text:?}\n{edit:?}")))?;
-        let doc = file::parse(&p.text).map_err(TestCaseError::fail)?;
-        prop_assert_eq!(fake.check(&layers, 0, &p.text).notices, Vec::<String>::new(), "{:?}", p.text);
-
-        // The value is the one asked for.
-        let got = match chord_of {
-            Some(c) => doc.get("keybind").and_then(|t| t.as_table_like()).and_then(|t| {
-                t.iter().filter(|(k, _)| fake_chord(k).ok().as_deref() == Some(c)).last().map(|(_, v)| v.clone())
-            }),
-            None => get(doc.as_table(), &path).cloned(),
-        };
-        let got = got.and_then(|i| i.as_value().cloned()).map(|mut v| { v.decor_mut().clear(); v.to_string() });
-        let want = want.map(|v| { let mut v = v; v.decor_mut().clear(); v.to_string() });
-        let removing = want.is_none();
-        prop_assert_eq!(got, want, "{:?} -> {:?}", text, p.text);
-
-        // The other lines are untouched, in order.
-        let crlf = text.contains("\r\n");
-        if crlf {
-            prop_assert!(!p.text.replace("\r\n", "").contains('\n'), "LF in a CRLF file: {:?}", p.text);
-        }
-        prop_assert_eq!(p.text.starts_with('\u{feff}'), text.starts_with('\u{feff}'));
-        let new_lines: Vec<&str> = p.text.trim_start_matches('\u{feff}').split('\n').collect();
-        let mut at = 0;
-        // The edited key's lines: its own, and the rest of a multi-line list.
-        // A removed key takes the comment lines right above it.
-        let lines: Vec<&str> = text.trim_start_matches('\u{feff}').split('\n').collect();
-        let mut gone = vec![false; lines.len()];
-        let mut in_list = false;
-        for (i, l) in lines.iter().enumerate() {
-            if in_list {
-                gone[i] = true;
-                in_list = !l.starts_with(']');
-            } else if mentions(l, &path, chord_of) {
-                gone[i] = true;
-                in_list = l.trim_end().ends_with('[');
-                let mut j = i;
-                while removing && j > 0 && lines[j - 1].trim_start_matches('\u{feff}').trim_start().starts_with('#') {
-                    j -= 1;
-                    gone[j] = true;
-                }
-            }
-        }
-        let kept: Vec<&str> = lines.iter().zip(&gone).filter(|(_, g)| !**g).map(|(l, _)| *l).collect();
-        for line in kept {
-            match new_lines[at..].iter().position(|n| n.trim_end_matches('\r') == line.trim_end_matches('\r')) {
-                Some(i) => at += i + 1,
-                None => prop_assert!(false, "line {line:?} changed or moved:\n{text:?}\n->\n{:?}", p.text),
-            }
-        }
-
-        // Undo gives the file back (with a final newline if removing the
-        // last line made one).
-        let back = file::prepare(&p.text, &p.undo, &chord).map_err(TestCaseError::fail)?;
-        let back = if text.ends_with('\n') { back.text } else { back.text.trim_end_matches(['\r', '\n']).to_string() };
-        prop_assert_eq!(&back, &text, "undo of {:?}", edit);
+        check(seed)?;
     }
 }

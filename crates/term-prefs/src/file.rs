@@ -43,6 +43,10 @@ pub enum Edit {
     TablePrefix { key: String, prefix: String },
     /// Sets what follows the last line of the file (as `TablePrefix`).
     Trailing(String),
+    /// Sets the file's line endings: CRLF or LF, and whether the last line
+    /// ends with one. Undo of an edit that left a file with no line break,
+    /// which no longer shows them.
+    LineEnds { crlf: bool, final_newline: bool },
     /// Several edits written as one.
     Many(Vec<Edit>),
 }
@@ -137,17 +141,44 @@ pub fn read(path: &Path) -> io::Result<Option<String>> {
 /// Fails, changing nothing, if `text` doesn't parse or the edit can't be
 /// made (a value in the way of a table); the result always parses.
 pub fn prepare(text: &str, edit: &Edit, chord: &dyn Fn(&str) -> Option<String>) -> Result<Prepared, String> {
-    let (shape, body) = shape(text);
+    let (mut shape, body) = shape(text);
     let mut doc = body.parse::<DocumentMut>().map_err(|e| e.to_string().trim_end().to_string())?;
     let mut dropped_comment = false;
-    let undo = apply(&mut doc, edit, chord, &mut dropped_comment)?;
+    let mut undo = apply(&mut doc, edit, chord, &mut dropped_comment)?;
+    let old = (shape.crlf, !shape.no_final_newline);
+    if let Some((crlf, final_newline)) = line_ends(edit) {
+        shape.crlf = crlf;
+        shape.no_final_newline = !final_newline;
+    }
     let text = shape.render(&doc);
+    // A file left with no line break (its only line removed) no longer
+    // shows its line endings: the undo puts them back.
+    let (new, _) = self::shape(&text);
+    if (new.crlf, !new.no_final_newline) != old {
+        undo = Edit::Many(vec![
+            undo,
+            Edit::LineEnds {
+                crlf: old.0,
+                final_newline: old.1,
+            },
+        ]);
+    }
     parse(&text).map_err(|e| format!("the edit would leave a file that doesn't parse: {e}"))?;
     Ok(Prepared {
         text,
         undo,
         dropped_comment,
     })
+}
+
+/// The line endings an edit sets: its last `LineEnds`, as
+/// `(crlf, final_newline)`.
+fn line_ends(edit: &Edit) -> Option<(bool, bool)> {
+    match edit {
+        Edit::LineEnds { crlf, final_newline } => Some((*crlf, *final_newline)),
+        Edit::Many(edits) => edits.iter().rev().find_map(line_ends),
+        _ => None,
+    }
 }
 
 /// The table an edit works in.
@@ -301,6 +332,8 @@ fn apply(doc: &mut DocumentMut, edit: &Edit, chord: &dyn Fn(&str) -> Option<Stri
             doc.set_trailing(text.as_str());
             Ok(Edit::Trailing(old))
         }
+        // Applied to the file's shape by `prepare`, which makes its undo.
+        Edit::LineEnds { .. } => Ok(Edit::Many(Vec::new())),
         Edit::Many(edits) => {
             let mut undo = Vec::new();
             for e in edits {

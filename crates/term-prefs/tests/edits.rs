@@ -27,13 +27,9 @@ fn set(key: &str, value: impl Into<Value>) -> Edit {
 
 fn apply(text: &str, edit: &Edit) -> String {
     let p = file::prepare(text, edit, &chord).unwrap_or_else(|e| panic!("{e}"));
-    // Undo gives back the text it started from.
+    // Undo gives back the text it started from, byte for byte.
     let back = file::prepare(&p.text, &p.undo, &chord).unwrap();
-    assert_eq!(
-        file::parse(&back.text).unwrap().to_string(),
-        file::parse(text).unwrap().to_string(),
-        "undo of {edit:?}"
-    );
+    assert_eq!(back.text, text, "undo of {edit:?}");
     p.text
 }
 
@@ -286,4 +282,37 @@ fn section_comments_stay_when_their_key_goes() {
         remove("a = 1\n\ncolors.foreground = \"#72e844\" # x", "colors.foreground"),
         "a = 1\n"
     );
+}
+
+/// Removing a file's only line leaves no line break to show its line
+/// endings: undo still puts back CRLF, the BOM and a missing final
+/// newline exactly, whatever the line's comment (found by the property
+/// test, seed 8796317076710775082).
+#[test]
+fn undo_of_the_only_line_keeps_its_line_endings() {
+    let remove = |key: &str| Edit::Remove { path: path(key) };
+    for comment in ["", " #", " #  ", " # mine", "  # from the old Mac  "] {
+        for (before, after) in [
+            ("", "\r\n"),
+            ("\u{feff}", "\r\n"),
+            ("", ""),
+            ("\u{feff}", ""),
+            ("# Settings\r\n", ""),
+            ("# Settings\r\n\r\n", "\r\n"),
+        ] {
+            for (key, line) in [
+                ("colors.background", "colors.background = \"#e6a723\""),
+                ("font_size", "font_size = 13"),
+            ] {
+                let text = format!("{before}{line}{comment}{after}");
+                let left = apply(&text, &remove(key));
+                // Redo after undo removes it the same way.
+                let p = file::prepare(&text, &remove(key), &chord).unwrap();
+                let back = file::prepare(&p.text, &p.undo, &chord).unwrap();
+                assert_eq!(apply(&back.text, &back.undo), left, "{text:?}");
+            }
+        }
+    }
+    // A line added to an empty file is LF, and undo empties it again.
+    assert_eq!(apply("", &set("font_size", 13)), "font_size = 13\n");
 }

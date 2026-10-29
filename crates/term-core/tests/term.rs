@@ -3,11 +3,11 @@
 //! state is compared through `Terminal::dump` with insta inline snapshots.
 
 use insta::assert_snapshot;
-use term_core::{Color, Term, flags};
+use term_core::{Attrs, Color, Term, Width};
 
 fn text(t: &Term, line: usize) -> String {
     let row = t.state.visible_row(line);
-    let s: String = row.cells.iter().filter(|c| !c.has(flags::WIDE_SPACER)).map(|c| c.ch()).collect();
+    let s: String = row.cells().filter(|c| !c.is_spacer()).map(|c| c.ch()).collect();
     s.trim_end().to_string()
 }
 
@@ -17,8 +17,8 @@ fn prints_and_wraps() {
     t.advance(b"abcdefg");
     assert_eq!(text(&t, 0), "abcde");
     assert_eq!(text(&t, 1), "fg");
-    assert!(t.state.visible_row(0).wrapped);
-    assert_eq!((t.state.cursor.row, t.state.cursor.col), (1, 2));
+    assert!(t.state.visible_row(0).wrapped());
+    assert_eq!((t.state.cursor().row(), t.state.cursor().col()), (1, 2));
 }
 
 #[test]
@@ -26,8 +26,8 @@ fn last_column_defers_wrap() {
     let mut t = Term::new(5, 3, 100);
     t.advance(b"abcde\r\n");
     assert_eq!(text(&t, 0), "abcde");
-    assert_eq!((t.state.cursor.row, t.state.cursor.col), (1, 0));
-    assert!(!t.state.visible_row(0).wrapped);
+    assert_eq!((t.state.cursor().row(), t.state.cursor().col()), (1, 0));
+    assert!(!t.state.visible_row(0).wrapped());
 }
 
 #[test]
@@ -40,7 +40,7 @@ fn scrolls_into_history_compactly() {
     t.state.scroll_view(1);
     assert_eq!(text(&t, 0), "one");
     // Trailing blanks dropped on the way into scrollback.
-    assert_eq!(t.state.visible_row(0).cells.len(), 3);
+    assert_eq!(t.state.visible_row(0).len(), 3);
 }
 
 #[test]
@@ -57,13 +57,13 @@ fn sgr_colours() {
     let mut t = Term::new(10, 1, 0);
     t.advance(b"\x1b[1;31mA\x1b[38;5;200mB\x1b[38;2;1;2;3mC\x1b[38:2::4:5:6mD\x1b[0mE");
     let r = t.state.visible_row(0);
-    assert!(r.cells[0].has(flags::BOLD));
-    assert_eq!(r.cells[0].fg, Color::indexed(1));
-    assert_eq!(r.cells[1].fg, Color::indexed(200));
-    assert_eq!(r.cells[2].fg, Color::rgb(1, 2, 3));
-    assert_eq!(r.cells[3].fg, Color::rgb(4, 5, 6));
-    assert_eq!(r.cells[4].fg, Color::DEFAULT);
-    assert!(!r.cells[4].has(flags::BOLD));
+    assert!(r.cell(0).style().attrs.contains(Attrs::BOLD));
+    assert_eq!(r.cell(0).style().fg, Color::indexed(1));
+    assert_eq!(r.cell(1).style().fg, Color::indexed(200));
+    assert_eq!(r.cell(2).style().fg, Color::rgb(1, 2, 3));
+    assert_eq!(r.cell(3).style().fg, Color::rgb(4, 5, 6));
+    assert_eq!(r.cell(4).style().fg, Color::DEFAULT);
+    assert!(!r.cell(4).style().attrs.contains(Attrs::BOLD));
 }
 
 #[test]
@@ -73,7 +73,7 @@ fn alt_screen_restores_primary() {
     assert_eq!(text(&t, 0), "vim");
     t.advance(b"\x1b[?1049l");
     assert_eq!(text(&t, 0), "hello");
-    assert_eq!(t.state.cursor.col, 5);
+    assert_eq!(t.state.cursor().col(), 5);
 }
 
 #[test]
@@ -81,7 +81,7 @@ fn erase_and_cursor_report() {
     let mut t = Term::new(10, 3, 0);
     t.advance(b"abcdef\x1b[3D\x1b[K\x1b[6n");
     assert_eq!(text(&t, 0), "abc");
-    assert_eq!(t.state.replies, b"\x1b[1;4R");
+    assert_eq!(t.state.replies(), b"\x1b[1;4R");
 }
 
 #[test]
@@ -91,8 +91,8 @@ fn wide_chars() {
     assert_eq!(text(&t, 0), "ab漢");
     assert_eq!(text(&t, 1), "字");
     let r = t.state.visible_row(0);
-    assert!(r.cells[2].has(flags::WIDE));
-    assert!(r.cells[3].has(flags::WIDE_SPACER));
+    assert!(r.cell(2).width() == Width::Wide);
+    assert!(r.cell(3).is_spacer());
 }
 
 #[test]
@@ -116,7 +116,7 @@ fn selection_text_joins_wrapped_lines() {
     t.advance(b"abcdef\r\nxy");
     let a = t.state.visible_point(0, 0);
     let b = t.state.visible_point(2, 3);
-    t.state.selection = Some(term_core::Selection { anchor: a, head: b });
+    t.state.set_selection(Some(term_core::Selection { anchor: a, head: b }));
     assert_eq!(t.state.selection_text().unwrap(), "abcdef\nxy");
 }
 
@@ -124,7 +124,7 @@ fn selection_text_joins_wrapped_lines() {
 fn origin_mode_restore_and_report() {
     let mut t = Term::new(80, 24, 0);
     t.advance(b"\x1b[?6h\x1b7\x1b[5;20r\x1b8\x1b[6n");
-    assert_eq!(t.state.replies, b"\x1b[1;1R");
+    assert_eq!(t.state.replies(), b"\x1b[1;1R");
 }
 
 #[test]
@@ -157,9 +157,9 @@ fn insert_char_does_not_split_wide() {
     t.advance("界".as_bytes());
     t.advance(b"\x1b[2G\x1b[@");
     let r = t.state.visible_row(0);
-    for (i, c) in r.cells.iter().enumerate() {
-        if c.has(flags::WIDE_SPACER) {
-            assert!(i > 0 && r.cells[i - 1].has(flags::WIDE));
+    for (i, c) in r.cells().enumerate() {
+        if c.is_spacer() {
+            assert!(i > 0 && r.cell(i - 1).width() == Width::Wide);
         }
     }
 }
@@ -176,7 +176,7 @@ fn soft_reset_keeps_screen() {
     let mut t = Term::new(5, 2, 10);
     t.advance(b"hi\x1b[1m\x1b[!p");
     assert_eq!(text(&t, 0), "hi");
-    assert!(!t.state.cursor.pen.has(flags::BOLD));
+    assert!(!t.state.cursor().pen().attrs.contains(Attrs::BOLD));
 }
 
 #[test]
@@ -190,7 +190,7 @@ fn erase_clears_pending_wrap() {
 fn queries() {
     let mut t = Term::new(10, 2, 0);
     t.advance(b"\x1b[?2026$p\x1b]11;?\x1b\\\x1b[?u");
-    let r = String::from_utf8(t.state.replies.clone()).unwrap();
+    let r = String::from_utf8(t.state.replies().to_vec()).unwrap();
     assert!(r.contains("\x1b[?2026;2$y"), "{r:?}");
     assert!(r.contains("\x1b]11;rgb:1616/1818/1c1c\x1b\\"), "{r:?}");
     assert!(r.contains("\x1b[?0u"), "{r:?}");
@@ -209,16 +209,16 @@ fn kitty_keyboard_stack() {
 fn vs16_widens_emoji() {
     let mut t = Term::new(10, 1, 0);
     t.advance("⚠\u{FE0F}x".as_bytes());
-    assert!(t.state.visible_row(0).cells[0].has(flags::WIDE));
-    assert_eq!(t.state.visible_row(0).cells[2].ch(), 'x');
+    assert!(t.state.visible_row(0).cell(0).width() == Width::Wide);
+    assert_eq!(t.state.visible_row(0).cell(2).ch(), 'x');
 }
 
 #[test]
 fn osc_clipboard_and_cwd() {
     let mut t = Term::new(10, 1, 0);
     t.advance(b"\x1b]52;c;aGVsbG8=\x07\x1b]7;file://host/Users/a%20b\x07");
-    assert_eq!(t.state.clipboard.as_deref(), Some("hello"));
-    assert_eq!(t.state.cwd.as_deref(), Some("/Users/a b"));
+    assert_eq!(t.state.clipboard(), Some("hello"));
+    assert_eq!(t.state.cwd(), Some("/Users/a b"));
 }
 
 #[test]
@@ -296,7 +296,7 @@ fn utf8_split_across_chunks_keeps_the_text_after_it() {
 fn select(t: &mut Term, from: (usize, usize), to: (usize, usize)) {
     let anchor = t.state.visible_point(from.0, from.1);
     let head = t.state.visible_point(to.0, to.1);
-    t.state.selection = Some(term_core::Selection { anchor, head });
+    t.state.set_selection(Some(term_core::Selection { anchor, head }));
 }
 
 #[test]

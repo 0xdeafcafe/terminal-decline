@@ -9,7 +9,7 @@ use term_core::{Selection, Term};
 fn select(t: &mut Term, anchor: (usize, usize), head: (usize, usize)) {
     let anchor = t.state.visible_point(anchor.0, anchor.1);
     let head = t.state.visible_point(head.0, head.1);
-    t.state.selection = Some(Selection { anchor, head });
+    t.state.set_selection(Some(Selection { anchor, head }));
 }
 
 fn copied(t: &Term) -> String {
@@ -25,7 +25,7 @@ fn selection_spans_scrollback_and_screen() {
     let anchor = t.state.visible_point(0, 1);
     t.state.scroll_view(-1);
     let head = t.state.visible_point(1, 2);
-    t.state.selection = Some(Selection { anchor, head });
+    t.state.set_selection(Some(Selection { anchor, head }));
     assert_eq!(copied(&t), "ne\ntwo\nthr");
 }
 
@@ -73,9 +73,9 @@ fn resize_clears_the_selection() {
     t.advance(b"hello");
     select(&mut t, (0, 0), (0, 4));
     t.state.resize(10, 2);
-    assert!(t.state.selection.is_some(), "same size is not a resize");
+    assert!(t.state.selection().is_some(), "same size is not a resize");
     t.state.resize(12, 3);
-    assert!(t.state.selection.is_none());
+    assert!(t.state.selection().is_none());
 }
 
 #[test]
@@ -123,10 +123,10 @@ fn view_scroll_clamps_at_both_ends() {
     }
     let max = t.state.scrollback_len();
     assert_eq!(max, 9);
-    let generation = t.state.generation;
+    let generation = t.state.generation();
     t.state.scroll_view(-5);
     assert_eq!(t.state.display_offset(), 0);
-    assert_eq!(t.state.generation, generation, "no change, no redraw");
+    assert_eq!(t.state.generation(), generation, "no change, no redraw");
     t.state.scroll_view(3);
     assert_eq!(t.state.display_offset(), 3);
     t.state.scroll_view(1000);
@@ -170,7 +170,7 @@ fn view_scroll_with_no_scrollback() {
 fn replies_in_one_chunk_keep_their_order() {
     let mut t = Term::new(10, 2, 0);
     t.advance(b"\x1b[5n\x1b[2;3H\x1b[6n\x1b[c\x1b]11;?\x07\x1b[?2026$p\x1b[>c\x1b[18t");
-    let replies = String::from_utf8(t.state.replies.clone()).unwrap();
+    let replies = String::from_utf8(t.state.replies().to_vec()).unwrap();
     assert_eq!(
         replies,
         "\x1b[0n\x1b[2;3R\x1b[?62;22c\x1b]11;rgb:1616/1818/1c1c\x1b\\\x1b[?2026;2$y\x1b[>1;10;0c\x1b[8;2;10t"
@@ -181,5 +181,5 @@ fn replies_in_one_chunk_keep_their_order() {
 fn reset_keeps_pending_replies() {
     let mut t = Term::new(10, 2, 0);
     t.advance(b"\x1b[5n\x1b[2;2H\x1bc\x1b[6n");
-    assert_eq!(t.state.replies, b"\x1b[0n\x1b[1;1R");
+    assert_eq!(t.state.replies(), b"\x1b[0n\x1b[1;1R");
 }

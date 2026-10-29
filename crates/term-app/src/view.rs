@@ -221,7 +221,7 @@ define_class!(
         fn paste(&self, _sender: Option<&AnyObject>) {
             let pb = NSPasteboard::generalPasteboard();
             let Some(text) = pb.stringForType(unsafe { NSPasteboardTypeString }) else { return };
-            let bracketed = self.with_state(|st| st.session.lock_term().state.modes.bracketed_paste).unwrap_or(false);
+            let bracketed = self.with_state(|st| st.session.lock_term().state.modes().bracketed_paste).unwrap_or(false);
             self.send_input(paste_bytes(&text.to_string(), bracketed));
         }
 
@@ -232,7 +232,7 @@ define_class!(
                 let s = &mut t.state;
                 let first = s.visible_point(0, 0).line - (s.scrollback_len() - s.display_offset()) as u64;
                 let last = s.visible_point(s.lines() - 1, s.cols() - 1);
-                s.selection = Some(Selection { anchor: Point { line: first, col: 0 }, head: last });
+                s.set_selection(Some(Selection { anchor: Point { line: first, col: 0 }, head: last }));
             });
             self.request_redraw();
         }
@@ -357,7 +357,7 @@ define_class!(
                 let m = st.renderer.metrics();
                 let pad = self.padding(st);
                 let t = st.session.lock_term();
-                let (x, y) = layout::cell_origin(t.state.cursor.row, t.state.cursor.col, m.into(), pad);
+                let (x, y) = layout::cell_origin(t.state.cursor().row(), t.state.cursor().col(), m.into(), pad);
                 let (x, y) = (x as f64 / st.scale, y as f64 / st.scale);
                 NSRect::new(NSPoint::new(x, y), NSSize::new(m.cell_width as f64 / st.scale, m.cell_height as f64 / st.scale))
             });
@@ -422,7 +422,7 @@ impl TerminalView {
         let (cols, lines) = layout::grid_size((size.width, size.height), launch.scale, m.into(), pad);
 
         let mut t = Term::new(cols, lines, config.scrollback);
-        t.state.default_colors = crate::config::query_colors(&theme);
+        t.state.set_default_colors(crate::config::query_colors(&theme));
         for n in launch.notices.iter() {
             crate::session::write_notice(&mut t, n);
         }
@@ -480,8 +480,15 @@ impl TerminalView {
     }
 
     pub fn foreground_cwd(&self) -> Option<String> {
-        self.with_state(|st| st.session.lock_term().state.cwd.clone().or_else(|| st.session.foreground_cwd()))
-            .flatten()
+        self.with_state(|st| {
+            st.session
+                .lock_term()
+                .state
+                .cwd()
+                .map(str::to_owned)
+                .or_else(|| st.session.foreground_cwd())
+        })
+        .flatten()
     }
 
     fn titlebar_height(&self) -> f64 {
@@ -531,7 +538,7 @@ impl TerminalView {
         let dirty = st.session.take_dirty();
         // Only a frame that may be drawn needs the terminal's lock.
         let mut t = (dirty && visible).then(|| crate::session::lock(&term));
-        let synchronized = t.as_ref().is_some_and(|t| t.state.modes.synchronized);
+        let synchronized = t.as_ref().is_some_and(|t| t.state.modes().synchronized);
         let sync_elapsed = if synchronized {
             st.sync_since.get_or_insert_with(Instant::now).elapsed()
         } else {
@@ -599,13 +606,12 @@ impl TerminalView {
         let clipboard;
         {
             let Some(t) = t.as_mut() else { return };
-            if t.state.title_changed {
-                t.state.title_changed = false;
-                title = t.state.title.clone();
+            if let Some(new) = t.state.take_title() {
+                title = Some(new);
             }
-            bell = std::mem::take(&mut t.state.bell);
-            clipboard = t.state.clipboard.take();
-            blink = t.state.cursor_blink;
+            bell = t.state.take_bell();
+            clipboard = t.state.take_clipboard();
+            blink = t.state.cursor_blink();
             let input = FrameInput {
                 term: &t.state,
                 theme: &st.theme,
@@ -688,7 +694,7 @@ impl TerminalView {
             with_view(id, |v| {
                 let again = v.with_state(|st| {
                     st.blink_scheduled = false;
-                    let blinking = st.focused && st.session.lock_term().state.cursor_blink;
+                    let blinking = st.focused && st.session.lock_term().state.cursor_blink();
                     st.cursor_on = !st.cursor_on || !blinking;
                     blinking
                 });
@@ -739,7 +745,7 @@ impl TerminalView {
         let report = self.with_state(|st| {
             st.focused = focused;
             st.cursor_on = true;
-            st.session.lock_term().state.modes.focus_events
+            st.session.lock_term().state.modes().focus_events
         });
         if report == Some(true) {
             self.send_raw(if focused { b"\x1b[I".to_vec() } else { b"\x1b[O".to_vec() });
@@ -789,7 +795,7 @@ impl TerminalView {
             st.last_input = Instant::now();
             let mut t = st.session.lock_term();
             t.state.scroll_view_to_bottom();
-            t.state.selection = None;
+            t.state.set_selection(None);
         });
         self.send_raw(bytes);
         self.request_redraw();
@@ -810,8 +816,8 @@ impl TerminalView {
         let modes = self.with_state(|st| {
             let t = st.session.lock_term();
             KeyModes {
-                app_cursor: t.state.modes.app_cursor,
-                app_keypad: t.state.modes.app_keypad,
+                app_cursor: t.state.modes().app_cursor,
+                app_keypad: t.state.modes().app_keypad,
                 kitty_flags: t.state.kitty_keyboard_flags(),
                 option_as_meta: st.config.option_as_meta,
                 composing: !st.marked.is_empty(),
@@ -859,7 +865,7 @@ impl TerminalView {
         let shift = event.modifierFlags().contains(NSEventModifierFlags::Shift);
         let (mode, sgr) = self.with_state(|st| {
             let t = st.session.lock_term();
-            (t.state.modes.mouse, t.state.modes.mouse_sgr)
+            (t.state.modes().mouse, t.state.modes().mouse_sgr)
         })?;
         mouse::reports(mode, shift).then_some((mode, sgr))
     }
@@ -891,11 +897,11 @@ impl TerminalView {
             let mut t = st.session.lock_term();
             let s = &mut t.state;
             let point = s.visible_point(line, col);
-            s.selection = match clicks {
+            let selection = match clicks {
                 1 => None,
                 2 => {
                     let row = s.visible_row(line);
-                    let chars: Vec<char> = (0..s.cols()).map(|c| row.get(c).ch()).collect();
+                    let chars: Vec<char> = (0..s.cols()).map(|c| row.cell(c).ch()).collect();
                     match mouse::word_at(&chars, col) {
                         None => Some(Selection {
                             anchor: point,
@@ -915,12 +921,13 @@ impl TerminalView {
                     })
                 }
             };
+            s.set_selection(selection);
             if clicks == 1 {
                 // Remember the anchor in an empty selection; dragging extends it.
-                s.selection = Some(Selection {
+                s.set_selection(Some(Selection {
                     anchor: point,
                     head: point,
-                });
+                }));
                 st.scroll_accum = 0.0;
             }
         });
@@ -928,8 +935,9 @@ impl TerminalView {
             // A plain click clears any visible selection until a drag starts.
             self.with_state(|st| {
                 let mut t = st.session.lock_term();
-                if let Some(sel) = &mut t.state.selection {
+                if let Some(mut sel) = t.state.selection() {
                     sel.head = sel.anchor;
+                    t.state.set_selection(Some(sel));
                 }
             });
         }
@@ -954,9 +962,10 @@ impl TerminalView {
             }
             let mut t = st.session.lock_term();
             let head = t.state.visible_point(line, col);
-            match &mut t.state.selection {
-                Some(sel) if sel.head != head => {
+            match t.state.selection() {
+                Some(mut sel) if sel.head != head => {
                     sel.head = head;
+                    t.state.set_selection(Some(sel));
                     true
                 }
                 _ => false,
@@ -994,7 +1003,7 @@ impl TerminalView {
         }
         let alt = self.with_state(|st| {
             let t = st.session.lock_term();
-            t.state.alt_screen_active().then_some(t.state.modes.app_cursor)
+            t.state.alt_screen_active().then_some(t.state.modes().app_cursor)
         });
         if let Some(Some(app_cursor)) = alt {
             // Full-screen programs without mouse support get arrow keys.

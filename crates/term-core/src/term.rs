@@ -8,7 +8,9 @@ use unicode_width::UnicodeWidthChar;
 use vte::{Params, Perform};
 
 use crate::cell::{Cell, Color, Row, flags};
+use crate::rows::{RowRef, style_of};
 use crate::scrollback::Scrollback;
+use crate::style::Style;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum CursorShape {
@@ -20,12 +22,33 @@ pub enum CursorShape {
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Cursor {
-    pub row: usize,
-    pub col: usize,
+    pub(crate) row: usize,
+    pub(crate) col: usize,
     /// The style new characters are drawn with.
-    pub pen: Cell,
+    pub(crate) pen: Cell,
     /// Set after writing the last column; the next character wraps first.
-    pub pending_wrap: bool,
+    pub(crate) pending_wrap: bool,
+}
+
+impl Cursor {
+    /// Screen row, 0 = the top of the screen (not of the view).
+    pub fn row(&self) -> usize {
+        self.row
+    }
+
+    pub fn col(&self) -> usize {
+        self.col
+    }
+
+    /// The last column was just written; the next character wraps first.
+    pub fn pending_wrap(&self) -> bool {
+        self.pending_wrap
+    }
+
+    /// The style new characters are drawn with.
+    pub fn pen(&self) -> Style {
+        style_of(self.pen)
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -136,7 +159,7 @@ pub struct Terminal {
     /// The same for the other screen.
     other_top_line: u64,
 
-    pub cursor: Cursor,
+    cursor: Cursor,
     saved_primary: Option<SavedCursor>,
     saved_alt: Option<SavedCursor>,
     scroll_top: usize,
@@ -151,25 +174,25 @@ pub struct Terminal {
     /// Kitty keyboard protocol flags, a stack per screen.
     kitty_flags: [Vec<u8>; 2],
 
-    pub modes: Modes,
-    pub cursor_shape: CursorShape,
-    pub cursor_blink: bool,
-    pub title: Option<String>,
-    pub title_changed: bool,
-    pub bell: bool,
-    pub selection: Option<Selection>,
+    modes: Modes,
+    cursor_shape: CursorShape,
+    cursor_blink: bool,
+    title: Option<String>,
+    title_changed: bool,
+    bell: bool,
+    selection: Option<Selection>,
     /// Text a program asked to put on the clipboard (OSC 52).
-    pub clipboard: Option<String>,
+    clipboard: Option<String>,
     /// The program's working directory, if it reports it (OSC 7).
-    pub cwd: Option<String>,
+    cwd: Option<String>,
     /// Default colours as 0xRRGGBB, for answering colour queries.
-    pub default_colors: [u32; 3],
+    default_colors: [u32; 3],
     /// Cell size in pixels, for answering size queries.
-    pub cell_pixels: (u16, u16),
+    cell_pixels: (u16, u16),
     /// Bytes the terminal must send back to the program (replies to queries).
-    pub replies: Vec<u8>,
+    replies: Vec<u8>,
     /// Bumped on any change that needs a redraw.
-    pub generation: u64,
+    generation: u64,
     /// Write printable ASCII runs in bulk ([`Terminal::write_ascii`]); off
     /// only in tests, as the reference the bulk path is compared against.
     bulk_ascii: bool,
@@ -264,9 +287,13 @@ impl Terminal {
 
     /// The row shown at visible line `line`, taking the scroll position into
     /// account. Rows from scrollback may be shorter than `cols`.
+    pub fn visible_row(&self, line: usize) -> RowRef<'_> {
+        RowRef::new(self.visible_row_cow(line))
+    }
+
     /// History lines are expanded from their compact form, so they come back
     /// owned; screen lines are borrowed.
-    pub fn visible_row(&self, line: usize) -> Cow<'_, Row> {
+    fn visible_row_cow(&self, line: usize) -> Cow<'_, Row> {
         let sb = self.scrollback.len();
         let idx = sb - self.display_offset + line;
         if idx < sb {
@@ -274,6 +301,98 @@ impl Terminal {
         } else {
             Cow::Borrowed(&self.screen[idx - sb])
         }
+    }
+
+    /// The cursor's position on the screen, and the pen it writes with.
+    pub fn cursor(&self) -> &Cursor {
+        &self.cursor
+    }
+
+    pub fn modes(&self) -> &Modes {
+        &self.modes
+    }
+
+    pub fn cursor_shape(&self) -> CursorShape {
+        self.cursor_shape
+    }
+
+    /// The program asked for a blinking cursor.
+    pub fn cursor_blink(&self) -> bool {
+        self.cursor_blink
+    }
+
+    /// The window title the program set (OSC 0/2).
+    pub fn title(&self) -> Option<&str> {
+        self.title.as_deref()
+    }
+
+    /// The title, if the program set it since the last call.
+    pub fn take_title(&mut self) -> Option<String> {
+        if !std::mem::take(&mut self.title_changed) {
+            return None;
+        }
+        self.title.clone()
+    }
+
+    /// Whether the bell rang since the last call.
+    pub fn take_bell(&mut self) -> bool {
+        std::mem::take(&mut self.bell)
+    }
+
+    pub fn selection(&self) -> Option<Selection> {
+        self.selection
+    }
+
+    pub fn set_selection(&mut self, selection: Option<Selection>) {
+        self.selection = selection;
+    }
+
+    /// Text a program asked to put on the clipboard (OSC 52), not yet taken.
+    pub fn clipboard(&self) -> Option<&str> {
+        self.clipboard.as_deref()
+    }
+
+    pub fn take_clipboard(&mut self) -> Option<String> {
+        self.clipboard.take()
+    }
+
+    /// The program's working directory, if it reports it (OSC 7).
+    pub fn cwd(&self) -> Option<&str> {
+        self.cwd.as_deref()
+    }
+
+    /// Foreground, background and cursor colours as 0xRRGGBB, for answering
+    /// colour queries.
+    pub fn default_colors(&self) -> [u32; 3] {
+        self.default_colors
+    }
+
+    pub fn set_default_colors(&mut self, colors: [u32; 3]) {
+        self.default_colors = colors;
+    }
+
+    /// Cell size in pixels, for answering size queries.
+    pub fn cell_pixels(&self) -> (u16, u16) {
+        self.cell_pixels
+    }
+
+    pub fn set_cell_pixels(&mut self, size: (u16, u16)) {
+        self.cell_pixels = size;
+    }
+
+    /// Bytes the terminal must send back to the program (replies to
+    /// queries), not yet taken.
+    pub fn replies(&self) -> &[u8] {
+        &self.replies
+    }
+
+    pub fn take_replies(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.replies)
+    }
+
+    /// Bumped on any change that needs a redraw.
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// Bytes used by scrollback, for measuring.
@@ -1501,7 +1620,7 @@ impl Terminal {
     pub fn dump(&self) -> String {
         let mut out = String::new();
         for line in 0..self.lines {
-            let row = self.visible_row(line);
+            let row = self.visible_row_cow(line);
             let len = row.cells.iter().rposition(|c| !c.is_blank()).map_or(0, |i| i + 1);
             let text: String = row.cells[..len]
                 .iter()

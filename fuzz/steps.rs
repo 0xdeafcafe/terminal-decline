@@ -105,9 +105,9 @@ pub fn apply(term: &mut Term, step: &Step) {
             let (lines, cols) = (t.lines(), t.cols());
             let anchor = t.visible_point(usize::from(al) % lines, usize::from(ac) % cols);
             let head = t.visible_point(usize::from(hl) % lines, usize::from(hc) % cols);
-            t.selection = Some(Selection { anchor, head });
+            t.set_selection(Some(Selection { anchor, head }));
         }
-        Step::ClearSelection => t.selection = None,
+        Step::ClearSelection => t.set_selection(None),
     }
 }
 

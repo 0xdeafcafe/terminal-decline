@@ -67,6 +67,12 @@ only with `DECLINE_TEST_DUMP=<file>` set) that writes JSON dumps.
   90 B (was 518 / 674 / – / ~1500 / – with full cell rows): 10k lines take
   0.5–1.8 MB. Encoding finds a line's end by skipping all-zero cells 8 at a
   time, and lines of plain default-style ASCII are a byte copy.
+- term-render and term-app read cells only through `RowRef` and `CellRef`
+  (content: empty, a character, cluster text or an image placeholder; width;
+  and a `&Style` with colours, attributes, underline style and link), and
+  the terminal only through `Terminal`'s methods: its fields are private.
+  How cells are stored is term-core's own business
+  (`docs/design/cells.md`).
 - Points in the buffer use an ever-increasing line number so a selection stays
   attached to its text while output scrolls.
 - Parsing: `vte` is vendored (`vendor/vte`, through `[patch.crates-io]`)

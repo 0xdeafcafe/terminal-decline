@@ -15,6 +15,7 @@ use crate::style::{Attrs, LinkId, Style, Underline};
 use crate::style_table::{StyleStats, StyleTable};
 use crate::unicode::{self, Segmenter};
 
+mod history;
 mod reflow;
 mod replies;
 mod search;
@@ -302,8 +303,12 @@ pub struct Terminal {
     /// Lines that scrolled off the top (primary screen only). Its total
     /// count of lines ever pushed is the base for [`Point`] line numbers.
     scrollback: Scrollback,
-    /// How many rows the view is scrolled back by (0 = following output).
-    display_offset: usize,
+    /// The first cell the view shows when scrolled back (the start of a
+    /// row of history at the current width, §12.3); `None` while following
+    /// output.
+    view: Option<Point>,
+    /// History laid out at the current width, kept between reads.
+    layouts: history::LayoutCache,
     /// Buffer line number ([`Point::line`]) of the screen's first row: the
     /// count of rows that have scrolled off its top. On the primary screen
     /// the scrollback holds the lines just before it.
@@ -426,7 +431,8 @@ impl Terminal {
             alt_active: false,
             primary_stale: false,
             scrollback: Scrollback::with_widths_as_written(scrollback_limit),
-            display_offset: 0,
+            view: None,
+            layouts: Default::default(),
             top_line: 0,
             other_top_line: 0,
             cursor: Cursor::default(),
@@ -499,43 +505,80 @@ impl Terminal {
         self.scrollback.len()
     }
 
+    /// How many rows the view is scrolled back by (0 = following output),
+    /// counted at the current width.
     pub fn display_offset(&self) -> usize {
-        self.display_offset
+        match self.view_start() {
+            None => 0,
+            Some((u, r)) => self.rows_below(&u, r),
+        }
     }
 
-    /// Scroll the view by `delta` lines (positive = back into history).
+    /// Scroll the view by `delta` rows (positive = back into history).
     pub fn scroll_view(&mut self, delta: isize) {
-        if self.alt_active {
+        if self.alt_active || delta == 0 || self.scrollback.is_empty() {
             return;
         }
-        let max = self.scrollback.len() as isize;
-        let new = (self.display_offset as isize + delta).clamp(0, max) as usize;
-        if new != self.display_offset {
-            self.display_offset = new;
+        let d = delta.unsigned_abs();
+        let new = match (self.view_start(), delta > 0) {
+            (None, false) => None,
+            (None, true) => {
+                let u = self.unit_at(self.top_line - 1);
+                let r = u.rows() - 1;
+                let (u, r) = self.rows_back(u, r, d - 1);
+                Some(u.row_start(r))
+            }
+            (Some((u, r)), true) => {
+                let (u, r) = self.rows_back(u, r, d);
+                Some(u.row_start(r))
+            }
+            (Some((u, r)), false) => self.rows_forward(u, r, d).map(|(u, r)| u.row_start(r)),
+        };
+        if new != self.view {
+            self.view = new;
             self.touch();
         }
     }
 
     pub fn scroll_view_to_bottom(&mut self) {
-        if self.display_offset != 0 {
-            self.display_offset = 0;
+        if self.view.is_some() {
+            self.view = None;
             self.touch();
         }
     }
 
     /// The row shown at visible line `line`, taking the scroll position into
-    /// account. Rows from scrollback may be shorter than `cols`.
+    /// account. History rows are laid out at the current width.
     ///
     /// History lines are expanded from their compact form, so they come back
     /// owned, with their own list of styles; screen lines are borrowed.
     pub fn visible_row(&self, line: usize) -> RowRef<'_> {
-        let sb = self.scrollback.len();
-        let idx = sb - self.display_offset + line;
-        if idx < sb {
-            self.history_row(idx)
-        } else {
-            self.screen_row(idx - sb)
+        self.view_row(self.view_row_at(line))
+    }
+
+    /// The columns of view row `line` the selection covers.
+    pub fn selected_cols(&self, line: usize) -> std::ops::Range<usize> {
+        let Some((a, b)) = self.selection.map(|s| s.ordered()) else {
+            return 0..0;
+        };
+        let at = self.view_row_at(line);
+        let mut pieces = Vec::new();
+        self.view_pieces(at, &mut pieces);
+        let mut out: Option<std::ops::Range<usize>> = None;
+        for p in &pieces {
+            if p.line < a.line || p.line > b.line {
+                continue;
+            }
+            let start = if p.line == a.line { a.col } else { 0 };
+            let end = if p.line == b.line { b.col + 1 } else { usize::MAX };
+            if let Some(r) = p.view_cols(p.line, start, end) {
+                out = Some(match out {
+                    None => r,
+                    Some(o) => o.start.min(r.start)..o.end.max(r.end),
+                });
+            }
         }
+        out.map_or(0..0, |r| r.start..r.end.min(self.cols))
     }
 
     fn screen_row(&self, r: usize) -> RowRef<'_> {
@@ -704,53 +747,54 @@ impl Terminal {
             return;
         }
         self.scrollback.set_limit(limit);
-        self.display_offset = self.display_offset.min(self.scrollback.len());
         self.touch();
     }
 
     /// The stable position of what is shown at view row `view_line` and
-    /// column `col`.
+    /// column `col`. In history laid out at another width, that is the
+    /// stored line and column the cell came from.
     pub fn point_at(&self, view_line: usize, col: usize) -> Point {
-        Point {
-            line: self.top_line - self.display_offset as u64 + view_line as u64,
-            col,
+        match self.view_row_at(view_line) {
+            history::ViewRow::History { lo, hi, row } => self.unit(lo, hi).point_at(row, col),
+            history::ViewRow::Screen(r) => Point {
+                line: self.top_line + r as u64,
+                col,
+            },
         }
     }
 
     /// Where the cursor is in the view (row, column), if it is in view.
     pub fn cursor_in_view(&self) -> Option<(usize, usize)> {
-        let line = self.cursor.row + self.display_offset;
+        let history = self
+            .view_rows()
+            .iter()
+            .filter(|r| matches!(r, history::ViewRow::History { .. }))
+            .count();
+        let line = self.cursor.row + history;
         (line < self.lines).then_some((line, self.cursor.col))
     }
 
     /// Where the view is.
     pub fn view_top(&self) -> ViewTop {
-        if self.display_offset == 0 {
-            return ViewTop::Bottom;
-        }
-        let line = self.top_line - self.display_offset as u64;
-        let start = self.logical_line(line).0;
-        ViewTop::At {
-            point: Point { line, col: 0 },
-            offset: (line - start) as usize * self.cols,
+        match self.view_start() {
+            None => ViewTop::Bottom,
+            Some((u, r)) => {
+                let point = u.row_start(r);
+                ViewTop::At {
+                    point,
+                    offset: u.offset_of(point, self.cols),
+                }
+            }
         }
     }
 
     /// Move the view: back to following output, or to show `point`'s row
-    /// at the top (as near as the history allows).
+    /// at the top (as near as the history allows). A point in the middle
+    /// of a row (from another width) shows that row.
     pub fn set_view_top(&mut self, top: ViewTop) {
         match top {
             ViewTop::Bottom => self.scroll_view_to_bottom(),
-            ViewTop::At { point, .. } => {
-                if self.alt_active {
-                    return;
-                }
-                let offset = self.top_line.saturating_sub(point.line).min(self.scrollback.len() as u64) as usize;
-                if offset != self.display_offset {
-                    self.display_offset = offset;
-                    self.touch();
-                }
-            }
+            ViewTop::At { point, .. } => self.set_view_point(Some(point)),
         }
     }
 
@@ -1144,7 +1188,10 @@ impl Terminal {
         self.scroll_top = 0;
         self.scroll_bottom = lines - 1;
         self.tabs = default_tabs(cols);
-        self.display_offset = self.display_offset.min(self.scrollback.len());
+        // The view's first cell, at the start of its row at the new width.
+        self.drop_layouts();
+        let view = self.view.take();
+        self.set_view_point(view);
 
         self.styles.set_sweeps_blocked(false);
         self.other_styles.set_sweeps_blocked(false);
@@ -1323,15 +1370,8 @@ impl Terminal {
     fn push_scrollback(&mut self, row: &Row) {
         self.scrollback
             .push_keyed(row, self.styles.styles(), self.styles.links().as_slice(), self.styles.version());
-        self.follow_history();
-    }
-
-    /// A line went into history: keep the view still while output arrives
-    /// underneath it.
-    fn follow_history(&mut self) {
-        if self.display_offset > 0 {
-            self.display_offset = (self.display_offset + 1).min(self.scrollback.len());
-        }
+        // The view holds a Point in history: output arriving underneath
+        // leaves it where it is.
     }
 
     fn scroll_up(&mut self, n: usize) {
@@ -1616,7 +1656,7 @@ impl Terminal {
         if on && clear {
             self.clear_alt_screen();
         }
-        self.display_offset = 0;
+        self.view = None;
         self.selection = None;
     }
 
@@ -2615,7 +2655,7 @@ impl Perform for Terminal {
                     3 => {
                         self.scrollback.clear();
                         self.history_epoch += 1;
-                        self.display_offset = 0;
+                        self.view = None;
                         self.selection = None;
                     }
                     _ => {}
@@ -2994,7 +3034,8 @@ impl Terminal {
         if self.styles.needs_sweep() {
             self.sweep_styles(false);
         }
-        self.display_offset = self.display_offset.min(self.scrollback.len());
+        self.drop_layouts();
+        self.view = self.view_point();
         self.selection = None;
         self.touch();
     }
@@ -3135,13 +3176,6 @@ impl Terminal {
         if a == b || a.max(b) > self.epochs {
             return Err(format!("table epochs {a} and {b}, counter at {}", self.epochs));
         }
-        if self.display_offset > self.scrollback.len() {
-            return Err(format!(
-                "display offset {} beyond scrollback length {}",
-                self.display_offset,
-                self.scrollback.len()
-            ));
-        }
         if self.scroll_top > self.scroll_bottom || self.scroll_bottom >= lines {
             return Err(format!(
                 "scroll region {}..={} invalid for {lines} lines",
@@ -3206,7 +3240,10 @@ impl Terminal {
         }
         out.push_str(&format!(
             "cursor=({},{}) alt={} offset={}",
-            self.cursor.row, self.cursor.col, self.alt_active, self.display_offset
+            self.cursor.row,
+            self.cursor.col,
+            self.alt_active,
+            self.display_offset()
         ));
         out
     }

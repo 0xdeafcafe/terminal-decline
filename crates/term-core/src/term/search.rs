@@ -129,7 +129,7 @@ impl Terminal {
         if matcher.is_some() && !self.alt_active {
             let (blocks, visible) = self.scrollback.search_blocks(0);
             segs = blocks.into_iter().map(|(d, len)| Seg::new(d, len, visible)).collect();
-            let top = self.top_line - self.display_offset as u64;
+            let top = self.point_at(0, 0).line;
             start = segs.partition_point(|s| s.data.first() <= top).saturating_sub(1);
             after = self.screen_first_char();
         }
@@ -265,8 +265,14 @@ impl Terminal {
     /// Where `p` is shown now, as (view row, column); None if it isn't in
     /// view.
     pub fn view_position(&self, p: Point) -> Option<(usize, usize)> {
-        let top = self.point_at(0, 0).line;
-        (p.line >= top && p.line < top + self.lines as u64).then(|| ((p.line - top) as usize, p.col))
+        let mut pieces = Vec::new();
+        for (r, at) in self.view_rows().into_iter().enumerate() {
+            self.view_pieces(at, &mut pieces);
+            if let Some(c) = pieces.iter().find_map(|piece| piece.view_cols(p.line, p.col, p.col + 1)) {
+                return Some((r, c.start));
+            }
+        }
+        None
     }
 
     /// Scroll so that `p`'s row is in view, in the middle when that means

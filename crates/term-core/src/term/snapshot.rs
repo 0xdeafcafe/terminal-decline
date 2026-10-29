@@ -12,6 +12,7 @@ use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use super::history::{Unit, ViewRow};
 use super::{CursorShape, LinkValue, Terminal};
 use crate::cell::{Cell, Row, Width};
 use crate::scrollback::HistoryReader;
@@ -224,6 +225,19 @@ pub(super) fn touch(row: &mut Row, counter: &mut u64, batch_start: u64) {
     }
 }
 
+/// `ranges` sorted and joined where they touch.
+fn merge(ranges: &mut [Range<usize>]) -> Vec<Range<usize>> {
+    ranges.sort_by_key(|r| r.start);
+    let mut out: Vec<Range<usize>> = Vec::new();
+    for r in ranges.iter() {
+        match out.last_mut() {
+            Some(l) if r.start <= l.end => l.end = l.end.max(r.end),
+            _ => out.push(r.clone()),
+        }
+    }
+    out
+}
+
 impl Terminal {
     /// Copy what the renderer needs for a frame into `out` (§9.2). `have`
     /// says whether the renderer's row cache already has a row; those rows
@@ -278,43 +292,70 @@ impl Terminal {
             .filter(|_| hovered_link.is_none())
             .and_then(|p| self.url_at(p))
             .map(|(a, b, _)| (a, b));
-        let history = self.scrollback.len();
-        let first = history - self.display_offset;
+        let history_first = self.history_first();
+        let view_rows = self.view_rows();
         // History rows are read one after another.
         let mut reader = HistoryReader::default();
         let mut found = Vec::new();
-        for view_line in 0..self.lines {
-            let line = self.point_at(view_line, 0).line;
+        let mut pieces = Vec::new();
+        let mut unit: Option<std::sync::Arc<Unit>> = None;
+        for &at in view_rows.iter() {
             let highlights = out.highlights.len() as u32;
-            if let Some((a, b)) = selection
-                && (a.line..=b.line).contains(&line)
-            {
-                let start = if line == a.line { a.col } else { 0 };
-                let end = if line == b.line { b.col + 1 } else { self.cols };
-                let end = end.min(self.cols);
-                if start < end {
+            self.view_pieces(at, &mut pieces);
+            // Stored columns `a..b` of `line`, as this row's columns.
+            let cols_of = |line: u64, a: usize, b: usize, out: &mut Vec<Range<usize>>| {
+                for p in &pieces {
+                    if let Some(r) = p.view_cols(line, a, b) {
+                        let r = r.start..r.end.min(self.cols);
+                        if r.start < r.end {
+                            out.push(r);
+                        }
+                    }
+                }
+            };
+            let mut ranges = Vec::new();
+            // A span of Points (both ends included), on this row.
+            let span = |(a, b): (super::Point, super::Point), ranges: &mut Vec<Range<usize>>| {
+                for p in &pieces {
+                    if p.line < a.line || p.line > b.line {
+                        continue;
+                    }
+                    let start = if p.line == a.line { a.col } else { 0 };
+                    let end = if p.line == b.line { b.col + 1 } else { usize::MAX };
+                    cols_of(p.line, start, end, ranges);
+                }
+            };
+            if let Some(sel) = selection {
+                ranges.clear();
+                span(sel, &mut ranges);
+                for r in merge(&mut ranges) {
                     out.highlights.push(Highlight {
-                        cols: to_u16(start)..to_u16(end),
+                        cols: to_u16(r.start)..to_u16(r.end),
                         kind: HighlightKind::Selection,
                     });
                 }
             }
-            let i = first + view_line;
             // A history row's links are its own: compared by value.
-            let history_row = (i < history && hovered_link.is_some()).then(|| self.history_row(i));
+            let history_row = (matches!(at, ViewRow::History { .. }) && hovered_link.is_some()).then(|| self.view_row(at));
+            let screen_r = match at {
+                ViewRow::Screen(r) => Some(r),
+                ViewRow::History { .. } => None,
+            };
             let on_link = |col: usize| -> bool {
-                match &history_row {
-                    Some(r) => col < r.len() && r.link(col) == hovered_link.as_ref(),
-                    None => {
-                        let row = &self.screen[i - history];
+                match (&history_row, screen_r) {
+                    (Some(r), _) => col < r.len() && r.link(col) == hovered_link.as_ref(),
+                    (None, Some(sr)) => {
+                        let row = &self.screen[sr];
                         hovered.is_some_and(|id| row.cells.get(col).is_some_and(|c| self.styles.get(c.style_id()).link == id))
                     }
+                    (None, None) => false,
                 }
             };
             if hovered_link.is_some() {
-                let len = match &history_row {
-                    Some(r) => r.len(),
-                    None => self.screen[i - history].cells.len(),
+                let len = match (&history_row, screen_r) {
+                    (Some(r), _) => r.len(),
+                    (None, Some(sr)) => self.screen[sr].cells.len(),
+                    (None, None) => 0,
                 };
                 let mut run: Option<usize> = None;
                 for col in 0..=len {
@@ -331,74 +372,103 @@ impl Terminal {
                         _ => {}
                     }
                 }
-                // Left to right, the selection's range among them.
-                out.highlights[highlights as usize..].sort_by_key(|h| h.cols.start);
             }
-            if let Some((a, b)) = hovered_url
-                && (a.line..=b.line).contains(&line)
-            {
-                let start = if line == a.line { a.col } else { 0 };
-                let end = if line == b.line { b.col + 1 } else { self.cols };
-                out.highlights.push(Highlight {
-                    cols: to_u16(start)..to_u16(end.min(self.cols)),
-                    kind: HighlightKind::HoveredLink,
-                });
-                out.highlights[highlights as usize..].sort_by_key(|h| h.cols.start);
-            }
-            found.clear();
-            self.search_highlights(line, &mut found);
-            if !found.is_empty() {
-                for (cols, current) in found.drain(..) {
+            if let Some(url) = hovered_url {
+                ranges.clear();
+                span(url, &mut ranges);
+                for r in merge(&mut ranges) {
                     out.highlights.push(Highlight {
-                        cols: to_u16(cols.start)..to_u16(cols.end),
-                        kind: if current {
-                            HighlightKind::CurrentSearchHit
-                        } else {
-                            HighlightKind::SearchHit
-                        },
+                        cols: to_u16(r.start)..to_u16(r.end),
+                        kind: HighlightKind::HoveredLink,
                     });
                 }
-                out.highlights[highlights as usize..].sort_by_key(|h| h.cols.start);
             }
+            let mut lines: Vec<u64> = pieces.iter().map(|p| p.line).collect();
+            lines.dedup();
+            for line in lines {
+                found.clear();
+                self.search_highlights(line, &mut found);
+                for (c, current) in found.drain(..) {
+                    ranges.clear();
+                    cols_of(line, c.start, c.end, &mut ranges);
+                    for r in ranges.drain(..) {
+                        out.highlights.push(Highlight {
+                            cols: to_u16(r.start)..to_u16(r.end),
+                            kind: if current {
+                                HighlightKind::CurrentSearchHit
+                            } else {
+                                HighlightKind::SearchHit
+                            },
+                        });
+                    }
+                }
+            }
+            // Left to right.
+            out.highlights[highlights as usize..].sort_by_key(|h| h.cols.start);
             let highlights = highlights..out.highlights.len() as u32;
 
             let mut flags = RowFlags::default();
             let start = out.cells.len() as u32;
             let clusters = out.cluster_spans.len() as u32;
-            let (key, copied) = if i < history {
-                let key = RowKey::History { line, col: 0 };
-                flags.set(RowFlags::HISTORY, true);
-                flags.set(RowFlags::WRAPPED, self.scrollback.wrapped(i));
-                flags.set(RowFlags::FILL, self.scrollback.fill(i));
-                let kept = same_history && popped.is_none_or(|p| line < p) && have(key);
-                let copied = !kept
-                    && self
-                        .scrollback
-                        .read(i, self.cols, &mut out.row, &mut out.row_styles, &mut out.row_links, &mut reader);
-                if copied {
-                    // The row's own style list joins the snapshot's, and its
-                    // cells' ids move up by where it starts.
-                    let base = out.history_styles.len() as u32;
-                    out.history_styles.extend_from_slice(&out.row_styles);
-                    out.cells.extend(
-                        out.row
-                            .cells
-                            .iter()
-                            .map(|c| c.with_style(Cell::template(c.style_id() + base, c.shows_empty()))),
-                    );
-                    copy_clusters(&out.row, &mut out.cluster_text, &mut out.cluster_spans);
+            let (key, copied) = match at {
+                ViewRow::History { lo, hi, row } => {
+                    if unit.as_ref().is_none_or(|u| u.lo != lo || u.hi != hi) {
+                        unit = Some(self.unit(lo, hi));
+                    }
+                    let u = unit.as_ref().expect("a unit");
+                    let first = u.row_start(row);
+                    let line = first.line;
+                    let key = RowKey::History {
+                        line,
+                        col: to_u16(first.col),
+                    };
+                    flags.set(RowFlags::HISTORY, true);
+                    let kept = same_history && popped.is_none_or(|p| line < p) && !u.growing(row) && have(key);
+                    let copied = if u.fast {
+                        let i = (line - history_first) as usize;
+                        flags.set(RowFlags::WRAPPED, self.scrollback.wrapped(i));
+                        flags.set(RowFlags::FILL, self.scrollback.fill(i));
+                        !kept
+                            && self
+                                .scrollback
+                                .read(i, self.cols, &mut out.row, &mut out.row_styles, &mut out.row_links, &mut reader)
+                    } else {
+                        let (r, fill) = u.row(row, self.cols);
+                        flags.set(RowFlags::WRAPPED, r.wrapped);
+                        flags.set(RowFlags::FILL, fill);
+                        if !kept {
+                            out.row = r;
+                            out.row_styles.clear();
+                            out.row_styles.extend_from_slice(&u.styles);
+                        }
+                        !kept
+                    };
+                    if copied {
+                        // The row's own style list joins the snapshot's, and its
+                        // cells' ids move up by where it starts.
+                        let base = out.history_styles.len() as u32;
+                        out.history_styles.extend_from_slice(&out.row_styles);
+                        out.cells.extend(
+                            out.row
+                                .cells
+                                .iter()
+                                .map(|c| c.with_style(Cell::template(c.style_id() + base, c.shows_empty()))),
+                        );
+                        copy_clusters(&out.row, &mut out.cluster_text, &mut out.cluster_spans);
+                    }
+                    (key, copied)
                 }
-                (key, copied)
-            } else {
-                let row = &self.screen[i - history];
-                let key = RowKey::Screen(row.seq);
-                flags.set(RowFlags::WRAPPED, row.wrapped);
-                let copied = !(same_terminal && have(key));
-                if copied {
-                    out.cells.extend_from_slice(&row.cells);
-                    copy_clusters(row, &mut out.cluster_text, &mut out.cluster_spans);
+                ViewRow::Screen(r) => {
+                    let row = &self.screen[r];
+                    let key = RowKey::Screen(row.seq);
+                    flags.set(RowFlags::WRAPPED, row.wrapped);
+                    let copied = !(same_terminal && have(key));
+                    if copied {
+                        out.cells.extend_from_slice(&row.cells);
+                        copy_clusters(row, &mut out.cluster_text, &mut out.cluster_spans);
+                    }
+                    (key, copied)
                 }
-                (key, copied)
             };
             out.rows.push(SnapRow {
                 key,

@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 836e266b117338d5a7c2689478e7a1340817a29b52f9e85594afb73acea25af8 # shrinks to cols = 29, lines = 4, steps = [Step { bytes: ["\u{1b}#8"], scroll: 0, selection: None, resize: Some((1, 1)), focused: false, cursor_on: false, preedit: None, padding: (0, 0) }, Step { bytes: [], scroll: 0, selection: None, resize: Some((15, 3)), focused: false, cursor_on: false, preedit: None, padding: (0, 0) }, Step { bytes: [], scroll: 2, selection: None, resize: None, focused: false, cursor_on: false, preedit: None, padding: (0, 0) }, Step { bytes: [], scroll: 0, selection: Some(((0, 0), (1, 0))), resize: None, focused: false, cursor_on: false, preedit: None, padding: (0, 0) }]

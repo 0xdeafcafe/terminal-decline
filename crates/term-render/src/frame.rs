@@ -873,18 +873,9 @@ impl Frame {
                 Some(fonts) if shaping => self.shapes.row(None, row.cells(), fonts),
                 _ => &[],
             };
-            // Selected columns on this line, as a half-open range.
-            let sel = selection
-                .and_then(|(a, b)| {
-                    let p = term.point_at(line, 0).line;
-                    if p < a.line || p > b.line {
-                        return None;
-                    }
-                    let start = if p == a.line { a.col } else { 0 };
-                    let end = if p == b.line { b.col + 1 } else { usize::MAX };
-                    Some(start..end)
-                })
-                .unwrap_or(0..0);
+            // Selected columns on this line (history rows at another
+            // width map the selection through their layout).
+            let sel = if selection.is_some() { term.selected_cols(line) } else { 0..0 };
             let ctx = RowCtx {
                 theme,
                 m,

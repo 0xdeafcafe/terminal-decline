@@ -102,7 +102,7 @@ sparkle_version=$(sed -n 's/^version="\(.*\)"$/\1/p' "$script_dir/sparkle.sh")
 sparkle_dir=${SPARKLE_DIR:-"$repo_root/target/sparkle/$sparkle_version"}
 fw="$contents/Frameworks/Sparkle.framework"
 sparkle=0
-if [[ -d "$sparkle_dir/Sparkle.framework" ]]; then
+if [[ -f "$sparkle_dir/Sparkle.framework/Versions/B/Sparkle" ]]; then
   sparkle=1
   ditto "$sparkle_dir/Sparkle.framework" "$fw"
   rm -rf "$fw/Versions/B/XPCServices" "$fw/XPCServices" \

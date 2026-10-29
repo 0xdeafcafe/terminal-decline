@@ -30,7 +30,7 @@ esac
 say() { [[ $quiet == 1 ]] || echo "$@" >&2; }
 
 if [[ -f "$dir/.sha256" && "$(cat "$dir/.sha256")" == "$sha256" \
-      && -d "$dir/Sparkle.framework" && -x "$dir/bin/sign_update" ]]; then
+      && -f "$dir/Sparkle.framework/Versions/B/Sparkle" && -x "$dir/bin/sign_update" ]]; then
   echo "$dir"
   exit 0
 fi

@@ -380,9 +380,10 @@ struct Sink<'a> {
     cols: Vec<(u32, u32)>,
     /// Premultiplied BGRA of the source row being added.
     line: Vec<u8>,
-    /// Sums for the scaled row being built.
-    acc: Vec<u32>,
-    acc_rows: u32,
+    /// Sums for the scaled row being built: 64-bit, as a span can hold
+    /// more than 2³² / 255 source pixels (a 17,000,000 × 1 image).
+    acc: Vec<u64>,
+    acc_rows: u64,
     /// Next source row, next scaled row.
     sy: u32,
     ty: u32,
@@ -408,7 +409,7 @@ impl<'a> Sink<'a> {
         } else {
             (target.width(), target.height())
         };
-        let own = sw as u64 * 4 + tw as u64 * (4 * size_of::<u32>() as u64 + size_of::<(u32, u32)>() as u64);
+        let own = sw as u64 * 4 + tw as u64 * (4 * size_of::<u64>() as u64 + size_of::<(u32, u32)>() as u64);
         if (held as u64).saturating_add(own) > limits.transient as u64 {
             return Err(DecodeError::TooLarge);
         }
@@ -474,7 +475,7 @@ impl<'a> Sink<'a> {
             let a = &mut self.acc[x * 4..x * 4 + 4];
             for px in self.line[x0 as usize * 4..x1 as usize * 4].as_chunks::<4>().0 {
                 for c in 0..4 {
-                    a[c] += px[c] as u32;
+                    a[c] += px[c] as u64;
                 }
             }
         }
@@ -488,7 +489,7 @@ impl<'a> Sink<'a> {
         let rows = self.acc_rows.max(1);
         let bytes = self.target.bytes_mut();
         for (x, &(x0, x1)) in self.cols.iter().enumerate() {
-            let n = rows * (x1 - x0).max(1);
+            let n = rows * (x1 - x0).max(1) as u64;
             let a = &mut self.acc[x * 4..x * 4 + 4];
             let px = [0, 1, 2, 3].map(|c| ((a[c] + n / 2) / n) as u8);
             a.fill(0);

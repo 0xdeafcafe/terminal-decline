@@ -90,3 +90,54 @@ fn wide_grey_png_stays_within_the_cap() {
     assert_eq!(r, Err(DecodeError::TooLarge));
     assert!(used <= 80 << 20, "{used} bytes at the peak");
 }
+
+/// Opaque white, premultiplied BGRA.
+const WHITE: [u8; 4] = [255, 255, 255, 255];
+
+/// A real `w` × `h` PNG, every pixel `rgb`.
+fn solid_rgb_png(w: u32, h: u32, rgb: [u8; 3]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut e = png::Encoder::new(&mut out, w, h);
+    e.set_color(png::ColorType::Rgb);
+    e.set_depth(png::BitDepth::Eight);
+    e.set_compression(png::Compression::Fast);
+    e.set_filter(png::Filter::NoFilter);
+    let mut wr = e.write_header().unwrap();
+    let data: Vec<u8> = rgb.iter().copied().cycle().take(w as usize * h as usize * 3).collect();
+    wr.write_image_data(&data).unwrap();
+    wr.finish().unwrap();
+    out
+}
+
+/// More than 2³² / 255 opaque pixels in one span overflowed the
+/// scaler's 32-bit sums: a panic in debug builds, and in release wrong
+/// colour and alpha while reporting the image opaque.
+#[test]
+fn wide_png_averages_without_overflow() {
+    let _g = lock();
+    let png = solid_rgb_png(17_000_000, 1, [255; 3]);
+    // Its rows are past the default cap (see above), so a larger one.
+    let options = Options {
+        transient: 1 << 30,
+        display_p3: false,
+    };
+    let (r, t, _) = decode_counted(&png, (1, 1), &options);
+    assert_eq!(r, Ok(true));
+    assert_eq!(t.pixel(0, 0), WHITE);
+}
+
+/// The same within every cap: a 65535 × 300 GIF (the largest width a
+/// GIF can say), all white, 14 KB (made with the gif crate's encoder: a
+/// white and a black palette entry, every index 0).
+#[test]
+fn large_gif_averages_without_overflow() {
+    let _g = lock();
+    let image = include_bytes!("fixtures/white-65535x300.gif");
+    let options = Options {
+        display_p3: false,
+        ..Options::default()
+    };
+    let (r, t, _) = decode_counted(image, (1, 1), &options);
+    assert_eq!(r, Ok(true));
+    assert_eq!(t.pixel(0, 0), WHITE);
+}

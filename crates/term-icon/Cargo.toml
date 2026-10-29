@@ -1,0 +1,15 @@
+[package]
+name = "term-icon"
+description = "Generated Dock pin icons by the Slope rule (slope-pins-2)"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+objc2-core-foundation.workspace = true
+objc2-core-graphics.workspace = true
+objc2-core-text.workspace = true
+objc2-image-io.workspace = true
+unicode-normalization = "0.1.25"
+unicode-segmentation = "1.13"
+unicode-properties = { version = "0.1.4", default-features = false, features = ["general-category"] }

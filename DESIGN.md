@@ -36,6 +36,7 @@ any command as its own Dock app.
 | `term-render` | Metal: glyph texture, per-cell instance buffer, one instanced draw    |
 | `term-app`    | AppKit window/view, keyboard + IME, mouse, clipboard, config, pins    |
 | `term-prefs`  | the preferences: settings schema, safe `config.toml` edits, the TUI (no platform code) |
+| `term-icon`   | generated pin icons by the Slope rule (`slope-pins-2`): Core Text outline of the initial, CoreGraphics drawing after `pin-template.svg`, ImageIO `.icns` |
 
 `term-core` has no platform code and is tested and benchmarked on its own.
 
@@ -434,6 +435,15 @@ Known limit: an ad-hoc signature is tied to the binary's hash, so after
 Full Disk Access, …). The fix (next milestone) is Chrome's web-app approach:
 a small launcher executable that never changes, loading Terminal Decline's code from
 the installed `Terminal Decline.app`, found by its bundle id.
+
+Generated icons (`term-icon`, docs/design/pins.md §8; not yet used by
+`pin`): `term_icon::generate(name)` gives the kept record (canonical name,
+FNV-1a hash, palette index and colours, initial, its outline as path data)
+and `render_icns` draws it. Measured (release, M-series, macOS 27): ~65 ms
+per pin for the outline and all ten `.icns` sizes, ~1.2 MB per `.icns`;
+the outline of "R" equals the brand template's point for point (±0.01),
+and 128/32/16 px renders differ from `docs/brand/pins.png` by 0.35–0.46
+per channel on average. Samples: `docs/brand/samples-generated/`.
 
 ## The name
 

@@ -108,7 +108,29 @@ impl Cursor {
 struct SavedCursor {
     cursor: Cursor,
     origin: bool,
-    line_drawing: bool,
+    charset: Charset,
+}
+
+/// A character set that can be designated as G0 or G1 (SCS, `ESC ( F`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+enum Charset {
+    #[default]
+    Ascii,
+    /// `ESC ( 0`: DEC Special Graphics, the line drawing set.
+    DecGraphics,
+    /// `ESC ( A`: British, `#` is `£`.
+    British,
+}
+
+impl Charset {
+    fn map(self, c: char) -> char {
+        match self {
+            Charset::Ascii => c,
+            Charset::DecGraphics => dec_line_drawing(c),
+            Charset::British if c == '#' => '£',
+            Charset::British => c,
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -286,11 +308,13 @@ pub struct Terminal {
     scroll_top: usize,
     scroll_bottom: usize,
     tabs: Vec<bool>,
-    /// G0 and G1 character sets: true = DEC line drawing.
-    charsets: [bool; 2],
+    /// G0 and G1 character sets.
+    charsets: [Charset; 2],
     /// Which of G0/G1 is in use (SI/SO).
     active_charset: usize,
-    line_drawing: bool,
+    /// The set in use, `charsets[active_charset]` unless a cursor restore
+    /// brought back another.
+    charset: Charset,
     /// The last grapheme printed, for REP: its character, or None when it
     /// is a cluster, which is then `last_cluster` (kept by value, at most
     /// 128 bytes, so REP works after its cell has been overwritten), of
@@ -385,9 +409,9 @@ impl Terminal {
             scroll_top: 0,
             scroll_bottom: lines - 1,
             tabs: default_tabs(cols),
-            charsets: [false; 2],
+            charsets: [Charset::Ascii; 2],
             active_charset: 0,
-            line_drawing: false,
+            charset: Charset::Ascii,
             last_char: None,
             last_cluster: String::new(),
             last_cluster_width: 1,
@@ -1179,7 +1203,7 @@ impl Terminal {
         let saved = SavedCursor {
             cursor: self.cursor,
             origin: self.modes.origin,
-            line_drawing: self.line_drawing,
+            charset: self.charset,
         };
         if self.alt_active {
             self.saved_alt = Some(saved)
@@ -1196,7 +1220,7 @@ impl Terminal {
                 // in this screen's table at the next print.
                 self.cursor = s.cursor;
                 self.modes.origin = s.origin;
-                self.line_drawing = s.line_drawing;
+                self.charset = s.charset;
             }
             None => {
                 self.cursor = Cursor::default();
@@ -1340,7 +1364,7 @@ impl Terminal {
     }
 
     fn write_char(&mut self, c: char) {
-        let c = if self.line_drawing { dec_line_drawing(c) } else { c };
+        let c = if self.charset != Charset::Ascii { self.charset.map(c) } else { c };
         let p = unicode::props(c);
         // Most text: a plain character with a width starts a cluster
         // unless a Prepend one came before it.
@@ -1416,12 +1440,12 @@ impl Terminal {
         self.touch_row(row);
         // REP repeats the whole cluster. The cell held `last_char` (its
         // first scalar) or `last_cluster` until now, so the copy grows
-        // with it.
+        // with it. After a REP it holds nothing, and stays so.
         if let Some(first) = self.last_char.take() {
             self.last_cluster.clear();
             self.last_cluster.push(first);
         }
-        if self.last_cluster.len() + c.len_utf8() <= crate::clusters::MAX_BYTES {
+        if !self.last_cluster.is_empty() && self.last_cluster.len() + c.len_utf8() <= crate::clusters::MAX_BYTES {
             self.last_cluster.push(c);
         }
         let have = if self.screen[row].cells[col].is_wide() { 2 } else { 1 };
@@ -1512,6 +1536,12 @@ impl Terminal {
         cells[col + 1] = cell.style_part();
         self.cursor.col = col + 1;
         self.cursor.pending_wrap = false;
+    }
+
+    /// Nothing for REP to repeat.
+    fn forget_last_char(&mut self) {
+        self.last_char = None;
+        self.last_cluster.clear();
     }
 
     /// REP of a cluster: `n` copies of `last_cluster`, each in its own slot.
@@ -1605,7 +1635,7 @@ impl Terminal {
             return self.write_ascii_after_prepend(bytes);
         }
         let Some(&last) = bytes.last() else { return };
-        if self.modes.insert || self.line_drawing || !self.modes.autowrap {
+        if self.modes.insert || self.charset != Charset::Ascii || !self.modes.autowrap {
             for &b in bytes {
                 self.write_char(b as char);
             }
@@ -1804,9 +1834,9 @@ impl Terminal {
         self.cursor.pending_wrap = false;
         self.scroll_top = 0;
         self.scroll_bottom = self.lines - 1;
-        self.charsets = [false; 2];
+        self.charsets = [Charset::Ascii; 2];
         self.active_charset = 0;
-        self.line_drawing = false;
+        self.charset = Charset::Ascii;
         self.saved_primary = None;
         self.saved_alt = None;
     }
@@ -2047,8 +2077,14 @@ fn dec_line_drawing(c: char) -> char {
     match c {
         '`' => '◆',
         'a' => '▒',
+        'b' => '␉',
+        'c' => '␌',
+        'd' => '␍',
+        'e' => '␊',
         'f' => '°',
         'g' => '±',
+        'h' => '␤',
+        'i' => '␋',
         'j' => '┘',
         'k' => '┐',
         'l' => '┌',
@@ -2070,6 +2106,7 @@ fn dec_line_drawing(c: char) -> char {
         '|' => '≠',
         '}' => '£',
         '~' => '·',
+        '_' => ' ',
         c => c,
     }
 }
@@ -2150,7 +2187,7 @@ impl Perform for Terminal {
             0x0D => self.goto_col(0),
             0x0E | 0x0F => {
                 self.active_charset = (byte == 0x0E) as usize;
-                self.line_drawing = self.charsets[self.active_charset];
+                self.charset = self.charsets[self.active_charset];
             }
             _ => return,
         }
@@ -2290,14 +2327,28 @@ impl Perform for Terminal {
                 let n = a1.min(self.cols * self.lines);
                 if let Some(c) = self.last_char {
                     for _ in 0..n {
+                        // Each copy is its own cluster: copies that could
+                        // join (regional indicators, Hangul jamo, Prepend)
+                        // mustn't merge (§6.4). The last copy keeps its
+                        // state, so a mark printed next still joins it.
+                        self.clear_grapheme();
                         self.write_char(c);
                     }
                 } else if !self.last_cluster.is_empty() {
                     self.repeat_cluster(n);
                 }
+                // As in xterm, REP uses the character up: a second REP
+                // straight after repeats nothing.
+                self.forget_last_char();
             }
             ('c', []) => self.replies.extend_from_slice(b"\x1b[?62;22c"),
             ('c', [b'>']) => self.replies.extend_from_slice(b"\x1b[>1;10;0c"),
+            // DECREQTPARM: no parity, 8 bits, 38400 baud both ways, clock
+            // multiplier 1, no STP flags; solicited (3) for `1 x`.
+            ('x', []) if arg(0) <= 1 => {
+                let reply = format!("\x1b[{};1;1;128;128;1;0x", arg(0) + 2);
+                self.replies.extend_from_slice(reply.as_bytes());
+            }
             ('g', []) => match arg(0) {
                 0 => self.tabs[self.cursor.col] = false,
                 3 => self.tabs.fill(false),
@@ -2331,6 +2382,17 @@ impl Perform for Terminal {
                 }
                 _ => {}
             },
+            // DECXCPR: the cursor position. A VT400 adds the page (always
+            // 1); we answer DA as a VT220, which doesn't, as xterm does then.
+            ('n', [b'?']) if arg(0) == 6 => {
+                let row = if self.modes.origin {
+                    self.cursor.row.saturating_sub(self.scroll_top)
+                } else {
+                    self.cursor.row
+                };
+                let reply = format!("\x1b[?{};{}R", row + 1, self.cursor.col + 1);
+                self.replies.extend_from_slice(reply.as_bytes());
+            }
             ('r', []) => {
                 let top = arg(0).max(1) - 1;
                 let bottom = if arg(1) == 0 { self.lines } else { arg(1).min(self.lines) } - 1;
@@ -2429,15 +2491,27 @@ impl Perform for Terminal {
             ([], b'>') => self.modes.app_keypad = false,
             ([b'(' | b')'], b) => {
                 let g = (intermediates[0] == b')') as usize;
-                self.charsets[g] = b == b'0';
-                self.line_drawing = self.charsets[self.active_charset];
+                self.charsets[g] = match b {
+                    b'0' => Charset::DecGraphics,
+                    b'A' => Charset::British,
+                    _ => Charset::Ascii,
+                };
+                self.charset = self.charsets[self.active_charset];
             }
+            // DECALN: fill with `E`, reset the margins, cursor home.
             ([b'#'], b'8') => {
                 for row in &mut self.screen {
                     row.fill(Cell::BLANK.with_char('E'));
                 }
                 self.touch_screen_rows();
+                self.scroll_top = 0;
+                self.scroll_bottom = self.lines - 1;
+                self.cursor.row = 0;
+                self.cursor.col = 0;
+                self.cursor.pending_wrap = false;
             }
+            // DECID: answered as primary DA.
+            ([], b'Z') => self.replies.extend_from_slice(b"\x1b[?62;22c"),
             _ => return,
         }
         self.touch();

@@ -38,6 +38,10 @@ pub struct Colors {
     pub cursor: Option<String>,
     #[serde(deserialize_with = "colour")]
     pub selection: Option<String>,
+    /// The line between panes; unset, the background mixed a quarter of
+    /// the way to the foreground.
+    #[serde(deserialize_with = "colour")]
+    pub split_divider: Option<String>,
     /// The 16 ANSI colours.
     #[serde(deserialize_with = "palette")]
     pub palette: Vec<String>,
@@ -71,6 +75,8 @@ pub struct Palette {
     pub background: u32,
     pub cursor: u32,
     pub selection: u32,
+    /// Set by a theme or `[colors]`; see [`Palette::divider`].
+    pub split_divider: Option<u32>,
     pub ansi: [u32; 16],
 }
 
@@ -81,6 +87,7 @@ impl Palette {
         background: 0x16181c,
         cursor: 0xd8dee9,
         selection: 0x2e3a4f,
+        split_divider: None,
         ansi: [
             0x1d1f21, 0xcc6666, 0xb5bd68, 0xf0c674, 0x81a2be, 0xb294bb, 0x8abeb7, 0xc5c8c6, //
             0x666666, 0xd54e53, 0xb9ca4a, 0xe7c547, 0x7aa6da, 0xc397d8, 0x70c0b1, 0xeaeaea,
@@ -98,12 +105,30 @@ impl Palette {
         set(&mut self.background, &colors.background);
         set(&mut self.cursor, &colors.cursor);
         set(&mut self.selection, &colors.selection);
+        if let Some(c) = colors.split_divider.as_deref().and_then(parse_hex) {
+            self.split_divider = Some(c);
+        }
         for (slot, v) in self.ansi.iter_mut().zip(&colors.palette) {
             if let Some(c) = parse_hex(v) {
                 *slot = c;
             }
         }
         self
+    }
+}
+
+impl Palette {
+    /// The divider between panes, as 0xRRGGBB: the theme's, else the
+    /// background mixed 25% towards the foreground, which shows in any
+    /// theme and appearance.
+    pub fn divider(&self) -> u32 {
+        self.split_divider.unwrap_or_else(|| {
+            let channel = |c: u32, shift: u32| (c >> shift) & 0xFF;
+            [16, 8, 0].into_iter().fold(0, |out, shift| {
+                let (bg, fg) = (channel(self.background, shift), channel(self.foreground, shift));
+                out | ((bg * 3 + fg + 2) / 4) << shift
+            })
+        })
     }
 }
 
@@ -147,6 +172,10 @@ pub struct Config {
     pub option_as_meta: OptionAsMeta,
     /// 0.0–1.0. Below 1 the desktop shows through.
     pub opacity: f64,
+    /// 0.0–1.0: how opaque panes without focus are drawn. 1, the default,
+    /// doesn't dim them (the hollow cursor marks them).
+    #[serde(deserialize_with = "unit")]
+    pub unfocused_pane_opacity: f64,
     /// Blur what shows through when `opacity` is below 1.
     pub blur: bool,
     /// Copy a selection to the clipboard as soon as it is made with the
@@ -192,6 +221,7 @@ impl Default for Config {
             scrollback: 10_000,
             option_as_meta: OptionAsMeta::None,
             opacity: 1.0,
+            unfocused_pane_opacity: 1.0,
             blur: false,
             copy_on_select: false,
             confirm_close: false,
@@ -216,6 +246,15 @@ fn line_height<'de, D: Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
         Ok(v)
     } else {
         Err(serde::de::Error::custom(format!("{v} is not above 0")))
+    }
+}
+
+fn unit<'de, D: Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
+    let v = f64::deserialize(d)?;
+    if (0.0..=1.0).contains(&v) {
+        Ok(v)
+    } else {
+        Err(serde::de::Error::custom(format!("{v} is not between 0 and 1")))
     }
 }
 
@@ -926,6 +965,33 @@ mod tests {
         assert!(errors.is_empty(), "{errors:?}");
         assert_eq!((c.command.as_slice(), c.font_size), (["htop".to_string()].as_slice(), 15.0));
         assert_eq!(source.watched(&c), [file]);
+    }
+
+    #[test]
+    fn pane_settings() {
+        let (c, errors) = parse("unfocused_pane_opacity = 0.7\n[colors]\nsplit_divider = '#123456'\n");
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(c.unfocused_pane_opacity, 0.7);
+        assert_eq!(Palette::DEFAULT.with(&c.colors).divider(), 0x123456);
+        let (c, errors) = parse("unfocused_pane_opacity = 1.5\n[colors]\nsplit_divider = 'grey'\n");
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        assert_eq!(c.unfocused_pane_opacity, 1.0, "not dimmed by default");
+        // Unset: the background a quarter of the way to the foreground.
+        let p = Palette {
+            background: 0x000000,
+            foreground: 0xffffff,
+            ..Palette::DEFAULT
+        };
+        assert_eq!(p.divider(), 0x404040);
+        let p = Palette {
+            background: 0xfdf6e3,
+            foreground: 0x657b83,
+            ..Palette::DEFAULT
+        };
+        assert_eq!(p.divider(), 0xd7d7cb);
+        // A theme can set it.
+        let t = crate::theme::parse("background = '#000000'\nsplit_divider = '#ff0000'\n").unwrap();
+        assert_eq!(Palette::DEFAULT.with(&t).divider(), 0xff0000);
     }
 
     #[test]

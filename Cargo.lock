@@ -900,6 +900,7 @@ dependencies = [
  "objc2-metal",
  "objc2-quartz-core",
  "objc2-user-notifications",
+ "proptest",
  "serde",
  "serde_json",
  "term-core",

@@ -5,7 +5,8 @@
 //! the kernel: no timers, no wakeups while nothing changes). When the file is
 //! replaced it saves each window's directory and frame, starts the new build
 //! with `--restore <file>`, and quits. Tabs are saved in order with the
-//! index of their tab group, and reopen as tabs of one window.
+//! index of their tab group, and reopen as tabs of one window. A window
+//! with several panes also saves their layout ([`SavedPanes`]).
 
 use std::os::fd::RawFd;
 use std::path::{Path, PathBuf};
@@ -26,6 +27,36 @@ pub struct SavedWindow {
     /// The tab that was in front in its group.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub selected: bool,
+    /// Its panes, when it has more than one (`cwd` is then the focused
+    /// pane's). `None` (and files from builds before splits): one pane.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub panes: Option<SavedPanes>,
+}
+
+/// A window's panes as saved: the tree with its shares, each pane's
+/// working directory, and which pane had focus and which was zoomed (by
+/// their place in tree order).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct SavedPanes {
+    pub root: SavedNode,
+    pub focused: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zoomed: Option<usize>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum SavedNode {
+    Pane {
+        cwd: Option<String>,
+    },
+    Split {
+        dir: crate::panes::Dir,
+        /// `a`'s share.
+        ratio: f32,
+        a: Box<SavedNode>,
+        b: Box<SavedNode>,
+    },
 }
 
 /// Saved windows as they reopen: one list per window, its tabs in order.
@@ -184,12 +215,35 @@ mod tests {
                 frame: [1.0, 2.0, 300.0, 200.0],
                 tab_group: None,
                 selected: false,
+                panes: None,
             },
             SavedWindow {
                 cwd: None,
                 frame: [5.0, 6.0, 300.0, 200.0],
                 tab_group: Some(1),
                 selected: true,
+                panes: None,
+            },
+            SavedWindow {
+                cwd: Some("/b".into()),
+                frame: [5.0, 6.0, 300.0, 200.0],
+                tab_group: None,
+                selected: false,
+                panes: Some(SavedPanes {
+                    root: SavedNode::Split {
+                        dir: crate::panes::Dir::Right,
+                        ratio: 0.25,
+                        a: Box::new(SavedNode::Pane { cwd: Some("/a".into()) }),
+                        b: Box::new(SavedNode::Split {
+                            dir: crate::panes::Dir::Down,
+                            ratio: 0.5,
+                            a: Box::new(SavedNode::Pane { cwd: Some("/b".into()) }),
+                            b: Box::new(SavedNode::Pane { cwd: None }),
+                        }),
+                    },
+                    focused: 1,
+                    zoomed: None,
+                }),
             },
         ];
         std::fs::write(&path, serde_json::to_vec(&w).unwrap()).unwrap();
@@ -204,6 +258,7 @@ mod tests {
             frame: [0.0, 0.0, 300.0, 200.0],
             tab_group,
             selected,
+            panes: None,
         }
     }
 
@@ -214,7 +269,7 @@ mod tests {
         let old = br#"[{"cwd":"/a","frame":[1.0,2.0,3.0,4.0]},{"cwd":null,"frame":[5.0,6.0,7.0,8.0]}]"#;
         let list: Vec<SavedWindow> = serde_json::from_slice(old).unwrap();
         assert_eq!(list.len(), 2);
-        assert!(list.iter().all(|w| w.tab_group.is_none() && !w.selected));
+        assert!(list.iter().all(|w| w.tab_group.is_none() && !w.selected && w.panes.is_none()));
         assert_eq!(tab_groups(list).iter().map(Vec::len).collect::<Vec<_>>(), [1, 1]);
         // Plain windows are written as before.
         let json = serde_json::to_string(&window("/a", None, false)).unwrap();

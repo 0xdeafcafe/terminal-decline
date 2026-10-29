@@ -3,7 +3,7 @@
 //! The AppKit parts (`app`, `view`) are thin; the logic they use lives in
 //! plain modules that are tested on their own: [`session`] (the program, its
 //! PTY and threads), [`keys`], [`mouse`], [`select`], [`layout`],
-//! [`frame_policy`], [`config`] and [`pin`].
+//! [`frame_policy`], [`panes`], [`config`] and [`pin`].
 
 pub mod app;
 mod ascii_layout;
@@ -19,6 +19,7 @@ pub mod latency;
 pub mod layout;
 pub mod mouse;
 pub mod notify;
+pub mod panes;
 pub mod paths;
 pub mod pin;
 pub mod reload;

@@ -414,7 +414,7 @@ impl Terminal {
             epochs: 2,
             sweep_at_test: None,
             alt_active: false,
-            scrollback: Scrollback::new(scrollback_limit),
+            scrollback: Scrollback::with_widths_as_written(scrollback_limit),
             display_offset: 0,
             top_line: 0,
             other_top_line: 0,
@@ -630,7 +630,13 @@ impl Terminal {
     /// it holds any lines): each block records the setting its lines were
     /// written with, so they read back as written.
     pub fn set_ambiguous_width(&mut self, width: u8) {
-        self.ambiguous = width.clamp(1, 2);
+        let width = width.clamp(1, 2);
+        if width != self.ambiguous {
+            // Cells written before keep their old width: history checks
+            // each one's width from now on.
+            self.scrollback.set_widths_as_written(false);
+        }
+        self.ambiguous = width;
         self.scrollback.set_ambiguous(self.ambiguous);
         self.clear_grapheme();
     }
@@ -1631,6 +1637,8 @@ impl Terminal {
         // Like xterm, a full reset clears scrollback too.
         fresh.scrollback = std::mem::replace(&mut self.scrollback, Scrollback::new(0));
         fresh.scrollback.clear();
+        // Every cell is new, written at the current setting.
+        fresh.scrollback.set_widths_as_written(true);
         // Keep line numbers counting up from the primary screen's.
         let primary_top = if self.alt_active { self.other_top_line } else { self.top_line };
         fresh.top_line = primary_top;
@@ -3122,6 +3130,12 @@ impl Terminal {
             ));
         }
         self.scrollback.check().map_err(|e| format!("history: {e}"))?;
+        let primary = if self.alt_active { &self.other_screen } else { &self.screen };
+        for (r, row) in primary.iter().enumerate() {
+            self.scrollback
+                .check_widths(row)
+                .map_err(|e| format!("primary row {r}, as history would store it: {e}"))?;
+        }
         if self.last_cluster.len() > crate::clusters::MAX_BYTES {
             return Err(format!("the last grapheme is {} bytes", self.last_cluster.len()));
         }

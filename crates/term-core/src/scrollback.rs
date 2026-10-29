@@ -582,8 +582,15 @@ impl OpenBlock {
         scratch.clusters.clear();
         scratch.widths.clear();
         let cluster_bytes = row.clusters().map_or(0, |x| x.raw().0.len());
-        room(&mut self.text, text_end * 4 + cluster_bytes + 1);
+        // The text is written in place into room for its longest form
+        // (4 bytes a cell, plus cluster text), then cut to length: no
+        // capacity check or `memcpy` call per character.
+        let most = text_end * 4 + cluster_bytes;
+        room(&mut self.text, most + 1);
         let text_start = self.text.len();
+        self.text.resize(text_start + most, 0);
+        let buf = &mut self.text[text_start..];
+        let mut at = 0;
         let amb = self.ambiguous;
         let (mut scalars, mut cluster_end, mut entry, mut width_next) = (0u32, 0u32, 0u32, 0u32);
         // The last scalar looked up in the Unicode table and its width.
@@ -596,7 +603,8 @@ impl OpenBlock {
             let predicted;
             if bits & (Cell::CONTENT & !0x7F | Cell::KIND | Cell::WIDTH) == 0 {
                 // Narrow ASCII (or empty), not a cluster: the usual case.
-                self.text.push(if bits as u8 == 0 { b' ' } else { bits as u8 });
+                buf[at] = if bits as u8 == 0 { b' ' } else { bits as u8 };
+                at += 1;
                 scalars += 1;
                 entry += 1;
                 continue;
@@ -604,11 +612,13 @@ impl OpenBlock {
                 let s = row.clusters().map_or("", |x| x.get(c.codepoint()));
                 let n = s.chars().count() as u32;
                 if n == 0 {
-                    self.text.push(b' ');
+                    buf[at] = b' ';
+                    at += 1;
                     predicted = 1;
                     scalars += 1;
                 } else {
-                    self.text.extend_from_slice(s.as_bytes());
+                    buf[at..at + s.len()].copy_from_slice(s.as_bytes());
+                    at += s.len();
                     if n > 1 {
                         // A cluster's width goes in its entry: no need to
                         // segment it again when it is read back.
@@ -626,21 +636,26 @@ impl OpenBlock {
                     0 => ' ',
                     cp => char::from_u32(cp).unwrap_or(' '),
                 };
-                push_utf8(&mut self.text, ch);
-                if ch != last.0 {
-                    last = (ch, scratch.memo.width(ch, amb));
-                }
-                predicted = last.1;
+                at += ch.encode_utf8(&mut buf[at..at + 4]).len();
+                predicted = if scratch.widths_as_written && ch != ' ' {
+                    actual(c)
+                } else {
+                    if ch != last.0 {
+                        last = (ch, scratch.memo.width(ch, amb));
+                    }
+                    last.1
+                };
                 scalars += 1;
             }
-            let actual = if c.is_wide() { 2 } else { 1 };
+            let actual = actual(c);
             if actual != predicted {
                 scratch.widths.push((entry - width_next, actual));
                 width_next = entry + 1;
             }
             entry += 1;
         }
-        let tlen = self.text.len() - text_start;
+        self.text.truncate(text_start + at);
+        let tlen = at;
         if !wrapped {
             self.text.push(END);
         }
@@ -755,6 +770,16 @@ struct Scratch {
     /// (cells, slot) per run.
     runs: Vec<(u32, u32)>,
     memo: WidthMemo,
+    /// Every single-scalar cell has the width the Unicode table gives at
+    /// the open block's setting ([`Scrollback::set_widths_as_written`]),
+    /// so storing skips the check.
+    widths_as_written: bool,
+}
+
+/// A cell's width in cells (a wide cell's spacer aside).
+#[inline(always)]
+fn actual(c: Cell) -> u8 {
+    if c.is_wide() { 2 } else { 1 }
 }
 
 /// The widths of the last scalars looked up, direct-mapped by scalar:
@@ -794,17 +819,6 @@ fn room<T>(v: &mut Vec<T>, add: usize) {
             v.reserve_exact(cap - v.len());
         }
     }
-}
-
-/// Append `c` as UTF-8: always a 4-byte store, then cut to its length, so
-/// no `memcpy` call for a 1–4 byte copy. The caller has made room.
-#[inline]
-fn push_utf8(out: &mut Vec<u8>, c: char) {
-    let mut buf = [0u8; 4];
-    let n = c.encode_utf8(&mut buf).len();
-    let len = out.len();
-    out.extend_from_slice(&buf);
-    out.truncate(len + n);
 }
 
 /// Scripts that are two cells wide whatever the ambiguous-width setting
@@ -1476,6 +1490,14 @@ impl Scrollback {
         }
     }
 
+    /// [`Scrollback::new`] for a terminal's cells, written at the table's
+    /// widths ([`Scrollback::set_widths_as_written`]).
+    pub fn with_widths_as_written(limit: usize) -> Scrollback {
+        let mut sb = Scrollback::new(limit);
+        sb.set_widths_as_written(true);
+        sb
+    }
+
     pub fn len(&self) -> usize {
         (self.end - self.start) as usize
     }
@@ -1549,6 +1571,36 @@ impl Scrollback {
             self.seal();
             self.open.ambiguous = ambiguous;
         }
+    }
+
+    /// Whether every single-scalar cell pushed from now on has the width
+    /// the Unicode table gives at the current ambiguous-width setting. The
+    /// terminal says so while the setting hasn't changed since its cells
+    /// were written (it writes them at the table's width): storing then
+    /// needs no table lookup to find width exceptions. Off by default,
+    /// so any row stores exactly.
+    pub fn set_widths_as_written(&mut self, on: bool) {
+        self.scratch.widths_as_written = on;
+    }
+
+    /// While widths are trusted ([`Scrollback::set_widths_as_written`]),
+    /// `row`'s single-scalar cells must have the table's width at the
+    /// open block's setting: checked on the screen after every `advance`
+    /// in debug builds, so a write path that breaks it is caught.
+    pub fn check_widths(&self, row: &Row) -> Result<(), String> {
+        if !self.scratch.widths_as_written {
+            return Ok(());
+        }
+        for (col, &c) in row.cells.iter().enumerate() {
+            if c.is_cluster() || c.is_spacer() || c.codepoint() == 0 {
+                continue;
+            }
+            let ch = char::from_u32(c.codepoint()).unwrap_or(' ');
+            if ch != ' ' && single_width(ch, self.open.ambiguous) != actual(c) {
+                return Err(format!("col {col}: {ch:?} is {} cells, the table says otherwise", actual(c)));
+            }
+        }
+        Ok(())
     }
 
     /// Store a row (trailing blank cells dropped); its cells' style ids

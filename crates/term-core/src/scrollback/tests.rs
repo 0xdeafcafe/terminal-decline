@@ -480,11 +480,6 @@ fn widths_without_a_lookup_agree_with_the_table() {
             }
         }
     }
-    let mut out = Vec::new();
-    for c in ['a', 'é', '漢', '😀', '\u{10FFFD}'] {
-        push_utf8(&mut out, c);
-    }
-    assert_eq!(out, "aé漢😀\u{10FFFD}".as_bytes());
 }
 
 #[test]

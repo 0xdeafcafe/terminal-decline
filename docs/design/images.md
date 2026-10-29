@@ -448,6 +448,12 @@ pub trait ImageHost: Send + Sync {
 }
 ```
 
+As built (I.1): the decoders are generic over the target type, with
+`AllocWith<'a, T> = &'a mut dyn FnMut(u32, u32) -> Option<T>` and `Alloc`
+its boxed form, so term-core gets its own `Box<dyn PixelBuffer>` back
+from the Sixel decoder without a downcast. `term_image::VecPixels` is the
+`Vec`-backed target for tests and the pure-Rust test host.
+
 term-core has no threads of its own. Work that must leave the lock is
 queued on the terminal:
 
@@ -704,6 +710,22 @@ is measured in PR I.5.
   orientation transform. When a smaller size is wanted (§7.2), ImageIO's
   thumbnail path (`kCGImageSourceThumbnailMaxPixelSize`) decodes at that
   size directly.
+- **As decided (§12, question 3) and built in I.1**: decoding is pure
+  Rust instead, in `term_image::decode` (the `png`, `jpeg-decoder` and
+  `gif` crates), fuzzed with the other targets; term-app's host only runs
+  it on the queue. `decode(bytes, into, limits)` writes premultiplied BGRA
+  at `into`'s size (`fit` picks it from the header), averaging down and
+  applying the EXIF orientation as rows stream; JPEG uses the decoder's
+  DCT scaling (up to 1/8 each way) first, so a phone photo drawn small is
+  never decoded at full size. Each decoder's own allocations are capped
+  (`Limits::transient`). Colour profiles are ignored (taken as sRGB).
+  Measured (`cargo bench -p term-image --bench decode`, M-series Mac):
+  PNG 1624 × 1018 screenshot 4.3 ms at its size, 7.6 ms halved; JPEG
+  1600 × 1200 11.8 ms, 3.1 ms at 400 × 300; binary size +321 KB
+  stripped for the three decoders (on top of +50 KB for the parsers and
+  Sixel), more than the 100–150 KB estimated. `jpeg-decoder` starts one
+  short-lived thread per colour component for images over 128 × 128 (its
+  built-in heuristic; rayon is off).
 - ImageIO parses untrusted bytes from programs (possibly remote), and a
   crash in it takes every window. Sniffing in Rust narrows what reaches
   it, and decoding off the lock keeps a slow image from stalling frames,
@@ -711,10 +733,20 @@ is measured in PR I.5.
   decoders, or a separate decoding process).
 - Raw kitty data and Sixel never reach ImageIO: term-image converts RGB /
   RGBA / palette pixels into BGRA premultiplied as they arrive.
-- **Colour**: images are converted to sRGB. The window's layer has no
-  colour space set today (`configure_layer`), so on a P3 display sRGB
-  values are shown as P3 and photos look more saturated than in Preview,
-  as text colours already do. Open question 9.
+- **Colour** (decided, question 9): the window's layer stays untagged,
+  and each image is converted once, when decoded, from its own colour
+  space (its ICC profile; sRGB if it has none) to Display P3, in
+  `term_image::color::ToP3`: the source curve through a table to 16-bit
+  linear, a 3 × 3 matrix in fixed point, the sRGB curve (P3's) through a
+  table. Matrix/TRC ICC profiles are read (`rXYZ`/`gXYZ`/`bXYZ`, `rTRC`
+  as `curv` or `para`); others are taken as sRGB; a Display P3 profile
+  (iPhone photos) is left as is; grey images are not touched. On by
+  default in `decode::Options`; kitty's raw pixels
+  (`Converter::display_p3`) and Sixel colours (`Decoder::display_p3`,
+  registers keep sRGB) take it as sRGB when term-core asks. Cost about
+  3 ns a pixel (M-series Mac, machine not idle): kitty's 8 MB full-HD
+  RGBA 10.2 → 17.3 ms; the 1624 × 1018 PNG 4.3 → 9.5 ms (§9 still
+  expects 5–15 ms).
 
 ### 6.2 Pixel buffers and textures (term-render)
 
@@ -880,6 +912,13 @@ slices (`put_slice` from vte's DCS passthrough, cells §14):
   of the string is skipped, and the image is dropped.
 - At the end, the image is cropped to the area painted (or the raster
   size if larger, as xterm does).
+- As built (I.1): with `P2 ≠ 1`, unset pixels take register 0 as it is
+  at the end of the string (programs define `#0` after the raster
+  attributes); painted pixels are always opaque, so alpha 0 marks unset
+  ones and no mask is kept. Decoding chafa-style data (a 1000 × 1000
+  photo-like image, 216 colours) runs at ~215 MB/s on an M-series Mac
+  (`cargo bench -p term-image --bench sixel`), through a fast path for
+  runs of single sixels at 1:1.
 
 The decoder writes BGRA premultiplied straight into the `PixelTarget`
 (§4.2; the Metal buffer the GPU reads). Decoding runs on the reader
@@ -943,7 +982,7 @@ A string abandoned (`dcs_end(false)`, CAN/SUB) drops the image.
 | GPU time, one window-sized image | + ≤ 0.1 ms | Metal counters, as the render bench does |
 | Footprint: images at the budget | peak − idle ≤ 32 MB + 4 MB (the 4 MB for metadata, ImageIO's own buffers beyond the reserved headroom, and allocator slack; measured and the margin set from the numbers in I.5) | `scripts/pressure/run.py` gains `images_flood` (mpv-like: 500 id-less 1600×1000 frames) and `images_tiny` (20,000 1×1 images); `/usr/bin/footprint -p <pid>` before, at peak, after |
 | Footprint with no images | unchanged (the pool and an empty `Graphics` are < 1 KB) | standard set before/after each PR |
-| Binary size | + ~60 KB (miniz_oxide) + ~40 KB (decoder, sniffing, protocols) | `ls -l` of the release library, recorded per PR |
+| Binary size | + ~60 KB (miniz_oxide) + ~40 KB (decoder, sniffing, protocols); measured in I.1: +50 KB for those, +321 KB for the PNG/JPEG/GIF decoders (stripped, thin LTO) | `ls -l` of the release library, recorded per PR |
 | Idle | 0% CPU, 0 wakeups, also with a lost image in view | `top -l 2 -s 5 -stats cpu,idlew` with an image on screen, and with the budget full of protected images and a lost one in view |
 | Parse speed of text | unchanged (an APC/DCS branch only) | `cargo bench -p term-core --bench parse` within noise; the parse-speed gate (cells §17.4) |
 
@@ -1087,7 +1126,7 @@ the size of the largest window; 2 animation after 1.0; 3 pure-Rust
 decoders, fuzzed; 4 no HEIC in 1.0; 5–8, 10, 11 as proposed; 7 iTerm2
 images sized per point, as iTerm2; 9 the window stays untagged (text keeps today's colours) and each image is
 converted from its own colour space (sRGB if none) to Display P3 once, when
-it is decoded.
+it is decoded (built in I.1, §6.1).
 
 1. **Budget on large screens.** One full-screen image is about 59 MB on a
    5K display and 31 MB on a 16" MacBook Pro, and the kitty protocol asks

@@ -25,6 +25,13 @@ vte
 >   still ignored.
 > - `Perform::put_slice(&[u8])`: DCS passthrough hands over runs of data
 >   bytes whole. The default calls `put` per byte.
+> - `Perform::dcs_end(complete)`: DCS passthrough has an escape state, as
+>   APC does, so the end of a string is reported once the byte after an ESC
+>   is known: `complete` is true for ST (`ESC \` or C1 `0x9C`), false if it
+>   was abandoned (CAN, SUB, or ESC and anything but `\`). The ST is
+>   consumed, not reported as an `esc_dispatch` (before, `ESC \` called
+>   `unhook` at the ESC and then `esc_dispatch` for the `\`). The default
+>   calls `unhook`, so other `Perform` implementations need no change.
 > - OSC keeps its `;` separators in the raw buffer, so a parameter can be
 >   rejoined (`params[2..].join(";")`) without loss. `osc_dispatch` is
 >   unchanged: at most 16 parts, the rest of the string cut off. With a

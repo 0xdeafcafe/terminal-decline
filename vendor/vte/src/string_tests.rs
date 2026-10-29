@@ -13,6 +13,8 @@ enum Ev {
     /// DCS data; neighbouring pieces are merged, however they were split.
     Dcs(Vec<u8>),
     Unhook,
+    /// `dcs_end`, recorded only when `Rec::ends` is set.
+    DcsEnd(bool),
     ApcStart,
     /// APC data, merged like `Dcs`.
     Apc(Vec<u8>),
@@ -30,6 +32,8 @@ struct Rec {
     log: Vec<Ev>,
     bulk: bool,
     policy: OscLarge,
+    /// Record `dcs_end` itself instead of letting the default call `unhook`.
+    ends: bool,
     /// How many separate calls delivered APC / DCS data.
     apc_calls: usize,
     dcs_calls: usize,
@@ -37,7 +41,7 @@ struct Rec {
 
 impl Rec {
     fn new(bulk: bool, policy: OscLarge) -> Rec {
-        Rec { log: Vec::new(), bulk, policy, apc_calls: 0, dcs_calls: 0 }
+        Rec { log: Vec::new(), bulk, policy, ends: false, apc_calls: 0, dcs_calls: 0 }
     }
 
     fn data(&mut self, bytes: &[u8], wrap: fn(Vec<u8>) -> Ev) {
@@ -85,6 +89,13 @@ impl Perform for Rec {
     }
     fn unhook(&mut self) {
         self.log.push(Ev::Unhook);
+    }
+    fn dcs_end(&mut self, complete: bool) {
+        if self.ends {
+            self.log.push(Ev::DcsEnd(complete));
+        } else {
+            self.unhook();
+        }
     }
     fn apc_start(&mut self) {
         self.log.push(Ev::ApcStart);
@@ -232,7 +243,8 @@ fn dcs_put_slice_matches_per_byte_put() {
     assert_eq!(bulk[1], Ev::Hook('q'));
     // DEL and the byte >= 0x80 are dropped as before; the rest is data.
     assert_eq!(bulk[2], Ev::Dcs(b"\"1;1;8;8#0;2;0;0;0~~@@\n\x07-$".to_vec()));
-    assert_eq!(&bulk[3..], &[Ev::Unhook, Ev::Esc(b'\\'), Ev::Print('y')][..]);
+    // The ST is consumed, as for APC: no `esc_dispatch` for its `\\`.
+    assert_eq!(&bulk[3..], &[Ev::Unhook, Ev::Print('y')][..]);
 }
 
 #[test]
@@ -256,6 +268,81 @@ fn dcs_can_aborts() {
         run(b"\x1bPqab\x18c"),
         vec![Ev::Hook('q'), Ev::Dcs(b"ab".to_vec()), Ev::Unhook, Ev::Execute(0x18), Ev::Print('c')]
     );
+}
+
+/// Feed `input` in pieces of `chunk` bytes, recording `dcs_end`.
+fn run_ends(input: &[u8], chunk: usize) -> Vec<Ev> {
+    let mut rec = Rec::new(true, OscLarge::Drop);
+    rec.ends = true;
+    let mut parser = Parser::new();
+    for piece in input.chunks(chunk) {
+        parser.advance(&mut rec, piece);
+    }
+    rec.log
+}
+
+#[test]
+fn dcs_end_reports_how_the_string_ended() {
+    let data = || Ev::Dcs(b"ab".to_vec());
+    let cases: &[(&[u8], Vec<Ev>)] = &[
+        (b"\x1bPqab\x1b\\c", vec![Ev::Hook('q'), data(), Ev::DcsEnd(true), Ev::Print('c')]),
+        (b"\x1bPqab\x9cc", vec![Ev::Hook('q'), data(), Ev::DcsEnd(true), Ev::Print('c')]),
+        (
+            b"\x1bPqab\x18c",
+            vec![Ev::Hook('q'), data(), Ev::DcsEnd(false), Ev::Execute(0x18), Ev::Print('c')],
+        ),
+        (
+            b"\x1bPqab\x1ac",
+            vec![Ev::Hook('q'), data(), Ev::DcsEnd(false), Ev::Execute(0x1a), Ev::Print('c')],
+        ),
+        // ESC and anything but `\`: abandoned, and the ESC starts a sequence.
+        (
+            b"\x1bPqab\x1b[Hc",
+            vec![Ev::Hook('q'), data(), Ev::DcsEnd(false), Ev::Csi('H'), Ev::Print('c')],
+        ),
+        (
+            b"\x1bPqab\x1b7c",
+            vec![Ev::Hook('q'), data(), Ev::DcsEnd(false), Ev::Esc(b'7'), Ev::Print('c')],
+        ),
+        (
+            b"\x1bPqab\x1b\x1b\\c",
+            vec![Ev::Hook('q'), data(), Ev::DcsEnd(false), Ev::Esc(b'\\'), Ev::Print('c')],
+        ),
+        (
+            b"\x1bPqab\x1bPqab\x1b\\",
+            vec![Ev::Hook('q'), data(), Ev::DcsEnd(false), Ev::Hook('q'), data(), Ev::DcsEnd(true)],
+        ),
+        // CAN right after the ESC: abandoned, then executed as usual.
+        (
+            b"\x1bPqab\x1b\x18c",
+            vec![Ev::Hook('q'), data(), Ev::DcsEnd(false), Ev::Execute(0x18), Ev::Print('c')],
+        ),
+    ];
+    for (input, want) in cases {
+        for chunk in [1, 2, 3, input.len()] {
+            assert_eq!(&run_ends(input, chunk), want, "{:?}, chunk {chunk}", input.escape_ascii());
+        }
+    }
+}
+
+#[test]
+fn dcs_end_waits_for_the_byte_after_esc() {
+    let mut rec = Rec::new(true, OscLarge::Drop);
+    rec.ends = true;
+    let mut parser = Parser::new();
+    parser.advance(&mut rec, b"\x1bPqab\x1b");
+    assert_eq!(rec.log, vec![Ev::Hook('q'), Ev::Dcs(b"ab".to_vec())]);
+    parser.advance(&mut rec, b"\\");
+    assert_eq!(rec.log.last(), Some(&Ev::DcsEnd(true)));
+}
+
+#[test]
+fn dcs_end_defaults_to_unhook() {
+    // `Rec::ends` off: the default `dcs_end` calls `unhook`, whatever the end.
+    for input in [&b"\x1bPqab\x1b\\"[..], b"\x1bPqab\x18", b"\x1bPqab\x1b[H"] {
+        let ev = run(input);
+        assert_eq!(ev.iter().filter(|e| **e == Ev::Unhook).count(), 1, "{:?}", input.escape_ascii());
+    }
 }
 
 #[test]

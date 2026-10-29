@@ -37,6 +37,7 @@ any command as its own Dock app.
 | `term-app`    | AppKit window/view, keyboard + IME, mouse, clipboard, config, pins    |
 | `term-prefs`  | the preferences: settings schema, safe `config.toml` edits, the TUI (no platform code) |
 | `term-icon`   | generated pin icons by the Slope rule (`slope-pins-2`): Core Text outline of the initial, CoreGraphics drawing after `pin-template.svg`, ImageIO `.icns` |
+| `term-image`  | image parsers and decoders with no terminal state: kitty keys, base64, zlib, iTerm2 arguments, Sixel, header sizes, pure-Rust PNG/JPEG/GIF, conversion to Display P3 (no platform code; docs/design/images.md) |
 
 `term-core` has no platform code and is tested and benchmarked on its own.
 

@@ -1,0 +1,33 @@
+[package]
+name = "term-image"
+description = "Parsers and decoders for terminal images: kitty graphics keys, base64, zlib, iTerm2 arguments, Sixel, PNG/JPEG/GIF"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
+# Pure-Rust decoders for images from programs (images.md §6.1). Defaults
+# off: no rayon threads for JPEG, no GIF encoder.
+png = "0.18"
+jpeg-decoder = { version = "0.3", default-features = false }
+gif = { version = "0.14", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+criterion = { version = "0.7", default-features = false }
+
+[[bench]]
+name = "probe"
+harness = false
+
+[[bench]]
+name = "sixel"
+harness = false
+
+[[bench]]
+name = "stream"
+harness = false
+
+[[bench]]
+name = "decode"
+harness = false

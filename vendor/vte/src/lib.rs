@@ -195,6 +195,7 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
                 self.advance_apc(performer, &[byte]);
             },
             State::ApcEscape => self.advance_apc_escape(performer, byte),
+            State::DcsEscape => self.advance_dcs_escape(performer, byte),
             State::Ground => unreachable!(),
         }
     }
@@ -333,18 +334,15 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
         match byte {
             0x00..=0x17 | 0x19 | 0x1C..=0x7E => performer.put_slice(&[byte]),
             0x18 | 0x1A => {
-                performer.unhook();
+                performer.dcs_end(false);
                 performer.execute(byte);
                 self.state = State::Ground
             },
-            0x1B => {
-                performer.unhook();
-                self.reset_params();
-                self.state = State::Escape
-            },
+            // ST or not is known only at the next byte.
+            0x1B => self.state = State::DcsEscape,
             0x7F => (),
             0x9C => {
-                performer.unhook();
+                performer.dcs_end(true);
                 self.state = State::Ground
             },
             _ => (),
@@ -687,6 +685,20 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
         }
     }
 
+    /// The byte after an ESC inside DCS passthrough.
+    fn advance_dcs_escape<P: Perform>(&mut self, performer: &mut P, byte: u8) {
+        if byte == b'\\' {
+            performer.dcs_end(true);
+            self.state = State::Ground;
+        } else {
+            // Abandoned: the ESC starts a new escape sequence.
+            performer.dcs_end(false);
+            self.reset_params();
+            self.state = State::Escape;
+            self.advance_esc(performer, byte);
+        }
+    }
+
     /// Inside DCS passthrough: pass the run of data bytes whole, and handle
     /// any other byte alone.
     #[inline]
@@ -986,6 +998,7 @@ enum State {
     Ground,
     ApcString,
     ApcEscape,
+    DcsEscape,
 }
 
 /// Performs actions requested by the Parser
@@ -1072,8 +1085,16 @@ pub trait Perform {
     /// Called when a device control string is terminated.
     ///
     /// The previously selected handler should be notified that the DCS has
-    /// terminated.
+    /// terminated. Called by the default [`Perform::dcs_end`].
     fn unhook(&mut self) {}
+
+    /// The device control string ended. `complete` is true for ST (`ESC \`
+    /// or C1 `0x9C`), false if it was abandoned (CAN, SUB, or ESC followed by
+    /// anything else). The ST is consumed, not reported as an
+    /// `esc_dispatch`. The default calls [`Perform::unhook`].
+    fn dcs_end(&mut self, _complete: bool) {
+        self.unhook();
+    }
 
     /// Dispatch an operating system command.
     fn osc_dispatch(&mut self, _params: &[&[u8]], _bell_terminated: bool) {}

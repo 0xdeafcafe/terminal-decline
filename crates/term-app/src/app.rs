@@ -139,7 +139,7 @@ define_class!(
                 return NSApplicationTerminateReply::TerminateNow;
             }
             let views: Vec<_> = self.ivars().windows.borrow().iter().map(|(_, v)| v.clone()).collect();
-            let programs: Vec<String> = views.iter().filter_map(|v| v.running_program()).collect();
+            let programs: Vec<String> = views.iter().flat_map(|v| v.running_programs()).collect();
             if programs.is_empty() {
                 return NSApplicationTerminateReply::TerminateNow;
             }
@@ -489,7 +489,7 @@ impl AppDelegate {
                 frame: [f.origin.x, f.origin.y, f.size.width, f.size.height],
                 tab_group,
                 selected,
-                panes: None,
+                panes: view.as_ref().and_then(|v| v.saved_panes()),
                 command: view.as_ref().and_then(|v| v.command_to_restore()),
             }
         };
@@ -516,8 +516,9 @@ impl AppDelegate {
         saved
     }
 
-    /// Reopen saved windows, tabs as tabs, with the same tab in front, and
-    /// type the command each was running at its shell's prompt.
+    /// Reopen saved windows, tabs as tabs, with the same tab in front and
+    /// the same panes, and type the command each pane was running at its
+    /// shell's prompt.
     fn restore(&self, saved: Vec<SavedWindow>) {
         for group in crate::reload::tab_groups(saved) {
             let mut first: Option<Retained<NSWindow>> = None;
@@ -530,8 +531,10 @@ impl AppDelegate {
                         Place::Frame(NSRect::new(NSPoint::new(x, y), objc2_foundation::NSSize::new(width, height)))
                     }
                 };
-                let opened = self.open_window(w.cwd, place, None);
-                if let (Some(command), Some(view)) = (w.command, opened.as_ref().and_then(|o| self.view_of(o))) {
+                // With panes, each pane types its own command.
+                let command = w.command.filter(|_| w.panes.is_none());
+                let opened = self.open_window_as(w.cwd, place, None, false, w.panes);
+                if let (Some(command), Some(view)) = (command, opened.as_ref().and_then(|o| self.view_of(o))) {
                     view.type_at_prompt(command);
                 }
                 if w.selected {
@@ -563,6 +566,9 @@ impl AppDelegate {
         let open = self.ivars().settings.borrow().clone();
         if let Some(window) = open {
             window.makeKeyAndOrderFront(None);
+            if let Some(view) = self.view_of(&window) {
+                view.focus_settings();
+            }
             let mtm = MainThreadMarker::from(self);
             NSApplication::sharedApplication(mtm).activate();
             crate::view::sync_visibility_soon();
@@ -572,7 +578,7 @@ impl AppDelegate {
             Some(window) => Place::TabOf(window),
             None => Place::Cascade,
         };
-        let opened = self.open_window_as(None, place, None, true);
+        let opened = self.open_window_as(None, place, None, true, None);
         *self.ivars().settings.borrow_mut() = opened;
     }
 
@@ -647,13 +653,21 @@ impl AppDelegate {
     /// Open a window in `cwd` (else the configured one) at `place`, running
     /// `argv` (else the configured program).
     fn open_window(&self, cwd: Option<String>, place: Place, argv: Option<Vec<String>>) -> Option<Retained<NSWindow>> {
-        self.open_window_as(cwd, place, argv, false)
+        self.open_window_as(cwd, place, argv, false, None)
     }
 
     /// [`Self::open_window`], or with `settings` the Settings tab: the
     /// main app's binary running the preferences directly (not through
-    /// the login shell), titled "Settings", opaque, without notices.
-    fn open_window_as(&self, cwd: Option<String>, place: Place, argv: Option<Vec<String>>, settings: bool) -> Option<Retained<NSWindow>> {
+    /// the login shell), titled "Settings", opaque, without notices. With
+    /// `layout`, the panes saved for a restart.
+    fn open_window_as(
+        &self,
+        cwd: Option<String>,
+        place: Place,
+        argv: Option<Vec<String>>,
+        settings: bool,
+        layout: Option<crate::reload::SavedPanes>,
+    ) -> Option<Retained<NSWindow>> {
         let mtm = MainThreadMarker::from(self);
         let config = self.ivars().config.borrow().clone();
         let scale = NSScreen::mainScreen(mtm).map(|s| s.backingScaleFactor()).unwrap_or(2.0);
@@ -721,7 +735,9 @@ impl AppDelegate {
         if let Some(pane) = view.first_responder() {
             window.makeFirstResponder(Some(&pane));
         }
-        window.setAcceptsMouseMovedEvents(true);
+        // Mouse moves come through each pane's tracking area: the window's
+        // own would send them all to the first responder, wherever the
+        // pointer is.
 
         let mut command = match settings {
             true => Command {
@@ -780,11 +796,17 @@ impl AppDelegate {
                     false => self.ivars().notices.borrow().clone(),
                 },
                 settings,
+                layout,
             },
         ) {
             eprintln!("terminal-decline: could not open a window: {e}");
             window.close();
             return None;
+        }
+        // A restored layout has panes of its own: its focused one gets
+        // the keys.
+        if let Some(pane) = view.first_responder() {
+            window.makeFirstResponder(Some(&pane));
         }
         let center = objc2_foundation::NSNotificationCenter::defaultCenter();
         unsafe {
@@ -840,6 +862,30 @@ fn tab_index(tag: isize, tabs: usize) -> Option<usize> {
         9 if tabs > 0 => Some(tabs - 1),
         1..=8 if (tag as usize) <= tabs => Some(tag as usize - 1),
         _ => None,
+    }
+}
+
+/// The Settings pane of `window` closed, leaving other panes: Cmd+,
+/// opens a new Settings tab from now on.
+pub(crate) fn settings_closed(window: &NSWindow) {
+    let delegate = DELEGATE.with(|d| d.borrow().as_ref().and_then(|w| w.load()));
+    if let Some(delegate) = delegate {
+        let mut settings = delegate.ivars().settings.borrow_mut();
+        if settings.as_deref().is_some_and(|s| std::ptr::eq::<NSWindow>(s, window)) {
+            *settings = None;
+        }
+    }
+}
+
+/// Write the windows as a restart would save them to `path`, as JSON
+/// (the test-only `save` control command).
+pub(crate) fn write_saved_windows(path: &std::path::Path) {
+    let delegate = DELEGATE.with(|d| d.borrow().as_ref().and_then(|w| w.load()));
+    if let Some(delegate) = delegate {
+        let json = serde_json::to_string(&delegate.saved_windows()).expect("saved windows serialise");
+        if let Err(e) = std::fs::write(path, json) {
+            eprintln!("terminal-decline: writing {}: {e}", path.display());
+        }
     }
 }
 
@@ -1011,7 +1057,12 @@ pub fn build_menus(mtm: MainThreadMarker, app_name: &str, binds: &Keybinds) -> R
         b("New Window", MenuAction::NewWindow),
         b("New Tab", MenuAction::NewTab),
         vec![NSMenuItem::separatorItem(mtm)],
+        b(MenuAction::SplitRight.label(), MenuAction::SplitRight),
+        b(MenuAction::SplitDown.label(), MenuAction::SplitDown),
+        vec![NSMenuItem::separatorItem(mtm)],
         b("Close", MenuAction::Close),
+        b(MenuAction::CloseTab.label(), MenuAction::CloseTab),
+        b(MenuAction::CloseWindow.label(), MenuAction::CloseWindow),
     ];
     submenu(mtm, &bar, "Shell", &shell.concat());
     let edit = [
@@ -1040,6 +1091,13 @@ pub fn build_menus(mtm: MainThreadMarker, app_name: &str, binds: &Keybinds) -> R
             item(mtm, "Zoom", Some(sel!(performZoom:)), ""),
             NSMenuItem::separatorItem(mtm),
         ],
+        b(MenuAction::FocusPanePrevious.label(), MenuAction::FocusPanePrevious),
+        b(MenuAction::FocusPaneNext.label(), MenuAction::FocusPaneNext),
+        b(MenuAction::FocusPaneLeft.label(), MenuAction::FocusPaneLeft),
+        b(MenuAction::FocusPaneRight.label(), MenuAction::FocusPaneRight),
+        b(MenuAction::FocusPaneUp.label(), MenuAction::FocusPaneUp),
+        b(MenuAction::FocusPaneDown.label(), MenuAction::FocusPaneDown),
+        vec![NSMenuItem::separatorItem(mtm)],
         b("Show Previous Tab", MenuAction::PreviousTab),
         b("Show Next Tab", MenuAction::NextTab),
         vec![

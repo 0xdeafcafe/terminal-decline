@@ -11,8 +11,16 @@
 //! - `front`: bring this window or tab to the front;
 //! - `drop PATH[<tab>PATH…]`: as if those files were dragged onto the
 //!   window (paths separated by tabs, so they may hold spaces);
-//! - `close`: close the window as Cmd+W does (asking first with
+//! - `close`: close the tab as its close button does (asking first with
 //!   `confirm_close`);
+//! - `split right` / `split down`: split the focused pane (Cmd+D,
+//!   Cmd+Shift+D);
+//! - `focus N` / `focus next|previous|left|right|up|down`: focus the
+//!   Nth pane (from 0, in the order the dump lists them), or as the pane
+//!   actions do;
+//! - `close-pane`: close the focused pane as Cmd+W does;
+//! - `save`: write what a restart would save (every window, its tabs and
+//!   panes) to the dump file's path with `.saved` added, as JSON;
 //! - `settings`: Terminal Decline > Settings… (Cmd+,);
 //! - `type-settings TEXT`: type TEXT into the Settings tab, as keys would
 //!   (`\r`, `\e` and `\\` stand for Return, Esc and a backslash);
@@ -29,6 +37,8 @@
 //! OSC.
 
 use serde::Serialize;
+
+use crate::panes::{Dir, Direction, PaneId};
 
 /// The env var that turns this on, naming the dump file.
 pub const ENV: &str = "DECLINE_TEST_DUMP";
@@ -144,8 +154,16 @@ pub enum Control {
     Front,
     /// Files dropped on the window.
     Drop(Vec<String>),
-    /// Shell > Close.
+    /// The tab's close button.
     Close,
+    /// Shell > Split Right / Split Down.
+    Split(Dir),
+    /// Focus a pane.
+    Focus(FocusTarget),
+    /// Shell > Close: the focused pane.
+    ClosePane,
+    /// Write the windows as a restart saves them.
+    Save,
     /// Terminal Decline > Settings….
     Settings,
     /// Bytes typed into the Settings tab.
@@ -156,6 +174,16 @@ pub enum Control {
         flags: u64,
     },
     Quit,
+}
+
+/// Which pane `focus` moves to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FocusTarget {
+    /// The Nth in tree order, from 0.
+    Index(usize),
+    Next,
+    Previous,
+    Towards(Direction),
 }
 
 /// `\r`, `\e` and `\\` as the bytes they stand for.
@@ -193,6 +221,22 @@ impl Control {
             "tab" => Control::Tab,
             "front" => Control::Front,
             "close" => Control::Close,
+            "close-pane" => Control::ClosePane,
+            "save" => Control::Save,
+            "split" => Control::Split(match words.next()? {
+                "right" => Dir::Right,
+                "down" => Dir::Down,
+                _ => return None,
+            }),
+            "focus" => Control::Focus(match words.next()? {
+                "next" => FocusTarget::Next,
+                "previous" => FocusTarget::Previous,
+                "left" => FocusTarget::Towards(Direction::Left),
+                "right" => FocusTarget::Towards(Direction::Right),
+                "up" => FocusTarget::Towards(Direction::Up),
+                "down" => FocusTarget::Towards(Direction::Down),
+                n => FocusTarget::Index(n.parse().ok()?),
+            }),
             "settings" => Control::Settings,
             "resize" => Control::Resize {
                 cols: words.next()?.parse().ok().filter(|&c| c > 0)?,
@@ -255,10 +299,15 @@ pub struct Dump {
     /// Settings tab. For the whole app, like `notifications`.
     pub settings_ready: bool,
     pub settings_recording: bool,
-    /// `Terminal::dump()`: the visible rows and a status line.
+    /// `Terminal::dump()` of the focused pane: the visible rows and a
+    /// status line.
     pub screen: String,
     pub cols: usize,
     pub lines: usize,
+    /// Every pane, in tree order (left to right, top to bottom).
+    pub panes: Vec<PaneDump>,
+    /// The dividers drawn between them.
+    pub dividers: usize,
     /// Frames the GPU has finished drawing.
     pub frames: u64,
     /// The last frame's glyph and rectangle (background, decoration)
@@ -277,6 +326,19 @@ pub struct Dump {
     pub background: String,
     /// `phys_footprint` from `task_info`, bytes.
     pub phys_footprint: u64,
+}
+
+/// One pane in a dump.
+#[derive(Clone, Debug, Serialize)]
+pub struct PaneDump {
+    pub id: PaneId,
+    /// Where it is in the window: x, y, width, height in pixels.
+    pub rect: [i32; 4],
+    pub cols: usize,
+    pub lines: usize,
+    pub focused: bool,
+    /// As [`Dump::screen`].
+    pub screen: String,
 }
 
 /// This process's memory footprint as Activity Monitor and `footprint`
@@ -379,6 +441,19 @@ mod tests {
             ("tab 2", None),
             ("front", Some(Control::Front)),
             ("close", Some(Control::Close)),
+            ("close-pane", Some(Control::ClosePane)),
+            ("save", Some(Control::Save)),
+            ("split right", Some(Control::Split(Dir::Right))),
+            ("split down", Some(Control::Split(Dir::Down))),
+            ("split", None),
+            ("split up", None),
+            ("focus 2", Some(Control::Focus(FocusTarget::Index(2)))),
+            ("focus next", Some(Control::Focus(FocusTarget::Next))),
+            ("focus previous", Some(Control::Focus(FocusTarget::Previous))),
+            ("focus left", Some(Control::Focus(FocusTarget::Towards(Direction::Left)))),
+            ("focus down", Some(Control::Focus(FocusTarget::Towards(Direction::Down)))),
+            ("focus", None),
+            ("focus x", None),
             ("drop /a b\t/c", Some(Control::Drop(vec!["/a b".into(), "/c".into()]))),
             ("drop /x", Some(Control::Drop(vec!["/x".into()]))),
             ("drop ", None),

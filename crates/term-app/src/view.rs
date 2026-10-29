@@ -2,8 +2,9 @@
 //! window's only `CAMetalLayer`, with one display link, and it draws every
 //! pane of the window in one frame (splits design §1). The panes are
 //! [`PaneView`]s laid over it, which take the keys, the input method and
-//! the mouse; each owns a session (program, PTY and terminal). For now a
-//! window has one pane, filling it.
+//! the mouse; each owns a session (program, PTY and terminal). Panes are
+//! split, closed and focused here; the window view draws the 1 pt
+//! dividers between them and sets the cursor over them.
 
 use std::cell::{Cell as StdCell, RefCell};
 use std::collections::{HashMap, VecDeque};
@@ -19,8 +20,8 @@ use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSAlert, NSAlertFirstButtonReturn, NSApplication, NSEvent, NSEventMask, NSEventModifierFlags, NSModalResponse, NSPasteboard,
-    NSPasteboardTypeString, NSResponder, NSView, NSWindow, NSWindowDelegate,
+    NSAlert, NSAlertFirstButtonReturn, NSApplication, NSBeep, NSCursor, NSEvent, NSEventMask, NSEventModifierFlags, NSModalResponse,
+    NSPasteboard, NSPasteboardTypeString, NSResponder, NSView, NSWindow, NSWindowDelegate,
 };
 use objc2_foundation::{
     NSArray, NSKeyValueObservingOptions, NSNotification, NSObjectNSKeyValueObserverRegistration, NSObjectProtocol, NSPoint, NSRect,
@@ -30,17 +31,19 @@ use objc2_metal::{MTLCommandBuffer, MTLDrawable};
 use objc2_quartz_core::{CADisplayLink, CALayer, CAMetalDrawable, CAMetalLayer};
 use term_core::Term;
 use term_pty::{Command, Size};
-use term_render::{FrameInput, PaneDraw, PaneRender, Renderer, Theme};
+use term_render::{FrameInput, PaneDraw, PaneRender, RectInstance, Renderer, Rgba, Theme};
 
 use crate::config::Config;
-use crate::control::{self, Control, Dump};
+use crate::control::{self, Control, Dump, FocusTarget, PaneDump};
 use crate::frame_policy::{self, Decision, ECHO_WAIT, PaneFrame, WindowTick};
 use crate::keybind::{self, Keybinds};
 use crate::keys::{KeyInput, KeyModes, KeysDown};
 use crate::latency::{self, FrameKeys, Latency};
 use crate::layout::{self, CellSize, Padding};
 use crate::pane_view::PaneView;
-use crate::panes::{Geometry, PaneId, Panes, PxRect};
+use crate::panes::{Dir, Direction, Geometry, PaneId, Panes, PxRect};
+use crate::reload::{SavedPane, SavedPanes};
+use crate::running::Closing;
 use crate::select::{Block, Gesture};
 use crate::session::{Events, Hooks, Outcome, Session};
 use crate::theme::Appearance;
@@ -90,6 +93,12 @@ pub(crate) struct Win {
     recording: Option<Recording>,
     /// Bumped by each recording, so a timeout cancels only its own.
     recordings: u64,
+    /// The colour of the dividers between panes.
+    divider: Rgba,
+    /// The window's `contentMinSize` before its panes raised it, and the
+    /// one last set (points).
+    base_min: Option<NSSize>,
+    min: Option<NSSize>,
 }
 
 /// What each pane keeps: its view, its session and what the renderer
@@ -138,12 +147,26 @@ pub(crate) struct Pane {
     /// program in the shell's foreground saved for a restart and typed at
     /// the prompt after it (see [`crate::reload::SavedWindow::command`]).
     runs_shell: bool,
+    /// It runs the window's own program (the first pane, or one restored
+    /// as such), not the user's shell as a split does.
+    program: bool,
+    /// It runs the preferences (the Settings tab's first pane): not a
+    /// running program for `confirm_close`, the only pane whose chord
+    /// recording is honoured, and titled "Settings".
+    pub(crate) settings: bool,
+    /// The title its program set last, shown while it has focus.
+    title: Option<String>,
+    /// The left click that focused it: it goes nowhere else (no
+    /// selection, no mouse report) until the button comes up.
+    pub(crate) swallow_click: bool,
 }
 
 pub(crate) struct State {
     pub(crate) win: Win,
     tree: Panes,
     pub(crate) panes: HashMap<PaneId, Pane>,
+    /// The lines between the panes, as drawn (window pixels).
+    dividers: Vec<RectInstance>,
 }
 
 impl State {
@@ -339,6 +362,89 @@ define_class!(
             let size = self.with_state(|st| st.win.config.font_size);
             self.reload_fonts(size);
         }
+
+        /// Shell > Split Right (Cmd+D).
+        #[unsafe(method(splitRight:))]
+        fn split_right(&self, _sender: Option<&AnyObject>) {
+            self.split(Dir::Right);
+        }
+
+        /// Shell > Split Down (Cmd+Shift+D).
+        #[unsafe(method(splitDown:))]
+        fn split_down(&self, _sender: Option<&AnyObject>) {
+            self.split(Dir::Down);
+        }
+
+        /// Shell > Close (Cmd+W): the focused pane, or the tab with its last.
+        #[unsafe(method(closePane:))]
+        fn close_pane_item(&self, _sender: Option<&AnyObject>) {
+            self.close_focused_pane();
+        }
+
+        /// Shell > Close Window (Cmd+Shift+W): every tab of the window.
+        #[unsafe(method(closeWindow:))]
+        fn close_window_item(&self, _sender: Option<&AnyObject>) {
+            self.close_all_tabs();
+        }
+
+        #[unsafe(method(selectPaneLeft:))]
+        fn select_pane_left(&self, _sender: Option<&AnyObject>) {
+            self.focus_towards(Direction::Left);
+        }
+
+        #[unsafe(method(selectPaneRight:))]
+        fn select_pane_right(&self, _sender: Option<&AnyObject>) {
+            self.focus_towards(Direction::Right);
+        }
+
+        #[unsafe(method(selectPaneUp:))]
+        fn select_pane_up(&self, _sender: Option<&AnyObject>) {
+            self.focus_towards(Direction::Up);
+        }
+
+        #[unsafe(method(selectPaneDown:))]
+        fn select_pane_down(&self, _sender: Option<&AnyObject>) {
+            self.focus_towards(Direction::Down);
+        }
+
+        #[unsafe(method(selectNextPane:))]
+        fn select_next_pane(&self, _sender: Option<&AnyObject>) {
+            self.focus_in_order(true);
+        }
+
+        #[unsafe(method(selectPreviousPane:))]
+        fn select_previous_pane(&self, _sender: Option<&AnyObject>) {
+            self.focus_in_order(false);
+        }
+
+        /// The I-beam over every pane, below the title bar. Set here for
+        /// all of them, since overlapping cursor rects of sibling views
+        /// have no defined winner.
+        #[unsafe(method(resetCursorRects))]
+        fn reset_cursor_rects(&self) {
+            let titlebar = self.titlebar_height();
+            let rects = self.with_state(|st| {
+                let scale = st.win.scale;
+                let shown = st.shown();
+                shown
+                    .iter()
+                    .filter_map(|id| st.panes.get(id))
+                    .map(|p| {
+                        let mut r = points(p.rect, scale);
+                        if p.rect.y == 0 {
+                            let cut = titlebar.min(r.size.height);
+                            r.origin.y += cut;
+                            r.size.height -= cut;
+                        }
+                        r
+                    })
+                    .collect::<Vec<_>>()
+            });
+            let cursor = NSCursor::IBeamCursor();
+            for r in rects.unwrap_or_default() {
+                self.addCursorRect_cursor(r, &cursor);
+            }
+        }
     }
 
     unsafe impl NSObjectProtocol for WindowView {}
@@ -371,17 +477,17 @@ define_class!(
             }
         }
 
-        /// With `confirm_close`, ask first while a program runs.
+        /// With `confirm_close`, ask first while a program runs in any
+        /// pane: once, naming them all.
         #[unsafe(method(windowShouldClose:))]
         fn window_should_close(&self, window: &NSWindow) -> bool {
             let ask = self.with_state(|st| st.win.config.confirm_close).unwrap_or(false);
-            match self.running_program().filter(|_| ask) {
-                Some(program) => {
-                    self.ask_to_close(window, &program);
-                    false
-                }
-                None => true,
+            let programs = if ask { self.running_programs() } else { Vec::new() };
+            let close = programs.is_empty();
+            if !close {
+                self.ask_to_close(window, Closing::Window, &programs, AfterAsk::Window);
             }
+            close
         }
 
         #[unsafe(method(windowWillClose:))]
@@ -402,6 +508,9 @@ pub struct Launch {
     pub notices: Rc<[String]>,
     /// The Settings tab (see `Win::settings`).
     pub settings: bool,
+    /// The panes to open, as saved for a restart; `None` for one pane
+    /// running `command`.
+    pub layout: Option<SavedPanes>,
 }
 
 /// The renderer's theme for a window: the Settings tab stays opaque
@@ -452,94 +561,140 @@ impl WindowView {
     }
 
     /// Start the program and drawing. The view must be in its window.
+    /// With a saved layout, every pane of it is opened in its folder.
     pub fn start(&self, config: Rc<Config>, launch: Launch) -> std::io::Result<()> {
         let id = self.ivars().id;
-        let Some((tree, view)) = self.ivars().first.borrow_mut().take() else {
+        let Some((first_tree, first_view)) = self.ivars().first.borrow_mut().take() else {
             return Err(std::io::Error::other("started twice"));
         };
-        let pane_id = tree.focused();
+        let mtm = MainThreadMarker::from(self);
         let layer = &self.ivars().layer;
         let renderer = launch.renderer;
         let settings = launch.settings;
-        let runs_shell = !settings && launch.command.argv.is_empty();
+        let scale = launch.scale;
         let opaque = config.opacity >= 1.0 || settings;
         term_render::configure_layer(layer, renderer.device(), opaque);
-        layer.setContentsScale(launch.scale);
+        layer.setContentsScale(scale);
 
         let appearance = self.appearance();
         let theme = window_theme(&config, appearance, settings);
         let m = renderer.metrics();
         let size = self.frame().size;
-        let pad = padding_for(&config, self.titlebar_height(), launch.scale);
-        let (cols, lines) = layout::grid_size((size.width, size.height), launch.scale, m.into(), pad);
-
-        let mut t = Term::new(cols, lines, config.scrollback);
-        t.state.set_ambiguous_width(config.ambiguous_width);
-        t.state.set_default_colors(crate::config::query_colors(&theme));
-        for n in launch.notices.iter() {
-            crate::session::write_notice(&mut t, n);
-        }
+        let titlebar = self.titlebar_height();
         let test = std::env::var_os(control::ENV).filter(|p| !p.is_empty()).map(|p| TestControl {
             path: PathBuf::from(p),
             queue: VecDeque::new(),
             dump: DumpState::Idle,
             seq: 0,
         });
-        let hooks = pane_hooks(id, pane_id, test.is_some(), settings);
-        let session = Session::spawn(&launch.command, pty_size(cols, lines, m), t, hooks)?;
+        let spawn = |n: NewPane| spawn_pane(id, &config, &theme, m, test.is_some(), n);
+        let mut panes = HashMap::new();
+        let tree = match &launch.layout {
+            None => {
+                let pad = padding_for(&config, titlebar, scale);
+                let grid = layout::grid_size((size.width, size.height), scale, m.into(), pad);
+                let pane_id = first_tree.focused();
+                let pane = spawn(NewPane {
+                    id: pane_id,
+                    view: first_view,
+                    command: &launch.command,
+                    grid,
+                    notices: &launch.notices,
+                    program: true,
+                    settings,
+                })?;
+                panes.insert(pane_id, pane);
+                first_tree
+            }
+            Some(saved) => {
+                first_view.removeFromSuperview();
+                let (mut tree, list) = Panes::restore(saved);
+                // Zooming comes with dividers that drag (B2.3c).
+                if tree.zoomed().is_some() {
+                    tree.toggle_zoom();
+                }
+                let g = geometry_of(&config, m, scale, size, titlebar);
+                let laid = tree.layout(&g);
+                let mut failed = None;
+                for (pane_id, saved) in list {
+                    let rect = laid.rect(pane_id).unwrap_or_default();
+                    let view = PaneView::new(mtm, self, pane_id, points(rect, scale));
+                    self.addSubview(&view);
+                    let mut command = if saved.program {
+                        launch.command.clone()
+                    } else {
+                        shell_command(&config)
+                    };
+                    if saved.cwd.is_some() {
+                        command.cwd = saved.cwd.clone();
+                    }
+                    let focused = pane_id == tree.focused();
+                    let made = spawn(NewPane {
+                        id: pane_id,
+                        view: view.clone(),
+                        command: &command,
+                        grid: grid_of(&config, titlebar, scale, m, rect),
+                        notices: if focused { &launch.notices } else { &[] },
+                        program: saved.program,
+                        settings: false,
+                    });
+                    match made {
+                        Ok(pane) => {
+                            if let Some(c) = saved.command.filter(|_| pane.runs_shell) {
+                                pane.session.type_at_prompt(c);
+                            }
+                            panes.insert(pane_id, pane);
+                        }
+                        Err(e) => {
+                            eprintln!("terminal-decline: could not open a pane: {e}");
+                            view.removeFromSuperview();
+                            failed = Some(e);
+                        }
+                    }
+                }
+                // Panes that didn't open give their space to the others.
+                for pane_id in tree.ids() {
+                    if !panes.contains_key(&pane_id) && tree.close(pane_id).is_none() {
+                        return Err(failed.unwrap_or_else(|| std::io::Error::other("no pane opened")));
+                    }
+                }
+                tree
+            }
+        };
 
         let link = unsafe { self.displayLinkWithTarget_selector(self, sel!(tick:)) };
         unsafe { link.addToRunLoop_forMode(&NSRunLoop::mainRunLoop(), NSRunLoopCommonModes) };
         link.setPaused(false);
 
-        let pane = Pane {
-            view,
-            session,
-            render: PaneRender::new(),
-            rect: PxRect::default(),
-            cursor_on: true,
-            blink_scheduled: false,
-            sync_since: None,
-            marked: String::new(),
-            scroll_accum: 0.0,
-            mouse_button: None,
-            selecting: None,
-            dragged: false,
-            block: None,
-            autoscroll: None,
-            autoscroll_scheduled: false,
-            held: false,
-            text_key: None,
-            keys_down: KeysDown::default(),
-            key_t0: None,
-            awaiting_echo: None,
-            runs_shell,
-        };
         *self.ivars().state.borrow_mut() = Some(State {
             win: Win {
                 renderer,
                 link,
                 font_size: config.font_size,
                 binds: config.keybinds(),
+                divider: divider_colour(&config, appearance),
                 config,
                 theme,
                 appearance,
-                scale: launch.scale,
+                scale,
                 focused: true,
                 idle_ticks: 0,
                 frames: 0,
                 rate: 0,
                 last_input: Instant::now(),
                 test,
-                top_inset: self.titlebar_height(),
+                top_inset: titlebar,
                 hidden: 0,
                 shown: true,
                 settings,
                 recording: None,
                 recordings: 0,
+                base_min: None,
+                min: None,
             },
             tree,
-            panes: HashMap::from([(pane_id, pane)]),
+            panes,
+            dividers: Vec::new(),
         });
         if let Some(window) = self.window() {
             unsafe {
@@ -564,16 +719,18 @@ impl WindowView {
     fn events(&self, pane: PaneId, events: Events) {
         let mtm = MainThreadMarker::from(self);
         let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
-        // Only the focused pane's title is the window's.
-        let Some((fixed_title, focused)) = self.with_state(|st| {
-            (
-                st.win.settings || st.win.config.title.is_some(),
-                st.panes.contains_key(&pane).then_some(st.tree.focused() == pane),
-            )
+        // Every pane keeps its title; only the focused pane's is the window's.
+        let Some(Some((fixed_title, focused))) = self.with_state(|st| {
+            let focused = st.tree.focused() == pane;
+            let fixed = st.win.config.title.is_some();
+            let p = st.panes.get_mut(&pane)?;
+            if let Some(title) = &events.title {
+                p.title = Some(title.clone());
+            }
+            Some((fixed || p.settings, focused))
         }) else {
             return;
         };
-        let Some(focused) = focused else { return };
         let window = self.window();
         if let Some(window) = &window
             && !fixed_title
@@ -623,17 +780,14 @@ impl WindowView {
         self.with_state(|st| st.focused().map(|p| p.view.clone())).flatten()
     }
 
+    /// The focused pane's working directory.
     pub fn foreground_cwd(&self) -> Option<String> {
-        self.with_state(|st| {
-            let p = st.focused()?;
-            p.session
-                .lock_term()
-                .state
-                .cwd()
-                .map(str::to_owned)
-                .or_else(|| p.session.foreground_cwd())
-        })
-        .flatten()
+        self.with_state(|st| st.focused().and_then(|p| pane_cwd(p))).flatten()
+    }
+
+    /// The focused pane, if the window has started.
+    pub(crate) fn focused_pane(&self) -> Option<PaneId> {
+        self.with_state(|st| st.tree.focused())
     }
 
     /// The title bar's height, plus the tab bar's while one shows.
@@ -745,7 +899,15 @@ impl WindowView {
         let mut guard = self.ivars().state.borrow_mut();
         let Some(st) = guard.as_mut() else { return };
         let shown = st.shown();
-        let State { win, panes, .. } = st;
+        let State {
+            win,
+            panes,
+            tree,
+            dividers,
+            ..
+        } = st;
+        let focused_pane = tree.focused();
+        let dividers: &[RectInstance] = if tree.zoomed().is_some() { &[] } else { dividers };
         // Under test control, draw even when covered by other windows, so a
         // dump never waits forever for a frame.
         let visible = visible || win.test.is_some();
@@ -857,7 +1019,9 @@ impl WindowView {
             if let Some(text) = t.state.take_clipboard() {
                 clipboard = Some(text);
             }
-            if t.state.cursor_blink() && win.focused && !p.blink_scheduled {
+            // Only the focused pane's cursor blinks; the others are hollow.
+            let focused = win.focused && id == focused_pane;
+            if t.state.cursor_blink() && focused && !p.blink_scheduled {
                 p.blink_scheduled = true;
                 blinking.push(id);
             }
@@ -866,8 +1030,8 @@ impl WindowView {
                 theme: &win.theme,
                 metrics: win.renderer.metrics(),
                 padding: (pad.x, pad.top),
-                cursor_on: p.cursor_on,
-                focused: win.focused,
+                cursor_on: p.cursor_on || !focused,
+                focused,
                 preedit: Some(p.marked.as_str()),
             };
             win.renderer.build_pane(&mut p.render, &mut t.state, &input);
@@ -904,8 +1068,10 @@ impl WindowView {
             _ => 0,
         };
         match timed {
-            Some((lat, keys)) if !keys.is_empty() => present_timed(&mut win.renderer, &self.ivars().layer, clear, &draws, lat, keys),
-            _ => win.renderer.present_panes(&self.ivars().layer, clear, &draws, &[]),
+            Some((lat, keys)) if !keys.is_empty() => {
+                present_timed(&mut win.renderer, &self.ivars().layer, clear, &draws, dividers, lat, keys)
+            }
+            _ => win.renderer.present_panes(&self.ivars().layer, clear, &draws, dividers),
         }
         drop(draws);
         win.frames += 1;
@@ -957,13 +1123,15 @@ impl WindowView {
         let id = self.ivars().id;
         let _ = DispatchQueue::main().after(DispatchTime::NOW.time(BLINK_INTERVAL.as_nanos() as i64), move || {
             with_view(id, |v| {
-                let again = v.with_pane(pane, |win, p| {
+                let again = v.with_state(|st| {
+                    let focused = st.win.focused && st.tree.focused() == pane;
+                    let p = st.panes.get_mut(&pane)?;
                     p.blink_scheduled = false;
-                    let blinking = win.focused && p.session.lock_term().state.cursor_blink();
+                    let blinking = focused && p.session.lock_term().state.cursor_blink();
                     p.cursor_on = !p.cursor_on || !blinking;
-                    blinking
+                    Some(blinking)
                 });
-                if again == Some(true) {
+                if again == Some(Some(true)) {
                     v.request_redraw(pane);
                 }
             })
@@ -972,24 +1140,7 @@ impl WindowView {
 
     /// The window's content in pixels, for laying out its panes.
     fn geometry(&self, st: &State, titlebar: f64) -> Geometry {
-        let size = self.frame().size;
-        let scale = st.win.scale;
-        let m = st.win.renderer.metrics();
-        let pad = padding_for(&st.win.config, 0.0, scale);
-        Geometry {
-            bounds: PxRect {
-                x: 0,
-                y: 0,
-                w: (size.width * scale).round() as i32,
-                h: (size.height * scale).round() as i32,
-            },
-            top_inset: (titlebar * scale).round() as i32,
-            min: (
-                (10 * m.cell_width + 2 * pad.x) as i32,
-                (3 * m.cell_height + pad.top + pad.bottom) as i32,
-            ),
-            divider: scale.round().max(1.0) as i32,
-        }
+        geometry_of(&st.win.config, st.win.renderer.metrics(), st.win.scale, self.frame().size, titlebar)
     }
 
     /// Lay out the panes for the view's size, title bar and fonts: each
@@ -997,7 +1148,7 @@ impl WindowView {
     fn resize(&self) {
         let Some(window) = self.window() else { return };
         let titlebar = self.titlebar_height();
-        self.with_state(|st| {
+        let min = self.with_state(|st| {
             st.win.scale = window.backingScaleFactor();
             st.win.top_inset = titlebar;
             let size = self.frame().size;
@@ -1014,15 +1165,43 @@ impl WindowView {
                 let frame = if st.tree.len() == 1 {
                     NSRect::new(NSPoint::new(0.0, 0.0), size)
                 } else {
-                    let pt = |v: i32| v as f64 / scale;
-                    NSRect::new(NSPoint::new(pt(rect.x), pt(rect.y)), NSSize::new(pt(rect.w), pt(rect.h)))
+                    points(rect, scale)
                 };
                 p.view.setFrame(frame);
                 let pad = pane_padding(&st.win.config, titlebar, scale, rect);
                 let (cols, lines) = layout::grid_size((frame.size.width, frame.size.height), scale, m.into(), pad);
                 let _ = p.session.resize(pty_size(cols, lines, m));
             }
+            let colour = st.win.divider;
+            st.dividers = layout
+                .dividers
+                .iter()
+                .map(|d| RectInstance {
+                    x: d.line.x.clamp(0, i16::MAX as i32) as i16,
+                    y: d.line.y.clamp(0, i16::MAX as i32) as i16,
+                    w: d.line.w.clamp(0, u16::MAX as i32) as u16,
+                    h: d.line.h.clamp(0, u16::MAX as i32) as u16,
+                    color: colour,
+                })
+                .collect();
+            // With several panes the window can't be made smaller than
+            // they all fit at their minimum.
+            let base = *st.win.base_min.get_or_insert_with(|| window.contentMinSize());
+            let min = if st.tree.len() > 1 {
+                let (w, h) = st.tree.min_size(&self.geometry(st, titlebar));
+                NSSize::new((w as f64 / scale).max(base.width), (h as f64 / scale).max(base.height))
+            } else {
+                base
+            };
+            (st.win.min != Some(min)).then(|| {
+                st.win.min = Some(min);
+                min
+            })
         });
+        if let Some(Some(min)) = min {
+            window.setContentMinSize(min);
+        }
+        window.invalidateCursorRectsForView(self);
         // Draw now so live resizing doesn't show a stretched old frame.
         self.draw();
     }
@@ -1070,6 +1249,7 @@ impl WindowView {
             }
             win.binds = config.keybinds();
             win.theme = window_theme(&config, win.appearance, win.settings);
+            win.divider = divider_colour(&config, win.appearance);
             for p in st.panes.values() {
                 let mut t = p.session.lock_term();
                 t.state.set_default_colors(crate::config::query_colors(&win.theme));
@@ -1079,7 +1259,7 @@ impl WindowView {
                 }
                 // Not into a full-screen program (vim, the preferences):
                 // the lines would land under its cursor in its colours.
-                if !win.settings && !t.state.alt_screen_active() {
+                if !p.settings && !t.state.alt_screen_active() {
                     for n in notices {
                         crate::session::write_late_notice(&mut t, n);
                     }
@@ -1119,12 +1299,15 @@ impl WindowView {
             }
             win.appearance = appearance;
             let theme = window_theme(&win.config, appearance, win.settings);
-            let recolour = theme.foreground != win.theme.foreground
+            let divider = divider_colour(&win.config, appearance);
+            let recolour = divider != win.divider
+                || theme.foreground != win.theme.foreground
                 || theme.background != win.theme.background
                 || theme.palette != win.theme.palette
                 || theme.cursor != win.theme.cursor
                 || theme.selection != win.theme.selection;
             win.theme = theme;
+            win.divider = divider;
             for p in st.panes.values() {
                 p.session
                     .lock_term()
@@ -1134,6 +1317,8 @@ impl WindowView {
             recolour
         });
         if changed == Some(true) {
+            // The dividers take the new colour.
+            self.resize();
             self.redraw_all();
         }
     }
@@ -1172,17 +1357,12 @@ impl WindowView {
         VIEWS.with(|v| v.borrow_mut().remove(&self.ivars().id));
     }
 
-    /// Pane `pane`'s program ended. A pane that has closed already is
-    /// ignored.
+    /// Pane `pane`'s program ended: the pane closes (the window with its
+    /// last pane), or holds to show why. A pane that has closed already
+    /// is ignored.
     fn program_exited(&self, pane: PaneId, outcome: Outcome) {
         match outcome {
-            Outcome::Closed => {
-                // The last pane closes the window (closing one of several
-                // comes with splitting).
-                if self.with_state(|st| st.panes.contains_key(&pane)) == Some(true) {
-                    self.close_window();
-                }
-            }
+            Outcome::Closed => self.close_pane(pane),
             Outcome::Hold => {
                 // The session wrote why into the terminal.
                 let testing = self.with_pane(pane, |win, p| {
@@ -1206,6 +1386,203 @@ impl WindowView {
         }
     }
 
+    /// Split the focused pane: a new pane right of or below it, running
+    /// the user's shell in its working directory (even in a pin or a
+    /// `-e PROGRAM` window), gets focus. Beeps if the two wouldn't both
+    /// fit at their minimum size.
+    pub(crate) fn split(&self, dir: Dir) {
+        let mtm = MainThreadMarker::from(self);
+        let titlebar = self.titlebar_height();
+        let cwd = self.foreground_cwd();
+        let id = self.ivars().id;
+        let made = self.with_state(|st| {
+            let g = self.geometry(st, titlebar);
+            let mut tree = st.tree.clone();
+            let new = tree.split(dir, &g).ok()?;
+            let rect = tree.layout(&g).rect(new)?;
+            let win = &st.win;
+            let (scale, m) = (win.scale, win.renderer.metrics());
+            let view = PaneView::new(mtm, self, new, points(rect, scale));
+            let mut command = shell_command(&win.config);
+            command.cwd = cwd.clone().or(command.cwd);
+            let pane = spawn_pane(
+                id,
+                &win.config,
+                &win.theme,
+                m,
+                win.test.is_some(),
+                NewPane {
+                    id: new,
+                    view: view.clone(),
+                    command: &command,
+                    grid: grid_of(&win.config, titlebar, scale, m, rect),
+                    notices: &[],
+                    program: false,
+                    settings: false,
+                },
+            );
+            match pane {
+                Ok(pane) => {
+                    st.tree = tree;
+                    st.panes.insert(new, pane);
+                    Some(view)
+                }
+                Err(e) => {
+                    eprintln!("terminal-decline: could not open a pane: {e}");
+                    None
+                }
+            }
+        });
+        let Some(Some(view)) = made else {
+            NSBeep();
+            return;
+        };
+        self.addSubview(&view);
+        self.resize();
+        if let Some(window) = self.window() {
+            window.makeFirstResponder(Some(&view));
+        }
+    }
+
+    /// Shell > Close: the focused pane, asking first with `confirm_close`
+    /// while a program runs in it. The last pane closes the tab, through
+    /// `performClose:` (so `windowShouldClose:` asks).
+    pub(crate) fn close_focused_pane(&self) {
+        let Some(window) = self.window() else { return };
+        let Some((pane, count, ask)) = self.with_state(|st| (st.tree.focused(), st.tree.len(), st.win.config.confirm_close)) else {
+            return;
+        };
+        if count == 1 {
+            window.performClose(None);
+            return;
+        }
+        match ask.then(|| self.pane_program(pane)).flatten() {
+            Some(program) => self.ask_to_close(&window, Closing::Pane, &[program], AfterAsk::Pane(pane)),
+            None => self.close_pane(pane),
+        }
+    }
+
+    /// Close pane `pane` without asking: focus moves first (to the pane
+    /// taking its space), then its program is hung up on and the others
+    /// are laid out again. The last pane closes the window instead.
+    pub(crate) fn close_pane(&self, pane: PaneId) {
+        let Some(window) = self.window() else { return };
+        let Some((was_focused, next)) = self
+            .with_state(|st| {
+                if !st.panes.contains_key(&pane) {
+                    return None;
+                }
+                let was_focused = st.tree.focused() == pane;
+                Some((
+                    was_focused,
+                    st.tree.close(pane).and_then(|n| st.panes.get(&n)).map(|p| p.view.clone()),
+                ))
+            })
+            .flatten()
+        else {
+            return;
+        };
+        let Some(next) = next else {
+            self.close_window();
+            return;
+        };
+        if self.with_state(|st| st.win.recording.as_ref().is_some_and(|r| r.pane == pane)) == Some(true) {
+            self.finish_recording(None);
+        }
+        if was_focused {
+            // Never leave the first responder a view being removed.
+            window.makeFirstResponder(Some(&next));
+        }
+        let Some(Some(closed)) = self.with_state(|st| st.panes.remove(&pane)) else {
+            return;
+        };
+        closed.view.removeFromSuperview();
+        if closed.settings {
+            crate::app::settings_closed(&window);
+        }
+        drop(closed); // hangs up on its program
+        self.resize();
+    }
+
+    /// Shell > Close Window: every tab of this window, asking once with
+    /// `confirm_close` while programs run in any of them.
+    pub(crate) fn close_all_tabs(&self) {
+        let Some(window) = self.window() else { return };
+        let ask = self.with_state(|st| st.win.config.confirm_close).unwrap_or(false);
+        let programs: Vec<String> = if ask {
+            tab_views(&window).iter().flat_map(|v| v.running_programs()).collect()
+        } else {
+            Vec::new()
+        };
+        if programs.is_empty() {
+            close_tabs(&window);
+        } else {
+            self.ask_to_close(&window, Closing::Window, &programs, AfterAsk::AllTabs);
+        }
+    }
+
+    /// Focus the pane next to the focused one in `dir`; beep if there is
+    /// none.
+    pub(crate) fn focus_towards(&self, dir: Direction) {
+        let titlebar = self.titlebar_height();
+        let next = self.with_state(|st| st.tree.neighbour(dir, &self.geometry(st, titlebar))).flatten();
+        match next {
+            Some(pane) => self.focus_pane(pane),
+            None => NSBeep(),
+        }
+    }
+
+    /// Focus the next (or previous) pane in order, wrapping; beep with one.
+    pub(crate) fn focus_in_order(&self, forward: bool) {
+        let next = self
+            .with_state(|st| (st.tree.len() > 1).then(|| if forward { st.tree.next() } else { st.tree.previous() }))
+            .flatten();
+        match next {
+            Some(pane) => self.focus_pane(pane),
+            None => NSBeep(),
+        }
+    }
+
+    /// Give pane `pane` the keys. Its view becoming first responder does
+    /// the rest ([`Self::pane_focused`]).
+    pub(crate) fn focus_pane(&self, pane: PaneId) {
+        let view = self.with_state(|st| st.panes.get(&pane).map(|p| p.view.clone())).flatten();
+        if let (Some(view), Some(window)) = (view, self.window()) {
+            window.makeFirstResponder(Some(&view));
+        }
+    }
+
+    /// Pane `pane`'s view became first responder (a click, a focus
+    /// action, a split or a close): it is the focused pane. Its program is
+    /// told if it asked for focus events and the window is key, and its
+    /// title becomes the window's. `clicked`: a left click in it did this,
+    /// which goes nowhere else.
+    pub(crate) fn pane_focused(&self, pane: PaneId, clicked: bool) {
+        let got = self.with_state(|st| {
+            st.tree.focus(pane);
+            let key = st.win.focused;
+            let fixed = st.win.config.title.clone();
+            let p = st.panes.get_mut(&pane)?;
+            p.swallow_click = clicked;
+            p.cursor_on = true;
+            let report = key && p.session.lock_term().state.modes().focus_events;
+            let title = match (p.settings, fixed) {
+                (true, _) => "Settings".to_string(),
+                (false, Some(t)) => t,
+                (false, None) => p.title.clone().unwrap_or_else(|| "Terminal Decline".into()),
+            };
+            Some((report, p.view.clone(), title))
+        });
+        let Some(Some((report, view, title))) = got else { return };
+        if report {
+            view.send_raw(b"\x1b[I".to_vec());
+        }
+        if let Some(window) = self.window() {
+            window.setTitle(&NSString::from_str(&title));
+        }
+        self.request_redraw(pane);
+    }
+
     /// Bytes typed for the latency harness (its `type` command), into the
     /// focused pane.
     pub fn latency_type(&self, bytes: Vec<u8>) {
@@ -1216,15 +1593,29 @@ impl WindowView {
         view.with(|_, p| p.key_t0 = None);
     }
 
-    /// The program running in the focused pane's foreground, if it isn't
-    /// the shell (see [`crate::running`]). Never the Settings tab: closing
-    /// it loses nothing, each edit being written at once.
-    pub fn running_program(&self) -> Option<String> {
-        let pid = self
+    /// The programs running in the panes' foregrounds, other than their
+    /// shells (see [`crate::running`]), in pane order. Never the Settings
+    /// pane's: closing it loses nothing, each edit being written at once.
+    pub fn running_programs(&self) -> Vec<String> {
+        let pids = self
             .with_state(|st| {
-                let settings = st.win.settings;
-                (!settings).then(|| st.focused().and_then(|p| p.session.pid())).flatten()
+                st.tree
+                    .ids()
+                    .iter()
+                    .filter_map(|id| st.panes.get(id))
+                    .filter(|p| !p.settings)
+                    .filter_map(|p| p.session.pid())
+                    .collect::<Vec<_>>()
             })
+            .unwrap_or_default();
+        pids.into_iter().filter_map(crate::running::foreground_program).collect()
+    }
+
+    /// The program running in pane `pane`'s foreground, as
+    /// [`Self::running_programs`].
+    fn pane_program(&self, pane: PaneId) -> Option<String> {
+        let pid = self
+            .with_state(|st| st.panes.get(&pane).filter(|p| !p.settings).and_then(|p| p.session.pid()))
             .flatten()?;
         crate::running::foreground_program(pid)
     }
@@ -1238,6 +1629,33 @@ impl WindowView {
             .with_state(|st| st.focused().and_then(|p| p.runs_shell.then(|| p.session.pid()).flatten()))
             .flatten()?;
         crate::running::foreground_command(pid)
+    }
+
+    /// The panes to save for a restart, when there are several: the tree
+    /// with its shares, and each pane's folder, the command in its shell's
+    /// foreground and whether it ran the window's program.
+    pub fn saved_panes(&self) -> Option<SavedPanes> {
+        self.with_state(|st| {
+            if st.tree.len() < 2 {
+                return None;
+            }
+            let panes = &st.panes;
+            Some(st.tree.save(|id| {
+                match panes.get(&id) {
+                    Some(p) => SavedPane {
+                        cwd: pane_cwd(p),
+                        command: p
+                            .runs_shell
+                            .then(|| p.session.pid())
+                            .flatten()
+                            .and_then(crate::running::foreground_command),
+                        program: p.program,
+                    },
+                    None => SavedPane::default(),
+                }
+            }))
+        })
+        .flatten()
     }
 
     /// Type a restored tab's `command` at its shell's prompt once the
@@ -1254,12 +1672,16 @@ impl WindowView {
         });
     }
 
-    /// Whether the program in the focused pane is on the alternate screen,
-    /// and whether a chord is being recorded (see [`crate::app::settings_status`]).
+    /// Whether the Settings pane's program is on the alternate screen, and
+    /// whether a chord is being recorded (see [`crate::app::settings_status`]).
     pub(crate) fn settings_status(&self) -> (bool, bool) {
         self.with_state(|st| {
             let recording = st.win.recording.is_some();
-            let alt = st.focused().is_some_and(|p| p.session.lock_term().state.alt_screen_active());
+            let alt = st
+                .panes
+                .values()
+                .find(|p| p.settings)
+                .is_some_and(|p| p.session.lock_term().state.alt_screen_active());
             (alt, recording)
         })
         .unwrap_or((false, false))
@@ -1270,10 +1692,23 @@ impl WindowView {
         self.with_state(|st| st.win.settings).unwrap_or(false)
     }
 
-    /// Type `bytes` into the focused pane as if typed (the test-only
+    /// The Settings pane gets the keys (Cmd+, with the Settings tab open).
+    pub fn focus_settings(&self) {
+        let pane = self
+            .with_state(|st| st.panes.iter().find(|(_, p)| p.settings).map(|(id, _)| *id))
+            .flatten();
+        if let Some(pane) = pane {
+            self.focus_pane(pane);
+        }
+    }
+
+    /// Type `bytes` into the Settings pane as if typed (the test-only
     /// `type-settings`).
     pub fn type_bytes(&self, bytes: Vec<u8>) {
-        if let Some(view) = self.focused_view() {
+        let view = self
+            .with_state(|st| st.panes.values().find(|p| p.settings).map(|p| p.view.clone()))
+            .flatten();
+        if let Some(view) = view {
             view.send_input(bytes);
         }
     }
@@ -1285,7 +1720,7 @@ impl WindowView {
     /// Plain Esc, the window losing focus (a tab switch too) or
     /// [`RECORD_TIMEOUT`] cancel.
     fn start_recording(&self, pane: PaneId) {
-        let Some(Some(view)) = self.with_state(|st| st.win.settings.then(|| st.panes.get(&pane).map(|p| p.view.clone())).flatten()) else {
+        let Some(Some(view)) = self.with_state(|st| st.panes.get(&pane).filter(|p| p.settings).map(|p| p.view.clone())) else {
             return;
         };
         // Asked again while waiting: the old monitor goes, silently.
@@ -1365,14 +1800,14 @@ impl WindowView {
         }
     }
 
-    /// Ask, in a sheet on `window`, whether to close it while `program`
-    /// runs; close it if so.
-    fn ask_to_close(&self, window: &NSWindow, program: &str) {
+    /// Ask, in a sheet on `window`, whether to close `what` while
+    /// `programs` run in it; do `then` if so.
+    fn ask_to_close(&self, window: &NSWindow, what: Closing, programs: &[String], then: AfterAsk) {
         if window.attachedSheet().is_some() {
             return;
         }
         let mtm = MainThreadMarker::from(self);
-        let (title, text) = crate::running::close_question(program);
+        let (title, text) = crate::running::close_question(what, programs);
         let alert = NSAlert::new(mtm);
         alert.setMessageText(&NSString::from_str(&title));
         alert.setInformativeText(&NSString::from_str(&text));
@@ -1381,7 +1816,15 @@ impl WindowView {
         let id = self.ivars().id;
         let done = RcBlock::new(move |response: NSModalResponse| {
             if response == NSAlertFirstButtonReturn {
-                with_view(id, |v| v.close_window());
+                with_view(id, |v| match then {
+                    AfterAsk::Pane(pane) => v.close_pane(pane),
+                    AfterAsk::Window => v.close_window(),
+                    AfterAsk::AllTabs => {
+                        if let Some(window) = v.window() {
+                            close_tabs(&window);
+                        }
+                    }
+                });
             }
         });
         alert.beginSheetModalForWindow_completionHandler(window, Some(&done));
@@ -1430,6 +1873,7 @@ fn present_timed(
     layer: &CAMetalLayer,
     clear: term_render::Rgba,
     panes: &[PaneDraw],
+    dividers: &[RectInstance],
     lat: &'static Latency,
     keys: Vec<latency::Key>,
 ) {
@@ -1437,7 +1881,7 @@ fn present_timed(
         lat.write(&keys);
         return;
     };
-    let cmd = renderer.encode_panes(&drawable.texture(), clear, panes, &[]);
+    let cmd = renderer.encode_panes(&drawable.texture(), clear, panes, dividers);
     let frame = Arc::new(FrameKeys::new(keys));
     let on_gpu = frame.clone();
     let done = RcBlock::new(move |cb: NonNull<ProtocolObject<dyn MTLCommandBuffer>>| {
@@ -1462,6 +1906,150 @@ pub(crate) fn padding_for(config: &Config, titlebar: f64, scale: f64) -> Padding
 /// only when it touches the window's top.
 pub(crate) fn pane_padding(config: &Config, titlebar: f64, scale: f64, rect: PxRect) -> Padding {
     padding_for(config, if rect.y == 0 { titlebar } else { 0.0 }, scale)
+}
+
+/// What closing does once its question is answered with Close.
+#[derive(Clone, Copy)]
+enum AfterAsk {
+    Pane(PaneId),
+    Window,
+    AllTabs,
+}
+
+/// The window views of `window`'s tabs (just its own without tabs).
+fn tab_views(window: &NSWindow) -> Vec<Retained<WindowView>> {
+    let tabs: Vec<Retained<NSWindow>> = match window.tabbedWindows() {
+        Some(tabs) => tabs.iter().collect(),
+        None => vec![objc2::Message::retain(window)],
+    };
+    let views: Vec<Retained<WindowView>> = VIEWS.with(|v| v.borrow().values().filter_map(|w| w.load()).collect());
+    views
+        .into_iter()
+        .filter(|v| v.window().is_some_and(|w| tabs.iter().any(|t| std::ptr::eq::<NSWindow>(&**t, &*w))))
+        .collect()
+}
+
+/// Close every tab of `window` without asking.
+fn close_tabs(window: &NSWindow) {
+    let tabs: Vec<Retained<NSWindow>> = match window.tabbedWindows() {
+        Some(tabs) => tabs.iter().collect(),
+        None => vec![objc2::Message::retain(window)],
+    };
+    for tab in tabs {
+        tab.close();
+    }
+}
+
+/// A pane about to be opened.
+struct NewPane<'a> {
+    id: PaneId,
+    view: Retained<PaneView>,
+    command: &'a Command,
+    /// Columns and lines.
+    grid: (usize, usize),
+    /// Written at the top before the program's output.
+    notices: &'a [String],
+    /// `command` is the window's own program, not the user's shell.
+    program: bool,
+    /// It runs the preferences.
+    settings: bool,
+}
+
+/// Start pane `n` of window `window`: its terminal and program.
+fn spawn_pane(window: usize, config: &Config, theme: &Theme, m: term_font::Metrics, test: bool, n: NewPane) -> std::io::Result<Pane> {
+    let (cols, lines) = n.grid;
+    let mut t = Term::new(cols, lines, config.scrollback);
+    t.state.set_ambiguous_width(config.ambiguous_width);
+    t.state.set_default_colors(crate::config::query_colors(theme));
+    for notice in n.notices {
+        crate::session::write_notice(&mut t, notice);
+    }
+    let hooks = pane_hooks(window, n.id, test, n.settings);
+    let session = Session::spawn(n.command, pty_size(cols, lines, m), t, hooks)?;
+    Ok(Pane {
+        view: n.view,
+        session,
+        render: PaneRender::new(),
+        rect: PxRect::default(),
+        cursor_on: true,
+        blink_scheduled: false,
+        sync_since: None,
+        marked: String::new(),
+        scroll_accum: 0.0,
+        mouse_button: None,
+        selecting: None,
+        dragged: false,
+        block: None,
+        autoscroll: None,
+        autoscroll_scheduled: false,
+        held: false,
+        text_key: None,
+        keys_down: KeysDown::default(),
+        key_t0: None,
+        awaiting_echo: None,
+        runs_shell: !n.settings && n.command.argv.is_empty(),
+        program: n.program,
+        settings: n.settings,
+        title: None,
+        swallow_click: false,
+    })
+}
+
+/// The user's login shell with the config's environment, for a split:
+/// not the window's own program, even in a pin (splits design §11).
+fn shell_command(config: &Config) -> Command {
+    Command {
+        argv: Vec::new(),
+        cwd: config.cwd.clone(),
+        env: config.env.clone().into_iter().collect(),
+        shell: None,
+        direct: false,
+    }
+}
+
+/// A pane's working directory: the one its shell reported (OSC 7), else
+/// its foreground program's.
+fn pane_cwd(p: &Pane) -> Option<String> {
+    let reported = p.session.lock_term().state.cwd().map(str::to_owned);
+    reported.or_else(|| p.session.foreground_cwd())
+}
+
+/// The divider colour for `config` in `appearance`.
+fn divider_colour(config: &Config, appearance: Appearance) -> Rgba {
+    term_render::rgb(config.palette(appearance).divider())
+}
+
+/// A rectangle in window pixels as the view's points.
+fn points(r: PxRect, scale: f64) -> NSRect {
+    let pt = |v: i32| v as f64 / scale;
+    NSRect::new(NSPoint::new(pt(r.x), pt(r.y)), NSSize::new(pt(r.w), pt(r.h)))
+}
+
+/// Columns and lines of a pane at `rect` (window pixels).
+fn grid_of(config: &Config, titlebar: f64, scale: f64, m: term_font::Metrics, rect: PxRect) -> (usize, usize) {
+    let r = points(rect, scale);
+    let pad = pane_padding(config, titlebar, scale, rect);
+    layout::grid_size((r.size.width, r.size.height), scale, m.into(), pad)
+}
+
+/// A window's content of `size` points, in pixels, for laying out its
+/// panes: the smallest a pane may be is 10 columns by 3 lines.
+fn geometry_of(config: &Config, m: term_font::Metrics, scale: f64, size: NSSize, titlebar: f64) -> Geometry {
+    let pad = padding_for(config, 0.0, scale);
+    Geometry {
+        bounds: PxRect {
+            x: 0,
+            y: 0,
+            w: (size.width * scale).round() as i32,
+            h: (size.height * scale).round() as i32,
+        },
+        top_inset: (titlebar * scale).round() as i32,
+        min: (
+            (10 * m.cell_width + 2 * pad.x) as i32,
+            (3 * m.cell_height + pad.top + pad.bottom) as i32,
+        ),
+        divider: scale.round().max(1.0) as i32,
+    }
 }
 
 fn pty_size(cols: usize, lines: usize, m: term_font::Metrics) -> Size {
@@ -1549,6 +2137,25 @@ impl WindowView {
                         window.performClose(None);
                     }
                 }
+                Some(Control::Split(dir)) => self.split(dir),
+                Some(Control::ClosePane) => self.close_focused_pane(),
+                Some(Control::Save) => {
+                    let path = self.with_state(|st| st.win.test.as_ref().map(|t| t.path.clone())).flatten();
+                    if let Some(path) = path {
+                        let mut name = path.into_os_string();
+                        name.push(".saved");
+                        crate::app::write_saved_windows(std::path::Path::new(&name));
+                    }
+                }
+                Some(Control::Focus(target)) => match target {
+                    FocusTarget::Next => self.focus_in_order(true),
+                    FocusTarget::Previous => self.focus_in_order(false),
+                    FocusTarget::Towards(dir) => self.focus_towards(dir),
+                    FocusTarget::Index(n) => match self.with_state(|st| st.tree.ids().get(n).copied()).flatten() {
+                        Some(pane) => self.focus_pane(pane),
+                        None => NSBeep(),
+                    },
+                },
                 Some(Control::Quit) => {
                     crate::app::quit_now();
                     return;
@@ -1661,10 +2268,28 @@ struct Window {
     settings: (bool, bool),
 }
 
-/// One line of JSON about the window and its focused pane.
+/// One line of JSON about the window, its focused pane and every pane.
 fn write_dump(st: &mut State, window: Window) {
     use std::io::Write;
     let focused = st.tree.focused();
+    let every: Vec<PaneDump> = st
+        .tree
+        .ids()
+        .into_iter()
+        .filter_map(|id| {
+            let p = st.panes.get(&id)?;
+            let t = p.session.lock_term();
+            Some(PaneDump {
+                id,
+                rect: [p.rect.x, p.rect.y, p.rect.w, p.rect.h],
+                cols: t.state.cols(),
+                lines: t.state.lines(),
+                focused: id == focused,
+                screen: t.state.dump(),
+            })
+        })
+        .collect();
+    let dividers = st.dividers.len();
     let State { win, panes, .. } = st;
     let Some(p) = panes.get(&focused) else { return };
     let pad_top = pane_padding(&win.config, window.top_inset, win.scale, p.rect).top;
@@ -1695,6 +2320,8 @@ fn write_dump(st: &mut State, window: Window) {
         screen,
         cols,
         lines,
+        panes: every,
+        dividers,
         frames: win.renderer.frames_completed(),
         glyphs: p.render.frame.glyphs.len(),
         rects: p.render.frame.rects.len(),

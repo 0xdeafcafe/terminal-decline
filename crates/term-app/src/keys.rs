@@ -145,7 +145,13 @@ pub fn translate(input: &KeyInput, modes: KeyModes) -> KeyAction {
             return KeyAction::Ignore;
         }
         // Cmd shortcuts belong to the menus and are never sent to the
-        // program, except the Mac line-editing ones.
+        // program, except the Mac line-editing ones: Cmd or Cmd+Shift
+        // alone, so Cmd+Opt+arrows (focus a pane) and Cmd+Ctrl+arrows
+        // (move a divider) never send ^A or ^E when unbound or with no
+        // pane that way (splits design §5).
+        if input.flags & (flags::OPTION | flags::CONTROL) != 0 {
+            return KeyAction::ToMenu;
+        }
         let bytes: &[u8] = match input.keycode {
             0x7B => b"\x01", // Cmd+Left: start of line
             0x7C => b"\x05", // Cmd+Right: end of line
@@ -612,6 +618,61 @@ impl KeysDown {
         let was = *w & 1 << (code % 64) != 0;
         *w &= !(1 << (code % 64));
         was
+    }
+
+    /// The keys held, lowest first; none are held after.
+    pub fn take(&mut self) -> Vec<u16> {
+        let mut out = Vec::new();
+        for (i, w) in self.0.iter_mut().enumerate() {
+            for bit in 0..64 {
+                if *w & 1 << bit != 0 {
+                    out.push((i * 64 + bit) as u16);
+                }
+            }
+            *w = 0;
+        }
+        out
+    }
+}
+
+/// For a `flagsChanged` event: whether modifier key `keycode` went down
+/// (`flags` being the state after the event). `None` for other keys, and
+/// for Caps Lock, which reports no release.
+pub fn modifier_pressed(keycode: u16, flags: usize) -> Option<bool> {
+    let key = modifier_key(keycode).filter(|k| k.held != 0)?;
+    Some(flags & key.held != 0)
+}
+
+/// What to send for a key still held when its pane loses focus, so the
+/// program doesn't think it stuck (kitty flag 2; nothing otherwise):
+/// the key's release with no modifiers. `plain` is what it types on the
+/// ASCII-capable layout with none.
+pub fn focus_release(keycode: u16, plain: Option<char>, modes: KeyModes) -> Option<Vec<u8>> {
+    if keycode == 0x39 {
+        return None;
+    }
+    let c: String = plain.map(String::from).unwrap_or_default();
+    let input = KeyInput {
+        keycode,
+        chars_ignoring_mods: c.clone(),
+        chars_shift_only: c.clone(),
+        chars_unshifted: c,
+        ascii: plain,
+        event: KeyEventType::Release,
+        ..KeyInput::default()
+    };
+    // Modifier keys are always given as presses: with no flags left,
+    // `translate` takes it for their release.
+    let input = match modifier_key(keycode) {
+        Some(_) => KeyInput {
+            event: KeyEventType::Press,
+            ..input
+        },
+        None => input,
+    };
+    match translate(&input, KeyModes { composing: false, ..modes }) {
+        KeyAction::Send(bytes) => Some(bytes),
+        _ => None,
     }
 }
 
@@ -1815,6 +1876,34 @@ mod tests {
     }
 
     #[test]
+    fn keys_still_down_are_released_on_focus_loss() {
+        let mut down = KeysDown::default();
+        for k in [0x00, 0x7E, 0x38, 100] {
+            down.press(k);
+        }
+        assert_eq!(down.take(), [0x00, 0x38, 100, 0x7E]);
+        assert_eq!(down.take(), Vec::<u16>::new());
+        let flags_1_2 = kitty_modes(kitty::DISAMBIGUATE | kitty::EVENT_TYPES);
+        assert_eq!(focus_release(0x00, Some('a'), flags_1_2), Some(b"\x1b[97;1:3u".to_vec()));
+        assert_eq!(focus_release(0x7E, None, flags_1_2), Some(b"\x1b[1;1:3A".to_vec()));
+        let all = kitty_modes(kitty::DISAMBIGUATE | kitty::EVENT_TYPES | kitty::ALL_KEYS);
+        assert_eq!(focus_release(0x38, None, all), Some(b"\x1b[57441;1:3u".to_vec()));
+        assert_eq!(focus_release(0x39, None, all), None, "caps lock");
+        // Without release events there is nothing to send.
+        assert_eq!(focus_release(0x00, Some('a'), kitty_modes(kitty::DISAMBIGUATE)), None);
+        assert_eq!(focus_release(0x00, Some('a'), KeyModes::default()), None);
+    }
+
+    #[test]
+    fn modifier_presses_and_releases() {
+        assert_eq!(modifier_pressed(0x38, SHIFT | LEFT_SHIFT), Some(true));
+        assert_eq!(modifier_pressed(0x38, SHIFT | RIGHT_SHIFT), Some(false));
+        assert_eq!(modifier_pressed(0x38, 0), Some(false));
+        assert_eq!(modifier_pressed(0x39, 0), None, "caps lock");
+        assert_eq!(modifier_pressed(0x00, 0), None);
+    }
+
+    #[test]
     fn cmd_keys() {
         let rows: &[(&str, KeyInput, KeyAction)] = &[
             ("cmd+left", key(0x7B, COMMAND), send(b"\x01")),
@@ -1822,6 +1911,11 @@ mod tests {
             ("cmd+backspace", key(0x33, COMMAND), send(b"\x15")),
             ("cmd+shift+left", key(0x7B, COMMAND | SHIFT), send(b"\x01")),
             ("cmd+up", key(0x7E, COMMAND), KeyAction::ToMenu),
+            ("cmd+option+left", key(0x7B, COMMAND | OPTION | LEFT_OPTION), KeyAction::ToMenu),
+            ("cmd+option+right", key(0x7C, COMMAND | OPTION | LEFT_OPTION), KeyAction::ToMenu),
+            ("cmd+ctrl+left", key(0x7B, COMMAND | CONTROL), KeyAction::ToMenu),
+            ("cmd+ctrl+right", key(0x7C, COMMAND | CONTROL), KeyAction::ToMenu),
+            ("cmd+option+backspace", key(0x33, COMMAND | OPTION | LEFT_OPTION), KeyAction::ToMenu),
             ("cmd+c", text("c", COMMAND), KeyAction::ToMenu),
             ("cmd+v", text("v", COMMAND), KeyAction::ToMenu),
             ("cmd+q", text("q", COMMAND), KeyAction::ToMenu),

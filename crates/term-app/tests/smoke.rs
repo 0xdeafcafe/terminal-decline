@@ -30,9 +30,12 @@ fn osc(cmd: &str) -> String {
 
 /// Shell that waits until this script's process group owns the terminal.
 /// `set -m` forks the job and hands it the terminal a moment later, and
-/// closing the window before that finds only the shell running.
+/// closing the window before that finds only the shell running. The ids
+/// are compared as numbers: `ps` pads TPGID and PGID to different widths,
+/// so with pids under 10000 (as on a freshly booted CI runner) the strings
+/// never match.
 fn in_foreground() -> &'static str {
-    "until [ \"$(ps -o tpgid= -p $$)\" = \"$(ps -o pgid= -p $$)\" ]; do sleep 0.05; done; "
+    "until [ \"$(ps -o tpgid= -p $$)\" -eq \"$(ps -o pgid= -p $$)\" ]; do sleep 0.05; done; "
 }
 
 struct TempDir(PathBuf);
@@ -307,7 +310,9 @@ fn smoke_restore_reopens_tabs_as_tabs() {
     ]);
     std::fs::write(&restore, saved.to_string()).unwrap();
     // Each window says where it is, and the last to dump quits.
-    let all_dumped = format!("[ \"$(wc -l < '{}')\" -ge 3 ]", dir.dump_file().display());
+    // Quietly: until the first dump the file is missing, and error lines
+    // from each try would scroll the first line out of a dump taken late.
+    let all_dumped = format!("[ \"$(cat '{}' 2>/dev/null | wc -l)\" -ge 3 ]", dir.dump_file().display());
     let script = format!(
         "echo \"in $(basename \"$PWD\")\"; {}i=0; while ! {all_dumped} && [ $i -lt 200 ]; do sleep 0.05; i=$((i+1)); done; {}sleep 20",
         osc("dump"),

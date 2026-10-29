@@ -34,6 +34,11 @@ impl Paths {
         self.config_dir.join("config.toml")
     }
 
+    /// The user's own themes: `<name>.toml`.
+    pub fn themes_dir(&self) -> PathBuf {
+        self.config_dir.join("themes")
+    }
+
     /// Each pin's settings: `<id>.toml`.
     pub fn pins_dir(&self) -> PathBuf {
         self.config_dir.join("pins")

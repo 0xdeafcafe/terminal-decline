@@ -9,6 +9,7 @@ use term_font::{CellWidth, FontConfig};
 use term_render::Theme;
 
 use crate::keybind::{self, KeybindConfig, Keybinds};
+use crate::theme::{self as themes, Appearance, ThemeChoice};
 
 /// Which Option key acts as Meta (sends ESC + key). Off by default, like
 /// Terminal.app and Ghostty, so Option still types @ [ ] { } | \\ ~ on
@@ -23,32 +24,102 @@ pub enum OptionAsMeta {
     None,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+/// `[colors]`, and a theme file: only what is set. Unset colours (and
+/// palette entries left out or `""`) come from the theme, else the
+/// defaults ([`Palette::DEFAULT`]).
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Colors {
-    pub foreground: String,
-    pub background: String,
-    pub cursor: String,
-    pub selection: String,
+    #[serde(deserialize_with = "colour")]
+    pub foreground: Option<String>,
+    #[serde(deserialize_with = "colour")]
+    pub background: Option<String>,
+    #[serde(deserialize_with = "colour")]
+    pub cursor: Option<String>,
+    #[serde(deserialize_with = "colour")]
+    pub selection: Option<String>,
     /// The 16 ANSI colours.
+    #[serde(deserialize_with = "palette")]
     pub palette: Vec<String>,
 }
 
-impl Default for Colors {
-    fn default() -> Colors {
-        Colors {
-            foreground: "#d8dee9".into(),
-            background: "#16181c".into(),
-            cursor: "#d8dee9".into(),
-            selection: "#2e3a4f".into(),
-            palette: [
-                "#1d1f21", "#cc6666", "#b5bd68", "#f0c674", "#81a2be", "#b294bb", "#8abeb7", "#c5c8c6", "#666666", "#d54e53", "#b9ca4a",
-                "#e7c547", "#7aa6da", "#c397d8", "#70c0b1", "#eaeaea",
-            ]
-            .map(String::from)
-            .to_vec(),
-        }
+fn colour<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    let s = String::deserialize(d)?;
+    match parse_hex(&s) {
+        Some(_) => Ok(Some(s)),
+        None => Err(serde::de::Error::custom(format!("{s:?} is not a colour (use \"#rrggbb\")"))),
     }
+}
+
+fn palette<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    let list = Vec::<String>::deserialize(d)?;
+    if list.len() > 16 {
+        return Err(serde::de::Error::custom(format!("{} colours: the palette has 16", list.len())));
+    }
+    if let Some(bad) = list.iter().find(|s| !s.is_empty() && parse_hex(s).is_none()) {
+        return Err(serde::de::Error::custom(format!(
+            "{bad:?} is not a colour (use \"#rrggbb\", or \"\" for the theme's)"
+        )));
+    }
+    Ok(list)
+}
+
+/// Resolved colours, as 0xRRGGBB.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Palette {
+    pub foreground: u32,
+    pub background: u32,
+    pub cursor: u32,
+    pub selection: u32,
+    pub ansi: [u32; 16],
+}
+
+impl Palette {
+    /// decline's colours with no theme and no `[colors]`.
+    pub const DEFAULT: Palette = Palette {
+        foreground: 0xd8dee9,
+        background: 0x16181c,
+        cursor: 0xd8dee9,
+        selection: 0x2e3a4f,
+        ansi: [
+            0x1d1f21, 0xcc6666, 0xb5bd68, 0xf0c674, 0x81a2be, 0xb294bb, 0x8abeb7, 0xc5c8c6, //
+            0x666666, 0xd54e53, 0xb9ca4a, 0xe7c547, 0x7aa6da, 0xc397d8, 0x70c0b1, 0xeaeaea,
+        ],
+    };
+
+    /// These colours with the ones `colors` sets in their place.
+    pub fn with(mut self, colors: &Colors) -> Palette {
+        let set = |slot: &mut u32, v: &Option<String>| {
+            if let Some(c) = v.as_deref().and_then(parse_hex) {
+                *slot = c;
+            }
+        };
+        set(&mut self.foreground, &colors.foreground);
+        set(&mut self.background, &colors.background);
+        set(&mut self.cursor, &colors.cursor);
+        set(&mut self.selection, &colors.selection);
+        for (slot, v) in self.ansi.iter_mut().zip(&colors.palette) {
+            if let Some(c) = parse_hex(v) {
+                *slot = c;
+            }
+        }
+        self
+    }
+}
+
+impl Default for Palette {
+    fn default() -> Palette {
+        Palette::DEFAULT
+    }
+}
+
+/// The colours for each appearance: the theme's (or the defaults) with
+/// `[colors]` on top. The same for both unless the theme is a light/dark
+/// pair.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Palettes {
+    pub light: Palette,
+    pub dark: Palette,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -89,7 +160,12 @@ pub struct Config {
     pub env: BTreeMap<String, String>,
     /// Window title for a pin; also shown in the Window menu.
     pub title: Option<String>,
+    /// `theme = "name"` or `{ light = "…", dark = "…" }`; see [`crate::theme`].
+    pub theme: Option<ThemeChoice>,
     pub colors: Colors,
+    /// The theme and `[colors]` resolved, by [`load`].
+    #[serde(skip)]
+    pub palettes: Palettes,
     /// `[keybind]`: shortcuts remapped, unbound, or sending text; see
     /// [`crate::keybind`].
     pub keybind: KeybindConfig,
@@ -121,7 +197,9 @@ impl Default for Config {
             cwd: None,
             env: BTreeMap::new(),
             title: None,
+            theme: None,
             colors: Colors::default(),
+            palettes: Palettes::default(),
             keybind: KeybindConfig::default(),
             pin_app: None,
         }
@@ -181,8 +259,9 @@ fn merge(base: &mut toml::Table, over: toml::Table) {
 /// Loads each of `layers` in order, later ones on top (the user's
 /// config.toml first, then a pin's settings, then `--config`). A missing
 /// file counts as empty. Errors are reported and the defaults used, so a
-/// typo never stops the terminal from opening.
-pub fn load(layers: &[&Path]) -> (Config, Vec<String>) {
+/// typo never stops the terminal from opening. Themes are looked for in
+/// `themes_dir`, then among the built-in ones.
+pub fn load(layers: &[&Path], themes_dir: &Path) -> (Config, Vec<String>) {
     let mut errors = Vec::new();
     let mut table = toml::Table::new();
     for &path in layers {
@@ -197,11 +276,41 @@ pub fn load(layers: &[&Path]) -> (Config, Vec<String>) {
     }
     let (table, bad) = keep_valid(table);
     errors.extend(bad);
-    let config = toml::Value::Table(table).try_into::<Config>().unwrap_or_else(|e| {
+    let mut config = toml::Value::Table(table).try_into::<Config>().unwrap_or_else(|e| {
         errors.push(format!("config: {e}"));
         Config::default()
     });
+    config.palettes = resolve(config.theme.as_ref(), &config.colors, themes_dir, &mut errors);
     (config, errors)
+}
+
+/// The colours for each appearance: theme, then `[colors]`. A theme that
+/// can't be loaded is reported and the defaults used.
+fn resolve(theme: Option<&ThemeChoice>, colors: &Colors, themes_dir: &Path, errors: &mut Vec<String>) -> Palettes {
+    let mut base = |name: &str| match themes::load(themes_dir, name) {
+        Ok(c) => Palette::DEFAULT.with(&c),
+        Err(e) => {
+            errors.push(format!("config: theme: {e}; ignored"));
+            Palette::DEFAULT
+        }
+    };
+    let (light, dark) = match theme {
+        None => (Palette::DEFAULT, Palette::DEFAULT),
+        Some(choice) => {
+            let light = base(choice.pick(Appearance::Light));
+            let dark_name = choice.pick(Appearance::Dark);
+            let dark = if dark_name == choice.pick(Appearance::Light) {
+                light
+            } else {
+                base(dark_name)
+            };
+            (light, dark)
+        }
+    };
+    Palettes {
+        light: light.with(colors),
+        dark: dark.with(colors),
+    }
 }
 
 /// Where the config comes from, kept so it can be read again when a file
@@ -210,6 +319,8 @@ pub fn load(layers: &[&Path]) -> (Config, Vec<String>) {
 pub struct Source {
     /// The user's config.toml, then a pin's settings, then `--config`.
     pub layers: Vec<PathBuf>,
+    /// The user's own themes: `~/.config/decline/themes`.
+    pub themes_dir: PathBuf,
     /// `-e PROGRAM ARGS...`, which replaces `command` whatever the files say.
     pub command: Option<Vec<String>>,
 }
@@ -218,16 +329,21 @@ impl Source {
     /// The config and its errors, as [`load`] gives them.
     pub fn load(&self) -> (Config, Vec<String>) {
         let refs: Vec<&Path> = self.layers.iter().map(PathBuf::as_path).collect();
-        let (mut config, errors) = load(&refs);
+        let (mut config, errors) = load(&refs, &self.themes_dir);
         if let Some(cmd) = self.command.as_ref().filter(|c| !c.is_empty()) {
             config.command = cmd.clone();
         }
         (config, errors)
     }
 
-    /// The files whose changes reload the config.
-    pub fn watched(&self, _config: &Config) -> Vec<PathBuf> {
-        self.layers.clone()
+    /// The files whose changes reload the config: its layers and the
+    /// theme files it names (watched even before they exist).
+    pub fn watched(&self, config: &Config) -> Vec<PathBuf> {
+        let mut files = self.layers.clone();
+        if let Some(choice) = &config.theme {
+            files.extend(choice.names().into_iter().map(|n| themes::file_of(&self.themes_dir, n)));
+        }
+        files
     }
 }
 
@@ -277,8 +393,9 @@ fn keep_valid(table: toml::Table) -> (toml::Table, Vec<String>) {
     let mut errors = Vec::new();
     for (key, value) in table {
         match value {
-            // Nested tables (colours) are checked key by key too.
-            toml::Value::Table(inner) => {
+            // Nested tables (colours) are checked key by key too; `theme`'s
+            // light/dark pair is one setting.
+            toml::Value::Table(inner) if key != "theme" => {
                 let mut kept = toml::Table::new();
                 for (k, v) in inner {
                     let probe =
@@ -354,21 +471,18 @@ impl Config {
         Keybinds::new(&self.keybind)
     }
 
-    pub fn theme(&self) -> Theme {
-        let d = Colors::default();
-        let c = &self.colors;
-        let pick = |v: &str, fallback: &str| parse_hex(v).or_else(|| parse_hex(fallback)).unwrap_or(0);
-        let mut ansi = [0u32; 16];
-        for (i, slot) in ansi.iter_mut().enumerate() {
-            *slot = pick(c.palette.get(i).map_or("", String::as_str), &d.palette[i]);
+    /// The colours for a window with `appearance`.
+    pub fn palette(&self, appearance: Appearance) -> Palette {
+        match appearance {
+            Appearance::Light => self.palettes.light,
+            Appearance::Dark => self.palettes.dark,
         }
-        let mut theme = Theme::new(
-            ansi,
-            pick(&c.foreground, &d.foreground),
-            pick(&c.background, &d.background),
-            pick(&c.cursor, &d.cursor),
-            pick(&c.selection, &d.selection),
-        );
+    }
+
+    /// The renderer's theme for a window with `appearance`.
+    pub fn theme(&self, appearance: Appearance) -> Theme {
+        let p = self.palette(appearance);
+        let mut theme = Theme::new(p.ansi, p.foreground, p.background, p.cursor, p.selection);
         theme.background_opacity = (self.opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
         theme
     }
@@ -398,8 +512,8 @@ mod tests {
         merge(&mut base, over);
         let c: Config = toml::Value::Table(base).try_into().unwrap();
         assert_eq!(c.font_size, 16.0);
-        assert_eq!(c.colors.foreground, "#ffffff");
-        assert_eq!(c.colors.background, "#111111");
+        assert_eq!(c.colors.foreground.as_deref(), Some("#ffffff"));
+        assert_eq!(c.colors.background.as_deref(), Some("#111111"));
     }
 
     #[test]
@@ -411,7 +525,7 @@ mod tests {
         let c: Config = toml::Value::Table(good).try_into().unwrap();
         assert_eq!(c.font_size, 15.0);
         assert_eq!(c.padding, Config::default().padding);
-        assert_eq!(c.colors.background, "#000000");
+        assert_eq!(c.colors.background.as_deref(), Some("#000000"));
         assert_eq!(errors.len(), 3, "{errors:?}");
         assert!(errors.iter().any(|e| e.contains("font_sise")));
         assert!(errors.iter().any(|e| e.contains("colors.backgrund")));
@@ -432,11 +546,11 @@ mod tests {
     #[test]
     fn missing_files_give_defaults() {
         let dir = TempDir::new("cfg-missing");
-        let (c, errors) = load(&[&dir.join("config.toml"), &dir.join("pin.toml")]);
+        let (c, errors) = load(&[&dir.join("config.toml"), &dir.join("pin.toml")], Path::new("/nonexistent"));
         assert_eq!(errors, Vec::<String>::new());
         assert_eq!(c.font_size, Config::default().font_size);
         assert_eq!(c.columns, 100);
-        let (c, errors) = load(&[]);
+        let (c, errors) = load(&[], Path::new("/nonexistent"));
         assert!(errors.is_empty());
         assert_eq!(c.font_family, "Menlo");
     }
@@ -452,13 +566,13 @@ mod tests {
         )
         .unwrap();
         std::fs::write(&pin, "font_size = 18\ncommand = ['htop']\n[colors]\nbackground = '#0a0b0c'\n").unwrap();
-        let (c, errors) = load(&[&user, &pin]);
+        let (c, errors) = load(&[&user, &pin], Path::new("/nonexistent"));
         assert!(errors.is_empty(), "{errors:?}");
         assert_eq!(c.font_size, 18.0);
         assert_eq!(c.padding, 2.0);
         assert_eq!(c.command, ["htop"]);
-        assert_eq!(c.colors.foreground, "#010203");
-        assert_eq!(c.colors.background, "#0a0b0c");
+        assert_eq!(c.colors.foreground.as_deref(), Some("#010203"));
+        assert_eq!(c.colors.background.as_deref(), Some("#0a0b0c"));
     }
 
     #[test]
@@ -468,13 +582,13 @@ mod tests {
         std::fs::write(&broken, "font_size = = 3").unwrap();
         let typo = dir.join("typo.toml");
         std::fs::write(&typo, "font_sise = 14\nlines = 40\n").unwrap();
-        let (c, errors) = load(&[&broken, &typo]);
+        let (c, errors) = load(&[&broken, &typo], Path::new("/nonexistent"));
         assert_eq!(c.lines, 40);
         assert_eq!(errors.len(), 2, "{errors:?}");
         assert!(errors[0].starts_with(&broken.display().to_string()), "{errors:?}");
         assert!(errors[1].contains("font_sise"), "{errors:?}");
         // A directory can't be read as a file.
-        let (_, errors) = load(&[dir.path()]);
+        let (_, errors) = load(&[dir.path()], Path::new("/nonexistent"));
         assert_eq!(errors.len(), 1, "{errors:?}");
     }
 
@@ -513,25 +627,91 @@ mod tests {
         }
     }
 
-    /// Bad colours fall back one by one; the query colours (OSC 10/11/12)
-    /// come back as 0xRRGGBB.
+    /// Bad colours are reported one by one and the rest kept; the query
+    /// colours (OSC 10/11/12) come back as 0xRRGGBB.
     #[test]
     fn theme_and_query_colours() {
-        let mut c = Config::default();
-        c.colors.foreground = "#112233".into();
-        c.colors.background = "nonsense".into();
-        c.colors.cursor = "#a1b2c3".into();
-        c.colors.palette = vec!["#ff0000".into(), "bad".into()];
-        let theme = c.theme();
+        let (c, errors) =
+            parse("[colors]\nforeground = '#112233'\nbackground = 'nonsense'\ncursor = '#a1b2c3'\npalette = ['#ff0000', '', '#00ff00']");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(
+            errors[0].starts_with("config: colors.background: \"nonsense\" is not a colour"),
+            "{errors:?}"
+        );
+        let mut c = c;
+        c.palettes = resolve(None, &c.colors, Path::new("/nonexistent"), &mut Vec::new());
+        let theme = c.theme(Appearance::Dark);
         assert_eq!(query_colors(&theme), [0x112233, 0x16181c, 0xa1b2c3]);
         assert_eq!(rgb_of(theme.palette[0]), 0xff0000);
-        assert_eq!(rgb_of(theme.palette[1]), 0xcc6666, "falls back to the default");
+        assert_eq!(rgb_of(theme.palette[1]), 0xcc6666, "\"\" keeps the default");
+        assert_eq!(rgb_of(theme.palette[2]), 0x00ff00);
         assert_eq!(rgb_of(theme.palette[15]), 0xeaeaea, "missing entries use the defaults");
         assert_eq!(rgb_of(theme.selection), 0x2e3a4f);
-        assert_eq!(query_colors(&Config::default().theme()), [0xd8dee9, 0x16181c, 0xd8dee9]);
+        assert_eq!(
+            query_colors(&Config::default().theme(Appearance::Light)),
+            [0xd8dee9, 0x16181c, 0xd8dee9]
+        );
         for (r, g, b) in [(0x12, 0x34, 0x56), (0xff, 0, 0), (0, 0, 0xff)] {
             assert_eq!(rgb_of(term_render::rgb(r << 16 | g << 8 | b)), r << 16 | g << 8 | b);
         }
+        let (_, errors) = parse("[colors]\npalette = ['#ff0000', 'red']");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("\"red\" is not a colour"), "{errors:?}");
+    }
+
+    /// `theme` loads a built-in theme or the user's file of that name;
+    /// `[colors]` override it; a pair follows the appearance; a missing
+    /// theme is a notice.
+    #[test]
+    fn themes_load_and_colors_override_them() {
+        let dir = TempDir::new("cfg-theme");
+        let themes = dir.join("themes");
+        std::fs::create_dir_all(&themes).unwrap();
+        let file = dir.join("config.toml");
+        let with = |text: &str| {
+            std::fs::write(&file, text).unwrap();
+            load(&[&file], &themes)
+        };
+        let (c, errors) = with("theme = 'solarized-dark'\n");
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(c.palette(Appearance::Light), c.palette(Appearance::Dark));
+        let p = c.palette(Appearance::Dark);
+        assert_eq!((p.foreground, p.background, p.ansi[1]), (0x839496, 0x002b36, 0xdc322f));
+        let (c, errors) = with("theme = 'solarized-dark'\n[colors]\nbackground = '#000000'\npalette = ['', '#ff0000']\n");
+        assert!(errors.is_empty(), "{errors:?}");
+        let p = c.palette(Appearance::Dark);
+        assert_eq!((p.foreground, p.background), (0x839496, 0x000000), "[colors] wins");
+        assert_eq!((p.ansi[0], p.ansi[1], p.ansi[2]), (0x073642, 0xff0000, 0x859900));
+        std::fs::write(themes.join("mine.toml"), "background = '#123456'\n").unwrap();
+        let (c, errors) = with("theme = { light = 'mine', dark = 'tokyo-night' }\n");
+        assert!(errors.is_empty(), "{errors:?}");
+        let (light, dark) = (c.palette(Appearance::Light), c.palette(Appearance::Dark));
+        assert_eq!(light.background, 0x123456);
+        assert_eq!(light.foreground, Palette::DEFAULT.foreground, "unset in the theme");
+        assert_eq!(dark.background, 0x1a1b26);
+        assert_eq!(c.theme(Appearance::Light).background, term_render::rgb(0x123456));
+        let (c, errors) = with("theme = 'no-such-theme'\nfont_size = 15\n");
+        assert_eq!(c.font_size, 15.0);
+        assert_eq!(c.palettes, Palettes::default());
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(
+            errors[0].starts_with("config: theme: no theme named \"no-such-theme\""),
+            "{errors:?}"
+        );
+        let (_, errors) = with("theme = { light = 'mine' }\n");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].starts_with("config: theme: "), "{errors:?}");
+        // The theme files named are watched too.
+        let from = Source {
+            layers: vec![file.clone()],
+            themes_dir: themes.clone(),
+            command: None,
+        };
+        let (c, _) = with("theme = { light = 'mine', dark = 'tokyo-night' }\n");
+        assert_eq!(
+            from.watched(&c),
+            [file.clone(), themes.join("mine.toml"), themes.join("tokyo-night.toml")]
+        );
     }
 
     fn parse(text: &str) -> (Config, Vec<String>) {
@@ -680,7 +860,7 @@ mod tests {
             "[keybind]\n\"command+D\" = \"none\"\n\"cmd+shift+t\" = { text = \"pin\" }\n\"cmd+w\" = \"none\"\n",
         )
         .unwrap();
-        let (c, errors) = load(&[&user, &pin]);
+        let (c, errors) = load(&[&user, &pin], Path::new("/nonexistent"));
         assert!(errors.is_empty(), "{errors:?}");
         let b = c.keybinds();
         let get = |s: &str| b.get(&Chord::parse(s).unwrap()).cloned();
@@ -690,7 +870,7 @@ mod tests {
         assert_eq!(get("cmd+w"), None, "the pin unbinds a default");
         assert_eq!(get("cmd+k"), Some(Bound::Menu(MenuAction::ClearScrollback)));
         // The user's config alone.
-        let (c, _) = load(&[&user]);
+        let (c, _) = load(&[&user], Path::new("/nonexistent"));
         assert_eq!(c.keybinds().get(&Chord::parse("cmd+d").unwrap()), Some(&Bound::Text("user".into())));
     }
 
@@ -725,6 +905,7 @@ mod tests {
         let mut source = Source {
             layers: vec![file.clone()],
             command: None,
+            ..Source::default()
         };
         assert_eq!(source.load().0.command, ["vim"]);
         source.command = Some(vec!["htop".into()]);
@@ -741,7 +922,7 @@ mod tests {
                 opacity,
                 ..Config::default()
             };
-            assert_eq!(c.theme().background_opacity, want, "{opacity}");
+            assert_eq!(c.theme(Appearance::Dark).background_opacity, want, "{opacity}");
         }
     }
 }

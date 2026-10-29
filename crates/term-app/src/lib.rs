@@ -25,6 +25,7 @@ pub mod select;
 pub mod session;
 #[cfg(test)]
 mod testutil;
+pub mod theme;
 mod view;
 pub mod watch;
 

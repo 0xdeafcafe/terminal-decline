@@ -1,0 +1,11 @@
+# Slope Light: decline's own theme, from the Slope brand palette
+# (docs/brand/README.md): spruce text on paper, a mint selection.
+# Part of decline, MIT licence.
+foreground = "#092d2b"
+background = "#f3f3eb"
+cursor = "#245950"
+selection = "#b9e5cc"
+palette = [
+    "#092d2b", "#b23a2e", "#2e7d4f", "#8a6414", "#2b5c9e", "#7a3e9e", "#1f7a72", "#dde2d8",
+    "#4e6e66", "#d0503f", "#3a9a62", "#a97b1c", "#3a73c0", "#9550be", "#26968c", "#fbfbf6",
+]

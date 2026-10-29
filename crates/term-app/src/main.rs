@@ -63,7 +63,11 @@ fn main() {
         i += 1;
     }
 
-    let from = config::Source { layers, command };
+    let from = config::Source {
+        layers,
+        themes_dir: paths.themes_dir(),
+        command,
+    };
     let (config, errors) = from.load();
     for e in &errors {
         eprintln!("decline: {e}");

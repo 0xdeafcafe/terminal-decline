@@ -707,6 +707,61 @@ fn smoke_pin_bundle_launches() {
     assert_eq!(num(&d[0], "font_size"), 17.0, "the pin's own settings were used");
 }
 
+/// Themes: one named in the config but not there yet is a notice, and is
+/// used once its file is created (theme files are watched too); a
+/// light/dark pair follows the system's appearance.
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_themes_load_and_follow_the_appearance() {
+    if !have_metal() {
+        return;
+    }
+    let dir = TempDir::new("theme");
+    let conf_dir = dir.config_home().join("decline");
+    std::fs::create_dir_all(&conf_dir).unwrap();
+    let file = conf_dir.join("config.toml");
+    std::fs::write(&file, "theme = 'mine'\n").unwrap();
+    let theme = conf_dir.join("themes/mine.toml");
+    let script = format!(
+        "echo start; {dump}{wait1}\
+         mkdir -p '{dir}'; printf \"background = '#203040'\\n\" > '{theme}'; {wait2}\
+         printf \"theme = {{ light = 'slope-light', dark = 'slope-dark' }}\\n\" > '{file}'; {wait3}{quit}sleep 20",
+        dump = osc("dump"),
+        dir = theme.parent().unwrap().display(),
+        theme = theme.display(),
+        file = file.display(),
+        wait1 = dump_until(&dir, "\"seq\":1"),
+        wait2 = dump_until(&dir, "#203040"),
+        wait3 = dump_until(&dir, "#(092d2b|f3f3eb)"),
+        quit = osc("quit"),
+    );
+    let (status, _) = decline(&dir, &script, true);
+    assert!(status.success(), "{status}");
+    let d = dumps(&dir);
+    assert!(d.len() >= 3, "{d:?}");
+    assert_eq!(d[0]["background"], "#16181c", "the defaults until the theme exists");
+    assert!(
+        screen(&d[0]).starts_with("decline: config: theme: no theme named \"mine\""),
+        "{}",
+        screen(&d[0])
+    );
+    assert!(
+        d.iter().any(|x| x["background"] == "#203040" && x["foreground"] == "#d8dee9"),
+        "{d:?}"
+    );
+    let dark = Command::new("/usr/bin/defaults")
+        .args(["read", "-g", "AppleInterfaceStyle"])
+        .output()
+        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "Dark");
+    let last = d.last().unwrap();
+    let (fg, bg) = if dark { ("#f3f3eb", "#092d2b") } else { ("#092d2b", "#f3f3eb") };
+    assert_eq!(
+        (last["foreground"].as_str(), last["background"].as_str()),
+        (Some(fg), Some(bg)),
+        "dark: {dark}"
+    );
+}
+
 /// A shell loop that sends `dump` every 0.1 s (for at most 10 s) until the
 /// dump file matches `pattern` (grep -E).
 fn dump_until(dir: &TempDir, pattern: &str) -> String {

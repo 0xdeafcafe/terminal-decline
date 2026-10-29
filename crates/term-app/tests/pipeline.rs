@@ -480,7 +480,7 @@ fn config_errors_show_before_the_output() {
     let home = TempDir::new("badconfig");
     let file = home.path().join("config.toml");
     std::fs::write(&file, "font_sise = 3\nfont_size = 15\n").unwrap();
-    let (config, errors) = decline::config::load(&[file.as_path()]);
+    let (config, errors) = decline::config::load(&[file.as_path()], std::path::Path::new("/nonexistent"));
     assert_eq!(config.font_size, 15.0);
     assert_eq!(errors.len(), 1, "{errors:?}");
     let cmd = command(&["/bin/sh", "-c", "echo program output; sleep 0.3"], home.path());

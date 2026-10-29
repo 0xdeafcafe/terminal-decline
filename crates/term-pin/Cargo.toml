@@ -9,6 +9,10 @@ license.workspace = true
 # Cargo.toml says why); scripts/bundle.sh renames the launcher to
 # `terminal-decline` inside the bundle.
 [[bin]]
+name = "terminal-decline-launcher"
+path = "src/bin/launcher.rs"
+
+[[bin]]
 name = "terminal-decline-pin"
 path = "src/bin/pin-stub.rs"
 

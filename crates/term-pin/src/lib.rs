@@ -11,7 +11,10 @@
 //! the stub links strongly is frozen with it.
 
 pub mod abi;
-// P-1 uses the rest.
-#[allow(dead_code)]
+pub mod alert;
 pub mod cf;
+pub mod find;
+pub mod launcher;
+pub mod message;
 pub mod sec;
+pub mod stub;

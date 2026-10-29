@@ -203,8 +203,8 @@ codesign --verify --strict --deep -vv "Terminal Decline.app"
 | Output | Built from | Ships in |
 |---|---|---|
 | `libterminal_decline.dylib` | `crates/term-dylib` (cdylib; depends on term-app and **defines** the `extern "C"` entries `td_app_main_v1`, `td_pin_main_v1`; install name `@rpath/libterminal_decline.dylib`) | app |
-| `terminal-decline` (launcher) | `crates/term-pin`, bin `launcher` | app |
-| `terminal-decline-pin` (stub) | `crates/term-pin`, bin `pin-stub` | app, copied into pins |
+| `terminal-decline` (launcher) | `crates/term-pin`, bin `terminal-decline-launcher` (`src/bin/launcher.rs`; renamed in the bundle) | app |
+| `terminal-decline-pin` (stub) | `crates/term-pin`, bin `terminal-decline-pin` (`src/bin/pin-stub.rs`) | app, copied into pins |
 | `terminal-decline` (static) | `crates/term-app`, bin, as today | `cargo install` only |
 
 - term-pin depends on nothing but `libc` and hand-written FFI to
@@ -212,7 +212,10 @@ codesign --verify --strict --deep -vv "Terminal Decline.app"
   per-package profile and the workspace's release profile unwinds, so its
   two bins are built in a second cargo run with their own profile
   (`release-stub`: `panic = "abort"`, `opt-level = "z"`, fat LTO,
-  stripped). Measured minimal size: ~290 KB.
+  stripped; `cargo build -p term-pin --bins --profile release-stub`).
+  Measured (P-1, arm64): stub 340 KB, launcher 320 KB, each with its
+  dSYM. Both link CoreFoundation, Security, libSystem and libiconv
+  (Rust's std).
 - term-app's library crate name collides with the cdylib's
   (`terminal_decline`); the term-app library is renamed internally so the
   cdylib keeps the public file name. A test checks `nm -gU` on the dylib
@@ -254,16 +257,30 @@ Info.plist keys, all written once:
 | `CFBundleShortVersionString`, `CFBundleVersion` | the stub's version (`1`), not the app's |
 | `LSMinimumSystemVersion` | `14.0` |
 | `NSHighResolutionCapable`, `NSSupportsAutomaticGraphicsSwitching` | true |
-| `CFBundleDocumentTypes` | folders (`public.folder`), if open question 7 says pins open dropped folders; decided before v1 is frozen |
+| `CFBundleDocumentTypes` | folders (`public.folder`, rank None), as the app: a folder dropped on a pin opens a window there (§11, question 7) |
 | usage strings | as §2.3, worded "A program running in Rush (a Terminal Decline pin) wants to …" |
 | `TDPinAbi` | `1` |
 | `TDPinId` | `rush` |
 | `TDAppBundleId` | `red.forbes.terminal-decline` |
 | `TDLibraryRequirement` | the code requirement the library must meet (§3.4) |
 
-P-1 goes through the app's Info.plist key by key and records, for each,
-whether pins carry it; anything added to pins later means a permission
-reset for every pin, so the list is decided once.
+The app's Info.plist (scripts/bundle.sh) key by key, and whether pins
+carry it (P-1; anything added to pins later means a permission reset
+for every pin, so the list is decided once):
+
+| App key | In pins | Why |
+|---|---|---|
+| `CFBundleIdentifier`, `CFBundleName`, `CFBundleDisplayName`, `CFBundleExecutable` | the pin's own | its own app to macOS |
+| `CFBundlePackageType` `APPL` | yes | |
+| `CFBundleShortVersionString`, `CFBundleVersion` | the stub's (`1`) | the app's version changes; the pin never does |
+| `LSMinimumSystemVersion` `14.0` | yes | |
+| `NSHighResolutionCapable` | yes | plus `NSSupportsAutomaticGraphicsSwitching`, as pins have today |
+| `CFBundleDocumentTypes` (folders, rank None) | yes, the same | §11 question 7: a folder dropped on a pin opens a window there |
+| `NSServices` (New Window/Tab at Folder) | **no** | Finder's Services menu would list every pin twice; Services are the app's |
+| `CFBundleIconFile` `icon` | yes | |
+| usage strings (§2.3) | yes, in the pin's wording | |
+| Sparkle keys (`SUPublicEDKey`, `SUFeedURL`; B.4) | **no** | a pin never loads Sparkle |
+| `TDPinAbi`, `TDPinId`, `TDAppBundleId`, `TDLibraryRequirement` | pins only | read by the stub (crates/term-pin/FROZEN.md) |
 
 Making the bundle, in order:
 1. Copy the stub (`cp -c`), Info.plist and icon into a temporary
@@ -334,10 +351,10 @@ app making it is signed (the library reads its own signing information
 with `SecCodeCopySigningInformation`):
 
 - **Release-made pin** (the library has a team ID):
-  `anchor apple generic and certificate leaf[subject.OU] = "<TEAMID>" and identifier "red.forbes.terminal-decline.lib"`.
-  This also accepts Apple Development certificates of the same team; if
-  dogfood builds won't use one (open question 2), the Developer ID
-  certificate's marker is added to the requirement.
+  `anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "<TEAMID>" and identifier "red.forbes.terminal-decline.lib"`.
+  The two markers (Developer ID intermediate and leaf) refuse Apple
+  Development certificates of the same team; dogfood builds use Developer
+  ID (question 2), so nothing needs them. Measured passing in P-0 (§12).
 - **Dev pin** (the library is ad-hoc): `identifier "red.forbes.terminal-decline.lib"`.
   Any ad-hoc library with that identifier passes, so it guards against
   mistakes, not attacks. `pin --list` marks these pins "dev".
@@ -814,7 +831,8 @@ bundle id):
     refused, exit 1, stderr names the reason and the path;
   - a fixture exporting only `td_pin_main_v2` with a v1 stub: the "needs
     a newer Terminal Decline" message; a v2 stub against a v1-only
-    fixture: runs v1;
+    fixture: runs v1 (waits for a v2 to exist; the countdown itself is a
+    unit test);
   - no app anywhere: the "isn't installed" message;
   - `DYLD_INSERT_LIBRARIES` set: ignored;
   - the struct layout matches the C header (a compile-time check plus the
@@ -895,7 +913,7 @@ crate.
 | # | Crate | PR | Size | After |
 |---|---|---|---|---|
 | P-0 | pin (new `term-pin`) | **spike first** (roadmap: "spiked early with real signing"): the ABI header and `term_pin::abi`; a minimal stub plus today's code built as a dylib; with a free Apple Development certificate: a Documents or Full Disk Access grant survives swapping the library, a child asking for the mic gets a prompt naming the pin and the answer is kept, the team requirement passes; `dlopen("/dev/fd/N")` tried; results in DESIGN.md before building on them | S | — (needs Alex's Apple ID for the certificate; the ad-hoc parts are already measured). **Landed** (§12), with the Developer ID certificate from Alex's keychain; the permission clicks wait for Alex (`spike/permissions.sh`) |
-| P-1 | pin | stub and launcher in full, the search order, the signature check, alerts, the `release-stub` profile; tests with the C fixture, the identity test | M | P-0 |
+| P-1 | pin | stub and launcher in full, the search order, the signature check, alerts, the `release-stub` profile; tests with the C fixture, the identity test | M | P-0. **Landed**: crates/term-pin (FROZEN.md lists what the stub freezes); tests run any stub binary with `TD_PIN_TEST_STUB` (the released-stubs job) and the release requirement with `TD_PIN_TEST_IDENTITY` (passed with Alex's Developer ID, debug and release-stub builds) |
 | P-2 | icon (new `term-icon`) | `slope-pins-2`: plan, outline, drawing, ImageIO `.icns`; tests of §9 | M | — |
 | P-3 | app (+ new `term-dylib`) | `run(role, args)`, `Role`, the entry points in term-dylib with panic catching, the pin role's argument rule, `Paths::app_bundle`, the `mainBundle`/`current_exe` audit, crash logs and dSYM naming, the library crate rename | M | P-0 (header) |
 | P-4 | packaging + ci | bundle.sh rewrite (layout, inside-out signing, entitlements files, usage strings, `HARDENED=1`), the stub build, dogfood.sh (`pin-app` file, `--repair` instead of `--update`, certificate signing if present), release.yml (three outputs, dSYMs, notarize all, released stubs kept), cask caveat; the packaging CI checks and smoke tests through the bundled app | M | P-1, P-3 |

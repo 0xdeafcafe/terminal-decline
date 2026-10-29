@@ -22,8 +22,9 @@ TEAM=$(printf '%s' "$ID" | sed -n 's/.*(\([A-Z0-9]*\))$/\1/p')
 echo "scratch: $S"
 echo "identity: ${ID:-none (ad-hoc only)}"
 
-cargo build -q --release -p term-pin --manifest-path "$root/Cargo.toml"
-STUB="$root/target/release/terminal-decline-pin"
+# P-0's minimal stub (examples/spike-stub.rs), which can time its steps.
+cargo build -q --release -p term-pin --example spike-stub --manifest-path "$root/Cargo.toml"
+STUB="$root/target/release/examples/spike-stub"
 FIX="$root/crates/term-pin/tests/fixture/fixture.c"
 
 ok() { printf '  ok    %s\n' "$*"; }

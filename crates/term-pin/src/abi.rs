@@ -78,10 +78,17 @@ pub fn dev_requirement() -> String {
     format!("identifier \"{LIBRARY_ID}\"")
 }
 
-/// The requirement a release pin writes: a library signed by Apple's chain
-/// for `team`, with our identifier.
+/// The requirement a release pin writes: a library signed with a
+/// Developer ID certificate of `team`, with our identifier. The two
+/// markers are Apple's Developer ID intermediate and leaf; they refuse an
+/// Apple Development certificate of the same team (pins.md §12: dogfood
+/// builds are signed with Developer ID too).
 pub fn team_requirement(team: &str) -> String {
-    format!("anchor apple generic and certificate leaf[subject.OU] = \"{team}\" and identifier \"{LIBRARY_ID}\"")
+    format!(
+        "anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists \
+         and certificate leaf[field.1.2.840.113635.100.6.1.13] exists \
+         and certificate leaf[subject.OU] = \"{team}\" and identifier \"{LIBRARY_ID}\""
+    )
 }
 
 #[cfg(test)]
@@ -106,7 +113,9 @@ mod tests {
         assert_eq!(dev_requirement(), r#"identifier "red.forbes.terminal-decline.lib""#);
         assert_eq!(
             team_requirement("6Z49PF6642"),
-            r#"anchor apple generic and certificate leaf[subject.OU] = "6Z49PF6642" and identifier "red.forbes.terminal-decline.lib""#
+            "anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate \
+             leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = \"6Z49PF6642\" and \
+             identifier \"red.forbes.terminal-decline.lib\""
         );
     }
 }

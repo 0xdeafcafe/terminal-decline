@@ -26,6 +26,7 @@ pub mod session;
 #[cfg(test)]
 mod testutil;
 mod view;
+pub mod watch;
 
 pub use paths::Paths;
 

@@ -63,17 +63,14 @@ fn main() {
         i += 1;
     }
 
-    let refs: Vec<&std::path::Path> = layers.iter().map(|p| p.as_path()).collect();
-    let (mut config, errors) = config::load(&refs);
+    let from = config::Source { layers, command };
+    let (config, errors) = from.load();
     for e in &errors {
         eprintln!("decline: {e}");
     }
-    if let Some(cmd) = command.filter(|c| !c.is_empty()) {
-        config.command = cmd;
-    }
     let name = pin::own_app_name(&paths).unwrap_or_else(|| "decline".into());
     // Shown in each window too: an app started from the Dock has no stderr.
-    app::run(config, errors, &name, restore);
+    app::run(config, errors, &name, restore, from);
 }
 
 fn die(msg: &str) -> ! {

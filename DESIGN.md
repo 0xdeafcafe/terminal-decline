@@ -365,7 +365,32 @@ the installed `Decline.app`.
 
 `~/.config/decline/config.toml`: font family/size, colours (16 + fg/bg/cursor/
 selection), padding, opacity/blur, option-as-meta, scrollback lines, shell.
-Read once at start; later: reload on file change (FSEvents, no polling).
+
+Live reload (`watch`, `AppDelegate::reload_config`): the config files (the
+user's, a pin's, `--config`) are watched with kqueue vnode watches on each
+file and its directory (editors save by renaming a new file over the old;
+a missing file is watched through the nearest directory that exists, a
+symlink at its target too). One thread blocks in `kevent`, so idle stays at
+0 wakeups (`top -l 2 -s 5 -stats idlew` with the watcher on: 0). After an
+event it waits 40 ms, arms the watches again and compares the files'
+contents, so only a real change reloads. A reload reads every layer again
+(`-e PROGRAM` still wins) and applies:
+
+- to every window at once: `[colors]`, the font settings (`font_family`,
+  `font_size`, `font_fallback`, `font_bold`/`_italic`/`_bold_italic`,
+  `line_height`, `cell_width`; Fonts rebuilt as Cmd+= does; a new
+  `font_size` replaces a size set with Cmd+= / Cmd+-), `padding`,
+  `opacity`, `option_as_meta`, `copy_on_select` and `[keybind]` (the menus
+  are rebuilt);
+- to new windows only, with a notice naming them (`decline: config:
+  columns changed: it applies to new windows`): `command`, `cwd`, `env`,
+  `columns`, `lines`, `blur` (a view set up with the window), `title`, and
+  `scrollback` (term-core has no way to change a running terminal's
+  limit; once it does, the new limit can apply from the next line).
+
+Errors in the edited file are notices in every window, written after the
+program's output, as at startup; new windows show the errors of the
+config in effect.
 
 Shortcuts (`[keybind]`, `keybind`): a chord (`"cmd+k"`, `"ctrl+shift+t"`,
 `"cmd+enter"`; modifiers cmd, ctrl, alt, shift; keys by character or name)

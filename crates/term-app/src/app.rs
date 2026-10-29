@@ -35,7 +35,14 @@ enum Place {
 }
 
 pub struct AppIvars {
-    config: Rc<Config>,
+    /// The config in effect; replaced when a config file changes.
+    config: RefCell<Rc<Config>>,
+    /// Where the config was read from, to read it again.
+    origin: crate::config::Source,
+    /// Watches the config files (see [`crate::watch`]).
+    watcher: RefCell<Option<crate::watch::Watcher>>,
+    /// The app's name, for the menus rebuilt after a reload.
+    app_name: String,
     /// Windows to reopen after a dogfood build restarted into a newer one.
     restore: RefCell<Vec<crate::reload::SavedWindow>>,
     /// Config errors, shown at the top of each window.
@@ -66,6 +73,7 @@ define_class!(
             }
             self.restore(restore);
             self.watch_for_new_build();
+            self.watch_config();
             crate::latency::listen(|cmd| {
                 let delegate = DELEGATE.with(|d| d.borrow().as_ref().and_then(|w| w.load()));
                 if let Some(delegate) = delegate {
@@ -175,9 +183,14 @@ impl AppDelegate {
         config: Config,
         notices: Vec<String>,
         restore: Vec<crate::reload::SavedWindow>,
+        origin: crate::config::Source,
+        app_name: &str,
     ) -> Retained<AppDelegate> {
         let this = Self::alloc(mtm).set_ivars(AppIvars {
-            config: Rc::new(config),
+            config: RefCell::new(Rc::new(config)),
+            origin,
+            watcher: RefCell::new(None),
+            app_name: app_name.into(),
             restore: RefCell::new(restore),
             notices: RefCell::new(notices.into()),
             fonts_checked: std::cell::Cell::new(false),
@@ -189,6 +202,59 @@ impl AppDelegate {
         let delegate: Retained<AppDelegate> = unsafe { msg_send![super(this), init] };
         DELEGATE.with(|d| *d.borrow_mut() = Some(objc2::rc::Weak::from_retained(&delegate)));
         delegate
+    }
+
+    /// Reload the config whenever one of its files changes.
+    fn watch_config(&self) {
+        let config = self.ivars().config.borrow().clone();
+        let files = self.ivars().origin.watched(&config);
+        let watcher = crate::watch::Watcher::start(files, || {
+            dispatch2::DispatchQueue::main().exec_async(|| {
+                let delegate = DELEGATE.with(|d| d.borrow().as_ref().and_then(|w| w.load()));
+                if let Some(delegate) = delegate {
+                    delegate.reload_config();
+                }
+            });
+        });
+        match watcher {
+            Ok(w) => *self.ivars().watcher.borrow_mut() = Some(w),
+            Err(e) => eprintln!("decline: can't watch the config for changes: {e}"),
+        }
+    }
+
+    /// Read the config again and apply it: to every window what can change
+    /// while it runs, the rest to new windows (with a notice saying so).
+    /// Errors are notices, as at startup.
+    fn reload_config(&self) {
+        let (config, errors) = self.ivars().origin.load();
+        let config = Rc::new(config);
+        let old = self.ivars().config.replace(config.clone());
+        let mut shown = errors.clone();
+        if old.font_config(old.font_size) != config.font_config(config.font_size) {
+            let mtm = MainThreadMarker::from(self);
+            let scale = NSScreen::mainScreen(mtm).map(|s| s.backingScaleFactor()).unwrap_or(2.0);
+            let fonts = Fonts::with_config(&config.font_config(config.font_size), scale);
+            shown.extend(config.missing_font_notices(fonts.missing()));
+        }
+        // New windows show the errors, as they would at startup.
+        *self.ivars().notices.borrow_mut() = shown.iter().cloned().collect();
+        shown.extend(crate::config::new_windows_notice(&crate::config::new_windows_only(&old, &config)));
+        for n in &shown {
+            eprintln!("decline: {n}");
+        }
+        if old.keybind != config.keybind {
+            let mtm = MainThreadMarker::from(self);
+            let menus = build_menus(mtm, &self.ivars().app_name, &config.keybinds());
+            NSApplication::sharedApplication(mtm).setMainMenu(Some(&menus));
+        }
+        let windows: Vec<_> = self.ivars().windows.borrow().clone();
+        for (window, view) in windows {
+            apply_opacity(&window, &config);
+            view.apply_config(config.clone(), &shown);
+        }
+        if let Some(w) = self.ivars().watcher.borrow().as_ref() {
+            w.set_paths(self.ivars().origin.watched(&config));
+        }
     }
 
     /// Dogfood builds: restart into a newer build when one is installed.
@@ -363,7 +429,7 @@ impl AppDelegate {
     /// `argv` (else the configured program).
     fn open_window(&self, cwd: Option<String>, place: Place, argv: Option<Vec<String>>) -> Option<Retained<NSWindow>> {
         let mtm = MainThreadMarker::from(self);
-        let config = self.ivars().config.clone();
+        let config = self.ivars().config.borrow().clone();
         let scale = NSScreen::mainScreen(mtm).map(|s| s.backingScaleFactor()).unwrap_or(2.0);
         let fonts = Fonts::with_config(&config.font_config(config.font_size), scale);
         let metrics = fonts.metrics;
@@ -407,10 +473,7 @@ impl AppDelegate {
 
         let view = TerminalView::new(mtm, bounds);
         view.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable);
-        if config.opacity < 1.0 {
-            window.setOpaque(false);
-            window.setBackgroundColor(Some(&NSColor::clearColor()));
-        }
+        apply_opacity(&window, &config);
         if config.opacity < 1.0 && config.blur {
             let blur = NSVisualEffectView::initWithFrame(NSVisualEffectView::alloc(mtm), bounds);
             blur.setMaterial(NSVisualEffectMaterial::UnderWindowBackground);
@@ -485,6 +548,20 @@ impl AppDelegate {
         };
         self.ivars().windows.borrow_mut().push((window.clone(), view));
         Some(window)
+    }
+}
+
+/// A window lets the desktop show through when `opacity` is below 1.
+fn apply_opacity(window: &NSWindow, config: &Config) {
+    let opaque = config.opacity >= 1.0;
+    if window.isOpaque() != opaque {
+        window.setOpaque(opaque);
+        let color = if opaque {
+            NSColor::windowBackgroundColor()
+        } else {
+            NSColor::clearColor()
+        };
+        window.setBackgroundColor(Some(&color));
     }
 }
 
@@ -651,13 +728,13 @@ thread_local! {
     static DELEGATE: RefCell<Option<objc2::rc::Weak<AppDelegate>>> = const { RefCell::new(None) };
 }
 
-pub fn run(config: Config, notices: Vec<String>, app_name: &str, restore: Vec<crate::reload::SavedWindow>) {
+pub fn run(config: Config, notices: Vec<String>, app_name: &str, restore: Vec<crate::reload::SavedWindow>, origin: crate::config::Source) {
     let mtm = MainThreadMarker::new().expect("must run on the main thread");
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
     crate::notify::on_click(crate::view::bring_to_front);
     let menus = build_menus(mtm, app_name, &config.keybinds());
-    let delegate = AppDelegate::new(mtm, config, notices, restore);
+    let delegate = AppDelegate::new(mtm, config, notices, restore, origin, app_name);
     app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
     app.setMainMenu(Some(&menus));
     app.run();

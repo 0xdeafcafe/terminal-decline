@@ -971,6 +971,43 @@ impl TerminalView {
         }
     }
 
+    /// A reloaded config: colours, fonts, padding, opacity and shortcuts
+    /// change at once, option-as-meta and copy-on-select from the next key
+    /// or selection; `notices` are written into the terminal. A new
+    /// `font_size` replaces a size set with Cmd+= / Cmd+-; otherwise the
+    /// window keeps its size.
+    pub fn apply_config(&self, config: Rc<Config>, notices: &[String]) {
+        let Some(window) = self.window() else { return };
+        let scale = window.backingScaleFactor();
+        let changed = self.with_state(|st| {
+            let old = std::mem::replace(&mut st.config, config.clone());
+            let old_fonts = old.font_config(st.font_size);
+            if config.font_size != old.font_size {
+                st.font_size = config.font_size;
+            }
+            let fonts = config.font_config(st.font_size);
+            if fonts != old_fonts || scale != st.scale {
+                st.scale = scale;
+                st.renderer.set_fonts(Fonts::with_config(&fonts, scale));
+            }
+            st.binds = config.keybinds();
+            st.theme = config.theme();
+            {
+                let mut t = st.session.lock_term();
+                t.state.set_default_colors(crate::config::query_colors(&st.theme));
+                for n in notices {
+                    crate::session::write_late_notice(&mut t, n);
+                }
+            }
+            self.ivars().layer.setOpaque(config.opacity >= 1.0);
+        });
+        if changed.is_some() {
+            // Padding or cell size may have changed the grid.
+            self.resize();
+            self.request_redraw();
+        }
+    }
+
     fn set_focus(&self, focused: bool) {
         let report = self.with_state(|st| {
             st.focused = focused;
@@ -1701,6 +1738,8 @@ fn write_dump(st: &mut State, window: Window) {
         cell_height: m.cell_height,
         font_size: st.font_size,
         scale: st.scale,
+        foreground: format!("#{:06x}", crate::config::rgb_of(st.theme.foreground)),
+        background: format!("#{:06x}", crate::config::rgb_of(st.theme.background)),
         phys_footprint: control::phys_footprint(),
     };
     let line = serde_json::to_string(&dump).expect("dump serialises");

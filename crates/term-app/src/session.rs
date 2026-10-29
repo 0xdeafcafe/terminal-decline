@@ -126,6 +126,15 @@ pub fn write_notice(term: &mut Term, text: &str) {
     write_red(term, &format!("decline: {text}"));
 }
 
+/// A notice written while a program runs (after a config reload): on a line
+/// of its own, after whatever the program printed.
+pub fn write_late_notice(term: &mut Term, text: &str) {
+    if term.state.cursor_in_view().is_none_or(|(_, col)| col > 0) {
+        term.advance(b"\r\n");
+    }
+    write_notice(term, text);
+}
+
 fn write_red(term: &mut Term, line: &str) {
     term.advance(format!("\x1b[0;2;31m{line}\x1b[0m\r\n").as_bytes());
     term.state.take_replies();

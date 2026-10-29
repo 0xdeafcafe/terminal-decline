@@ -2,7 +2,7 @@
 //! (inside its app bundle) layered on top.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Deserializer};
 use term_font::{CellWidth, FontConfig};
@@ -23,7 +23,7 @@ pub enum OptionAsMeta {
     None,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Colors {
     pub foreground: String,
@@ -51,7 +51,7 @@ impl Default for Colors {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub font_family: String,
@@ -202,6 +202,65 @@ pub fn load(layers: &[&Path]) -> (Config, Vec<String>) {
         Config::default()
     });
     (config, errors)
+}
+
+/// Where the config comes from, kept so it can be read again when a file
+/// changes.
+#[derive(Clone, Debug, Default)]
+pub struct Source {
+    /// The user's config.toml, then a pin's settings, then `--config`.
+    pub layers: Vec<PathBuf>,
+    /// `-e PROGRAM ARGS...`, which replaces `command` whatever the files say.
+    pub command: Option<Vec<String>>,
+}
+
+impl Source {
+    /// The config and its errors, as [`load`] gives them.
+    pub fn load(&self) -> (Config, Vec<String>) {
+        let refs: Vec<&Path> = self.layers.iter().map(PathBuf::as_path).collect();
+        let (mut config, errors) = load(&refs);
+        if let Some(cmd) = self.command.as_ref().filter(|c| !c.is_empty()) {
+            config.command = cmd.clone();
+        }
+        (config, errors)
+    }
+
+    /// The files whose changes reload the config.
+    pub fn watched(&self, _config: &Config) -> Vec<PathBuf> {
+        self.layers.clone()
+    }
+}
+
+/// Settings that a running window can't take on: they apply to windows
+/// opened after a reload. The rest apply to every window at once (see
+/// DESIGN.md, Config).
+pub fn new_windows_only(old: &Config, new: &Config) -> Vec<&'static str> {
+    let mut changed = Vec::new();
+    let mut check = |name, differs: bool| {
+        if differs {
+            changed.push(name);
+        }
+    };
+    check("command", old.command != new.command);
+    check("cwd", old.cwd != new.cwd);
+    check("env", old.env != new.env);
+    check("columns", old.columns != new.columns);
+    check("lines", old.lines != new.lines);
+    // term-core has no way to change a terminal's scrollback limit.
+    check("scrollback", old.scrollback != new.scrollback);
+    // The blur is a view behind the terminal's, set up with the window.
+    check("blur", old.blur != new.blur);
+    check("title", old.title != new.title);
+    changed
+}
+
+/// The notice for settings that changed but apply to new windows only.
+pub fn new_windows_notice(changed: &[&str]) -> Option<String> {
+    match changed {
+        [] => None,
+        [one] => Some(format!("config: {one} changed: it applies to new windows")),
+        many => Some(format!("config: {} changed: they apply to new windows", many.join(", "))),
+    }
 }
 
 fn accepts(table: toml::Table) -> Result<(), String> {
@@ -633,6 +692,46 @@ mod tests {
         // The user's config alone.
         let (c, _) = load(&[&user]);
         assert_eq!(c.keybinds().get(&Chord::parse("cmd+d").unwrap()), Some(&Bound::Text("user".into())));
+    }
+
+    #[test]
+    fn some_settings_wait_for_new_windows() {
+        let old = Config::default();
+        assert!(new_windows_only(&old, &old.clone()).is_empty());
+        let (live, _) = parse(
+            "font_size = 20\npadding = 1\nopacity = 0.5\noption_as_meta = 'left'\ncopy_on_select = true\n\
+             [colors]\nbackground = '#000000'\n[keybind]\n\"cmd+k\" = \"none\"",
+        );
+        assert!(new_windows_only(&old, &live).is_empty());
+        let (later, _) = parse("columns = 80\ncommand = ['htop']\nscrollback = 5\nblur = true");
+        let changed = new_windows_only(&old, &later);
+        assert_eq!(changed, ["command", "columns", "scrollback", "blur"]);
+        assert_eq!(
+            new_windows_notice(&changed).unwrap(),
+            "config: command, columns, scrollback, blur changed: they apply to new windows"
+        );
+        assert_eq!(
+            new_windows_notice(&["lines"]).unwrap(),
+            "config: lines changed: it applies to new windows"
+        );
+        assert_eq!(new_windows_notice(&[]), None);
+    }
+
+    #[test]
+    fn source_keeps_the_command_line_program() {
+        let dir = TempDir::new("cfg-source");
+        let file = dir.join("config.toml");
+        std::fs::write(&file, "command = ['vim']\nfont_size = 15\n").unwrap();
+        let mut source = Source {
+            layers: vec![file.clone()],
+            command: None,
+        };
+        assert_eq!(source.load().0.command, ["vim"]);
+        source.command = Some(vec!["htop".into()]);
+        let (c, errors) = source.load();
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!((c.command.as_slice(), c.font_size), (["htop".to_string()].as_slice(), 15.0));
+        assert_eq!(source.watched(&c), [file]);
     }
 
     #[test]

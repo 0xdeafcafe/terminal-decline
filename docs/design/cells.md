@@ -2970,6 +2970,65 @@ standard benchmarks. Rows marked "estimate" are not measured yet.
   engine can take a `regex::bytes` matcher later, with the regex's required
   literals feeding the filter.
 
+**Landed (PR 13b).** What was built (`search.rs` and its tests in
+`search/tests.rs`, the terminal's side in `term/search.rs`, hooks in
+`scrollback.rs` and `term/snapshot.rs`), and where it differs from
+§13.3–§13.8:
+- **The API** is §13.4's: `Terminal::start_search(Query) -> SearchJob`
+  (the screen searched at once, history's blocks and a copy of the open
+  block taken), `SearchJob::next_batch()` / `run()` on the worker (one
+  block per batch, the view's block first, then alternately older and
+  newer, a last empty batch marked done, None once cancelled), and
+  `add_search_hits(batch) -> bool` (redraw wanted). For the bar:
+  `search_count()` (`total`, `current`, `running`, `capped`),
+  `search_next()` / `search_previous()` (select the hit and scroll to
+  it; wrap once history is searched; otherwise wait for the worker and
+  jump when the hit arrives), `current_hit()`, `search_hits()`,
+  `stop_search()`, and `view_position` / `scroll_to` (§13.2). The
+  snapshot's highlights carry `SearchHit` and `CurrentSearchHit`.
+- **Every place a match starts is a hit, overlapping ones included**
+  ("aa" twice in "aaa"), not the leftmost non-overlapping ones: hits
+  are then the same in whatever order blocks are searched, which the
+  nearest-first order needs, and a hit is known by its start.
+- **The live rule** runs at snapshot time (and before next/previous and
+  merging): history lines from `history_to` on are searched with a
+  match's reach (4 bytes a query scalar, plus one scalar) before them,
+  keeping matches that end in the new text; pops lower `history_to`
+  through a search mark of the scrollback's own. The screen is searched
+  again whole when any row's `seq`, its first line or the screen
+  changes, with the end of history's last logical line before it; its
+  list holds the hits that end on the screen. Not per row yet.
+- **ED 3 and RIS** drop history's hits and stop the job; nothing needs
+  starting again, as history after them is searched as live output.
+  RIS keeps the search. On the alternate screen the count, next and
+  previous and the highlights use the screen's hits only.
+- **Case folding** is worked out from the standard library's case
+  tables (the lower case of a character's upper case) rather than a
+  generated table: the equivalence classes are those of simple folding,
+  with the KELVIN SIGN, LONG S and Turkish i left out; a test checks no
+  non-ASCII character folds to ASCII. A query with non-ASCII cased
+  letters is matched scalar by scalar, jumping to its first scalar with
+  `memchr2` when that is ASCII; the longest-ASCII-stretch speed-up is
+  not built. memchr is now a direct dependency (it was already in the
+  tree through vte).
+- **Points:** a hit's line is found from the block's line starts
+  (worked out once per block with a candidate); ASCII lines without
+  clusters or width exceptions take the column from the byte offset,
+  other lines are decoded and their cells walked. A match that starts
+  or ends inside a cluster is dropped there.
+- **In view first:** when the view is at the bottom, its hits come from
+  the screen search under the lock; scrolled back, from the job's first
+  block.
+- **Tests:** folding, the word rule, each matcher path, wraps, clusters
+  and wide cells, block boundaries (a test aid seals the open block),
+  live output, freeing and ED 3, next/previous and the highlights, and a
+  property test: hits equal a naive scalar-by-scalar search over the
+  whole text built from every row, before and after more output, with
+  random seals and limits.
+- **Not built yet:** the hit list's narrowing while typing, hits moved
+  by region scrolls (screen hits are found again instead), the filter
+  (13c), R.7's decompression, and regex (not in 1.0).
+
 ### 13.9 The find bar (Alex's decision: our own, not NSTextFinder)
 
 Cmd+F shows a native-style find bar of decline's own, made only of standard

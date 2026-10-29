@@ -956,6 +956,7 @@ version = "0.0.1"
 dependencies = [
  "criterion",
  "insta",
+ "memchr",
  "proptest",
  "unicode-segmentation",
  "unicode-width",

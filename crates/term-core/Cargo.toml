@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 vte.workspace = true
+memchr = "2.7"
 
 [dev-dependencies]
 criterion = { version = "0.7", default-features = false }
@@ -24,4 +25,8 @@ harness = false
 
 [[bench]]
 name = "history"
+harness = false
+
+[[bench]]
+name = "search"
 harness = false

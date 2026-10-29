@@ -34,6 +34,8 @@
 //!   opened while this control is on: it is listed in the dump's `opened`;
 //! - `scroll N`: scroll the focused pane's view N lines back into history
 //!   (negative: towards the bottom), as the scroll wheel does;
+//! - `menu ACTION`: send a menu item's action (a `[keybind]` action name,
+//!   as `select_output`) up the responder chain, as choosing it does;
 //! - `quit`: quit the app, without asking.
 //!
 //! While this is on, the window draws even when covered by other windows,
@@ -187,6 +189,8 @@ pub enum Control {
     Click(usize, usize),
     /// Scroll the view this many lines back.
     Scroll(isize),
+    /// A menu item's action, as choosing the item sends it.
+    Menu(crate::keybind::MenuAction),
     Quit,
 }
 
@@ -263,6 +267,7 @@ impl Control {
             }),
             "click" => Control::Click(words.next()?.parse().ok()?, words.next()?.parse().ok()?),
             "scroll" => Control::Scroll(words.next()?.parse().ok()?),
+            "menu" => Control::Menu(crate::keybind::MenuAction::from_name(words.next()?)?),
             "key" => {
                 let keycode = words.next()?.parse().ok()?;
                 let mut flags = 0;
@@ -505,6 +510,8 @@ mod tests {
             ("click 0", None),
             ("scroll -4", Some(Control::Scroll(-4))),
             ("scroll", None),
+            ("menu select_output", Some(Control::Menu(crate::keybind::MenuAction::SelectOutput))),
+            ("menu launch_missiles", None),
             (
                 "type-settings /fg\\r\\e\\\\x",
                 Some(Control::TypeSettings(b"/fg\r\x1b\\x".to_vec())),

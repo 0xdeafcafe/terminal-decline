@@ -2135,6 +2135,13 @@ impl WindowView {
                 Some(Control::Settings) => crate::app::show_settings_now(),
                 Some(Control::TypeSettings(bytes)) => crate::app::type_into_settings(bytes),
                 Some(Control::Key { keycode, flags }) => post_key(MainThreadMarker::from(self), keycode, flags),
+                Some(Control::Menu(action)) => {
+                    let app = NSApplication::sharedApplication(MainThreadMarker::from(self));
+                    let sent = unsafe { app.sendAction_to_from(objc2::runtime::Sel::register(action.selector()), None, None) };
+                    if !sent {
+                        NSBeep();
+                    }
+                }
                 Some(Control::Hover(cell)) => {
                     if let Some(view) = self.focused_view() {
                         view.set_hover(cell);
@@ -2263,12 +2270,26 @@ impl WindowView {
 /// A key press and release put on the app's event queue for the key
 /// window (the test-only `key` command): it goes where a real key goes,
 /// local event monitors and the menus first. The characters are the
-/// ASCII-capable layout's.
+/// ASCII-capable layout's; the arrow keys get AppKit's function-key
+/// characters and flags, as real ones do, so menu shortcuts match them.
 fn post_key(mtm: MainThreadMarker, keycode: u16, flags: u64) {
     let app = NSApplication::sharedApplication(mtm);
     let Some(window) = app.keyWindow() else { return };
-    let flags = NSEventModifierFlags(flags as usize);
-    let (plain, shifted) = crate::ascii_layout::chars(keycode);
+    let mut flags = NSEventModifierFlags(flags as usize);
+    let arrow = match keycode {
+        0x7B => Some('\u{F702}'),
+        0x7C => Some('\u{F703}'),
+        0x7D => Some('\u{F701}'),
+        0x7E => Some('\u{F700}'),
+        _ => None,
+    };
+    if arrow.is_some() {
+        flags |= NSEventModifierFlags::Function | NSEventModifierFlags::NumericPad;
+    }
+    let (plain, shifted) = match arrow {
+        Some(c) => (Some(c), Some(c)),
+        None => crate::ascii_layout::chars(keycode),
+    };
     let typed = if flags.contains(NSEventModifierFlags::Shift) {
         shifted
     } else {

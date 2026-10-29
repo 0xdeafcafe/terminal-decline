@@ -19,7 +19,7 @@ use objc2_app_kit::{
 use objc2_foundation::{
     NSArray, NSAttributedString, NSAttributedStringKey, NSNotFound, NSObjectProtocol, NSPoint, NSRange, NSRect, NSSize, NSString, NSURL,
 };
-use term_core::Selection;
+use term_core::{Point, Selection};
 
 use crate::keybind;
 use crate::keys::{KeyAction, KeyEventType, KeyInput, KeyModes, Mods, encode_key, paste_bytes};
@@ -37,6 +37,8 @@ pub struct Ivars {
     /// The link the right-click menu was opened on, for Open Link and
     /// Copy Link.
     menu_link: RefCell<Option<String>>,
+    /// Where the right-click menu was opened, for Select Command Output.
+    menu_point: Cell<Option<Point>>,
     /// The pointer is the pointing hand, over a link with Cmd held.
     hand: Cell<bool>,
 }
@@ -209,6 +211,30 @@ define_class!(
             self.request_redraw();
         }
 
+        #[unsafe(method(jumpToPreviousPrompt:))]
+        fn jump_to_previous_prompt(&self, _sender: Option<&AnyObject>) {
+            self.jump_to_prompt(true);
+        }
+
+        #[unsafe(method(jumpToNextPrompt:))]
+        fn jump_to_next_prompt(&self, _sender: Option<&AnyObject>) {
+            self.jump_to_prompt(false);
+        }
+
+        #[unsafe(method(selectCommandOutput:))]
+        fn select_command_output(&self, _sender: Option<&AnyObject>) {
+            self.select_output_at(None);
+        }
+
+        /// The right-click menu's Select Command Output: the command
+        /// clicked.
+        #[unsafe(method(selectClickedOutput:))]
+        fn select_clicked_output(&self, _sender: Option<&AnyObject>) {
+            if let Some(at) = self.ivars().menu_point.take() {
+                self.select_output_at(Some(at));
+            }
+        }
+
         #[unsafe(method(clearBuffer:))]
         fn clear_buffer(&self, _sender: Option<&AnyObject>) {
             self.with(|_, p| p.session.lock_term().advance(b"\x1b[H\x1b[2J\x1b[3J"));
@@ -341,6 +367,7 @@ impl PaneView {
             window: Weak::new(window),
             pane,
             menu_link: RefCell::new(None),
+            menu_point: Cell::new(None),
             hand: Cell::new(false),
         });
         let view: Retained<PaneView> = unsafe { msg_send![super(this), initWithFrame: frame] };
@@ -519,8 +546,19 @@ impl PaneView {
     /// the program isn't taking the mouse.
     fn show_context_menu(&self, event: &NSEvent) {
         let mtm = MainThreadMarker::from(self);
-        let link = self.cell_at(event).and_then(|(line, col)| self.link_at_cell(line, col));
+        let cell = self.cell_at(event);
+        let link = cell.and_then(|(line, col)| self.link_at_cell(line, col));
         self.ivars().menu_link.replace(link.clone());
+        let output = cell
+            .and_then(|(line, col)| {
+                self.with(|_, p| {
+                    let t = p.session.lock_term();
+                    let at = t.state.point_at(line, col);
+                    crate::prompts::has_output(&t.state, at).then_some(at)
+                })
+            })
+            .flatten();
+        self.ivars().menu_point.set(output);
         let has_selection = self
             .with(|_, p| p.session.lock_term().state.selection_text().is_some_and(|t| !t.is_empty()))
             .unwrap_or(false);
@@ -548,6 +586,9 @@ impl PaneView {
         add("Copy", sel!(copy:), has_selection);
         add("Paste", sel!(paste:), can_paste);
         add("Select All", sel!(selectAll:), true);
+        if output.is_some() {
+            add("Select Command Output", sel!(selectClickedOutput:), true);
+        }
         menu.addItem(&NSMenuItem::separatorItem(mtm));
         add("Clear Scrollback", sel!(clearBuffer:), true);
         NSMenu::popUpContextMenu_withEvent_forView(&menu, event, self);
@@ -739,6 +780,32 @@ impl PaneView {
             let b = view.bounds();
             let inside = at.x >= b.origin.x && at.y >= b.origin.y && at.x < b.origin.x + b.size.width && at.y < b.origin.y + b.size.height;
             view.set_hover(if cmd && inside { view.cell_at_point(at) } else { None });
+        }
+    }
+
+    /// Jump to Previous / Next Prompt: scroll the view to it, or beep if
+    /// there is none that way ([`crate::prompts::jump`]).
+    fn jump_to_prompt(&self, up: bool) {
+        match self.with(|_, p| crate::prompts::jump(&mut p.session.lock_term().state, up)) {
+            Some(true) => self.request_redraw(),
+            _ => NSBeep(),
+        }
+    }
+
+    /// Select the output of the command at `at`, or with `None` the one
+    /// at the top of the view or the last ([`crate::prompts::select_output`]);
+    /// beep if there is none.
+    fn select_output_at(&self, at: Option<Point>) {
+        let selected = self.with(|_, p| {
+            let mut t = p.session.lock_term();
+            match at {
+                Some(at) => t.state.select_output(at),
+                None => crate::prompts::select_output(&mut t.state),
+            }
+        });
+        match selected {
+            Some(true) => self.request_redraw(),
+            _ => NSBeep(),
         }
     }
 

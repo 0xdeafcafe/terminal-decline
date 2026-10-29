@@ -435,6 +435,12 @@ fn ghostty_action(action: &str) -> Option<String> {
             _ => return None,
         },
         "equalize_splits" => "equalize_panes",
+        // `jump_to_prompt:-1`: a count, its sign the way.
+        "jump_to_prompt" => match arg.parse::<i32>().ok()? {
+            n if n < 0 => "previous_prompt",
+            n if n > 0 => "next_prompt",
+            _ => return None,
+        },
         "toggle_split_zoom" => "toggle_pane_zoom",
         "unbind" => "none",
         "text" => return Some(format!("{{ text = {} }}", quote(&unescape(arg)?))),
@@ -1116,6 +1122,9 @@ mod tests {
             ("resize_split:sideways,3", None),
             ("equalize_splits", Some("equalize_panes")),
             ("toggle_split_zoom", Some("toggle_pane_zoom")),
+            ("jump_to_prompt:-1", Some("previous_prompt")),
+            ("jump_to_prompt:2", Some("next_prompt")),
+            ("jump_to_prompt:0", None),
             ("close_surface", Some("close")),
             ("close_tab", Some("close_tab")),
         ] {

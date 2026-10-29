@@ -485,6 +485,72 @@ fn a_restored_command_waits_at_the_prompt() {
     assert!(tried.len() >= 2, "{tried:?}");
 }
 
+/// The shell integration snippets in `shell/`, sourced by each shell
+/// there is: every prompt is marked, so the prompts can be jumped to and
+/// a command's output selected, with its exit status in the end mark.
+#[test]
+fn shell_integration_snippets_mark_prompts() {
+    let snippets = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../shell").canonicalize().unwrap();
+    let shells = [
+        ("/bin/zsh", ".zshrc", "decline.zsh"),
+        ("/bin/bash", ".bash_profile", "decline.bash"),
+        ("/opt/homebrew/bin/bash", ".bash_profile", "decline.bash"),
+        ("/opt/homebrew/bin/fish", "fish/config.fish", "decline.fish"),
+        ("/usr/local/bin/fish", "fish/config.fish", "decline.fish"),
+    ];
+    let mut tried = Vec::new();
+    for (shell, rc, snippet) in shells.into_iter().filter(|(s, ..)| Path::new(s).exists()) {
+        tried.push(shell);
+        let home = TempDir::new(&format!("integration-{}", shell.replace('/', "-")));
+        let cmd = login_shell(shell, home.path());
+        let rc = home.path().join(rc);
+        let mut startup = std::fs::read_to_string(&rc).unwrap();
+        startup.push_str(&format!("source '{}'\n", snippets.join(snippet).display()));
+        std::fs::write(&rc, startup).unwrap();
+        let signal = Arc::new(Signal::default());
+        let session = Session::spawn(&cmd, size(60, 6), Term::new(60, 6, 1000), signal.hooks()).expect("spawn");
+        let h = Harness {
+            session: Some(session),
+            signal,
+            _home: home,
+        };
+        h.wait_for(&format!("{shell}'s first prompt"), |d| prompts(d) == 1);
+        h.type_text("echo one; echo two\n");
+        h.wait_for(&format!("{shell}'s second prompt"), |d| prompts(d) == 2);
+        h.type_text("echo three; false\n");
+        h.wait_for(&format!("{shell}'s third prompt"), |d| prompts(d) == 3);
+        // Enough lines for the first command to scroll into history.
+        h.type_text("printf 'x\\n%.0s' 1 2 3 4 5 6\n");
+        h.wait_term(&format!("{shell}'s fourth prompt"), |t| {
+            let cursor = t.point_at(t.cursor_in_view()?.0, 0);
+            let mut line = cursor.line;
+            let mut found = 0;
+            while let Some(q) = t.previous_prompt(line) {
+                found += 1;
+                line = q.line;
+            }
+            let at_prompt = t.marks_at(cursor.line).iter().any(|m| m.kind == term_core::MarkKind::Input);
+            (found == 3 && at_prompt).then_some(())
+        });
+        let mut term = h.session().term().lock().unwrap();
+        let t = &mut term.state;
+        assert!(t.scrollback_len() > 0, "{shell}: nothing in history\n{}", t.dump());
+        // Back to the first prompt, and its output.
+        for _ in 0..3 {
+            assert!(terminal_decline::prompts::jump(t, true), "{shell}\n{}", t.dump());
+        }
+        assert!(t.dump().starts_with(&format!("{PROMPT} echo one")), "{shell}\n{}", t.dump());
+        assert!(terminal_decline::prompts::select_output(t), "{shell}");
+        assert_eq!(t.selection_text().as_deref(), Some("one\ntwo"), "{shell}");
+        // The second command's end mark has its status.
+        let second = t.next_prompt(t.point_at(0, 0).line).unwrap();
+        let third = t.next_prompt(second.line).unwrap();
+        let end = t.marks_at(third.line).into_iter().find(|m| m.kind == term_core::MarkKind::End);
+        assert_eq!(end.and_then(|m| m.status), Some(1), "{shell}: {:?}", t.marks_at(third.line));
+    }
+    assert!(tried.len() >= 2, "{tried:?}");
+}
+
 /// A restored command isn't typed once something else has been: it would
 /// be mixed into what the user typed.
 #[test]

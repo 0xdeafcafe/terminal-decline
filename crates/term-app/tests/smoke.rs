@@ -1149,6 +1149,52 @@ fn smoke_links_hover_and_open() {
     );
 }
 
+/// With prompts marked as the shell integration snippets mark them,
+/// Cmd+Up and Cmd+Down scroll the view to the prompts in history, and
+/// Select Command Output (its action sent as the menu sends it) selects
+/// the output of the command at the top.
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_jump_to_prompts_and_select_output() {
+    if !have_metal() {
+        return;
+    }
+    let dir = TempDir::new("prompts");
+    let wait = "i=0; while [ \"$(stty size)\" != '20 80' ] && [ $i -lt 100 ]; do sleep 0.05; i=$((i+1)); done; ";
+    // Prompts at lines 0, 41 and 82 and the last at 123, each command
+    // printing 40 lines.
+    let session = "s() { printf '\\033]133;A\\007$ %s\\033]133;B\\007\\n\\033]133;C\\007' \"$1\"; \
+                   i=0; while [ $i -lt 40 ]; do echo \"$1 $i\"; i=$((i+1)); done; printf '\\033]133;D;0\\007'; }; \
+                   s one; s two; s three; printf '\\033]133;A\\007$ '; ";
+    let up = osc("key 126 cmd");
+    let down = osc("key 125 cmd");
+    let dump = osc("dump");
+    let script = format!(
+        "{resize}{wait}{session}{dump}{up}{dump}{up}{dump}{select}{dump}{down}{dump}{down}{dump}{down}{dump}{quit}sleep 20",
+        resize = osc("resize 80 20"),
+        select = osc("menu select_output"),
+        quit = osc("quit"),
+    );
+    let (status, _) = decline(&dir, &script, true);
+    assert!(status.success(), "{status}");
+    let d = dumps(&dir);
+    assert_eq!(d.len(), 7, "{d:?}");
+    let offset = |x: &Value| num(x, "view_offset") as u64;
+    let top = |x: &Value| screen(x).lines().next().unwrap_or_default().to_string();
+    assert_eq!(offset(&d[0]), 0, "{}", d[0]);
+    // The screen is lines 104..124: up to `three` (82), then `two` (41).
+    assert_eq!((offset(&d[1]), top(&d[1])), (22, "$ three|".into()), "{}", d[1]);
+    assert_eq!((offset(&d[2]), top(&d[2])), (63, "$ two|".into()), "{}", d[2]);
+    let selected = d[3]["selection"].as_str().unwrap_or_default();
+    let want: Vec<String> = (0..40).map(|i| format!("two {i}")).collect();
+    assert_eq!(selected, want.join("\n"), "{}", d[3]);
+    assert_eq!(offset(&d[4]), 22, "{}", d[4]);
+    // The last prompt is on the screen: the view goes to the bottom, and
+    // no further.
+    assert_eq!(offset(&d[5]), 0, "{}", d[5]);
+    assert_eq!(offset(&d[6]), 0, "{}", d[6]);
+}
+
 /// A folder opened with the app (`open -a`, as a folder dropped on its
 /// Dock icon is): an app that isn't running starts with a window there
 /// and no other, and a running one opens another window (or a tab, as the

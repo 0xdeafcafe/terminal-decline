@@ -25,6 +25,7 @@ pub mod panes;
 pub mod paths;
 pub mod pin;
 pub mod prefs;
+pub mod prompts;
 pub mod reload;
 pub mod running;
 pub mod secure_input;

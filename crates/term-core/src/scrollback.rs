@@ -312,27 +312,37 @@ fn encode(row: &Row, styles: &[Style], out: &mut Vec<u8>, body: &mut Vec<u8>, ru
         return;
     }
 
+    // Room for 4 bytes a cell, written in place and cut to length after.
     body.clear();
+    body.resize(cells.len() * 4, 0);
+    let mut at = 0;
     runs.clear();
-    let mut utf8 = [0u8; 4];
-    // Neighbouring cells mostly share a style id: look each run's up once.
-    let mut last_id = 0;
-    let mut base = DEFAULT_LOOK;
+    // Neighbouring cells mostly share a style id and width: work out a
+    // run's look only when they change. Two ids can still have the same
+    // look (it leaves out the link), so a new look may extend the last run.
+    const KEY: u64 = 0xFFFF_FFFF << 32 | Cell::WIDTH;
+    let mut last_key = u64::MAX;
     for &c in cells {
         if c.is_spacer() {
             continue;
         }
         let cp = c.codepoint();
         if cp < 0x80 {
-            body.push(if cp == 0 { b' ' } else { cp as u8 });
+            body[at] = if cp == 0 { b' ' } else { cp as u8 };
+            at += 1;
         } else {
-            body.extend_from_slice(c.ch().encode_utf8(&mut utf8).as_bytes());
+            at += c.ch().encode_utf8(&mut body[at..at + 4]).len();
         }
-        if c.style_id() != last_id {
-            last_id = c.style_id();
-            base = styles.get(last_id as usize).map_or(DEFAULT_LOOK, Look::of);
+        let key = c.bits() & KEY;
+        if key == last_key {
+            // Same style id and width as the cell before: same run.
+            if let Some((_, n)) = runs.last_mut() {
+                *n += 1;
+            }
+            continue;
         }
-        let mut look = base;
+        last_key = key;
+        let mut look = styles.get(c.style_id() as usize).map_or(DEFAULT_LOOK, Look::of);
         if c.is_wide() {
             look.style |= look::WIDE;
         }
@@ -341,6 +351,7 @@ fn encode(row: &Row, styles: &[Style], out: &mut Vec<u8>, body: &mut Vec<u8>, ru
             _ => runs.push((look, 1)),
         }
     }
+    body.truncate(at);
     put_varint(out, body.len() as u32);
     out.extend_from_slice(body);
     put_runs(out, runs);

@@ -252,7 +252,7 @@ pub fn remove_pin(paths: &Paths, name: &str, running: &dyn Fn(&Path) -> bool) ->
 pub fn is_pin_file(paths: &Paths, path: &Path) -> bool {
     let dir = paths.pins_dir();
     let same = |a: &Path, b: &Path| a == b || a.canonicalize().ok().zip(b.canonicalize().ok()).is_some_and(|(a, b)| a == b);
-    path.extension().is_some_and(|e| e == "toml") && path.parent().is_some_and(|p| same(p, &dir))
+    path.extension().is_some_and(|e| e == "toml") && !crate::pin::record::is_record(path) && path.parent().is_some_and(|p| same(p, &dir))
 }
 
 /// `terminal-decline prefs ARGS`: the preferences in this terminal.

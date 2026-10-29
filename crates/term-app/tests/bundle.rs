@@ -165,6 +165,54 @@ fn layout_signing_and_the_app_starts() {
     assert!(listed.trim().is_empty(), "{listed}");
 }
 
+/// `terminal-decline pin` run from the bundled app makes a stub pin from
+/// its `Helpers/terminal-decline-pin` (pins.md §3.1), which `--list`
+/// shows as a dev pin; `--update` leaves it alone. All in a temp `HOME`.
+#[test]
+fn the_app_makes_stub_pins() {
+    let out = OutDir::new("stub-pins");
+    let app = support::bundle(&out.0.join("bundle"), &[]);
+    let launcher = support::launcher(&app);
+    let apps = out.0.join("Applications");
+    let pin = |args: &[&str]| {
+        run_ok(
+            Command::new(&launcher)
+                .arg("pin")
+                .args(args)
+                .env("XDG_CONFIG_HOME", out.0.join("config"))
+                .env("HOME", &out.0),
+        )
+    };
+    let made = pin(&["Rush", "--dir", apps.to_str().unwrap(), "--", "/bin/echo", "hi"]);
+    assert!(made.contains("created"), "{made}");
+    let rush = apps.join("Rush.app");
+    let lsregister = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister";
+    let _ = Command::new(lsregister).arg("-u").arg(&rush).status();
+    assert_eq!(extract(&rush.join("Contents/Info.plist"), "TDPinId"), "rush");
+    assert_eq!(
+        extract(&rush.join("Contents/Info.plist"), "TDLibraryRequirement"),
+        r#"identifier "red.forbes.terminal-decline.lib""#
+    );
+    let d = codesign_display(&rush, &["--entitlements", "-"]);
+    assert!(d.contains("Identifier=red.forbes.terminal-decline.pin.rush"), "{d}");
+    assert!(d.contains("(adhoc,runtime)") && d.contains("disable-library-validation"), "{d}");
+    run_ok(Command::new("/usr/bin/codesign").args(["--verify", "--strict"]).arg(&rush));
+    // The pin's library requirement passes for this app's library.
+    run_ok(
+        Command::new("/usr/bin/codesign")
+            .args(["--verify", "-R", r#"=identifier "red.forbes.terminal-decline.lib""#])
+            .arg(app.join("Contents/Frameworks/libterminal_decline.dylib")),
+    );
+    let before = codesign_display(&rush, &[]);
+
+    let listed: serde_json::Value = serde_json::from_str(&pin(&["--list", "--json"])).unwrap();
+    assert_eq!(listed["pins"][0]["status"], "ok", "{listed}");
+    assert_eq!(listed["pins"][0]["dev"], true, "{listed}");
+    let updated = pin(&["--update"]);
+    assert!(updated.contains("Rush is up to date"), "{updated}");
+    assert_eq!(codesign_display(&rush, &[]), before);
+}
+
 /// `HARDENED=1` (ad-hoc): the hardened runtime everywhere, and the dev
 /// entitlements, without which dyld refuses the ad-hoc library.
 #[test]

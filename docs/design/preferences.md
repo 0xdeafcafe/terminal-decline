@@ -263,13 +263,15 @@ does.
 
 - The section lists the pins (`pin::list`): name, command, icon. Enter
   opens that pin's file in the same editor, layered over the user's file.
-- It is built on the pin layout P.2 makes (a launcher plus the app's
-  library), which comes first.
+- It is built on the pin layout P.2 makes (the app's stub in each pin,
+  loading the installed library; landed in P-5), and can read
+  `pin --list --json` for each pin's state.
 - Remove calls `pin::remove`, asks to confirm, refuses while that pin is
   running (its executable among the running processes), and says that its
   Dock tile stays.
-- Changing the icon re-signs the pin; until P.2 its permissions are asked
-  again, and the TUI says so.
+- Changing the icon of a stub pin sets a Finder custom icon (pins.md
+  §5.2), so its permissions are kept; only a rename or a rebuild
+  (`pin --repair`) asks for them again, and the TUI says so first.
 - A running pin watches its own files, so edits apply in that pin's
   windows at once.
 - `pin_app` is hidden, `command` can't be reset, and `title` is under

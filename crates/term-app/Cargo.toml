@@ -23,6 +23,8 @@ term-pty.workspace = true
 term-font.workspace = true
 term-render.workspace = true
 term-prefs.workspace = true
+term-pin = { path = "../term-pin" }
+term-icon = { path = "../term-icon" }
 objc2-core-text.workspace = true
 objc2.workspace = true
 block2.workspace = true

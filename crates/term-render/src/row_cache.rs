@@ -77,8 +77,15 @@ impl Hasher for KeyHasher {
     }
     #[inline]
     fn write(&mut self, bytes: &[u8]) {
-        for &b in bytes {
-            self.mix(b as u64);
+        // Eight bytes at a time: stretches of text are keys too.
+        let (chunks, tail) = bytes.as_chunks::<8>();
+        for c in chunks {
+            self.mix(u64::from_le_bytes(*c));
+        }
+        let mut rest = [0u8; 8];
+        if !tail.is_empty() {
+            rest[..tail.len()].copy_from_slice(tail);
+            self.mix(u64::from_le_bytes(rest) ^ (tail.len() as u64) << 59);
         }
     }
     #[inline]

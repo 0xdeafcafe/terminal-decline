@@ -39,9 +39,10 @@ Use [Conventional Commits](https://www.conventionalcommits.org/):
 Alex uses `~/Applications/Terminal Decline.app`, installed by `scripts/dogfood.sh`.
 After merging changes to `main` that affect the app, run
 `scripts/dogfood.sh`: the running copy restarts into the new build and
-reopens its windows in the same folders and places. The first run after
-the rename also runs `pin --update` and removes the old
-`~/Applications/Decline.app`, whose windows move to the new app.
+reopens its windows in the same folders and places. The bundle is the
+launcher, `Frameworks/libterminal_decline.dylib` and the pin stub in
+`Helpers/`; the restart watches the library. Until P-5 lands, `pin` and
+`pin --update` refuse to run from this bundle (existing pins keep working).
 
 ## Agents in worktrees
 

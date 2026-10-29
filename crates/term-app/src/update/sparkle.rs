@@ -112,6 +112,7 @@ pub fn check_in_background() {
         log("update-check: the updater is off");
         return;
     };
+    log("update-check: a background check");
     set_status("checking");
     let _: () = unsafe { msg_send![&*updater, checkForUpdatesInBackground] };
 }

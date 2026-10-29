@@ -85,6 +85,18 @@ fn unicode(size: usize) -> Vec<u8> {
     out
 }
 
+/// Grapheme clusters: combining marks, emoji presentation, skin tones,
+/// flags, keycaps, ZWJ sequences and an Indic conjunct, among plain text.
+fn clusters(size: usize) -> Vec<u8> {
+    let s = "cafe\u{301} ❤\u{fe0f} 👍🏽 🇬🇧 1\u{fe0f}\u{20e3} 👨\u{200d}👩\u{200d}👧 क\u{94d}ष ok done ";
+    let mut out = Vec::with_capacity(size);
+    while out.len() < size {
+        out.extend_from_slice(s.as_bytes());
+        out.extend_from_slice(b"\r\n");
+    }
+    out
+}
+
 fn bench(c: &mut Criterion) {
     const SIZE: usize = 4 << 20;
     let inputs = [
@@ -93,6 +105,7 @@ fn bench(c: &mut Criterion) {
         ("tui", tui(SIZE)),
         ("seq", seq(SIZE)),
         ("unicode", unicode(SIZE)),
+        ("clusters", clusters(SIZE)),
     ];
     // `parse`: 64 KB per `advance` (the reader's slice size). `parse_1k`:
     // 1 KB per call, what a macOS PTY returns per read, so per-call costs

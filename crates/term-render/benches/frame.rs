@@ -37,9 +37,40 @@ enum Colours {
     /// Bold every other cell, plain in between: the style changes on every
     /// cell, but there are only two styles.
     Alternating,
+    /// CJK, accented letters, emoji and grapheme clusters (combining
+    /// marks, skin tones, flags, ZWJ sequences) among plain text.
+    Unicode,
 }
 
+/// Pieces of the unicode screen, with their widths in cells.
+const UNICODE: &[(&str, usize)] = &[
+    ("漢字", 4),
+    (" ", 1),
+    ("cafe\u{301}", 4),
+    (" ", 1),
+    ("❤\u{FE0F}", 2),
+    ("👍\u{1F3FD}", 2),
+    (" ", 1),
+    ("🇬🇧", 2),
+    (" ", 1),
+    ("👨\u{200D}👩\u{200D}👧", 2),
+    (" naïve ", 7),
+    ("Ελλάδα", 6),
+    (" ", 1),
+];
+
 fn line(l: usize, cols: usize, colours: Colours, s: &mut String) {
+    if colours == Colours::Unicode {
+        let mut used = 0;
+        for (piece, w) in UNICODE.iter().cycle().skip(l % UNICODE.len()) {
+            if used + w > cols {
+                break;
+            }
+            s.push_str(piece);
+            used += w;
+        }
+        return;
+    }
     for c in 0..cols {
         if colours == Colours::Coloured && c % 7 == 0 {
             s.push_str(&format!("\x1b[38;5;{};48;5;{}m", (l + c) % 256, (l * 3 + c) % 256));
@@ -87,6 +118,7 @@ fn bench(c: &mut Criterion) {
         ("300x100 plain", 300, 100, Colours::Plain),
         ("300x100 coloured", 300, 100, Colours::Coloured),
         ("300x100 per-cell style", 300, 100, Colours::Alternating),
+        ("300x100 unicode", 300, 100, Colours::Unicode),
     ];
     for (name, cols, lines, colours) in cases {
         let mut t = screen(cols, lines, colours);

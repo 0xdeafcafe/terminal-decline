@@ -2316,3 +2316,38 @@ fn smoke_kitty_png_is_listed_in_the_images_dump() {
     assert!(num(images, "bytes") > 0.0, "{}", d[0]);
     assert!(num(images, "budget") >= (32 << 20) as f64, "{}", d[0]);
 }
+
+/// `images = true`: an iTerm2 image (`imgcat`'s OSC 1337 `File=`) and a
+/// Sixel image are listed in the dump's `images` section, both decoded
+/// (docs/design/images.md §11).
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_iterm2_and_sixel_images_are_listed_in_the_images_dump() {
+    if !have_metal() {
+        return;
+    }
+    // A 1 x 1 RGBA PNG.
+    const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+    // A 4 x 6 red Sixel image.
+    const SIXEL: &str = "\\033P0;1;0q\"1;1;4;6#1;2;100;0;0#1!4~\\033\\\\";
+    let dir = TempDir::new("images-own");
+    std::fs::create_dir_all(dir.config_home().join("terminal-decline")).unwrap();
+    std::fs::write(dir.config_home().join("terminal-decline/config.toml"), "images = true\n").unwrap();
+    // Some text too: every dump checks glyphs were drawn. Decoding runs on
+    // a queue: give it a moment before the dump.
+    let script = format!(
+        "printf 'images\\n\\033]1337;File=inline=1:{PNG}\\007\\n{SIXEL}\\n'; sleep 1; {}{}sleep 20",
+        osc("dump"),
+        osc("quit")
+    );
+    let (status, _) = decline(&dir, &script, true);
+    assert!(status.success(), "{status}");
+    let d = dumps(&dir);
+    assert_eq!(d.len(), 1, "{d:?}");
+    check_dump(&d[0]);
+    let images = &d[0]["images"];
+    assert_eq!(images["enabled"], true, "{}", d[0]);
+    assert_eq!(images["count"], 2, "{}", d[0]);
+    assert_eq!(images["ready"], 2, "{}", d[0]);
+    assert!(num(images, "bytes") > 0.0, "{}", d[0]);
+}

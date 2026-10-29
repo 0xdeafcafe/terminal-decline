@@ -2112,7 +2112,7 @@ fn write_dump(st: &mut State, window: Window) {
         (t.state.dump(), t.state.cols(), t.state.lines())
     };
     let m = st.renderer.metrics();
-    let (mask_texture, color_texture) = st.renderer.glyphs.texture_sizes();
+    let (mask_texture, color_texture) = st.renderer.glyph_texture_sizes();
     let dump = Dump {
         seq: test.seq,
         window: window.id,
@@ -2130,8 +2130,8 @@ fn write_dump(st: &mut State, window: Window) {
         cols,
         lines,
         frames: st.renderer.frames_completed(),
-        glyphs: st.renderer.frame.glyphs.len(),
-        rects: st.renderer.frame.rects.len(),
+        glyphs: st.renderer.pane.frame.glyphs.len(),
+        rects: st.renderer.pane.frame.rects.len(),
         mask_texture,
         color_texture,
         cell_width: m.cell_width,

@@ -78,7 +78,7 @@ fn offscreen_render_reads_back() {
         preedit: None,
     };
     renderer.prepare(&mut t.state, &input);
-    assert_eq!(renderer.frame.glyphs.len(), 1);
+    assert_eq!(renderer.pane.frame.glyphs.len(), 1);
 
     let desc = unsafe {
         MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(MTLPixelFormat::BGRA8Unorm, width, height, false)
@@ -215,8 +215,7 @@ fn snapshot_frames_draw_like_the_live_terminal() {
         };
         renderer.prepare(&mut t.state, &input);
         let from_snapshot = draw(&mut renderer, &t);
-        let Renderer { frame, glyphs, .. } = &mut renderer;
-        frame.build_live(&t.state, &input, glyphs);
+        renderer.build_live(&t.state, &input);
         let live = draw(&mut renderer, &t);
         let differ = from_snapshot
             .data

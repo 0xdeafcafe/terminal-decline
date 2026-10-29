@@ -3066,8 +3066,21 @@ standard benchmarks. Rows marked "estimate" are not measured yet.
   and wide cells, block boundaries (a test aid seals the open block),
   live output, freeing and ED 3, next/previous and the highlights, and a
   property test: hits equal a naive scalar-by-scalar search over the
-  whole text built from every row, before and after more output, with
-  random seals and limits.
+  whole text built from every row, before and after more output and a
+  resize, with random seals and limits.
+- **Fixes after landing** (found by the property test, run with 300,000
+  cases): searching the screen starts a new snapshot batch, so a row
+  written twice before a snapshot still changes its `seq`; the screen
+  is searched with history's last rows up to a match's reach, whole
+  lines included (a query with line ends can start in them); Ends With
+  and Full Word matches ending where history ends belong to the
+  screen's search, which checks them against the screen's first scalar
+  each time, and the live rule checks them again when lines follow;
+  when the first visible line moves (the limit hides lines, or a pop in
+  a resize shows them again), lines shown again are searched and the
+  old first line's start is searched again. A resize needs nothing
+  else: history's hits keep their Points (§13.8), pulled-back lines go
+  through the pop mark, and the screen is searched again.
 - **Not built yet:** the hit list's narrowing while typing, hits moved
   by region scrolls (screen hits are found again instead), the filter
   (13c), R.7's decompression, and regex (not in 1.0).

@@ -322,6 +322,13 @@ pub const SETTINGS: &[Setting] = &[
         Editor::List(Item::Text),
         "OpenType features on or off: \"zero\", \"ss01=1\", \"-liga\"; [\"-calt\", \"-liga\"] turns ligatures off",
     ),
+    setting(
+        "ambiguous_width",
+        "Ambiguous width",
+        Font,
+        integer(1.0, 2.0, 1.0),
+        "Cells taken by East Asian Ambiguous characters (\u{2160}, \u{25cb}, \u{00b1}): 1, or 2 as CJK terminals draw them",
+    ),
     // Keys
     setting(
         "option_as_meta",
@@ -537,6 +544,7 @@ mod tests {
                 "line_height",
                 "cell_width",
                 "font_features",
+                "ambiguous_width",
                 "option_as_meta",
                 "keybind",
                 "columns",

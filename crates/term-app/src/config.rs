@@ -173,6 +173,10 @@ pub struct Config {
     /// font has them; `["-calt", "-liga"]` turns them off. Entries that
     /// aren't features are a notice each and left out, by [`load`].
     pub font_features: Vec<String>,
+    /// Cells East Asian Ambiguous characters take: 1 (the default) or 2,
+    /// as CJK terminals draw them (cells design §6.3).
+    #[serde(deserialize_with = "ambiguous_width")]
+    pub ambiguous_width: u8,
     /// Space around the text, in points.
     pub padding: f64,
     pub scrollback: usize,
@@ -225,6 +229,7 @@ impl Default for Config {
             line_height: 1.0,
             cell_width: CellWidth::default(),
             font_features: Vec::new(),
+            ambiguous_width: 1,
             padding: 6.0,
             scrollback: 10_000,
             option_as_meta: OptionAsMeta::None,
@@ -254,6 +259,14 @@ fn line_height<'de, D: Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
         Ok(v)
     } else {
         Err(serde::de::Error::custom(format!("{v} is not above 0")))
+    }
+}
+
+fn ambiguous_width<'de, D: Deserializer<'de>>(d: D) -> Result<u8, D::Error> {
+    let v = i64::deserialize(d)?;
+    match v {
+        1 | 2 => Ok(v as u8),
+        _ => Err(serde::de::Error::custom(format!("{v} is not 1 or 2"))),
     }
 }
 
@@ -903,6 +916,19 @@ mod tests {
         assert_eq!(c.font_features, ["-calt", "-liga"]);
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert!(errors[0].contains("\"nope!\""), "{errors:?}");
+    }
+
+    #[test]
+    fn ambiguous_width_is_1_or_2() {
+        assert_eq!(Config::default().ambiguous_width, 1);
+        let (c, errors) = parse("ambiguous_width = 2");
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(c.ambiguous_width, 2);
+        for bad in ["0", "3", "1.5", "'2'"] {
+            let (c, errors) = parse(&format!("ambiguous_width = {bad}"));
+            assert_eq!(c.ambiguous_width, 1, "{bad}");
+            assert!(errors[0].starts_with("config: ambiguous_width: "), "{bad}: {errors:?}");
+        }
     }
 
     #[test]

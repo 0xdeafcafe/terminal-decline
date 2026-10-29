@@ -474,6 +474,7 @@ impl WindowView {
         let (cols, lines) = layout::grid_size((size.width, size.height), launch.scale, m.into(), pad);
 
         let mut t = Term::new(cols, lines, config.scrollback);
+        t.state.set_ambiguous_width(config.ambiguous_width);
         t.state.set_default_colors(crate::config::query_colors(&theme));
         for n in launch.notices.iter() {
             crate::session::write_notice(&mut t, n);
@@ -1072,6 +1073,10 @@ impl WindowView {
             for p in st.panes.values() {
                 let mut t = p.session.lock_term();
                 t.state.set_default_colors(crate::config::query_colors(&win.theme));
+                if t.state.ambiguous_width() != config.ambiguous_width {
+                    // For output from now on; what is on screen stays.
+                    t.state.set_ambiguous_width(config.ambiguous_width);
+                }
                 // Not into a full-screen program (vim, the preferences):
                 // the lines would land under its cursor in its colours.
                 if !win.settings && !t.state.alt_screen_active() {

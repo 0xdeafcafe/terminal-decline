@@ -152,6 +152,7 @@ font_fallback = []
 line_height = 1.0
 cell_width = "0"
 font_features = []
+ambiguous_width = 1
 padding = 6.0
 scrollback = 10000
 option_as_meta = "none"

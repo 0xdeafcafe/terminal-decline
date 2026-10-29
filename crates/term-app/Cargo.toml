@@ -22,6 +22,7 @@ term-core.workspace = true
 term-pty.workspace = true
 term-font.workspace = true
 term-render.workspace = true
+term-image.workspace = true
 term-prefs.workspace = true
 term-pin = { path = "../term-pin" }
 term-icon = { path = "../term-icon" }
@@ -49,3 +50,4 @@ test-hooks = []
 [dev-dependencies]
 terminal-decline = { path = ".", features = ["test-hooks"] }
 proptest = { version = "1.12", default-features = false, features = ["std"] }
+png = "0.18"

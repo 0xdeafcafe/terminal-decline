@@ -87,6 +87,8 @@ pub(crate) struct Win {
     /// Whether the window could be seen when last checked
     /// (`sync_visibility`), so hiding and showing happen once each.
     shown: bool,
+    /// The image pool was told this window is hidden (images.md §5.5).
+    images_hidden: bool,
     /// This is the Settings tab, which the app started itself: a fixed
     /// title, always opaque, not a running program for `confirm_close`,
     /// and the only session whose chord recording is honoured.
@@ -795,6 +797,7 @@ impl WindowView {
                 top_inset: titlebar,
                 hidden: 0,
                 shown: true,
+                images_hidden: false,
                 settings,
                 recording: None,
                 recordings: 0,
@@ -1019,6 +1022,7 @@ impl WindowView {
             if changed && !visible {
                 st.win.hidden += 1;
                 st.win.renderer.hide(minimised);
+                images_shown(&mut st.win, &st.panes, false);
             }
             changed
         });
@@ -1128,6 +1132,7 @@ impl WindowView {
                 }
                 win.link.setPaused(true);
                 win.renderer.hide(keep_surface);
+                images_shown(win, panes, false);
                 return;
             }
             Decision::Hold => {
@@ -1142,6 +1147,7 @@ impl WindowView {
         keep_held(panes, &ticks);
         win.idle_ticks = 0;
         win.renderer.show();
+        images_shown(win, panes, true);
         if rate != win.rate {
             win.rate = rate;
             let r = rate as f32;
@@ -1233,6 +1239,8 @@ impl WindowView {
                 crashed.push(id);
                 continue;
             }
+            // Re-decodes the snapshot asked for (images.md §5.4).
+            p.session.take_image_jobs(t);
             if let Some(f) = &mut p.find {
                 let snap = p.render.frame.snapshot_mut();
                 f.drawn = snap
@@ -1471,7 +1479,9 @@ impl WindowView {
             let scale = st.win.scale;
             let layer = &self.ivars().layer;
             layer.setContentsScale(scale);
-            layer.setDrawableSize(NSSize::new((size.width * scale).round(), (size.height * scale).round()));
+            let pixels = ((size.width * scale).round(), (size.height * scale).round());
+            layer.setDrawableSize(NSSize::new(pixels.0, pixels.1));
+            crate::images::window_size(&term_core::ImagePool::process(), self.ivars().id, pixels.0 as u32, pixels.1 as u32);
             let layout = st.tree.layout(&self.geometry(st, titlebar));
             let m = st.win.renderer.metrics();
             let alone = layout.panes.len() == 1;
@@ -1698,6 +1708,7 @@ impl WindowView {
             crate::notify::set_progress(MainThreadMarker::from(self), self.ivars().id, term_core::Progress::Clear);
         }
         VIEWS.with(|v| v.borrow_mut().remove(&self.ivars().id));
+        crate::images::window_size(&term_core::ImagePool::process(), self.ivars().id, 0, 0);
     }
 
     /// Pane `pane`'s program ended: the pane closes (the window with its
@@ -3063,4 +3074,15 @@ fn write_dump(st: &mut State, window: Window) {
     if let Err(e) = written {
         eprintln!("terminal-decline: writing {}: {e}", test.path.display());
     }
+}
+
+/// Tell the image pool that `win` hid (after its renderer dropped its
+/// textures) or shows (before it draws), once per change (images.md §5.5).
+fn images_shown(win: &mut Win, panes: &HashMap<PaneId, Pane>, shown: bool) {
+    if win.images_hidden != shown || !crate::images::enabled() {
+        return;
+    }
+    win.images_hidden = !shown;
+    let owners = panes.values().filter_map(|p| p.session.image_owner());
+    crate::images::set_shown(&term_core::ImagePool::process(), owners, shown);
 }

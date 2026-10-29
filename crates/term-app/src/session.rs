@@ -34,6 +34,7 @@ use term_core::Term;
 use term_pty::{Child, Command, Pty, Size};
 
 use crate::control::ControlScanner;
+use crate::images::SessionImages;
 
 /// A macOS PTY hands out ~1 KB per read, so 64 KB is plenty.
 const READ_BUF: usize = 64 * 1024;
@@ -175,17 +176,32 @@ struct Bug;
 /// if `events` is set, the [`Events`] taken out of it. A panic is caught
 /// before the lock is released, and the terminal, possibly half-updated, is
 /// replaced by a fresh one of the same size.
-fn parse(term: &Mutex<Term>, bytes: &[u8], on_parsed: Option<&(dyn Fn() + Send)>, events: bool) -> Result<(Vec<u8>, Events), Bug> {
-    let mut t = lock(term);
-    let parsed = catch_unwind(AssertUnwindSafe(|| {
-        test_panic(bytes);
-        t.advance(bytes);
-    }));
+fn parse(
+    term: &Mutex<Term>,
+    bytes: &[u8],
+    on_parsed: Option<&(dyn Fn() + Send)>,
+    events: bool,
+    images: Option<&SessionImages>,
+) -> Result<(Vec<u8>, Events), Bug> {
+    let (mut t, parsed) = if images.is_some() {
+        parse_with_head_reads(term, lock(term), bytes)
+    } else {
+        let mut t = lock(term);
+        let parsed = catch_unwind(AssertUnwindSafe(|| {
+            test_panic(bytes);
+            t.advance(bytes);
+        }));
+        (t, parsed)
+    };
     if let Some(f) = on_parsed {
         f();
     }
     match parsed {
         Ok(()) => {
+            if let Some(images) = images {
+                // Queued with the lock held, run with it released.
+                images.take_jobs(&mut t.state);
+            }
             let events = if events { Events::take(&mut t) } else { Events::default() };
             Ok((t.state.take_replies(), events))
         }
@@ -196,6 +212,51 @@ fn parse(term: &Mutex<Term>, bytes: &[u8], on_parsed: Option<&(dyn Fn() + Send)>
     }
 }
 
+/// Parse with images on: when a kitty command needs a medium's header
+/// (the size of a PNG from a file placed at once, images.md §3.4), the
+/// parser stops there, the lock is let go while the host reads it, and
+/// parsing carries on from where it stopped. Returns the guard, held
+/// again. A panic is caught with the lock held, as in [`parse`]. Should
+/// the terminal be replaced meanwhile, the new one ignores the header.
+pub(crate) fn parse_with_head_reads<'a>(
+    term: &'a Mutex<Term>,
+    mut t: MutexGuard<'a, Term>,
+    bytes: &[u8],
+) -> (MutexGuard<'a, Term>, std::thread::Result<()>) {
+    if let Err(e) = catch_unwind(|| test_panic(bytes)) {
+        return (t, Err(e));
+    }
+    let mut rest = bytes;
+    while !rest.is_empty() {
+        let step = catch_unwind(AssertUnwindSafe(|| {
+            let n = t.advance_until_head(rest);
+            (n, t.state.take_head_read())
+        }));
+        let (n, read) = match step {
+            Ok(s) => s,
+            Err(e) => return (t, Err(e)),
+        };
+        rest = &rest[n..];
+        let Some(read) = read else {
+            if n == 0 {
+                // Stopped with no header to read: parse the rest as usual.
+                let r = catch_unwind(AssertUnwindSafe(|| t.advance(rest)));
+                return (t, r);
+            }
+            continue;
+        };
+        let host = t.state.image_host().clone();
+        drop(t);
+        // Unlocked: the read may wait on the disk.
+        let head = host.read_head(read.medium(), read.max);
+        t = lock(term);
+        if let Err(e) = catch_unwind(AssertUnwindSafe(|| t.state.head_read_done(read, head))) {
+            return (t, Err(e));
+        }
+    }
+    (t, Ok(()))
+}
+
 /// Replace a terminal that may be half-updated by a panic with a fresh one
 /// of the same size and colours.
 pub(crate) fn replace_term(t: &mut Term) {
@@ -204,6 +265,11 @@ pub(crate) fn replace_term(t: &mut Term) {
     fresh.state.set_default_colors(t.state.default_colors());
     fresh.state.set_default_palette(t.state.default_palette());
     fresh.state.set_cell_pixels(t.state.cell_pixels());
+    // The same host: the app's, with images on.
+    fresh.state.set_image_host(t.state.image_host().clone());
+    if fresh.state.images_enabled() {
+        fresh.state.set_reads_off_lock(true);
+    }
     *t = fresh;
 }
 
@@ -235,6 +301,8 @@ pub struct Session {
     /// ([`Session::type_at_prompt`]); taken when it is sent or given up
     /// on, or when something else is typed first.
     at_prompt: Arc<Mutex<Option<Sender<Vec<u8>>>>>,
+    /// Its side of the decode queue, when images are on.
+    images: Option<Arc<SessionImages>>,
 }
 
 impl Session {
@@ -243,8 +311,16 @@ impl Session {
     /// If the program can't be started, the session has no program: the
     /// error is written into `term` and `on_exit(Outcome::Hold)` is called
     /// before this returns. Errors are only for failing to start threads.
-    pub fn spawn(command: &Command, size: Size, term: Term, hooks: Hooks) -> io::Result<Session> {
+    pub fn spawn(command: &Command, size: Size, mut term: Term, hooks: Hooks) -> io::Result<Session> {
         let started = Instant::now();
+        let images_on = term.state.images_enabled();
+        if images_on {
+            // Metal pixels, the app's media rules, and headers read with
+            // the lock released.
+            term.state.set_image_host(crate::images::process_host());
+            term.state.set_reads_off_lock(true);
+        }
+        let terminal_id = term.state.terminal_id();
         let term = Arc::new(Mutex::new(term));
         let dirty = Arc::new(AtomicBool::new(true));
         let pty = match Pty::spawn(command, size) {
@@ -268,6 +344,7 @@ impl Session {
                     batches: Arc::default(),
                     stopped: Arc::default(),
                     at_prompt: Arc::default(),
+                    images: None,
                 });
             }
         };
@@ -297,6 +374,8 @@ impl Session {
             on_events,
             mut on_record_chord,
         } = hooks;
+        let images = images_on.then(|| SessionImages::for_process(&term, terminal_id, dirty.clone(), wake.clone()));
+        let images2 = images.clone();
         let reader = std::thread::Builder::new().name("pty-reader".into()).spawn(move || {
             // A panic anywhere else in the loop stops the session too.
             let read = catch_unwind(AssertUnwindSafe(|| -> Result<(), Bug> {
@@ -309,7 +388,7 @@ impl Session {
                     if bytes.is_empty() || stopped2.load(Ordering::Acquire) {
                         return Ok(());
                     }
-                    let (replies, events) = parse(&term2, bytes, on_parsed.as_deref(), on_events.is_some())?;
+                    let (replies, events) = parse(&term2, bytes, on_parsed.as_deref(), on_events.is_some(), images2.as_deref())?;
                     if !replies.is_empty() {
                         let _ = tx2.send(replies);
                     }
@@ -321,6 +400,10 @@ impl Session {
                     Ok(())
                 };
                 loop {
+                    if let Some(images) = &images2 {
+                        // Decoding lags: let the PTY slow the program down.
+                        images.hold_back();
+                    }
                     let n = reader.read_batch(&mut buf);
                     if n == 0 {
                         return Ok(());
@@ -380,7 +463,21 @@ impl Session {
             batches,
             stopped,
             at_prompt: Arc::default(),
+            images,
         })
+    }
+
+    /// Queue the image jobs `t` (this session's terminal, locked) has
+    /// waiting: after a snapshot, so an idle terminal's re-decodes run.
+    pub fn take_image_jobs(&self, t: &mut Term) {
+        if let Some(images) = &self.images {
+            images.take_jobs(&mut t.state);
+        }
+    }
+
+    /// The terminal's id in the image pool, when images are on.
+    pub fn image_owner(&self) -> Option<u64> {
+        self.images.as_ref().map(|i| i.terminal_id())
     }
 
     /// Type `text` at the shell's prompt once its line editor is reading,
@@ -533,6 +630,9 @@ impl Session {
     /// it is still there after a grace period). The reader then sees the end
     /// of output and exits, and the writer once both senders are gone.
     fn release(&mut self) {
+        if let Some(images) = &self.images {
+            images.cancel();
+        }
         self.pty = None;
         self.input = None;
         *lock_slot(&self.at_prompt) = None;

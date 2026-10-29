@@ -16,6 +16,7 @@ pub mod entry;
 mod find_bar;
 pub mod frame_policy;
 pub mod idle_filters;
+pub mod images;
 pub mod import;
 pub mod keybind;
 pub mod keys;

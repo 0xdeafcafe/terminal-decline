@@ -207,6 +207,13 @@ fn a_pin_missing_a_key_is_damaged() {
 
 #[test]
 fn dyld_insert_libraries_is_ignored() {
+    // The hardened runtime's refusal is enforced by System Integrity
+    // Protection; CI's virtual machines run with it off.
+    let sip = std::process::Command::new("/usr/bin/csrutil").arg("status").output();
+    if !sip.is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("enabled")) {
+        eprintln!("skipped: System Integrity Protection is off, so DYLD_INSERT_LIBRARIES isn't blocked");
+        return;
+    }
     let s = Scratch::new("dyld");
     let (_, p) = setup(&s, "dyl", "A");
     let inject = s.path("lib/inject.dylib");

@@ -2,10 +2,11 @@
 //! tested and benchmarked on its own.
 
 use term_core::{Attrs, Cell, CellRef, ColorKind, Content, CursorShape, HighlightKind, RowFlags, StyleKey, Terminal, Underline, Width};
-use term_font::{Metrics, Style as FontStyle};
+use term_font::{Fonts, GlyphKey, Metrics, ShapedGlyph, Style as FontStyle};
 use unicode_width::UnicodeWidthChar;
 
 use crate::row_cache::{Built, Entry, MISSING, Mark, RowCache};
+use crate::shape_cache::ShapeCache;
 
 /// RGBA8 with red in the low byte (matches `unpack_unorm4x8_to_float`).
 pub type Rgba = u32;
@@ -27,7 +28,7 @@ fn s16(v: i32) -> i16 {
 /// Cells a character takes, by the same rule term-core uses when it prints:
 /// 0 for characters it drops (controls, combining marks).
 #[inline]
-fn char_cells(c: char) -> usize {
+pub(crate) fn char_cells(c: char) -> usize {
     c.width().unwrap_or(0)
 }
 
@@ -118,6 +119,26 @@ pub trait GlyphSource {
     fn generation(&self) -> u64 {
         0
     }
+
+    /// The slot for a shaped glyph's key: ligatures, contextual
+    /// alternates and the other glyphs of cells shaped with them. `None`
+    /// as for [`glyph`](GlyphSource::glyph).
+    fn glyph_key(&mut self, key: GlyphKey) -> Option<GlyphSlot> {
+        let _ = key;
+        None
+    }
+
+    /// The fonts the glyphs come from, to shape rows in faces with
+    /// ligatures ([`Fonts::features`]). `None`: every cell is drawn alone.
+    fn fonts(&self) -> Option<&Fonts> {
+        None
+    }
+
+    /// Names [`fonts`](GlyphSource::fonts): what rows were shaped with is
+    /// kept until this changes.
+    fn fonts_key(&self) -> u64 {
+        0
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -201,11 +222,31 @@ struct RowCtx<'a> {
     block_cursor: std::ops::Range<usize>,
     /// Columns covered by input-method text, which draw no glyphs.
     covered: std::ops::Range<usize>,
+    /// Glyphs of cells that don't draw as their character alone
+    /// (ligatures and their neighbours, by column; ligatures design §4.1).
+    subs: &'a [ShapedGlyph],
+}
+
+/// A cell's text colour as drawn, for the pieces of ligatures in it.
+#[derive(Clone, Copy, Default)]
+struct Ink {
+    fg: Rgba,
+    dim: bool,
+    /// False for hidden cells and cells under input-method text.
+    drawn: bool,
+}
+
+/// Buffers for rows with substitutions, kept between rows.
+#[derive(Default)]
+struct Pieces {
+    inks: Vec<Ink>,
+    /// Columns whose own glyph a substitution replaces.
+    replaced: Vec<bool>,
 }
 
 /// A cell as frame building reads it: `CellRef`, a snapshot's cells, and
 /// in tests cells built from any `Style`.
-trait CellView {
+pub(crate) trait CellView {
     /// Equal keys mean equal styles.
     type Key: Copy + PartialEq;
     fn key(&self) -> Self::Key;
@@ -401,6 +442,11 @@ pub struct Frame {
     rows: RowCache,
     /// Indexes into the snapshot's rows of the rows to build this frame.
     to_build: Vec<usize>,
+    /// Rows shaped in faces with ligatures (ligatures design §4.2).
+    shapes: ShapeCache,
+    pieces: Pieces,
+    /// The glyph generation the snapshot was taken against.
+    snapped_with: u64,
 }
 
 /// Rows whose top is this far down (pixels) are built every frame rather
@@ -423,6 +469,21 @@ impl Frame {
     /// are drawn over them. Holds `term` (the lock) for all of it until R.1
     /// moves building out.
     pub fn build(&mut self, term: &mut Terminal, input: &FrameInput, glyphs: &mut impl GlyphSource) {
+        self.snapshot(term, input, glyphs.generation());
+        if !self.build_snapshot(input, glyphs) {
+            // The glyph textures were emptied since: every row again.
+            self.forget_rows();
+            self.snapshot(term, input, glyphs.generation());
+            self.build_snapshot(input, glyphs);
+        }
+    }
+
+    /// The part of [`build`](Frame::build) that needs the terminal (its
+    /// lock): drop cached rows if what they were built with changed (the
+    /// glyph textures' `generation` among it), and take the snapshot,
+    /// copying the rows not cached. Shaping and building wait for
+    /// [`build_snapshot`](Frame::build_snapshot), which doesn't need it.
+    pub fn snapshot(&mut self, term: &mut Terminal, input: &FrameInput, generation: u64) {
         let m = input.metrics;
         self.rows.check(&Built {
             theme: input.theme.clone(),
@@ -435,13 +496,40 @@ impl Frame {
                 m.strike_offset,
             ],
             padding_x: input.padding.0,
-            glyphs: glyphs.generation(),
+            glyphs: generation,
         });
         self.rows.snapshot(term);
+        self.snapped_with = generation;
+    }
+
+    /// Build the frame from the last [`snapshot`](Frame::snapshot), taken
+    /// with the same `input`, without the terminal: shape the rows it
+    /// copied in faces with ligatures, build them and draw the overlays.
+    /// False, having built nothing, when the glyph textures' generation
+    /// changed since the snapshot (another pane emptied them): the cached
+    /// rows are then wrong, and the frame must be built again from a new
+    /// snapshot, with the terminal.
+    pub fn build_snapshot(&mut self, input: &FrameInput, glyphs: &mut impl GlyphSource) -> bool {
+        if glyphs.generation() != self.snapped_with {
+            return false;
+        }
         self.rows.take(&mut self.to_build);
+        self.shapes.check(&self.rows.snap, glyphs.fonts_key());
+        self.redraw(input, glyphs);
+        if !self.to_build.is_empty() {
+            self.shapes.keep_visible(&self.rows.snap);
+        }
+        true
+    }
+
+    /// Build again the rows this frame built, and the frame: after a glyph
+    /// texture that ran out of room grew (keeping every slot), so the
+    /// glyphs that didn't fit are drawn. Rows kept from earlier frames had
+    /// all theirs.
+    pub fn redraw(&mut self, input: &FrameInput, glyphs: &mut impl GlyphSource) {
         self.build_rows(input, glyphs);
         self.rows.place();
-        let (py, ch) = (input.padding.1 as i32, m.cell_height as i32);
+        let (py, ch) = (input.padding.1 as i32, input.metrics.cell_height as i32);
         self.rows.move_rows(|line| py + line as i32 * ch);
         self.assemble(input, glyphs);
         self.rows.drop_far(FAR);
@@ -459,14 +547,45 @@ impl Frame {
         self.rows.len()
     }
 
+    /// Forget the rows shaped, and with `stretches` the stretches too, so
+    /// the next build shapes again: for measuring shaping. Test aid.
+    #[doc(hidden)]
+    pub fn forget_shaping(&mut self, stretches: bool) {
+        self.shapes.forget(stretches);
+    }
+
+    /// Rows kept in the shaping cache, and how many rows and stretches
+    /// were shaped so far (not found kept). Test aid.
+    #[doc(hidden)]
+    pub fn shaping(&self) -> (usize, u64, u64) {
+        let (rows, stretches) = self.shapes.shaped();
+        (self.shapes.len(), rows, stretches)
+    }
+
     /// Build the rows the snapshot copied into the row cache, where they
     /// are drawn this frame.
     fn build_rows(&mut self, input: &FrameInput, glyphs: &mut impl GlyphSource) {
         let cols = self.rows.snap.cols as usize;
         let (py, ch) = (input.padding.1 as i32, input.metrics.cell_height as i32);
+        let shaping = glyphs.fonts().is_some_and(shapes_runs);
         for &i in &self.to_build {
             let row = &self.rows.snap.rows[i];
             let key = row.key;
+            let subs: &[ShapedGlyph] = match glyphs.fonts() {
+                Some(fonts) if shaping => {
+                    let styles = self.rows.styles_for(row.flags.contains(RowFlags::HISTORY));
+                    let snap = &self.rows.snap;
+                    let cells = snap.row_cells(row).unwrap_or(&[]);
+                    let clusters = SnapClusters { snap, row };
+                    let cells = cells.iter().map(|&cell| SnapCell {
+                        cell,
+                        styles,
+                        clusters: &clusters,
+                    });
+                    self.shapes.row(Some(key), cells, fonts)
+                }
+                _ => &[],
+            };
             let slot = self.rows.entry_for(key);
             let ctx = RowCtx {
                 theme: input.theme,
@@ -477,6 +596,7 @@ impl Frame {
                 sel: 0..0,
                 block_cursor: 0..0,
                 covered: 0..0,
+                subs,
             };
             // The entry is taken out while it's built, as its cells and
             // styles are borrowed from the cache.
@@ -492,7 +612,7 @@ impl Frame {
                 styles,
                 clusters: &clusters,
             });
-            build_row(&ctx, cells, glyphs, &mut entry);
+            build_row(&ctx, cells, glyphs, &mut entry, &mut self.pieces);
             let used = std::mem::replace(self.rows.entry_mut(slot), entry);
             debug_assert!(used.glyphs.is_empty());
         }
@@ -557,14 +677,18 @@ impl Frame {
         // Highlights, then the block cursor over them.
         for (line, row) in snap.rows.iter().enumerate() {
             for h in snap.row_highlights(row) {
-                let color = match h.kind {
-                    HighlightKind::Selection => theme.selection,
-                    // Drawn once search (E.7) and links (PR 9) set them.
-                    HighlightKind::SearchHit | HighlightKind::CurrentSearchHit | HighlightKind::HoveredLink => continue,
-                };
                 let (a, b) = (h.cols.start as usize, (h.cols.end as usize).min(cols));
-                if a < b {
-                    self.rects.push(full(line, a..b, color));
+                match h.kind {
+                    _ if a >= b => {}
+                    HighlightKind::Selection => self.rects.push(full(line, a..b, theme.selection)),
+                    // Underlined in the text colour, over the backgrounds.
+                    HighlightKind::HoveredLink => self.decorations.push(RectInstance {
+                        y: s16(row_y(line) + (m.baseline + m.underline_offset) as i32),
+                        h: m.underline_thickness.max(1) as u16,
+                        ..full(line, a..b, theme.foreground)
+                    }),
+                    // Drawn once search (E.7) sets them.
+                    HighlightKind::SearchHit | HighlightKind::CurrentSearchHit => {}
                 }
             }
         }
@@ -679,8 +803,13 @@ impl Frame {
         });
 
         let cols = term.cols();
+        let shaping = glyphs.fonts().is_some_and(shapes_runs);
         for line in 0..term.lines() {
             let row = term.visible_row(line);
+            let subs: &[ShapedGlyph] = match glyphs.fonts() {
+                Some(fonts) if shaping => self.shapes.row(None, row.cells(), fonts),
+                _ => &[],
+            };
             // Selected columns on this line, as a half-open range.
             let sel = selection
                 .and_then(|(a, b)| {
@@ -709,13 +838,14 @@ impl Frame {
                     .as_ref()
                     .and_then(|(l, r)| (*l == line).then(|| r.clone()))
                     .unwrap_or(0..0),
+                subs,
             };
             let mut sink = Direct {
                 rects: &mut self.rects,
                 glyphs: &mut self.glyphs,
                 decorations: &mut self.decorations,
             };
-            build_row(&ctx, row.cells(), glyphs, &mut sink);
+            build_row(&ctx, row.cells(), glyphs, &mut sink, &mut self.pieces);
         }
 
         // Cursors other than a focused block are drawn on top as rectangles.
@@ -806,27 +936,59 @@ impl Frame {
     }
 }
 
-/// One row of cells, left to right from column 0.
-#[inline]
-fn build_row<C: CellView, S: RowSink>(ctx: &RowCtx, cells: impl Iterator<Item = C>, glyphs: &mut impl GlyphSource, out: &mut S) {
-    // Most rows have no selection, block cursor or input-method text (and
-    // rows built for the cache never do): they get a loop without those
-    // checks.
-    if ctx.sel.is_empty() && ctx.block_cursor.is_empty() && ctx.covered.is_empty() {
-        row_cells::<false, C, S>(ctx, cells, glyphs, out)
-    } else {
-        row_cells::<true, C, S>(ctx, cells, glyphs, out)
-    }
+/// Whether any face of `fonts` shapes runs (ligatures design §1).
+fn shapes_runs(fonts: &Fonts) -> bool {
+    FontStyle::ALL.iter().any(|&s| fonts.features(s).ligatures)
 }
 
-/// `build_row`, with `OVERLAY` false when the row has no selection, block
-/// cursor or input-method text.
-#[inline(always)]
-fn row_cells<const OVERLAY: bool, C: CellView, S: RowSink>(
+/// One row of cells, left to right from column 0.
+#[inline]
+fn build_row<C: CellView, S: RowSink>(
     ctx: &RowCtx,
     cells: impl Iterator<Item = C>,
     glyphs: &mut impl GlyphSource,
     out: &mut S,
+    pieces: &mut Pieces,
+) {
+    // Most rows have no selection, block cursor or input-method text (and
+    // rows built for the cache never do), and no ligatures: they get a
+    // loop without those checks.
+    let overlay = !(ctx.sel.is_empty() && ctx.block_cursor.is_empty() && ctx.covered.is_empty());
+    if ctx.subs.is_empty() {
+        if overlay {
+            row_cells::<true, false, C, S>(ctx, cells, glyphs, out, pieces)
+        } else {
+            row_cells::<false, false, C, S>(ctx, cells, glyphs, out, pieces)
+        }
+        return;
+    }
+    pieces.replaced.clear();
+    pieces.replaced.resize(ctx.cols, false);
+    for g in ctx.subs {
+        let at = g.cell as usize;
+        for r in pieces.replaced.iter_mut().take(at + g.cells as usize).skip(at) {
+            *r = true;
+        }
+    }
+    pieces.inks.clear();
+    if overlay {
+        row_cells::<true, true, C, S>(ctx, cells, glyphs, out, pieces)
+    } else {
+        row_cells::<false, true, C, S>(ctx, cells, glyphs, out, pieces)
+    }
+    draw_subs(ctx, &pieces.inks, glyphs, out);
+}
+
+/// `build_row`, with `OVERLAY` false when the row has no selection, block
+/// cursor or input-method text, and `LIG` false when it has no
+/// substitutions.
+#[inline(always)]
+fn row_cells<const OVERLAY: bool, const LIG: bool, C: CellView, S: RowSink>(
+    ctx: &RowCtx,
+    cells: impl Iterator<Item = C>,
+    glyphs: &mut impl GlyphSource,
+    out: &mut S,
+    pieces: &mut Pieces,
 ) {
     let RowCtx { theme, m, px, y, .. } = *ctx;
     let (cw, ch) = (m.cell_width as i32, m.cell_height as i32);
@@ -866,6 +1028,13 @@ fn row_cells<const OVERLAY: bool, C: CellView, S: RowSink>(
         }
 
         let x = px + col as i32 * cw;
+        if LIG {
+            pieces.inks.push(Ink {
+                fg,
+                dim: pen.attrs.contains(Attrs::DIM),
+                drawn: !pen.attrs.contains(Attrs::HIDDEN) && !(OVERLAY && ctx.covered.contains(&col)),
+            });
+        }
         // A cluster draws its first character until clusters are shaped
         // (F3.2).
         let c = match cell.content() {
@@ -878,6 +1047,7 @@ fn row_cells<const OVERLAY: bool, C: CellView, S: RowSink>(
             && !spacer
             && !pen.attrs.contains(Attrs::HIDDEN)
             && !(OVERLAY && ctx.covered.contains(&col))
+            && !(LIG && pieces.replaced[col])
             && let Some(g) = glyphs.glyph(c as u32, pen.face())
         {
             out.glyph(GlyphInstance {
@@ -897,6 +1067,51 @@ fn row_cells<const OVERLAY: bool, C: CellView, S: RowSink>(
         end = col + 1;
     }
     pad_row(out, ctx, end, run_start, run_color);
+}
+
+/// The substitutions of a row, after its cells: each glyph at its cell's
+/// origin plus its offset. A split glyph (a ligature, or an alternate
+/// whose ink reaches past its cell) is drawn in pieces, one per cell its
+/// ink touches, each clipped to that cell's columns and in that cell's
+/// text colour; the leftmost piece stays open to the left and the
+/// rightmost to the right, and pieces in hidden cells or under
+/// input-method text are left out (ligatures design §4.1). Each piece
+/// records its cell, so the block cursor recolours only the pieces in its
+/// cells.
+fn draw_subs(ctx: &RowCtx, inks: &[Ink], glyphs: &mut impl GlyphSource, out: &mut impl RowSink) {
+    let RowCtx { m, px, y, subs, .. } = *ctx;
+    let Some(last) = inks.len().checked_sub(1) else { return };
+    let cw = m.cell_width as i32;
+    let cell_of = |x: i32| ((x - px).div_euclid(cw.max(1))).clamp(0, last as i32) as usize;
+    for g in subs {
+        let Some(slot) = glyphs.glyph_key(g.key) else { continue };
+        let x0 = px + g.cell as i32 * cw + g.dx as i32 + slot.left as i32;
+        let x1 = x0 + slot.w as i32;
+        let gy = s16(y + m.baseline as i32 + g.dy as i32 - slot.top as i32);
+        let (first, end) = if g.split {
+            (cell_of(x0), cell_of(x1 - 1))
+        } else {
+            let c = (g.cell as usize).min(last);
+            (c, c)
+        };
+        for (c, &ink) in inks.iter().enumerate().take(end + 1).skip(first) {
+            let l = if c == first { x0 } else { px + c as i32 * cw };
+            let r = if c == end { x1 } else { px + (c as i32 + 1) * cw };
+            if !ink.drawn || r <= l {
+                continue;
+            }
+            out.glyph(GlyphInstance {
+                x: s16(l),
+                y: gy,
+                w: (r - l) as u16,
+                h: slot.h,
+                u: slot.u + (l - x0) as u16,
+                v: slot.v,
+                color: ink.fg,
+                is_color: GlyphInstance::flags(&slot, c, ink.dim),
+            });
+        }
+    }
 }
 
 /// Ends a row whose cells stopped at column `from`, with the background
@@ -1079,9 +1294,10 @@ mod tests {
             sel: 0..0,
             block_cursor: 0..0,
             covered: 0..0,
+            subs: &[],
         };
         let mut e = Entry::default();
-        build_row(&ctx, cells.iter().copied(), &mut NoGlyphs, &mut e);
+        build_row(&ctx, cells.iter().copied(), &mut NoGlyphs, &mut e, &mut Pieces::default());
         e.decorations
     }
 
@@ -1203,9 +1419,10 @@ mod tests {
             sel: 0..0,
             block_cursor: 0..0,
             covered: 0..0,
+            subs: &[],
         };
         let mut e = Entry::default();
-        build_row(&ctx, [TestCell('a', s)].into_iter(), &mut NoGlyphs, &mut e);
+        build_row(&ctx, [TestCell('a', s)].into_iter(), &mut NoGlyphs, &mut e, &mut Pieces::default());
         assert!(e.decorations.iter().all(|r| r.w > 0));
         assert_eq!(e.decorations.iter().map(|r| r.w).sum::<u16>(), 5);
     }

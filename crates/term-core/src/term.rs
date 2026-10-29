@@ -779,53 +779,48 @@ impl Terminal {
         self.screen.get(r)
     }
 
-    /// The first line stored: history's oldest on the primary screen.
-    fn first_line(&self) -> u64 {
-        if self.alt_active {
-            self.top_line
-        } else {
-            self.top_line - self.scrollback.len() as u64
-        }
+    /// History's lines with marks, as buffer lines, nearest first: before
+    /// `from` going up, at or after it going down. The alternate screen
+    /// has no history.
+    fn history_marked(&self, from: u64, up: bool) -> impl Iterator<Item = u64> + '_ {
+        let base = self.top_line.saturating_sub(self.scrollback.len() as u64);
+        let mut at = (!self.alt_active && !(up && from <= base)).then(|| (from.clamp(base, self.top_line) - base) as usize);
+        std::iter::from_fn(move || {
+            let i = self.scrollback.marked(at?, up)?;
+            at = Some(if up { i } else { i + 1 });
+            Some(base + i as u64)
+        })
     }
 
     /// Lines holding marks, nearest first: before `line` going up, or
-    /// after it going down. History lines are found from their flags,
-    /// skipping blocks without marks (§11.6).
-    fn marked_lines(&self, line: u64, up: bool) -> Box<dyn Iterator<Item = u64> + '_> {
-        let lo = self.first_line().max(self.top_line);
-        let hi = self.top_line + self.lines as u64;
+    /// after it going down (`None`: every one, oldest first). History
+    /// lines are found from their flags, skipping blocks without marks
+    /// (§11.6).
+    fn marked_lines(&self, line: Option<u64>, up: bool) -> Box<dyn Iterator<Item = u64> + '_> {
+        let top = self.top_line;
+        let hi = top + self.lines as u64;
         let has = move |l: &u64| self.screen_line(*l).is_some_and(Row::has_marks);
-        // History lines, as buffer lines (on the primary screen only).
-        let base = self.top_line - self.scrollback.len() as u64;
-        let history = !self.alt_active;
-        if up {
-            let screen = (lo..line.min(hi)).rev().filter(has);
-            let mut at = (history && line > base).then(|| (line.min(self.top_line) - base) as usize);
-            let older = std::iter::from_fn(move || {
-                let i = self.scrollback.marked(at?, true)?;
-                at = Some(i);
-                Some(base + i as u64)
-            });
-            Box::new(screen.chain(older))
-        } else {
-            let mut at = (history && line.saturating_add(1) < self.top_line).then(|| (line.saturating_add(1).max(base) - base) as usize);
-            let newer = std::iter::from_fn(move || {
-                let i = self.scrollback.marked(at?, false)?;
-                at = Some(i + 1);
-                Some(base + i as u64)
-            });
-            Box::new(newer.chain((line.saturating_add(1).max(lo)..hi).filter(has)))
+        match line {
+            Some(line) if up => {
+                let screen = (top..line.min(hi)).rev().filter(has);
+                Box::new(screen.chain(self.history_marked(line, true)))
+            }
+            Some(line) => {
+                let screen = (line.saturating_add(1).max(top)..hi).filter(has);
+                Box::new(self.history_marked(line.saturating_add(1), false).chain(screen))
+            }
+            None => Box::new(self.history_marked(0, false).chain((top..hi).filter(has))),
         }
     }
 
     /// Where the nearest prompt (OSC 133 A) above line `line` starts.
     pub fn previous_prompt(&self, line: u64) -> Option<Point> {
-        self.marked_lines(line, true).find_map(|l| self.prompt_on(l))
+        self.marked_lines(Some(line), true).find_map(|l| self.prompt_on(l))
     }
 
     /// Where the nearest prompt (OSC 133 A) below line `line` starts.
     pub fn next_prompt(&self, line: u64) -> Option<Point> {
-        self.marked_lines(line, false).find_map(|l| self.prompt_on(l))
+        self.marked_lines(Some(line), false).find_map(|l| self.prompt_on(l))
     }
 
     fn prompt_on(&self, line: u64) -> Option<Point> {
@@ -841,19 +836,9 @@ impl Terminal {
     /// and last cell. `None` if there is no C mark for it or the output
     /// is empty.
     pub fn command_output(&self, p: Point) -> Option<(Point, Point)> {
-        // Every mark in the order written, history's included (only the
-        // lines of blocks with marks are read).
-        let first = self.first_line();
-        let lines = self.marked_lines(first.saturating_sub(1), false);
-        let lines: Vec<u64> = if first == 0 && self.marks_at(0).is_empty() {
-            lines.collect()
-        } else if first == 0 {
-            std::iter::once(0).chain(lines).collect()
-        } else {
-            lines.collect()
-        };
-        let marks: Vec<(Point, MarkKind)> = lines
-            .into_iter()
+        // Every mark in the order written, history's then the screen's.
+        let marks: Vec<(Point, MarkKind)> = self
+            .marked_lines(None, false)
             .flat_map(|line| {
                 self.marks_at(line)
                     .into_iter()
@@ -989,9 +974,30 @@ impl Terminal {
     /// The first and last cell of the word at `p` on its logical line, or
     /// `(p, p)` when `p` isn't on a word.
     fn word_span(&self, p: Point) -> (Point, Point) {
+        let (text, cells, at) = self.logical_text(p);
+        match at.and_then(|i| crate::word::word_at(&text, i)) {
+            Some((a, b)) => (cells[a].0, cells[b].1),
+            None => (p, p),
+        }
+    }
+
+    /// The plain URL at `p` (one written without OSC 8, starting
+    /// `https://`, `http://`, `file://` or `mailto:`; see
+    /// [`crate::word::url_at`]), on its logical line, so a URL that a soft
+    /// wrap splits across rows is found whole: its first and last cell,
+    /// and its text.
+    pub fn url_at(&self, p: Point) -> Option<(Point, Point, String)> {
+        let (text, cells, at) = self.logical_text(p);
+        let (a, b) = crate::word::url_at(&text, at?)?;
+        Some((cells[a].0, cells[b].1, text[a..=b].iter().collect()))
+    }
+
+    /// The text of the logical line `p` is on, one entry per character,
+    /// with each character's first and last cell (a wide character's last
+    /// cell is its spacer), and which character `p` is on.
+    #[allow(clippy::type_complexity)]
+    fn logical_text(&self, p: Point) -> (Vec<char>, Vec<(Point, Point)>, Option<usize>) {
         let (start, end) = self.logical_line(p.line);
-        // One entry per character: the character, and its first and last
-        // cell (a wide character's last cell is its spacer).
         let mut text = Vec::new();
         let mut cells: Vec<(Point, Point)> = Vec::new();
         let mut at = None;
@@ -1029,10 +1035,7 @@ impl Terminal {
                 cells.push((here, here));
             }
         }
-        match at.and_then(|i| crate::word::word_at(&text, i)) {
-            Some((a, b)) => (cells[a].0, cells[b].1),
-            None => (p, p),
-        }
+        (text, cells, at)
     }
 
     /// The row at buffer line `line`, or None if it is not stored (any more).

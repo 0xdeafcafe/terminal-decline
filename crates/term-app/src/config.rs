@@ -636,6 +636,34 @@ pub fn query_colors(theme: &Theme) -> [u32; 3] {
     [theme.foreground, theme.background, theme.cursor].map(rgb_of)
 }
 
+/// The theme's 256 colours as 0xRRGGBB: the palette programs read (OSC 4)
+/// and go back to (OSC 104).
+pub fn query_palette(theme: &Theme) -> [u32; 256] {
+    theme.palette.map(rgb_of)
+}
+
+/// The theme's colours as the terminal's defaults: what colour queries
+/// answer and resets go back to.
+pub fn set_term_colors(t: &mut term_core::Terminal, theme: &Theme) {
+    t.set_default_colors(query_colors(theme));
+    t.set_default_palette(&query_palette(theme));
+}
+
+/// What a pane draws with: `base` with the colours its program set (OSC
+/// 4, 10–12) on top, or `None` while they are all the theme's.
+pub fn program_theme(base: &Theme, t: &term_core::Terminal) -> Option<Theme> {
+    use term_core::DynamicColor;
+    let palette = t.palette();
+    let dynamic = [DynamicColor::Foreground, DynamicColor::Background, DynamicColor::Cursor].map(|c| t.dynamic_color(c));
+    if *palette == query_palette(base) && dynamic == query_colors(base) {
+        return None;
+    }
+    let mut theme = base.clone();
+    theme.palette = palette.map(term_render::rgb);
+    [theme.foreground, theme.background, theme.cursor] = dynamic.map(term_render::rgb);
+    Some(theme)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1318,5 +1346,31 @@ mod tests {
             };
             assert_eq!(c.theme(Appearance::Dark).background_opacity, want, "{opacity}");
         }
+    }
+
+    #[test]
+    fn programs_colours_are_drawn_over_the_theme() {
+        let theme = Config::default().theme(Appearance::Dark);
+        let mut t = term_core::Term::new(10, 2, 0);
+        set_term_colors(&mut t.state, &theme);
+        assert!(t.state.take_colors_changed());
+        // The theme's palette is what programs read.
+        assert_eq!(t.state.palette()[1], rgb_of(theme.palette[1]));
+        assert_eq!(t.state.palette()[200], rgb_of(theme.palette[200]));
+        assert_eq!(program_theme(&theme, &t.state), None);
+        // OSC 11 and OSC 4: drawn with the program's colours, the rest
+        // the theme's.
+        t.advance(b"\x1b]11;#102030\x1b\\\x1b]4;1;rgb:ff/00/00\x1b\\");
+        assert!(t.state.take_colors_changed());
+        let drawn = program_theme(&theme, &t.state).expect("program colours");
+        assert_eq!(rgb_of(drawn.background), 0x102030);
+        assert_eq!(rgb_of(drawn.palette[1]), 0xff0000);
+        assert_eq!(drawn.palette[2], theme.palette[2]);
+        assert_eq!(drawn.foreground, theme.foreground);
+        assert_eq!(drawn.selection, theme.selection);
+        // Resets go back to the theme.
+        t.advance(b"\x1b]111\x1b\\\x1b]104\x1b\\");
+        assert!(t.state.take_colors_changed());
+        assert_eq!(program_theme(&theme, &t.state), None);
     }
 }

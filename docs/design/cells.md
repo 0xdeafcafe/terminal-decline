@@ -650,7 +650,15 @@ end.
   `command_output(p)` / `select_output(p)`: from the C mark of the
   command `p` is in (on its output, prompt or command line) to the cell
   before the next D or A, or up to the cursor while it runs; `None` for
-  an empty output. They read screen lines only for now.
+  an empty output. They read history too since E.5 (below).
+- **Marks in history before v2** (E.5): until PR 7, `Scrollback` keeps
+  the marks of each line it stores that has any, by line number, beside
+  the v1 lines (`marks(i)`, `marked()`); they go when their line is
+  trimmed and on clear. `marks_at`, the prompt lookups and
+  `command_output` read them, so jumps and output selection reach
+  history. A row's marks are copied only when it has some; `parse_1k`
+  plain and `seq` showed no change (p 0.55 and 0.29, a loaded machine).
+  PR 7 replaced this with its `MARKS` section (end of §11.8).
 - **Not done here: plain-URL detection.** The design doesn't place it,
   and the roadmap has it in E.2; since it needs logical lines, it would
   fit in term-core next to `select_word` as `url_at(p)`.
@@ -1515,7 +1523,8 @@ changed from the design, and what is left:
 - **API:** `Renderer::prepare(&mut Terminal, &FrameInput)` and
   `Frame::build(&mut Terminal, &FrameInput, glyphs)`; `FrameInput` no
   longer carries the terminal. For R.1 the snapshot call moves out of
-  `build`.
+  `build`: done early in B1.2 (`Frame::snapshot` with the lock,
+  `Frame::build_snapshot` without; ligatures.md §4.3).
 - **What a cached row is:** its backgrounds, glyphs and decorations,
   placed where the row was last drawn (not at y = 0): a row that stayed is
   one `memcpy` into the frame, and a row that moved (a scroll, or other
@@ -3340,10 +3349,10 @@ in that app:
 
 - **Between PRs 5 and 7,** history still uses v1. As built, v1 keeps
   underline colour, underline style and overline (§5.4, Landed); only
-  links are lost. With PR 9 before PR 7, OSC 8 links and OSC 133 marks
-  work on the screen and are dropped when their lines scroll into
-  history, so prompt jumps and selecting output reach only the screen.
-  (Closed by PR 7: history keeps links, marks and whole clusters.)
+  links are lost. With PR 9 before PR 7, OSC 8 links work on the screen
+  and are dropped when their lines scroll into history; OSC 133 marks
+  are kept beside v1 history since E.5.
+  (Closed by PR 7: history keeps links, marks and whole clusters itself.)
 
 - **Between PRs 6 and 7,** clusters work on the screen, but v1 history keeps
   only each cluster's first scalar: a family emoji scrolled into history

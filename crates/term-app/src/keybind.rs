@@ -28,10 +28,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::keys::{KeyEventType, KeyInput, flags};
 
-/// The app's actions that can be bound: its menu items. The pane actions
-/// that move dividers and zoom (`resize_pane_*`, `equalize_panes`,
-/// `toggle_pane_zoom`) have defaults but no menu items or handlers yet;
-/// until they do, their keys do what they did before.
+/// The app's actions that can be bound: its menu items.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum MenuAction {
     NewWindow,
@@ -76,10 +73,17 @@ pub enum MenuAction {
     TogglePaneZoom,
     /// Terminal Decline > Settings…: the preferences in a tab.
     Settings,
+    /// Scroll the view to the prompt above or below its top line (OSC 133
+    /// marks from the shell integration snippets).
+    PreviousPrompt,
+    NextPrompt,
+    /// Select the output of the command at the top of the view, or the
+    /// last command's when the view is at the bottom.
+    SelectOutput,
 }
 
 impl MenuAction {
-    pub const ALL: [MenuAction; 31] = [
+    pub const ALL: [MenuAction; 34] = [
         MenuAction::NewWindow,
         MenuAction::NewTab,
         MenuAction::Close,
@@ -111,6 +115,9 @@ impl MenuAction {
         MenuAction::EqualizePanes,
         MenuAction::TogglePaneZoom,
         MenuAction::Settings,
+        MenuAction::PreviousPrompt,
+        MenuAction::NextPrompt,
+        MenuAction::SelectOutput,
     ];
 
     /// The name in the config.
@@ -147,12 +154,13 @@ impl MenuAction {
             MenuAction::EqualizePanes => "equalize_panes",
             MenuAction::TogglePaneZoom => "toggle_pane_zoom",
             MenuAction::Settings => "settings",
+            MenuAction::PreviousPrompt => "previous_prompt",
+            MenuAction::NextPrompt => "next_prompt",
+            MenuAction::SelectOutput => "select_output",
         }
     }
 
-    /// Its menu item, as the menus and the preferences show it. The
-    /// divider and zoom actions have no items yet; these are the names
-    /// they will have.
+    /// Its menu item, as the menus and the preferences show it.
     pub fn label(self) -> &'static str {
         match self {
             MenuAction::NewWindow => "New Window",
@@ -186,6 +194,9 @@ impl MenuAction {
             MenuAction::EqualizePanes => "Equalize Panes",
             MenuAction::TogglePaneZoom => "Zoom Pane",
             MenuAction::Settings => "Settings…",
+            MenuAction::PreviousPrompt => "Jump to Previous Prompt",
+            MenuAction::NextPrompt => "Jump to Next Prompt",
+            MenuAction::SelectOutput => "Select Command Output",
         }
     }
 
@@ -225,17 +236,21 @@ impl MenuAction {
             MenuAction::EqualizePanes => c"equalizePanes:",
             MenuAction::TogglePaneZoom => c"togglePaneZoom:",
             MenuAction::Settings => c"showSettings:",
+            MenuAction::PreviousPrompt => c"jumpToPreviousPrompt:",
+            MenuAction::NextPrompt => c"jumpToNextPrompt:",
+            MenuAction::SelectOutput => c"selectCommandOutput:",
         }
     }
 
-    fn from_name(name: &str) -> Option<MenuAction> {
+    /// The action called `name` in the config.
+    pub fn from_name(name: &str) -> Option<MenuAction> {
         MenuAction::ALL.into_iter().find(|a| a.name() == name)
     }
 }
 
 /// The menus' shortcuts with no config. The pane ones are iTerm2's and
-/// Ghostty's.
-pub const DEFAULTS: [(&str, MenuAction); 29] = [
+/// Ghostty's; the prompt ones Terminal.app's and iTerm2's.
+pub const DEFAULTS: [(&str, MenuAction); 32] = [
     ("cmd+n", MenuAction::NewWindow),
     ("cmd+t", MenuAction::NewTab),
     ("cmd+w", MenuAction::Close),
@@ -265,6 +280,9 @@ pub const DEFAULTS: [(&str, MenuAction); 29] = [
     ("ctrl+cmd+=", MenuAction::EqualizePanes),
     ("shift+cmd+enter", MenuAction::TogglePaneZoom),
     ("cmd+,", MenuAction::Settings),
+    ("cmd+up", MenuAction::PreviousPrompt),
+    ("cmd+down", MenuAction::NextPrompt),
+    ("shift+cmd+a", MenuAction::SelectOutput),
 ];
 
 /// The menus' shortcuts that `[keybind]` can't move, and their items

@@ -658,9 +658,9 @@ toggle_full_screen, next_tab, previous_tab, settings (Cmd+,), and find, a placeh
 Edit > Find… item stays disabled until the find bar exists; and the pane
 actions of docs/design/splits.md §5, split_right/down, close_tab,
 close_window, focus_pane_left/right/up/down/next/previous,
-resize_pane_left/right/up/down, equalize_panes and toggle_pane_zoom, which
-have their defaults (Cmd+D, Cmd+Opt+arrows, …) but no menu items or
-handlers until panes are wired in, so their keys do what they did),
+resize_pane_left/right/up/down, equalize_panes and toggle_pane_zoom, in
+the Shell and Window menus with their defaults (Cmd+D, Cmd+Opt+arrows,
+…)),
 `"none"`, or
 `{ text = "…" }`. The menus' own shortcuts are the defaults and each entry
 replaces or removes one chord; the menus are built from the result, so

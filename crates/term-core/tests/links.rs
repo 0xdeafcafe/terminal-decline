@@ -154,6 +154,45 @@ fn hovered_link_is_highlighted_in_every_piece() {
 }
 
 #[test]
+fn plain_urls_are_found_across_wraps_and_hovered_like_links() {
+    let mut t = Term::new(12, 4, 10);
+    // Soft-wrapped onto a second row, then a full stop that isn't part of it.
+    t.advance(b"go https://example.com/x. ok");
+    let url = |t: &Term, line, col| t.state.url_at(t.state.point_at(line, col));
+    let (a, b, u) = url(&t, 1, 3).unwrap();
+    assert_eq!(u, "https://example.com/x");
+    assert_eq!((a, b), (t.state.point_at(0, 3), t.state.point_at(1, 11)));
+    assert_eq!(url(&t, 0, 4).map(|x| x.2), Some(u.clone()), "from either row");
+    assert_eq!(url(&t, 0, 1), None, "not on the URL");
+    assert_eq!(url(&t, 2, 0), None);
+
+    let mut snap = Snapshot::default();
+    t.state.set_hover(Some(t.state.point_at(1, 0)));
+    t.state.snapshot(&mut snap, |_| true);
+    let rows: Vec<Vec<(std::ops::Range<u16>, HighlightKind)>> = snap
+        .rows
+        .iter()
+        .map(|r| snap.row_highlights(r).iter().map(|h| (h.cols.clone(), h.kind)).collect())
+        .collect();
+    use HighlightKind::HoveredLink;
+    assert_eq!(rows, vec![vec![(3..12, HoveredLink)], vec![(0..12, HoveredLink)], vec![], vec![]]);
+
+    // An OSC 8 link wins over the URL text it shows.
+    let mut t = Term::new(40, 2, 0);
+    t.advance(b"\x1b]8;;https://real\x1b\\https://shown\x1b]8;;\x1b\\");
+    t.state.set_hover(Some(t.state.point_at(0, 2)));
+    t.state.snapshot(&mut snap, |_| true);
+    assert_eq!(snap.row_highlights(&snap.rows[0]).len(), 1);
+    assert_eq!(snap.row_highlights(&snap.rows[0])[0].cols, 0..13);
+
+    // History rows are text too.
+    let mut t = Term::new(20, 2, 10);
+    t.advance(b"see http://old.ex\r\n\r\nnew");
+    t.state.scroll_view(1);
+    assert_eq!(url(&t, 0, 6).map(|x| x.2).as_deref(), Some("http://old.ex"));
+}
+
+#[test]
 fn a_saved_cursor_holds_its_link_by_value() {
     let mut t = Term::new(20, 3, 0);
     t.advance(b"\x1b]8;;https://saved\x1b\\\x1b7\x1b]8;;\x1b\\a\x1b8b");
@@ -417,6 +456,47 @@ fn marks_in_history_work_as_on_the_screen() {
     }
     assert!(short.state.command_output(Point { line: 1, col: 0 }).is_some());
     check(&short);
+}
+
+/// Marks scrolled into history are kept with its lines: prompts there
+/// are found going up and down, outputs there are selected, and they go
+/// with their lines when history drops them or is cleared.
+#[test]
+fn marks_in_history() {
+    let mut t = Term::new(20, 4, 6);
+    session(&mut t, "one", "1\r\n", 0);
+    session(&mut t, "two", "2\r\n22\r\n", 1);
+    t.advance(b"\x1b]133;A\x07$ ");
+    // Lines 0..7: prompts at 0, 2 and 5; the screen is lines 2..6.
+    let top = t.state.point_at(0, 0).line;
+    assert_eq!(top, 2);
+    let at = |line: u64| Point { line, col: 0 };
+    assert_eq!(t.state.marks_at(0), vec![mark(MarkKind::Prompt, 0), mark(MarkKind::Input, 2)]);
+    assert_eq!(t.state.previous_prompt(5), Some(at(2)));
+    assert_eq!(t.state.previous_prompt(2), Some(at(0)));
+    assert_eq!(t.state.previous_prompt(0), None);
+    assert_eq!(t.state.next_prompt(0), Some(at(2)));
+    assert_eq!(t.state.next_prompt(1), Some(at(2)));
+    let copy = |t: &mut Term, at: Point| t.state.select_output(at).then(|| t.state.selection_text().unwrap());
+    assert_eq!(copy(&mut t, at(0)), Some("1".into()));
+    assert_eq!(copy(&mut t, at(3)), Some("2\n22".into()));
+    // History holds 6 lines: 6 more lines drop lines 0 and 1, the first
+    // command's.
+    t.advance(b"\r\n\r\n\r\n\r\n\r\n\r\n");
+    assert_eq!(t.state.scrollback_len(), 6);
+    assert_eq!(t.state.marks_at(0), vec![]);
+    assert_eq!(t.state.marks_at(1), vec![]);
+    assert_eq!(t.state.previous_prompt(5), Some(at(2)));
+    assert_eq!(t.state.previous_prompt(2), None);
+    // ED 3 clears history and its marks.
+    t.advance(b"\x1b[3J");
+    assert_eq!(t.state.previous_prompt(10), None);
+    // The alternate screen has no history to jump into.
+    let mut t = Term::new(20, 2, 10);
+    session(&mut t, "one", "1\r\n", 0);
+    t.advance(b"\x1b[?1049h");
+    assert_eq!(t.state.previous_prompt(t.state.point_at(1, 0).line), None);
+    check(&t);
 }
 
 #[test]

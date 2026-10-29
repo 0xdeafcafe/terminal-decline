@@ -19,6 +19,18 @@
 //!   Nth pane (from 0, in the order the dump lists them), or as the pane
 //!   actions do;
 //! - `close-pane`: close the focused pane as Cmd+W does;
+//! - `drag N PX`: drag divider N (from 0, in tree order) so its line
+//!   starts at PX (window pixels: x for side-by-side panes, y for
+//!   stacked), as the mouse does;
+//! - `resize-pane left|right|up|down`: move the focused pane's divider
+//!   one cell, as Cmd+Ctrl+arrows do;
+//! - `equalize`: equal shares (Cmd+Ctrl+=);
+//! - `zoom`: zoom the focused pane, or end the zoom (Cmd+Shift+Enter);
+//! - `build-panic N [snapshot]`: with the `test-hooks` feature, the next
+//!   build of pane N's frame (from 0, in tree order) panics, to test that
+//!   the panic stays in that pane: while it is built unlocked, or with
+//!   `snapshot` while its snapshot is taken with the terminal locked;
+//!   without the feature, nothing;
 //! - `save`: write what a restart would save (every window, its tabs and
 //!   panes) to the dump file's path with `.saved` added, as JSON;
 //! - `settings`: Terminal Decline > Settings… (Cmd+,);
@@ -27,6 +39,15 @@
 //! - `key CODE [MODS]`: put a key press on the app's event queue, where a
 //!   real key arrives: monitors and menus first (MODS: `cmd`, `ctrl`, `alt`,
 //!   `shift` joined by `+`);
+//! - `hover LINE COL` / `hover off`: the pointer is over that visible cell
+//!   of the focused pane with Cmd held, as a mouse move there would be, or
+//!   Cmd is let go;
+//! - `click LINE COL`: Cmd-click that cell. A link that may open isn't
+//!   opened while this control is on: it is listed in the dump's `opened`;
+//! - `scroll N`: scroll the focused pane's view N lines back into history
+//!   (negative: towards the bottom), as the scroll wheel does;
+//! - `menu ACTION`: send a menu item's action (a `[keybind]` action name,
+//!   as `select_output`) up the responder chain, as choosing it does;
 //! - `quit`: quit the app, without asking.
 //!
 //! While this is on, the window draws even when covered by other windows,
@@ -162,6 +183,24 @@ pub enum Control {
     Focus(FocusTarget),
     /// Shell > Close: the focused pane.
     ClosePane,
+    /// Drag divider `index` (tree order) so its line starts at `to`
+    /// pixels.
+    Drag {
+        index: usize,
+        to: i32,
+    },
+    /// Window > Move Divider ….
+    ResizePane(Direction),
+    /// Window > Equalize Panes.
+    Equalize,
+    /// Window > Zoom Pane.
+    Zoom,
+    /// The next build of this pane's frame panics (`test-hooks` only),
+    /// taking the snapshot or building from it.
+    BuildPanic {
+        index: usize,
+        snapshot: bool,
+    },
     /// Write the windows as a restart saves them.
     Save,
     /// Terminal Decline > Settings….
@@ -173,6 +212,15 @@ pub enum Control {
         keycode: u16,
         flags: u64,
     },
+    /// The pointer over a visible cell (line, column) with Cmd held, or
+    /// Cmd let go.
+    Hover(Option<(usize, usize)>),
+    /// Cmd-click on a visible cell (line, column).
+    Click(usize, usize),
+    /// Scroll the view this many lines back.
+    Scroll(isize),
+    /// A menu item's action, as choosing the item sends it.
+    Menu(crate::keybind::MenuAction),
     Quit,
 }
 
@@ -222,6 +270,27 @@ impl Control {
             "front" => Control::Front,
             "close" => Control::Close,
             "close-pane" => Control::ClosePane,
+            "equalize" => Control::Equalize,
+            "zoom" => Control::Zoom,
+            "build-panic" => Control::BuildPanic {
+                index: words.next()?.parse().ok()?,
+                snapshot: match words.next() {
+                    None => false,
+                    Some("snapshot") => true,
+                    Some(_) => return None,
+                },
+            },
+            "drag" => Control::Drag {
+                index: words.next()?.parse().ok()?,
+                to: words.next()?.parse().ok()?,
+            },
+            "resize-pane" => Control::ResizePane(match words.next()? {
+                "left" => Direction::Left,
+                "right" => Direction::Right,
+                "up" => Direction::Up,
+                "down" => Direction::Down,
+                _ => return None,
+            }),
             "save" => Control::Save,
             "split" => Control::Split(match words.next()? {
                 "right" => Dir::Right,
@@ -243,6 +312,13 @@ impl Control {
                 lines: words.next()?.parse().ok().filter(|&l| l > 0)?,
             },
             "font" => Control::Font(words.next()?.parse().ok()?),
+            "hover" => Control::Hover(match words.next()? {
+                "off" => None,
+                line => Some((line.parse().ok()?, words.next()?.parse().ok()?)),
+            }),
+            "click" => Control::Click(words.next()?.parse().ok()?, words.next()?.parse().ok()?),
+            "scroll" => Control::Scroll(words.next()?.parse().ok()?),
+            "menu" => Control::Menu(crate::keybind::MenuAction::from_name(words.next()?)?),
             "key" => {
                 let keycode = words.next()?.parse().ok()?;
                 let mut flags = 0;
@@ -306,8 +382,20 @@ pub struct Dump {
     pub lines: usize,
     /// Every pane, in tree order (left to right, top to bottom).
     pub panes: Vec<PaneDump>,
+    /// The focused pane's hovered link (OSC 8 or a plain URL), if the
+    /// pointer is over one with Cmd held.
+    pub hovered_link: Option<String>,
+    /// Links opened so far in this window, as they would be opened
+    /// (opening is stubbed under test control).
+    pub opened: Vec<String>,
+    /// How many lines the focused pane's view is scrolled back.
+    pub view_offset: usize,
+    /// The focused pane's selected text.
+    pub selection: Option<String>,
     /// The dividers drawn between them.
     pub dividers: usize,
+    /// The zoomed pane's id, while one fills the window.
+    pub zoomed: Option<PaneId>,
     /// Frames the GPU has finished drawing.
     pub frames: u64,
     /// The last frame's glyph and rectangle (background, decoration)
@@ -337,6 +425,11 @@ pub struct PaneDump {
     pub cols: usize,
     pub lines: usize,
     pub focused: bool,
+    /// Shown: not hidden by another pane's zoom.
+    pub shown: bool,
+    /// Times its frame was built, and times building it panicked.
+    pub builds: u64,
+    pub crashes: u32,
     /// As [`Dump::screen`].
     pub screen: String,
 }
@@ -442,6 +535,20 @@ mod tests {
             ("front", Some(Control::Front)),
             ("close", Some(Control::Close)),
             ("close-pane", Some(Control::ClosePane)),
+            ("drag 0 300", Some(Control::Drag { index: 0, to: 300 })),
+            ("drag 1", None),
+            ("drag x 3", None),
+            ("resize-pane left", Some(Control::ResizePane(Direction::Left))),
+            ("resize-pane down", Some(Control::ResizePane(Direction::Down))),
+            ("resize-pane", None),
+            ("resize-pane 3", None),
+            ("equalize", Some(Control::Equalize)),
+            ("zoom", Some(Control::Zoom)),
+            ("zoom 1", None),
+            ("build-panic 1", Some(Control::BuildPanic { index: 1, snapshot: false })),
+            ("build-panic 0 snapshot", Some(Control::BuildPanic { index: 0, snapshot: true })),
+            ("build-panic 0 x", None),
+            ("build-panic", None),
             ("save", Some(Control::Save)),
             ("split right", Some(Control::Split(Dir::Right))),
             ("split down", Some(Control::Split(Dir::Down))),
@@ -468,6 +575,15 @@ mod tests {
             ),
             ("key 53", Some(Control::Key { keycode: 53, flags: 0 })),
             ("key 45 hyper", None),
+            ("hover 2 10", Some(Control::Hover(Some((2, 10))))),
+            ("hover off", Some(Control::Hover(None))),
+            ("hover 2", None),
+            ("click 0 3", Some(Control::Click(0, 3))),
+            ("click 0", None),
+            ("scroll -4", Some(Control::Scroll(-4))),
+            ("scroll", None),
+            ("menu select_output", Some(Control::Menu(crate::keybind::MenuAction::SelectOutput))),
+            ("menu launch_missiles", None),
             (
                 "type-settings /fg\\r\\e\\\\x",
                 Some(Control::TypeSettings(b"/fg\r\x1b\\x".to_vec())),

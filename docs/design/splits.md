@@ -450,6 +450,95 @@ Panes split, close and take focus; dividers are drawn but don't drag yet
   (about 0.6 MB per extra idle pane); 0.0% CPU and 0 idle wake-ups
   (`top -stats cpu,idlew`, three 3 s samples) with 1, 2 and 4 panes.
 
+### 3.8 Landed (B2.3c)
+
+Dividers drag, the keyboard moves and evens them out, and a pane zooms.
+
+- **`DividerView`** (`divider_view.rs`, `DeclineDividerView`): a plain
+  `NSView` over each divider's grab zone (`panes::GRAB`, 3 pt either side
+  of the line, below the title bar) that draws nothing. The window view
+  makes, moves and removes them as it lays the panes out, and adds pane
+  views below them, so they win hit testing. Mouse down starts a drag
+  (keeping where in the zone it was taken), mouse dragged moves the split
+  through `Panes::drag` (clamped at the minimum) and lays the panes out,
+  and the next display-link tick draws at the input rate (120 Hz: the
+  drag counts as input). A double-click evens out the run of panes the
+  divider runs between (`Panes::equalize_at`). `acceptsFirstMouse` is YES,
+  so a drag works in an inactive window.
+- **Cursors**: `resetCursorRects` puts `columnResizeCursor` /
+  `rowResizeCursor` (macOS 15+; `resizeLeftRightCursor` /
+  `resizeUpDownCursor` on 14) over the grab zones, and the I-beam over the
+  rest of each pane (`panes::subtract`), so no two cursor rects overlap.
+  A drag sets the resize cursor on every move.
+- **Grids**: a pane's program is told its size (PTY resize, SIGWINCH)
+  only when its columns, lines or cell size change, for drags and window
+  resizes alike; a pane that moved or changed size is drawn again.
+- **Actions** on `WindowView`: `resizePane{Left,Right,Up,Down}:`
+  (Cmd+Ctrl+arrows: the nearest divider across that way moves one cell;
+  beeps when there is none, it can't move, or a pane is zoomed),
+  `equalizePanes:` (Cmd+Ctrl+=), `togglePaneZoom:` (Cmd+Shift+Enter;
+  beeps with one pane). Window menu: Move Divider Left/Right/Up/Down,
+  Equalize Panes, Zoom Pane (with a checkmark while zoomed).
+- **Zoom**: the focused pane fills the window; the others' views are
+  hidden, their programs keep running at their sizes and their frames
+  aren't built, and no dividers are drawn. Zooming again, splitting,
+  closing the zoomed pane, or focusing another pane (`focus`, the
+  Select items) ends it; the panes come back drawn afresh.
+- **Restore** keeps a saved zoom: the hidden panes open at the size
+  they get when it ends.
+- **Keys for tests**: `key` gives Return and the arrows their AppKit
+  characters, so their menu shortcuts match.
+- **Test control**: `drag N PX` (through the drag handlers), `resize-pane
+  left|right|up|down`, `equalize`, `zoom`; dumps give `zoomed` and each
+  pane's `shown`. Smoke tests: a drag, Cmd+Ctrl+→, Cmd+Ctrl+=,
+  Cmd+Shift+Enter, `zoom` and `focus` each give the panes the rects
+  expected and both programs the sizes of their grids (a hidden pane
+  keeps its size); a restored zoom shows one pane and saves back zoomed.
+- Not measured: nothing in the frame path changed beyond the layout.
+  Divider drag with Neovim in both panes and zoom with htop (§9's manual
+  checks) are still to do.
+
+### 3.9 Landed (B2.4)
+
+A panic while building one pane's frame stays in that pane (§7).
+
+- **Where**: `draw` wraps each of a pane's three build steps (B1.2) in
+  `crash::contain`, which catches the panic and tells the panic hook not
+  to abort the main thread for it (the hook still writes the crash log and
+  the os_log fault): `snapshot_pane` with the terminal locked,
+  `build_from_snapshot` unlocked, and the fallback `build_pane` under the
+  lock when the textures were emptied in between. In the locked steps the
+  terminal's guard is held outside the catch and a terminal that may be
+  half-updated is replaced (`session::replace_term`) before the guard is
+  released, so the reader never parses into it. A panic in the unlocked
+  step leaves the terminal untouched, but it is still replaced when the
+  message is written: what it showed likely led to the panic, and drawing
+  it again would only panic again and hide the message behind the repeat
+  limit.
+- **Then**: the pane's `PaneRender` is forgotten; `Renderer::
+  forget_glyphs` empties the glyph textures (every pane of every window is
+  built again before its glyphs are drawn) and the window's fonts forget
+  their shaped clusters; `Session::stop_for_bug` kills the program, drops
+  its output from then on and ends the session held without a message of
+  its own; the pane shows the parse panic's message ("hit a bug and
+  stopped this session; details in …") and closes on a key, like any held
+  pane. Every pane of the window is drawn again.
+- **Repeats**: a second panic in the same pane within 10 s stops it being
+  built: it shows its background only (a rectangle drawn with the
+  dividers), so a panic doesn't repeat every frame. The other panes keep
+  drawing throughout.
+- **Test hook**: `build-panic N [snapshot]` (with `test-hooks`) makes
+  pane N's next build panic, building unlocked or taking the snapshot;
+  dumps give each pane's `builds` and `crashes`. Smoke test: the split
+  crashes taking its snapshot, shows the message and a crash log is written (under a
+  temp `HOME`) while the first pane keeps printing and being built; a
+  second crash, building unlocked, stops the split being built while the
+  first keeps going.
+  term-render test: `forget_glyphs` makes every pane stale (backgrounds
+  only) until built again, then it draws as before.
+- Not measured: the catch costs nothing unless a panic happens (no
+  change in the frame path otherwise).
+
 ## 4. Input and focus
 
 - The focused pane's PaneView is the window's first responder. Focus

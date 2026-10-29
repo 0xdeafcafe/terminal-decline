@@ -60,6 +60,22 @@ pub fn is_dogfood_bundle(bundle: &Path) -> bool {
     bundle.join("Contents/Resources/dogfood").exists()
 }
 
+/// The bundle's name after the rename to Terminal Decline (E.17).
+pub const RENAMED_BUNDLE: &str = "Terminal Decline.app";
+
+/// The bundle to restart into once `bundle`'s executable changed: `bundle`
+/// itself when a new build replaced it, else (the dogfood script removed
+/// the build from before the rename) `Terminal Decline.app` in the same
+/// folder, if it is there.
+pub fn relaunch_target(bundle: &Path) -> Option<PathBuf> {
+    let is_app = |b: &Path| b.join("Contents/Info.plist").is_file();
+    if is_app(bundle) {
+        return Some(bundle.to_path_buf());
+    }
+    let renamed = bundle.parent()?.join(RENAMED_BUNDLE);
+    (renamed != bundle && is_app(&renamed)).then_some(renamed)
+}
+
 /// Calls `on_change` (on a background thread) once the executable at `exe`
 /// is replaced, deleted or rewritten.
 pub fn watch(exe: PathBuf, on_change: impl FnOnce() + Send + 'static) -> std::io::Result<()> {
@@ -226,6 +242,31 @@ mod tests {
             .collect();
         assert_eq!(groups, [vec!["/one"], vec!["/a1", "/a2", "/a3"], vec!["/b1"], vec!["/two"]]);
         assert!(tab_groups(Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn restarts_into_the_renamed_bundle_once_this_one_is_gone() {
+        let dir = std::env::temp_dir().join(format!("decline-relaunch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let app = |name: &str| {
+            let b = dir.join(name);
+            std::fs::create_dir_all(b.join("Contents")).unwrap();
+            std::fs::write(b.join("Contents/Info.plist"), b"").unwrap();
+            b
+        };
+        let old = app("Decline.app");
+        // Replaced in place: restart into the same bundle.
+        assert_eq!(relaunch_target(&old), Some(old.clone()));
+        // Removed, with nothing beside it: nowhere to go.
+        std::fs::remove_dir_all(&old).unwrap();
+        assert_eq!(relaunch_target(&old), None);
+        // Removed, with the renamed build beside it.
+        let renamed = app(RENAMED_BUNDLE);
+        assert_eq!(relaunch_target(&old), Some(renamed.clone()));
+        assert_eq!(relaunch_target(&renamed), Some(renamed.clone()));
+        std::fs::remove_dir_all(&renamed).unwrap();
+        assert_eq!(relaunch_target(&renamed), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

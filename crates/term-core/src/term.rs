@@ -2290,6 +2290,11 @@ impl Perform for Terminal {
                 let n = a1.min(self.cols * self.lines);
                 if let Some(c) = self.last_char {
                     for _ in 0..n {
+                        // Each copy is its own cluster: copies that could
+                        // join (regional indicators, Hangul jamo, Prepend)
+                        // mustn't merge (§6.4). The last copy keeps its
+                        // state, so a mark printed next still joins it.
+                        self.clear_grapheme();
                         self.write_char(c);
                     }
                 } else if !self.last_cluster.is_empty() {

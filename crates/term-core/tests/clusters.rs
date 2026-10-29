@@ -212,6 +212,42 @@ fn rep_repeats_the_whole_cluster_by_value() {
     assert_eq!(t.state.dump().lines().nth(1).unwrap(), "a\u{301} a\u{301}a\u{301}|");
 }
 
+/// REP of one scalar that could join its own copies (a regional indicator,
+/// Hangul jamo) repeats it: each copy is its own cell. Found by review.
+#[test]
+fn rep_of_a_joining_scalar_keeps_copies_apart() {
+    let t = term(10, 1, "🇬\x1b[2b");
+    assert_eq!(
+        cells(&t, 0)[..3],
+        [
+            ("🇬".into(), Width::Narrow),
+            ("🇬".into(), Width::Narrow),
+            ("🇬".into(), Width::Narrow)
+        ]
+    );
+    assert_eq!(cursor(&t), (0, 3, false));
+    let t = term(10, 1, "\u{1100}\x1b[1b");
+    assert_eq!(
+        cells(&t, 0)[..4],
+        [
+            ("\u{1100}".into(), Width::Wide),
+            (String::new(), Width::Spacer),
+            ("\u{1100}".into(), Width::Wide),
+            (String::new(), Width::Spacer)
+        ]
+    );
+    // A mark printed after REP still joins the last copy.
+    let t = term(10, 1, "e\x1b[2b\u{301}");
+    assert_eq!(
+        cells(&t, 0)[..3],
+        [
+            ("e".into(), Width::Narrow),
+            ("e".into(), Width::Narrow),
+            ("e\u{301}".into(), Width::Narrow)
+        ]
+    );
+}
+
 #[test]
 fn legacy_mode_joins_only_zero_width_scalars() {
     let t = term(12, 1, "\x1b[?2027l❤\u{FE0F}e\u{301}🇬🇧1\u{20E3}⌚\u{FE0E}");

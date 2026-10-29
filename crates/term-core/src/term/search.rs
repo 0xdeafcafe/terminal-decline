@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::{Point, Selection, Terminal, ViewTop};
 use crate::cell::Row;
-use crate::search::{Cells, HIT_CAP, Hit, HitBatch, Mapper, Matcher, Query, SearchJob, Seg, char_at, scan_seg};
+use crate::search::{Cells, HIT_CAP, Hit, HitBatch, Mapper, Matcher, Query, SearchJob, Seg, WordMatch, char_at, scan_seg};
 
 /// Where a search is, for the find bar's count.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -41,6 +41,16 @@ pub(crate) struct SearchState {
     /// History lines below this have been searched (by the job or the
     /// live rule).
     history_to: u64,
+    /// The first visible history line when hits were last brought up to
+    /// date: hiding lines before it can make its start a word's start.
+    first_visible: u64,
+    /// Where history's text ended (after its last cell or line end) when
+    /// the screen was last searched, and when the job was taken. Ends With
+    /// and Full Word look at the scalar after a match, so a match ending
+    /// there depends on the screen: the screen's search keeps those up to
+    /// date, and the job's are dropped.
+    history_end: Option<(u64, u16)>,
+    job_end: Option<(u64, u16)>,
     /// Lowest line popped since the search started: worker hits at or
     /// after it are dropped (those lines are searched again as output).
     popped_low: Option<u64>,
@@ -50,6 +60,16 @@ pub(crate) struct SearchState {
     pending: Option<bool>,
     done: bool,
     capped: bool,
+}
+
+/// Where a hit ends: its line, and the column after it.
+fn end(h: &Hit) -> (u64, u16) {
+    (h.end_line(), h.end_col)
+}
+
+/// Whether the query's word check looks at the scalar after a match.
+fn looks_after(m: &Matcher) -> bool {
+    matches!(m.word(), WordMatch::EndsWith | WordMatch::FullWord)
 }
 
 /// Process-wide search generations: a newer one cancels older jobs.
@@ -68,6 +88,20 @@ impl SearchState {
             Some(self.blocks.iter().flat_map(|b| b.1.iter()))
         };
         history.into_iter().flatten().chain(self.screen.iter())
+    }
+
+    /// Drop history's hits that end at `at`.
+    fn drop_ending_at(&mut self, at: (u64, u16)) {
+        for b in self.blocks.iter_mut().rev() {
+            b.1.retain(|h| end(h) != at);
+            if b.0 <= at.0 {
+                break;
+            }
+        }
+        self.blocks.retain(|b| !b.1.is_empty());
+        if self.current.is_some_and(|c| end(&c) == at) {
+            self.current = None;
+        }
     }
 
     fn add(&mut self, block: u64, mut hits: Vec<Hit>) {
@@ -117,6 +151,9 @@ impl Terminal {
             screen_top: 0,
             screen_alt: false,
             history_to: self.scrollback.total(),
+            first_visible: self.scrollback.first_visible(),
+            history_end: None,
+            job_end: None,
             popped_low: None,
             epoch: self.history_epoch,
             current: None,
@@ -125,6 +162,7 @@ impl Terminal {
             capped: false,
         };
         self.search_screen(&mut state);
+        state.job_end = state.history_end;
         let (mut segs, mut start, mut after) = (Vec::new(), 0, None);
         if matcher.is_some() && !self.alt_active {
             let (blocks, visible) = self.scrollback.search_blocks(0);
@@ -163,7 +201,8 @@ impl Terminal {
         let first = self.scrollback.first_visible();
         let popped = s.popped_low;
         let mut hits = batch.hits;
-        hits.retain(|h| h.line >= first && popped.is_none_or(|p| h.end_line() < p));
+        let job_end = s.job_end.filter(|_| s.matcher.as_deref().is_some_and(looks_after));
+        hits.retain(|h| h.line >= first && popped.is_none_or(|p| h.end_line() < p) && Some(end(h)) != job_end);
         let in_view = hits
             .iter()
             .any(|h| self.view_position(h.start()).is_some() || self.view_position(h.last()).is_some());
@@ -372,7 +411,14 @@ impl Terminal {
             self.search_new_history(&mut s);
             changed = true;
         }
-        let screen_changed = s.screen_alt != self.alt_active
+        let first_moved = s.first_visible != first;
+        if first > s.first_visible {
+            self.search_history_start(&mut s);
+            changed = true;
+        }
+        s.first_visible = first;
+        let screen_changed = first_moved
+            || s.screen_alt != self.alt_active
             || s.screen_top != self.top_line
             || s.screen_seqs.len() != self.screen.len()
             || self.screen.iter().zip(&s.screen_seqs).any(|(r, &q)| r.seq != q);
@@ -408,9 +454,17 @@ impl Terminal {
         let after = self.screen_first_char();
         let reach = m.reach();
         let (mut scratch, mut raw, mut found) = (Vec::new(), Vec::new(), Vec::new());
+        // Where the old text ended, as a place in the block before when the
+        // new lines start a block.
+        let mut old_end = (j, off);
         if j > 0 {
-            // Only the boundary's matches.
-            scan_seg(&m, &mut segs, j - 1, None, true, after, &mut scratch, &mut raw, &mut found);
+            // The boundary's matches, and those ending at it (below).
+            let (_, wb) = segs[j - 1].window();
+            if n == 0 {
+                old_end = (j - 1, wb);
+            }
+            let from = Some(wb.saturating_sub(reach));
+            scan_seg(&m, &mut segs, j - 1, from, false, after, &mut scratch, &mut raw, &mut found);
         }
         scan_seg(
             &m,
@@ -426,7 +480,13 @@ impl Terminal {
         for i in j + 1..segs.len() {
             scan_seg(&m, &mut segs, i, None, false, after, &mut scratch, &mut raw, &mut found);
         }
-        found.retain(|&(_, b)| b > (j, off));
+        // A match ending where history's text ended was checked against
+        // the screen's first scalar: check it again against the new line.
+        let at_old_end = looks_after(&m) && s.history_end.is_some();
+        if at_old_end && let Some(e) = s.history_end {
+            s.drop_ending_at(e);
+        }
+        found.retain(|&(_, b)| b > (j, off) || (at_old_end && b == old_end));
         let mut mapper = Mapper::default();
         let mut per: Vec<(u64, Vec<Hit>)> = Vec::new();
         for (a, b) in found {
@@ -444,6 +504,46 @@ impl Terminal {
         }
     }
 
+    /// Lines were hidden by the limit: a match at the start of the first
+    /// visible line now has nothing before it, so it may start a word
+    /// where it didn't before (§13.8). Search that line's start again,
+    /// with the lines after it up to a match's reach. A match that runs on
+    /// to the screen is the screen's.
+    fn search_history_start(&mut self, s: &mut SearchState) {
+        let Some(m) = s.matcher.clone() else { return };
+        if !matches!(m.word(), WordMatch::StartsWith | WordMatch::FullWord) {
+            return;
+        }
+        let sb = self.scrollback.len();
+        let first = self.scrollback.first_visible();
+        let (mut cells, mut row, mut styles) = (Cells::default(), Row::default(), Vec::new());
+        let mut k = 0;
+        while k < sb && (k == 0 || cells.text.len() < m.reach()) {
+            self.scrollback.get_into(k, &mut row, &mut styles);
+            cells.push_row(&row, first + k as u64);
+            k += 1;
+        }
+        if cells.text.is_empty() {
+            return;
+        }
+        // The scalar after these lines: the next one's first (its line end
+        // if it is empty), or the screen's.
+        let after = match self.scrollback.text(k) {
+            Some(t) => Some(if t.is_empty() { '\n' } else { char_at(t, 0).0 }),
+            None => self.screen_first_char(),
+        };
+        let (mut scratch, mut raw) = (Vec::new(), Vec::new());
+        m.find(&cells.text, None, after, &mut scratch, &mut raw);
+        let hits: Vec<Hit> = raw
+            .iter()
+            .filter(|&&(a, _)| a == 0)
+            .filter_map(|&(a, b)| Some(Hit::from_parts(cells.start_at(a)?, cells.end_at(b)?)))
+            .collect();
+        if !hits.is_empty() {
+            s.add(self.scrollback.block_first(first), hits);
+        }
+    }
+
     /// Search the screen again, with the end of history's last logical
     /// line before it (a match can start there and end on the screen):
     /// the screen's hits are replaced.
@@ -451,6 +551,10 @@ impl Terminal {
         s.screen.clear();
         s.screen_seqs.clear();
         s.screen_seqs.extend(self.screen.iter().map(|r| r.seq));
+        // A row's counter changes once per snapshot batch, so a row written
+        // again in this batch would keep the counter just recorded and its
+        // change would be missed: start a new batch, as a snapshot does.
+        self.batch_start = self.counter + 1;
         s.screen_top = self.top_line;
         s.screen_alt = self.alt_active;
         let Some(m) = s.matcher.clone() else { return };
@@ -458,14 +562,15 @@ impl Terminal {
         let mut row = Row::default();
         let mut styles = Vec::new();
         if !self.alt_active {
-            // History rows of the last logical line, newest first, until
-            // there are enough bytes for a match's reach.
+            // History's last rows, newest first, until there are enough
+            // bytes for a match's reach: whole lines too, as a query with
+            // line ends in it can start in one and run on to the screen.
             let sb = self.scrollback.len();
             let mut k = sb;
             let mut bytes = 0;
-            while k > 0 && self.scrollback.wrapped(k - 1) && bytes < m.reach() {
+            while k > 0 && bytes < m.reach() {
                 k -= 1;
-                bytes += self.scrollback.text(k).map_or(0, |t| t.len());
+                bytes += self.scrollback.text(k).map_or(0, |t| t.len()) + 1;
             }
             let first = self.top_line - (sb - k) as u64;
             for i in k..sb {
@@ -474,17 +579,34 @@ impl Terminal {
             }
         }
         let context = cells.text.len();
+        let history_end = cells.end_at(context);
+        s.history_end = history_end;
         for (r, row) in self.screen.iter().enumerate() {
             cells.push_row(row, self.top_line + r as u64);
         }
         let (mut scratch, mut raw) = (Vec::new(), Vec::new());
         m.find(&cells.text, None, None, &mut scratch, &mut raw);
+        // History's matches that end where it does, checked against the
+        // screen's first scalar now (they stay history's).
+        let mut at_end = Vec::new();
         for &(a, b) in &raw {
-            if b <= context {
+            if b < context || (b == context && !looks_after(&m)) {
                 continue;
             }
             if let (Some(st), Some(en)) = (cells.start_at(a), cells.end_at(b)) {
-                s.screen.push(Hit::from_parts(st, en));
+                if b == context {
+                    at_end.push(Hit::from_parts(st, en));
+                } else {
+                    s.screen.push(Hit::from_parts(st, en));
+                }
+            }
+        }
+        if looks_after(&m)
+            && let Some(e) = history_end
+        {
+            s.drop_ending_at(e);
+            for h in at_end {
+                s.add(self.scrollback.block_first(h.line), vec![h]);
             }
         }
     }

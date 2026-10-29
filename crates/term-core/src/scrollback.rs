@@ -2173,6 +2173,15 @@ impl Scrollback {
         (out, self.start)
     }
 
+    /// The first line of the block holding stored line `line` (the key
+    /// search keeps that block's hits under).
+    pub(crate) fn block_first(&self, line: u64) -> u64 {
+        self.blocks
+            .iter()
+            .find(|b| b.data.first + b.len as u64 > line)
+            .map_or(self.open.first, |b| b.data.first)
+    }
+
     /// The first line still visible.
     pub(crate) fn first_visible(&self) -> u64 {
         self.start

@@ -236,6 +236,74 @@ fn freed_and_cleared_history_drop_their_hits() {
     assert_eq!(t.state.search_hits(), naive(&t, &query));
 }
 
+/// Found by `equals_naive_search` on CI: a row written again before the
+/// next snapshot kept the change counter the screen's search recorded,
+/// so "ς" stayed a whole-word hit after "a" was printed after it.
+#[test]
+fn screen_row_written_again_before_a_snapshot() {
+    let mut t = Term::new(8, 3, 8);
+    let query = q("ς", false, WordMatch::FullWord);
+    t.advance("ς".as_bytes());
+    assert_eq!(search(&mut t, query.clone()).len(), 1);
+    t.advance(b"a");
+    t.state.refresh_search();
+    assert_eq!(t.state.search_hits(), naive(&t, &query));
+    assert!(t.state.search_hits().is_empty());
+}
+
+/// Found by `equals_naive_search`: when the limit hides the first row of
+/// a wrapped line, the next row's start has nothing visible before it,
+/// so a match there starts a word (as a new search would find).
+#[test]
+fn hiding_a_wrapped_rows_start_makes_a_word_start() {
+    let mut t = Term::new(4, 2, 3);
+    t.advance("aaaaéb\r\n".as_bytes());
+    let query = q("é", false, WordMatch::StartsWith);
+    assert!(search(&mut t, query.clone()).is_empty());
+    for _ in 0..8 {
+        t.advance(b"x\r\n");
+        t.state.refresh_search();
+        assert_eq!(t.state.search_hits(), naive(&t, &query));
+        if t.state.search_text_for_test().text.starts_with("é".as_bytes()) {
+            assert_eq!(t.state.search_hits().len(), 1);
+            return;
+        }
+    }
+    panic!("the wrapped line's second row never became the first visible line");
+}
+
+/// A match at history's end is checked against the screen's first
+/// scalar, so writing there changes whether it ends a word.
+#[test]
+fn history_hit_at_its_end_follows_the_screen() {
+    // "y" ends history; the screen's rows are empty.
+    let mut t = Term::new(8, 2, 100);
+    t.advance(b"y\r\n\r\n");
+    let query = q("y\n", false, WordMatch::FullWord);
+    assert_eq!(search(&mut t, query.clone()).len(), 1);
+    for (write, hits) in [("c", 0), (" ", 1), ("d", 0)] {
+        t.advance(format!("\x1b[H{write}").as_bytes());
+        t.state.refresh_search();
+        assert_eq!(t.state.search_hits(), naive(&t, &query), "after {write:?}");
+        assert_eq!(t.state.search_hits().len(), hits, "after {write:?}");
+    }
+}
+
+/// A query with line ends in it can start in history's last lines, not
+/// only its last logical line, and run on to the screen.
+#[test]
+fn match_from_historys_line_ends_onto_the_screen() {
+    for (out, query) in [("x\r\nab\r\n", "\nA"), ("x\r\n\r\nab\r\n", "\n\nA")] {
+        let mut t = Term::new(8, 2, 100);
+        t.advance(out.as_bytes());
+        let query = q(query, true, WordMatch::Contains);
+        let hits = search(&mut t, query.clone());
+        assert_eq!(hits, naive(&t, &query), "{out:?}");
+        assert_eq!(hits.len(), 1, "{out:?}");
+        assert_eq!((hits[0].line, hits[0].col), (0, 1), "{out:?}");
+    }
+}
+
 const PIECES: &[&str] = &[
     "a", "b", "A", "B", "ab", "é", "É", "σ", "Σ", "ς", "e\u{301}", "中", " ", "_", "-", "\r\n", "aaa", "ß",
 ];

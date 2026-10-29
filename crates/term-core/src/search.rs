@@ -172,6 +172,10 @@ impl Matcher {
         4 * self.chars + 4
     }
 
+    pub(crate) fn word(&self) -> WordMatch {
+        self.word
+    }
+
     fn word_ok(&self, before: Option<char>, after: Option<char>) -> bool {
         let edge = |c: Option<char>| !c.is_some_and(is_word_char);
         match self.word {

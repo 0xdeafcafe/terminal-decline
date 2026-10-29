@@ -103,9 +103,19 @@ only with `DECLINE_TEST_DUMP=<file>` set: `dump`, `resize`, `font`, `tab`,
   from the Unicode 18.0.0 files; equal to `unicode-width` per scalar but
   for U+17D8). The terminal segments printed text into grapheme clusters
   (UAX #29) as it arrives, including after a bulk ASCII run.
-- Known gap for the first milestone: combining marks / grapheme clusters are
-  still dropped from the cells (needs a side table for multi-codepoint cells;
-  cells design PR 6). Resize does not re-wrap lines yet.
+- Grapheme clusters (`e` + U+0301, emoji ZWJ sequences, flags, keycaps,
+  skin tones, Indic conjuncts) are stored whole: a cluster cell holds a
+  slot in its row's own cluster store (`src/clusters.rs`), freed as soon as
+  the cell is overwritten. Mode 2027 is on by default: a cluster is 2
+  cells if it is an emoji sequence, 1 with VS15, otherwise its first
+  character's width (what `string-width`, and so Ink, computes); a
+  program can turn it off for the old per-character rule. East Asian
+  Ambiguous characters are 1 or 2 cells by `Terminal::set_ambiguous_width`
+  (the app's setting comes with cells design PR 15). Selection text and
+  `dump()` give whole clusters; history keeps only a cluster's first
+  character until scrollback v2 (PR 7), and the renderer draws a cluster's
+  first character until clusters are shaped (F3.2).
+- Known gap for the first milestone: resize does not re-wrap lines yet.
 
 ## Threads
 
@@ -908,7 +918,8 @@ pin identity collisions, pin signing and quarantine.
 
 1. ~~Scrollback as text + style runs~~ (done). Next: compress sealed blocks.
 2. ~~8-byte cells with a style table per screen~~ (done, cells design
-   PR 5). Next: grapheme clusters per row (PR 6), OSC 8 links (PR 9).
+   PR 5), ~~grapheme clusters per row and mode 2027~~ (done, PR 6). Next:
+   scrollback v2 (PR 7), OSC 8 links (PR 9).
 3. ~~Parse plain-text runs in bulk~~ (done). Next: a CSI/SGR fast path.
 4. **Copy cells under the lock, build GPU instances outside it**, with
    per-row dirty flags so a spinner doesn't rebuild the whole screen.
@@ -958,6 +969,18 @@ style every cell 152.8 → 140.9 µs. Memory: 8 B a cell (was 12); style
 tables 92 B for plain text, 14 KB for 256 colours, 117 KB / 1.83 MB at
 80×24 / 300×100 for a truecolour gradient, back under 4 KB once the screen
 is cleared.
+
+### Grapheme clusters (cells design PR 6)
+
+Interleaved A/B against `main`, best of 5, busy machine. Parse (64 KB /
+1 KB pieces): plain +0.6% / +0.9%, coloured +3.0% / +3.4%, `tui` +1.1% /
++1.3%, `seq` +0.9% / +2.0%, unicode +4.5% / +4.5%; the new `clusters`
+input (marks, emoji sequences, flags, keycaps, a conjunct) 30.9 → 44.6
+ms, as `main` dropped what this stores (about 20 ns a cluster). Frames
+from the snapshot, every row rebuilt (best of 3): 300×100 plain 126.9 →
+125.8 µs, coloured 144.2 → 143.8 µs; the new 300×100 unicode screen
+119 µs. Memory: a row is 48 B (was 40) plus, only in rows with
+clusters, a store of 8 B a slot and the clusters' UTF-8.
 
 ### Frames from the snapshot (cells design F3.3)
 

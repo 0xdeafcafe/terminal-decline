@@ -868,6 +868,98 @@ though Ambiguous in EastAsianWidth.txt, stay one cell at either setting
 | push to history | the cluster's text goes inline in the stored line's text, with a boundary list (§11.3) |
 | selection text, search, `dump()` | emit the cluster's text |
 
+**Landed (PR 6).** What was built (`clusters.rs`, `cell.rs`, `term.rs`),
+and where it differs from §6.1–6.4:
+- **The row** is `seq` (PR 8), its cells, `wrapped` and `extra:
+  Option<Box<RowExtra>>`: 48 bytes, as §6.1 says (40 before).
+  `RowExtra` holds only the cluster store; the flags and prompt marks come
+  with PRs 7 and 9. Cells are
+  still a public field, so code that overwrites a cell frees its cluster
+  first (`Row::free_clusters`); `Row::fill`, `reset` and `resize_cells` do
+  it themselves.
+- **The store** is as in §6.1: text with holes, 8-byte spans by slot, a
+  free list, a garbage count, compaction when over half of more than 256
+  bytes is garbage, and the caps (32 scalars, 128 bytes, 8 KB a row). The
+  text is a `String`. A scalar joining the cluster written last grows it
+  in place; one joining an older cluster moves it to the end, keeping its
+  slot. A row reset keeps a store under 1 KB, emptied. A cluster that
+  doesn't fit in its row's 8 KB keeps its first scalar.
+- **Joining** follows §6.2 in mode 2027; with it off, only scalars of
+  width 0 join. A join that changes the width fixes the cell in place as
+  in §6.3. In insert mode, widening inserts the spacer rather than
+  overwriting the next cell. Without mode 2027 a cell keeps its first
+  scalar's width, so VS16 no longer widens anything there; before PR 6 it
+  always did. DECRQM 2027 answers 1 or 2, and the mode is on after RIS.
+- **Edge spacers are written** wherever a wide cell doesn't fit in the
+  last column with autowrap on: a wide character (before PR 6 that column
+  was left blank) and a cluster widened there. Selection text and the
+  double-click word rule skip them, and the block cursor covers two cells
+  only on a wide cell. `repair_wide` blanks misplaced ones (DCH, ICH)
+  and resize blanks one that is no longer in the last column.
+- **REP** repeats `last_char` or, after a cluster, the cluster kept by
+  value (at most 128 bytes) with its width and its segmenter state, so a
+  combining mark after REP joins the last copy.
+- **Erasing** widens its range to the other half of a wide cell at either
+  end, then frees the clusters in it and fills it, in one pass.
+- **`set_ambiguous_width`** clamps to 1 or 2 and clears the grapheme
+  state. History is still v1, which stores each cell's width, so there is
+  no block to seal yet; PR 7 does that. Both print paths (the plain
+  character path and the rules) use the setting.
+- **The snapshot** (PR 8) carries the clusters of the rows it copies:
+  `cluster_text` and `cluster_spans` (offset and length by slot, free
+  slots empty) as §9.2 has them, `SnapRow::clusters` (a range of
+  `cluster_spans`) and `Snapshot::cluster(row, slot)`. `cluster_text` is a
+  `String`. A scalar that joins the cell before (and any widening or
+  narrowing that follows) touches its row, since no cell is written;
+  `tests/snapshot.rs` checks both. The props test's row cache keeps each
+  copied cluster cell's text from the snapshot and compares it with the
+  live row.
+- **Reading:** `Content::Cluster` gives the text, `CellRef::push_text`
+  appends a cell's whole text and `CellRef::ch` its first scalar. Selection
+  text and `dump()` give whole clusters. History v1 keeps a cluster's first
+  scalar (§17.5). The renderer draws a cluster's first character (F3.2
+  shapes the rest), both from the live terminal and from the snapshot
+  (F3.3): its snapshot cells take their text from `cluster_text`, and
+  term-render's frame test checks the two frames agree.
+- **`check_invariants`** checks the clusters of §17.3 (every cluster
+  cell's slot live in its row, each live slot held by one cell, the
+  store's own consistency, no cluster cells in a row without a store), that
+  an edge spacer is only in the last column of a wrapped row, and that the
+  kept cluster is at most 128 bytes.
+- **Tests:** `tests/clusters.rs` (each operation of §6.4, widening and
+  narrowing in place and at the margin, legacy mode, DECRQM, REP by value,
+  selection and `dump()`, the caps); in `tests/unicode.rs` the setting
+  and a
+  property that the cells hold exactly the clusters `unicode-segmentation`
+  finds, with §6.3's widths, at both settings and in legacy mode, fed
+  whole or a byte at a time, with bulk ASCII on or off; and every one of
+  the 5,244 sequences in emoji-test.txt (Unicode 18.0.0, checked in without
+  comments by `generate.py`) printed alone and in streams, at both
+  settings. The property tests gain cluster pieces, mode 2027 switches and
+  setting changes (which must leave the screen as it was); the fuzz
+  dictionary gains the entries of §17.3 item 14 that apply, the fuzz
+  input a step that changes the setting (`FF 'A' w`), and the corpus a
+  `seed-clusters` seed.
+- **Measured** (interleaved A/B against `main` with PR 8 and F3.3, best
+  of 5, busy machine):
+  - parse, `parse` (64 KB pieces) / `parse_1k`: plain +0.6% / +0.9%,
+    coloured +3.0% / +3.4%, `tui` +1.1% / +1.3%, `seq` +0.9% / +2.0%,
+    unicode (CJK, Cyrillic, box drawing, one emoji a line) +4.5% /
+    +4.5%. The new `clusters` input (marks, VS16, skin tones, flags,
+    keycaps, ZWJ sequences, a conjunct) goes from 30.9 to 44.6 ms, +44%:
+    `main` dropped the joined scalars, and storing them costs about 20
+    ns a cluster. The history encoder tests "narrow ASCII, not a
+    cluster" with one mask rather than adding an `is_cluster` test per
+    cell; with that, coloured went from +5.4% to +3%.
+  - frames from the snapshot (`cargo bench -p term-render --bench frame`,
+    every row copied and built, best of 3): 300×100 plain 126.9 → 125.8
+    µs, coloured 144.2 → 143.8 µs. A cluster cell reads its text from
+    the snapshot only when drawn; working it out for every cell while
+    copying made these 17% slower. The new 300×100 unicode screen (CJK,
+    accents, Greek, emoji clusters) takes 119 µs; `main` draws a different
+    screen from the same text (marks dropped, sequences split) in 83 µs.
+    A copied row's clusters are copied in one piece, holes and all.
+
 ### 6.5 Rendering
 
 A cluster cell's text goes to term-font's shaping (§10), through the
@@ -1252,8 +1344,8 @@ pub enum HighlightKind { Selection, SearchHit, CurrentSearchHit, HoveredLink }
   columns the frame builder uses today; `HighlightKind` already has
   `SearchHit`, `CurrentSearchHit` and `HoveredLink`.
 - **Not in it yet, and why:** `cluster_text`/`cluster_spans` and
-  `SnapRow::clusters` come with clusters (PR 6, whichever of the two
-  merges second adds them); `palette` and `reverse_video` with OSC 4 and
+  `SnapRow::clusters` come with clusters (added by PR 6, at the end of
+  §6.4); `palette` and `reverse_video` with OSC 4 and
   DECSCNM, which term-core doesn't handle yet; placements and images with
   PR 14; the `FILL`, placeholder and blinking row flags with PRs 7, 10 and
   F3.3.
@@ -2828,7 +2920,7 @@ go in order, and the font and render agents run alongside.
 | 3 | vte | APC state, `put_slice`, OSC separators kept and size policy (§14), no-op defaults. **Landed, `0bb234d`** | S | — |
 | 4 | core | Unicode table (with the ambiguous flag) + incremental segmentation; width lookups move to the table (a test checks it equals `unicode-width` per scalar); clusters not stored yet. **Landed, `e49b27d`**, with the OSC size policy (§14) in `9f31d7e`; what changed from the design is in §6.2 and §6.3 | M | 2 |
 | 5 | core | **8-byte cells and the per-screen style table**: SGR 4:x, 21, 53/55, 58/59 stored; erase style; sweep with every holder (§5.2); renumbering; `set_sweep_at`; `check_invariants` extended. History is still v1. **Landed**; what changed from the design is at the end of §5.4 | M | 4 |
-| 6 | core | **clusters per row and mode 2027** (the width rule of §6.3, legacy mode, REP by value, the extended `repair_wide`); `Terminal::set_ambiguous_width`; selection text and `dump()` show clusters | M | 5 |
+| 6 | core | **clusters per row and mode 2027** (the width rule of §6.3, legacy mode, REP by value, the extended `repair_wide`); `Terminal::set_ambiguous_width`; selection text and `dump()` show clusters. **Landed**; what changed from the design is at the end of §6.4 | M | 5 |
 | 7 | core | **scrollback v2** (§11) at the written width only: `BlockData` (shared) and `BlockEntry`, meta and contiguous text, checkpoints, per-block ambiguous setting, `FILL`, `pop()` with the lowest-popped mark, the 32 MB backstop, the 64-entry slot cache; `scrollback_mem` gains emoji, placeholder, gradient and sealed figures; bench limits lowered | L | 6 |
 | 8 | core | row change counters, `terminal_id`, `history_epoch`, `popped_from`, the snapshot with highlight ranges, the screen it shows and style updates (§9). **Landed**; what changed from the design is at the end of §9.2 | S | 5 |
 | 9 | core | OSC 8 link table and OSC 133 prompt marks, on the screen and in v2 | S | 7 |

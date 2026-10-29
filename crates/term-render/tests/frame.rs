@@ -250,6 +250,22 @@ fn run_breaks_at_selection() {
 }
 
 #[test]
+fn selection_covers_short_history_rows_to_the_edge() {
+    // "ab" scrolls into history, which may store it shorter than the
+    // screen: the selection still reaches the last column.
+    let mut t = term(10, 2, &format!("{NO_CURSOR}ab\r\ncd\r\nef"));
+    t.state.scroll_view(1);
+    assert!(t.state.visible_row(0).len() < 10, "history row stored short");
+    let line = t.state.point_at(0, 0).line;
+    t.state
+        .set_selection(Some(Selection::new(Point { line, col: 1 }, Point { line, col: 9 })));
+    let theme = Theme::default();
+    let f = build(&t.state);
+    assert_eq!(f.rects, [rect(1, 0, 9, theme.selection)]);
+    assert_eq!(decoded(&f, 10, 2, (0, 0)), ["ab        ", "cd        "]);
+}
+
+#[test]
 fn run_breaks_at_inverse() {
     let t = term(10, 1, &format!("{NO_CURSOR}\x1b[41mab\x1b[7mcd\x1b[27mef"));
     let theme = Theme::default();

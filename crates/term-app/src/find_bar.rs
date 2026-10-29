@@ -16,20 +16,18 @@ use std::cell::{Cell, RefCell};
 use std::ptr::NonNull;
 
 use block2::RcBlock;
-use std::ops::Range;
 
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, Bool, ProtocolObject, Sel};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSApplication, NSAutoresizingMaskOptions, NSBox, NSBoxType, NSButton, NSColor, NSControl, NSControlSize, NSControlTextEditingDelegate,
-    NSEvent, NSEventMask, NSEventModifierFlags, NSFont, NSImage, NSMenu, NSMenuItem, NSPasteboard, NSPasteboardNameFind,
-    NSPasteboardTypeString, NSResponder, NSSearchField, NSSearchFieldDelegate, NSSegmentSwitchTracking, NSSegmentedControl,
-    NSTextAlignment, NSTextField, NSTextFieldDelegate, NSTextView, NSView, NSVisualEffectBlendingMode, NSVisualEffectMaterial,
-    NSVisualEffectView,
+    NSEvent, NSEventMask, NSEventModifierFlags, NSEventType, NSFont, NSImage, NSMenu, NSMenuItem, NSPasteboard, NSPasteboardNameFind,
+    NSPasteboardTypeString, NSPasteboardTypeTextFinderOptions, NSResponder, NSSearchField, NSSearchFieldDelegate, NSSegmentSwitchTracking,
+    NSSegmentedControl, NSTextAlignment, NSTextField, NSTextFieldDelegate, NSTextFinderCaseInsensitiveKey, NSTextFinderMatchingTypeKey,
+    NSTextView, NSView, NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectView,
 };
-use objc2_foundation::{NSArray, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
-use term_core::HighlightKind;
+use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
 
 use crate::pane_view::PaneView;
 use crate::search::{Query, Search, Status, WordMatch};
@@ -52,13 +50,13 @@ const IGNORE_CASE: isize = 100;
 pub(crate) struct Find {
     pub(crate) bar: Retained<FindBar>,
     pub(crate) search: Box<dyn Search>,
-    /// The hits in view the search adds to the snapshot itself (the
-    /// fallback's), as last taken.
-    pub(crate) marks: Vec<(u16, Range<u16>, HighlightKind)>,
     /// Search highlights in the last snapshot (for the test dumps).
     pub(crate) drawn: usize,
     /// The count as last shown.
     pub(crate) shown: Status,
+    /// The terminal (its id, and whether it shows the alternate screen)
+    /// the search was started on; None before the first search.
+    pub(crate) seen: Option<(u64, bool)>,
 }
 
 impl Find {
@@ -66,9 +64,9 @@ impl Find {
         Find {
             bar,
             search,
-            marks: Vec::new(),
             drawn: 0,
             shown: Status::default(),
+            seen: None,
         }
     }
 }
@@ -294,6 +292,17 @@ impl FindBar {
         let bar = Weak::new(self);
         let handler = RcBlock::new(move |event: NonNull<NSEvent>| -> *mut NSEvent {
             let e = unsafe { event.as_ref() };
+            if e.r#type() == NSEventType::LeftMouseDown {
+                // A click in the bar focuses its pane (the keys stay in
+                // the field).
+                if let Some(bar) = bar.load()
+                    && bar.contains_click(e)
+                    && let Some(p) = bar.ivars().pane.load()
+                {
+                    p.bar_clicked();
+                }
+                return event.as_ptr();
+            }
             let plain = !e.modifierFlags().intersects(
                 NSEventModifierFlags::Command | NSEventModifierFlags::Control | NSEventModifierFlags::Option | NSEventModifierFlags::Shift,
             );
@@ -308,8 +317,50 @@ impl FindBar {
             }
             event.as_ptr()
         });
-        let monitor = unsafe { NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::KeyDown, &handler) };
+        let monitor =
+            unsafe { NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::KeyDown | NSEventMask::LeftMouseDown, &handler) };
         *self.ivars().monitor.borrow_mut() = monitor;
+    }
+
+    /// Whether the mouse-down `e` is on the bar.
+    fn contains_click(&self, e: &NSEvent) -> bool {
+        if e.window(MainThreadMarker::from(self))
+            .is_none_or(|w| self.window().is_none_or(|mine| !std::ptr::eq(&*w, &*mine)))
+        {
+            return false;
+        }
+        let at = self.convertPoint_fromView(e.locationInWindow(), None);
+        let size = self.bounds().size;
+        at.x >= 0.0 && at.y >= 0.0 && at.x < size.width && at.y < size.height
+    }
+
+    /// The test control's click: a left click on the search field, put on
+    /// the event queue as a real one arrives (the down first, so the
+    /// field's own tracking finds the up waiting).
+    pub(crate) fn post_click(&self) {
+        let Some(window) = self.window() else { return };
+        let f = self.ivars().field.frame();
+        let at = self.convertPoint_toView(
+            NSPoint::new(f.origin.x + f.size.width / 2.0, f.origin.y + f.size.height / 2.0),
+            None,
+        );
+        let app = NSApplication::sharedApplication(MainThreadMarker::from(self));
+        for kind in [NSEventType::LeftMouseDown, NSEventType::LeftMouseUp] {
+            let event = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+                kind,
+                at,
+                NSEventModifierFlags::empty(),
+                0.0,
+                window.windowNumber(),
+                None,
+                0,
+                1,
+                1.0,
+            );
+            if let Some(event) = event {
+                app.postEvent_atStart(&event, false);
+            }
+        }
     }
 
     /// The bar is closing: stop watching for Esc.
@@ -420,23 +471,105 @@ impl FindBar {
     }
 }
 
-/// The shared find text (the find pasteboard), as Safari, Xcode and the
-/// rest use it. Not under the test control, so smoke tests don't read or
-/// change the user's.
-pub(crate) fn shared_text() -> Option<String> {
+/// The shared find text and options (the find pasteboard), as Safari,
+/// Xcode and the rest use them. Not under the test control, so smoke
+/// tests don't read or change the user's.
+pub(crate) fn shared_query() -> Option<Query> {
     if std::env::var_os(crate::control::ENV).is_some() {
         return None;
     }
-    let pb = NSPasteboard::pasteboardWithName(unsafe { NSPasteboardNameFind });
-    pb.stringForType(unsafe { NSPasteboardTypeString }).map(|s| s.to_string())
+    read_query(&NSPasteboard::pasteboardWithName(unsafe { NSPasteboardNameFind }))
 }
 
-/// Make `text` the shared find text.
-pub(crate) fn share_text(text: &str) {
+/// Make `q` the shared find text and options.
+pub(crate) fn share_query(q: &Query) {
     if std::env::var_os(crate::control::ENV).is_some() {
         return;
     }
     let pb = NSPasteboard::pasteboardWithName(unsafe { NSPasteboardNameFind });
+    // Leave it alone if it already says this (its change count is how
+    // other apps know it changed).
+    if read_query(&pb).as_ref() != Some(q) {
+        write_query(&pb, q);
+    }
+}
+
+/// NSTextFinderMatchingType's values, as apps write them.
+fn matching_type(word: WordMatch) -> isize {
+    match word {
+        WordMatch::Contains => 0,
+        WordMatch::StartsWith => 1,
+        WordMatch::FullWord => 2,
+    }
+}
+
+/// `pb`'s find text, with the options of its text finder dictionary when
+/// it has one (Ends With, which the bar doesn't have, reads as Contains).
+fn read_query(pb: &NSPasteboard) -> Option<Query> {
+    let text = pb.stringForType(unsafe { NSPasteboardTypeString })?.to_string();
+    let mut q = Query { text, ..Query::default() };
+    let options = pb.propertyListForType(unsafe { NSPasteboardTypeTextFinderOptions });
+    if let Some(dict) = options.as_deref().and_then(|o| o.downcast_ref::<NSDictionary>()) {
+        let number = |key: &NSString| {
+            dict.objectForKey(key)
+                .and_then(|v| v.downcast_ref::<NSNumber>().map(|n| n.as_isize()))
+        };
+        if let Some(i) = number(unsafe { NSTextFinderCaseInsensitiveKey }) {
+            q.ignore_case = i != 0;
+        }
+        q.word = match number(unsafe { NSTextFinderMatchingTypeKey }) {
+            Some(1) => WordMatch::StartsWith,
+            Some(2) => WordMatch::FullWord,
+            _ => WordMatch::Contains,
+        };
+    }
+    Some(q)
+}
+
+/// Put `q`'s text and options on `pb`.
+fn write_query(pb: &NSPasteboard, q: &Query) {
     pb.clearContents();
-    pb.setString_forType(&NSString::from_str(text), unsafe { NSPasteboardTypeString });
+    pb.setString_forType(&NSString::from_str(&q.text), unsafe { NSPasteboardTypeString });
+    let ignore_case = NSNumber::new_bool(q.ignore_case);
+    let matching = NSNumber::new_isize(matching_type(q.word));
+    let options: Retained<NSDictionary<NSString, AnyObject>> = unsafe {
+        NSDictionary::from_slices(
+            &[NSTextFinderCaseInsensitiveKey, NSTextFinderMatchingTypeKey],
+            &[&*ignore_case as &AnyObject, &*matching as &AnyObject],
+        )
+    };
+    unsafe { pb.setPropertyList_forType(&options, NSPasteboardTypeTextFinderOptions) };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn options_roundtrip_through_the_pasteboard() {
+        let pb = NSPasteboard::pasteboardWithUniqueName();
+        for (ignore_case, word) in [
+            (true, WordMatch::FullWord),
+            (false, WordMatch::StartsWith),
+            (true, WordMatch::Contains),
+        ] {
+            let q = Query {
+                text: "needle".into(),
+                ignore_case,
+                word,
+            };
+            write_query(&pb, &q);
+            assert_eq!(read_query(&pb), Some(q));
+        }
+        // Another app's text with no options reads with the defaults.
+        pb.clearContents();
+        pb.setString_forType(&NSString::from_str("plain"), unsafe { NSPasteboardTypeString });
+        assert_eq!(
+            read_query(&pb),
+            Some(Query {
+                text: "plain".into(),
+                ..Query::default()
+            })
+        );
+    }
 }

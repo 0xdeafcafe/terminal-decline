@@ -1,0 +1,61 @@
+# git-cliff configuration: the changelog (CHANGELOG.md) and the release
+# notes of a tag (.github/workflows/release.yml). Commits follow the
+# Conventional Commits rules in CLAUDE.md; the scope is the module.
+#
+#   git cliff --unreleased                 # what main has since the last tag
+#   git cliff --latest --strip header      # the notes of the newest tag
+#   git cliff --output CHANGELOG.md        # regenerate the whole file
+
+[changelog]
+header = """
+# Changelog
+
+All notable changes to Terminal Decline, generated from the commit
+messages by [git-cliff](https://git-cliff.org) (see `cliff.toml`).
+Regenerate with `git cliff --output CHANGELOG.md`.
+
+"""
+# Groups are the commit types; inside a group the commits are listed by
+# module (the scope), with the changes that span modules last.
+body = """
+{% if version -%}
+## {{ version | trim_start_matches(pat="v") }} - {{ timestamp | date(format="%Y-%m-%d") }}
+{% else -%}
+## Unreleased
+{% endif -%}
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | striptags | trim | upper_first }}
+{% for commit in commits | filter(attribute="scope") | sort(attribute="scope") %}
+- **{{ commit.scope }}:** {{ commit.message | split(pat="\n") | first | trim }}
+  {%- if commit.breaking %} (breaking){% endif %}
+{%- endfor %}
+{%- for commit in commits %}{% if not commit.scope %}
+- {{ commit.message | split(pat="\n") | first | trim }}
+  {%- if commit.breaking %} (breaking){% endif %}
+{%- endif %}{% endfor %}
+{% endfor %}
+"""
+footer = ""
+trim = true
+
+[git]
+conventional_commits = true
+filter_unconventional = true
+split_commits = false
+protect_breaking_commits = true
+filter_commits = false
+topo_order = false
+sort_commits = "oldest"
+tag_pattern = "v[0-9]*"
+# Types that matter to someone installing the app. Tests, docs, CI and
+# chores are in the history, not in the notes; merges are skipped.
+commit_parsers = [
+  { message = "^Merge ", skip = true },
+  { message = "^feat", group = "Features" },
+  { message = "^fix", group = "Fixes" },
+  { message = "^perf", group = "Performance" },
+  { message = "^refactor", group = "Internal changes" },
+  { message = "^build\\(deps\\)", skip = true },
+  { message = "^build", group = "Build and packaging" },
+  { message = "^(docs|test|ci|chore|style)", skip = true },
+]

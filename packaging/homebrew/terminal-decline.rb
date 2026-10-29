@@ -25,11 +25,20 @@ cask "terminal-decline" do
     by earlier versions (copies of the whole app, including those from
     Decline.app) keep working as they are; `terminal-decline pin --repair`
     rebuilds them as pins that load the installed app.
+
+    Terminal Decline updates itself when you quit it, so `brew upgrade`
+    skips it. If its updater is off (`update = false`, or an app owned by
+    root), update it with `brew upgrade --greedy terminal-decline`. That
+    installs the version this tap names, which can be older than one the
+    app has already updated itself to.
   EOS
 
   zap trash: [
     "~/.config/terminal-decline",
     "~/Library/Caches/terminal-decline",
+    # Sparkle's downloads and staged updates, and its HTTP cache.
+    "~/Library/Caches/red.forbes.terminal-decline",
+    "~/Library/HTTPStorages/red.forbes.terminal-decline",
     "~/Library/Logs/terminal-decline",
     "~/Library/Preferences/red.forbes.terminal-decline.plist",
     "~/Library/Saved Application State/red.forbes.terminal-decline.savedState",

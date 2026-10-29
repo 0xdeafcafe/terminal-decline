@@ -1224,11 +1224,46 @@ and where it differs from §3 and §4:
   id, serial) order with their view row (negative above the view, one
   row per line), and when any row in view has placeholders, every
   virtual placement of a ready image is listed (not only those the
-  cells name). `drawn` is called with what was listed.
+  cells name). The snapshot doesn't call `drawn`: the frame does (I.4).
 - **Not built**: the producer hold-back and the stalled-upload stop by
   the pool (§3.2, §4.2), `image_file_transfer` (the app's host decides),
   re-decoding lost images (§5.4), images in the `dump`, the
   `images` bench (§9).
+
+**Landed (I.4).** Drawing, in term-render (`images.rs` without Metal,
+`pixels.rs`, `metal.rs`, `shaders.metal`); where it differs from §6:
+- **`MetalPixels`** is a shared-storage `MTLBuffer` with rows padded to
+  the device's linear texture alignment; `PixelAlloc` makes them from any
+  thread (`Renderer::pixel_alloc`, or `PixelAlloc::system_default` for
+  the app's decode queue). Pixels of any other type (the tests'
+  `VecBuffer`) are listed but not drawn.
+- **`ImageInstance` is 48 bytes**, not 32: it carries the clamp rectangle
+  (the source rectangle inset by half a texel) besides the texels at the
+  quad's edges, so the pieces of one image sample across their seams and
+  never outside the source. Instances are clipped to the grid in f32 and
+  rounded to whole pixels, the texels following the rounded edges.
+- **Layers**: the frame's `rects` split at the end of the backgrounds
+  (`Frame::split`); per pane: images under the backgrounds, backgrounds,
+  images under the text (and placeholder pieces), highlights, block
+  cursor and decorations, glyphs, images above the text, then the
+  bar/underline/hollow cursor again over them. Without images the draws
+  are the same as before. Highlights over cells covered by images under
+  the text are drawn at half their alpha.
+- **Placeholders**: a cached row keeps its runs of placeholder cells
+  (merged as §6.3 says) in its row cache entry; the pieces are rebuilt
+  each frame from the snapshot's `virtual_placements` (a run naming
+  placement 0 takes any of the image's). A placeholder's content bits are
+  no longer read as a character.
+- **The texture map** is per window, keyed by (pool entry, generation),
+  rebuilt each frame from the panes' images and emptied on hide.
+- **`pool.drawn`** is called by the frame after building from a snapshot,
+  with the images it drew (and once more when it draws none after some).
+- **Test injection**: `Renderer::build_pane_with` (and
+  `Frame::snapshot_mut` between `snapshot` and `build_snapshot`) put
+  placements in a snapshot; no term-core change.
+- **Measured** (`cargo bench -p term-render --bench frame -- with_images`,
+  80×24, rows cached, on a loaded machine): no images 2.9 µs, ten
+  placements 4.7 µs, a 40×20 placeholder image (20 pieces) 3.3 µs.
 
 V.1 and I.1 can start now. After I.0: I.2 (core), I.4 (render) at once,
 then I.5a (app) once I.4's `MetalPixels` is in; I.3 follows I.2. B.3 is

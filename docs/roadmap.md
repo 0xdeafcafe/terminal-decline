@@ -107,6 +107,7 @@ Design: docs/design/pins.md.
 | R.2 | Per-row instance caching (uses row counters) + row-end blank skip | sparse frame ≤ 15 µs at 203×50 |
 | R.3 | Scrollback row cache while scrolled back | no decode per frame when the view doesn't move |
 | R.4 | CSI/SGR parse fast path | coloured ≥ 1.5× vs the commit before R.4 |
+| R.10 | Re-measure frame building (plain cases and `--bench renderer`) after images I.4 split the frame's rectangles — its bench ran at load ~31 and gave no usable before/after | within 3% of before I.4 |
 | R.9 | Win back scrollback v2's costs (merged over the gate on purpose, 29 Oct): parse plain +6–16% and seq +6% (per-line store bookkeeping), unicode +9% (encoder per non-ASCII cell), CJK/ls history decode +12–20%; re-measure on a quiet Mac first | parse within 3% of before PR 7 |
 | R.5 | Memory-pressure handler (spare drawables, purge textures, compress scrollback) | simulated warning: footprint drop then correct redraw |
 | R.6 | `CAMetalDisplayLink` | kept only if N.5 numbers improve |

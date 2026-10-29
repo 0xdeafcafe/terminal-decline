@@ -1050,6 +1050,7 @@ dependencies = [
  "proptest",
  "term-core",
  "term-font",
+ "term-image",
  "unicode-width",
 ]
 

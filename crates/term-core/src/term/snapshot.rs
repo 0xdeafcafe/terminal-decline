@@ -535,19 +535,18 @@ impl Terminal {
 
     /// The images in view (images.md §4.4): direct placements reaching
     /// into it and, when placeholder cells are in view, the virtual
-    /// placements of ready images. The pool is told what is drawn.
+    /// placements of ready images. The frame tells the pool what it drew
+    /// (I.4).
     fn snapshot_images(&mut self, out: &mut Snapshot, row_pieces: &[(usize, super::history::Piece)], placeholders: bool) {
         let Some(first) = row_pieces.first().map(|(_, p)| p.line) else {
             return;
         };
         let last = row_pieces.last().map_or(first, |(_, p)| p.line);
         let pool = self.graphics.pool().clone();
-        let mut drawn = Vec::new();
-        let snap_image = |g: &crate::image::Graphics, key, drawn: &mut Vec<_>| -> Option<SnapImage> {
+        let snap_image = |g: &crate::image::Graphics, key| -> Option<SnapImage> {
             let image = g.image(key).filter(|i| i.state == ImageState::Ready)?;
             let id = image.pool?;
             let (pixels, generation) = pool.pixels(id)?;
-            drawn.push(id);
             Some(SnapImage {
                 pool: id,
                 generation,
@@ -557,7 +556,7 @@ impl Terminal {
             })
         };
         for (key, p) in self.graphics.placements_in(first, last + 1) {
-            let Some(image) = snap_image(&self.graphics, p.image, &mut drawn) else {
+            let Some(image) = snap_image(&self.graphics, p.image) else {
                 continue;
             };
             // The view row and column of its top-left cell; above the view,
@@ -585,7 +584,7 @@ impl Terminal {
         out.placements.sort_by_key(|p| (p.z, p.image.pool, p.serial));
         if placeholders {
             for v in self.graphics.virtual_placements() {
-                let Some(image) = snap_image(&self.graphics, v.image, &mut drawn) else {
+                let Some(image) = snap_image(&self.graphics, v.image) else {
                     continue;
                 };
                 out.virtual_placements.push(SnapVirtual {
@@ -596,11 +595,6 @@ impl Terminal {
                     fit: v.fit,
                 });
             }
-        }
-        if !drawn.is_empty() {
-            drawn.sort_unstable();
-            drawn.dedup();
-            pool.drawn(self.terminal_id, &drawn);
         }
     }
 

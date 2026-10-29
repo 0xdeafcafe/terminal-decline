@@ -324,6 +324,7 @@ impl AppDelegate {
         if let Some(id) = objc2_foundation::NSBundle::mainBundle().bundleIdentifier() {
             secure_input::carry_over(&id.to_string());
         }
+        crate::images::apply_config(config.images, config.image_memory, config.image_file_transfer);
         let this = Self::alloc(mtm).set_ivars(AppIvars {
             config: RefCell::new(Rc::new(config)),
             origin,
@@ -393,6 +394,7 @@ impl AppDelegate {
         let settings_open = self.ivars().settings.borrow().is_some();
         shown.retain(|n| !settings_open && !before.contains(n));
         crate::update::sparkle::set_setting(config.update);
+        crate::images::apply_config(config.images, config.image_memory, config.image_file_transfer);
         if old.keybind != config.keybind || old.update != config.update {
             let mtm = MainThreadMarker::from(self);
             let menus = build_menus(mtm, &self.ivars().app_name, &config.keybinds());

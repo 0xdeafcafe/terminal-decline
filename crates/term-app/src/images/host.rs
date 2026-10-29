@@ -29,6 +29,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use term_core::ImagePool;
 use term_core::image::{ImageError, ImageHost, Medium, MediumRequest, OpenMedium, PixelBuffer};
@@ -47,7 +48,7 @@ pub struct AppHost {
     alloc: Option<PixelAlloc>,
     pool: Arc<ImagePool>,
     /// `image_file_transfer`: off, only direct transmissions work.
-    media: bool,
+    media: AtomicBool,
     /// The real paths temporary files may be in.
     temp_dirs: Vec<PathBuf>,
 }
@@ -96,9 +97,14 @@ impl AppHost {
         AppHost {
             alloc,
             pool,
-            media,
+            media: AtomicBool::new(media),
             temp_dirs,
         }
+    }
+
+    /// Turn `image_file_transfer` on or off; opened media stay readable.
+    pub fn set_media(&self, on: bool) {
+        self.media.store(on, Ordering::Relaxed);
     }
 
     /// The bytes `req` asks for in an object of `len` bytes: (offset, length).
@@ -237,7 +243,7 @@ impl ImageHost for AppHost {
     }
 
     fn open_medium(&self, req: &MediumRequest) -> Result<OpenMedium, ImageError> {
-        if !self.media {
+        if !self.media.load(Ordering::Relaxed) {
             return Err(ImageError::Refused);
         }
         match req.medium {

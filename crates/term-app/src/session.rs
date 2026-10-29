@@ -265,11 +265,9 @@ pub(crate) fn replace_term(t: &mut Term) {
     fresh.state.set_default_colors(t.state.default_colors());
     fresh.state.set_default_palette(t.state.default_palette());
     fresh.state.set_cell_pixels(t.state.cell_pixels());
-    // The same host: the app's, with images on.
+    // The same host: the app's.
     fresh.state.set_image_host(t.state.image_host().clone());
-    if fresh.state.images_enabled() {
-        fresh.state.set_reads_off_lock(true);
-    }
+    fresh.state.set_reads_off_lock(true);
     *t = fresh;
 }
 
@@ -313,13 +311,12 @@ impl Session {
     /// before this returns. Errors are only for failing to start threads.
     pub fn spawn(command: &Command, size: Size, mut term: Term, hooks: Hooks) -> io::Result<Session> {
         let started = Instant::now();
-        let images_on = term.state.images_enabled();
-        if images_on {
-            // Metal pixels, the app's media rules, and headers read with
-            // the lock released.
-            term.state.set_image_host(crate::images::process_host());
-            term.state.set_reads_off_lock(true);
-        }
+        // Always, so the `images` setting can be turned on while the
+        // session runs: Metal pixels, the app's media rules, and headers
+        // read with the lock released. (With images off, none of it is
+        // reached.)
+        term.state.set_image_host(crate::images::process_host());
+        term.state.set_reads_off_lock(true);
         let terminal_id = term.state.terminal_id();
         let term = Arc::new(Mutex::new(term));
         let dirty = Arc::new(AtomicBool::new(true));
@@ -374,7 +371,7 @@ impl Session {
             on_events,
             mut on_record_chord,
         } = hooks;
-        let images = images_on.then(|| SessionImages::for_process(&term, terminal_id, dirty.clone(), wake.clone()));
+        let images = Some(SessionImages::for_process(&term, terminal_id, dirty.clone(), wake.clone()));
         let images2 = images.clone();
         let reader = std::thread::Builder::new().name("pty-reader".into()).spawn(move || {
             // A panic anywhere else in the loop stops the session too.

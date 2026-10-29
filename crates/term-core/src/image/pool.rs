@@ -124,8 +124,9 @@ struct PoolInner {
 /// a new image doesn't fit.
 pub struct ImagePool {
     inner: Mutex<PoolInner>,
-    /// The hidden switch, for this pool's terminals.
-    enabled: bool,
+    /// Whether this pool's terminals handle images: the hidden switch at
+    /// first, then the app's `images` setting ([`ImagePool::set_enabled`]).
+    enabled: std::sync::atomic::AtomicBool,
 }
 
 static POOL_IDS: AtomicU64 = AtomicU64::new(1);
@@ -148,7 +149,7 @@ impl ImagePool {
                 evicted: HashMap::new(),
                 clock: 1,
             }),
-            enabled,
+            enabled: std::sync::atomic::AtomicBool::new(enabled),
         }
     }
 
@@ -168,7 +169,13 @@ impl ImagePool {
 
     /// Whether this pool's terminals handle images at all.
     pub fn enabled(&self) -> bool {
-        self.enabled
+        self.enabled.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Turn images on or off for this pool's terminals, from now on:
+    /// what is held stays until evicted.
+    pub fn set_enabled(&self, on: bool) {
+        self.enabled.store(on, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn lock(&self) -> MutexGuard<'_, PoolInner> {

@@ -203,6 +203,17 @@ pub struct Config {
     pub env: BTreeMap<String, String>,
     /// Window title for a pin; also shown in the Window menu.
     pub title: Option<String>,
+    /// Kitty graphics, iTerm2 images and Sixel (docs/design/images.md).
+    /// Off for now; `TD_IMAGES=1` in the environment turns it on for
+    /// tests whatever this says.
+    pub images: bool,
+    /// The memory images may use, in MB (at most 16384); 0, the default,
+    /// is the larger of 32 MB and two window-sized images.
+    #[serde(deserialize_with = "image_memory")]
+    pub image_memory: u32,
+    /// Let programs send images by file path or shared memory (kitty's
+    /// `t=f`, `t=t` and `t=s`) as well as inline.
+    pub image_file_transfer: bool,
     /// `theme = "name"` or `{ light = "…", dark = "…" }`; see [`crate::theme`].
     pub theme: Option<ThemeChoice>,
     pub colors: Colors,
@@ -248,6 +259,9 @@ impl Default for Config {
             cwd: None,
             env: BTreeMap::new(),
             title: None,
+            images: false,
+            image_memory: 0,
+            image_file_transfer: true,
             theme: None,
             colors: Colors::default(),
             palettes: Palettes::default(),
@@ -272,6 +286,20 @@ fn ambiguous_width<'de, D: Deserializer<'de>>(d: D) -> Result<u8, D::Error> {
     match v {
         1 | 2 => Ok(v as u8),
         _ => Err(serde::de::Error::custom(format!("{v} is not 1 or 2"))),
+    }
+}
+
+/// The most `image_memory` may ask for, in MB.
+pub const IMAGE_MEMORY_MAX: u32 = 16_384;
+
+fn image_memory<'de, D: Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
+    let v = i64::deserialize(d)?;
+    if (0..=IMAGE_MEMORY_MAX as i64).contains(&v) {
+        Ok(v as u32)
+    } else {
+        Err(serde::de::Error::custom(format!(
+            "{v} is not a number of MB from 0 to {IMAGE_MEMORY_MAX} (0 is the default)"
+        )))
     }
 }
 
@@ -1337,6 +1365,35 @@ mod tests {
         let mut keys = term_prefs::schema::new_windows_keys();
         keys.sort_unstable();
         assert_eq!(keys, ["blur", "columns", "command", "cwd", "env", "lines", "scrollback", "title"]);
+    }
+
+    #[test]
+    fn image_settings_default_read_and_report_bad_values() {
+        let (c, errors) = parse("");
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(!c.images && c.image_memory == 0 && c.image_file_transfer);
+        let all = "images = true\nimage_memory = 256\nimage_file_transfer = false";
+        let (c, errors) = parse(all);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(c.images && c.image_memory == 256 && !c.image_file_transfer);
+        for text in [
+            "image_memory = -1",
+            "image_memory = 99999",
+            "image_memory = 'big'",
+            "images = 'yes'",
+            "image_file_transfer = 1",
+        ] {
+            let (c, errors) = parse(text);
+            assert_eq!(errors.len(), 1, "{text}: {errors:?}");
+            assert!(
+                errors[0].starts_with("config: image") && errors[0].ends_with("; ignored"),
+                "{errors:?}"
+            );
+            assert_eq!((c.images, c.image_memory, c.image_file_transfer), (false, 0, true), "{text}");
+        }
+        // All three apply to running windows.
+        let (new, _) = parse(all);
+        assert!(new_windows_only(&Config::default(), &new).is_empty());
     }
 
     #[test]

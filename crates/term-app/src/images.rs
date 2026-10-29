@@ -14,8 +14,10 @@
 //!   textures) and show (before drawing), and the budget follows the
 //!   largest window.
 //!
-//! All of it is off unless images are on (`TD_IMAGES=1`, the hidden
-//! switch): [`enabled`].
+//! All of it is off unless images are on (the `images` setting, or
+//! `TD_IMAGES=1` in the environment, which tests use): [`enabled`]. The
+//! settings `images`, `image_memory` and `image_file_transfer` are applied
+//! by [`apply_config`], at start and on every reload.
 
 pub mod host;
 pub mod queue;
@@ -36,10 +38,33 @@ pub fn enabled() -> bool {
     ImagePool::process().enabled()
 }
 
+/// `image_file_transfer`, for a host not made yet.
+static FILE_TRANSFER: AtomicBool = AtomicBool::new(true);
+/// `image_memory` in MB; 0 is the default (the window-based budget).
+static MEMORY_MB: AtomicU64 = AtomicU64::new(0);
+
+static HOST: OnceLock<Arc<AppHost>> = OnceLock::new();
+
 /// The process's host, made on first use.
 pub fn process_host() -> Arc<AppHost> {
-    static HOST: OnceLock<Arc<AppHost>> = OnceLock::new();
-    HOST.get_or_init(|| Arc::new(AppHost::new(ImagePool::process(), true))).clone()
+    HOST.get_or_init(|| Arc::new(AppHost::new(ImagePool::process(), FILE_TRANSFER.load(Ordering::Relaxed))))
+        .clone()
+}
+
+/// Apply the image settings (`images`, `image_memory`, `image_file_transfer`):
+/// at start and when the config reloads, all live. `TD_IMAGES=1` in the
+/// environment keeps images on whatever the setting says. Turning images
+/// off stops new images and queries; what is held goes as the budget needs
+/// it.
+pub fn apply_config(images: bool, memory_mb: u32, file_transfer: bool) {
+    let pool = ImagePool::process();
+    pool.set_enabled(images || term_core::image::images_switch());
+    FILE_TRANSFER.store(file_transfer, Ordering::Relaxed);
+    if let Some(host) = HOST.get() {
+        host.set_media(file_transfer);
+    }
+    MEMORY_MB.store(memory_mb as u64, Ordering::Relaxed);
+    refresh_budget(&pool);
 }
 
 /// The process's decode queue.
@@ -202,22 +227,36 @@ fn windows() -> &'static Mutex<HashMap<usize, (u32, u32)>> {
     W.get_or_init(Default::default)
 }
 
-/// Window `id` is now `width` × `height` device pixels (0 × 0: closed).
-/// The budget follows the largest window: the larger of 32 MB and two
-/// images its size (§12, question 1).
-pub fn window_size(pool: &ImagePool, id: usize, width: u32, height: u32) {
-    if !pool.enabled() {
-        return;
+/// The budget for windows whose largest is `largest` (device pixels):
+/// `memory_mb` MB when set, else the larger of 32 MB and two images that
+/// size (§12, question 1).
+pub fn budget(largest: (u32, u32), memory_mb: u32) -> usize {
+    if memory_mb > 0 {
+        (memory_mb as usize) << 20
+    } else {
+        ImagePool::budget_for(largest.0, largest.1)
     }
+}
+
+/// Window `id` is now `width` × `height` device pixels (0 × 0: closed).
+/// The budget follows the largest window (see [`budget`]).
+pub fn window_size(pool: &ImagePool, id: usize, width: u32, height: u32) {
     let mut w = windows().lock().unwrap_or_else(PoisonError::into_inner);
     if width == 0 || height == 0 {
         w.remove(&id);
     } else {
         w.insert(id, (width, height));
     }
-    let largest = w.values().copied().max_by_key(|&(w, h)| w as u64 * h as u64).unwrap_or((0, 0));
-    let budget = ImagePool::budget_for(largest.0, largest.1);
     drop(w);
+    refresh_budget(pool);
+}
+
+/// Set `pool`'s budget from the windows and `image_memory`.
+fn refresh_budget(pool: &ImagePool) {
+    let w = windows().lock().unwrap_or_else(PoisonError::into_inner);
+    let largest = w.values().copied().max_by_key(|&(w, h)| w as u64 * h as u64).unwrap_or((0, 0));
+    drop(w);
+    let budget = budget(largest, MEMORY_MB.load(Ordering::Relaxed) as u32);
     if pool.limit() != budget {
         pool.set_limit(budget);
     }

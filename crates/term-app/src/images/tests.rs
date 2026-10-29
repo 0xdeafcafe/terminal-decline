@@ -351,3 +351,10 @@ fn the_budget_follows_the_largest_window() {
     assert_eq!(pool.limit(), 32 << 20, "closed: back to the smaller window's");
     window_size(&pool, a, 0, 0);
 }
+
+#[test]
+fn image_memory_replaces_the_window_budget() {
+    assert_eq!(crate::images::budget((5120, 2880), 0), ImagePool::budget_for(5120, 2880));
+    assert_eq!(crate::images::budget((5120, 2880), 64), 64 << 20);
+    assert_eq!(crate::images::budget((0, 0), 16), 16 << 20, "even below the 32 MB default");
+}

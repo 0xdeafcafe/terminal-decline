@@ -1140,6 +1140,15 @@ the switch.
 | I.6 | ci + fuzz | fuzz targets in the nightly rotation, the `parse` target with images on, dictionary entries, the pressure scenarios added | S | I.1, I.2 |
 | I.7 | docs | DESIGN.md (Rendering, memory, idle), the manual checklist, numbers on the standard set, roadmap B.3/B.5 marked; the hidden switch removed | S | I.3, I.5b |
 
+**Settings (after I.5a).** `images` (default off until Alex decides),
+`image_memory` (MB, 0 = the larger of 32 MB and two window-sized images)
+and `image_file_transfer` (default on) are in the preferences schema and
+all apply live: `images::apply_config` runs at start and on each reload.
+`TD_IMAGES=1` still turns images on whatever `images` says. Sessions
+always install the app's host, so `images` can be turned on in a running
+window; turning it off stops new images and queries, and what is held
+leaves as the budget needs it.
+
 **Landed (I.6).** Fuzzing and pressure, ahead of the image code being
 complete (the seeds and dictionary entries simply find nothing to do until
 I.2 and I.3 land).

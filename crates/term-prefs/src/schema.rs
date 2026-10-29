@@ -419,6 +419,27 @@ pub const SETTINGS: &[Setting] = &[
         )
     }),
     setting(
+        "images",
+        "Images",
+        Advanced,
+        Editor::Toggle,
+        "Show images that programs send (kitty graphics, iTerm2, Sixel); off for now",
+    ),
+    setting(
+        "image_memory",
+        "Image memory",
+        Advanced,
+        integer(0.0, 16_384.0, 32.0),
+        "MB images may use; 0 is the larger of 32 and two window-sized images",
+    ),
+    setting(
+        "image_file_transfer",
+        "Image file transfer",
+        Advanced,
+        Editor::Toggle,
+        "Let programs send images by file path or shared memory, not only inline",
+    ),
+    setting(
         "update",
         "Check for updates",
         Advanced,
@@ -563,6 +584,9 @@ mod tests {
                 "cwd",
                 "env",
                 "title",
+                "images",
+                "image_memory",
+                "image_file_transfer",
                 "update",
                 "pin_app",
             ]

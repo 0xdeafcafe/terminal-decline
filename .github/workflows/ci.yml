@@ -66,6 +66,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      # Also keeps target/bundle-test, where the bundle tests build the
+      # library, launcher and stub (rust-cache cleans and keeps target
+      # dirs nested in target/).
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: macos

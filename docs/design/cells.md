@@ -3235,6 +3235,39 @@ own matching over the client's text and can't take matches from our search.
 - This is the one piece of decline's own UI, by Alex's decision; it is built
   from standard controls so it looks and behaves like the system's.
 
+**Landed (E.7).** The bar is `find_bar.rs` (the field, count, arrows, Done and
+options menu, all standard AppKit controls, a subview of its pane's view over
+the grid's top rows) and the engine behind it is `search.rs`'s `CoreSearch`,
+term-core's search of §13.4; the first fallback engine (`TextSearch`, reading
+rows through the public API) is gone, and the `Search` trait stays as the
+bar's seam. What differs from the design above, and what was fixed after
+landing:
+- **Covered rows.** The bar covers the top rows rather than shortening the
+  grid. term-core's `search_next` / `search_previous` don't know that, so
+  after each step, a new search, and a history batch that a waiting step
+  jumps to, the app scrolls back just far enough
+  (`search::keep_clear`) to bring the current hit below the covered rows.
+- **Restarts.** A search belongs to one screen of one terminal. The pane
+  notes the terminal's `terminal_id` and whether the alternate screen is
+  showing when it searches, and searches again with the same query when
+  either changes (vim or less opening and closing; a caught parser panic).
+- **Find pasteboard.** The text goes on the find pasteboard together with
+  `NSPasteboardTypeTextFinderOptions` (`NSTextFinderCaseInsensitiveKey`, and
+  `NSTextFinderMatchingTypeKey` as 0 contains, 1 starts with, 2 full word).
+  The bar reads both when it opens, and an open bar reads them again when
+  the app becomes active, taking them only if they differ and the field has
+  no typing the search hasn't caught up with. Ends With (3), which the bar
+  has no mode for, reads as Contains. The test control doesn't touch the
+  user's pasteboard, so only the round trip (on a private pasteboard) is
+  tested, not the app-active read.
+- **Focus.** A mouse-down on the bar of a pane that isn't focused makes it
+  the focused pane (Find Next, the title and focus events follow), and the
+  keys stay in the field. The test control's `find-click N` posts such a
+  click.
+- **Not built:** regex, and a smoke test of the caught-panic restart (the
+  alternate-screen smoke test covers the same path through the terminal
+  identity check).
+
 ### 13.10 VoiceOver: UTF-16 offsets over all of history
 
 The accessibility element (E.12) addresses text by UTF-16 offset into one

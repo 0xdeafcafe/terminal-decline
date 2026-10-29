@@ -1195,8 +1195,7 @@ impl WindowView {
                 focused,
                 preedit: Some(p.marked.as_str()),
             };
-            // The find bar's search keeps up with output, and its hits in
-            // view go into the snapshot.
+            // The find bar's search keeps up with output.
             let covered = rows_under_find_bar(win, p, titlebar);
             if let Some(f) = &mut p.find {
                 // A new terminal (after a caught panic) or a switch to or
@@ -1216,8 +1215,6 @@ impl WindowView {
                 if let Some(after) = polled.again {
                     find_again.push((id, after));
                 }
-                f.marks.clear();
-                f.search.view_highlights(&t.state, &mut f.marks);
             }
             p.builds += 1;
             // A panic taking the snapshot stays in this pane. The
@@ -1237,7 +1234,6 @@ impl WindowView {
             }
             if let Some(f) = &mut p.find {
                 let snap = p.render.frame.snapshot_mut();
-                crate::search::add_highlights(snap, &f.marks);
                 f.drawn = snap
                     .highlights
                     .iter()

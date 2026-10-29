@@ -16,7 +16,6 @@ use std::cell::{Cell, RefCell};
 use std::ptr::NonNull;
 
 use block2::RcBlock;
-use std::ops::Range;
 
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, Bool, ProtocolObject, Sel};
@@ -29,7 +28,6 @@ use objc2_app_kit::{
     NSTextView, NSView, NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectView,
 };
 use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
-use term_core::HighlightKind;
 
 use crate::pane_view::PaneView;
 use crate::search::{Query, Search, Status, WordMatch};
@@ -52,9 +50,6 @@ const IGNORE_CASE: isize = 100;
 pub(crate) struct Find {
     pub(crate) bar: Retained<FindBar>,
     pub(crate) search: Box<dyn Search>,
-    /// The hits in view the search adds to the snapshot itself (the
-    /// fallback's), as last taken.
-    pub(crate) marks: Vec<(u16, Range<u16>, HighlightKind)>,
     /// Search highlights in the last snapshot (for the test dumps).
     pub(crate) drawn: usize,
     /// The count as last shown.
@@ -69,7 +64,6 @@ impl Find {
         Find {
             bar,
             search,
-            marks: Vec::new(),
             drawn: 0,
             shown: Status::default(),
             seen: None,

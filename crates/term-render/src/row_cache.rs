@@ -18,7 +18,7 @@ use term_core::{RowKey, ScreenId, Snapshot, Style, Terminal};
 
 use crate::frame::{GlyphInstance, RectInstance, Theme};
 
-/// The cell a glyph or decoration belongs to, and how the block cursor
+/// The cell a decoration belongs to, and how the block cursor
 /// recolours it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Mark {
@@ -43,7 +43,6 @@ pub(crate) struct Entry {
     pub y: i32,
     pub backgrounds: Vec<RectInstance>,
     pub glyphs: Vec<GlyphInstance>,
-    pub glyph_marks: Vec<Mark>,
     pub decorations: Vec<RectInstance>,
     pub decoration_marks: Vec<Mark>,
     /// The frame that last showed it.
@@ -54,7 +53,6 @@ impl Entry {
     fn clear(&mut self) {
         self.backgrounds.clear();
         self.glyphs.clear();
-        self.glyph_marks.clear();
         self.decorations.clear();
         self.decoration_marks.clear();
     }

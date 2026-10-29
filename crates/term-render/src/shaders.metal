@@ -46,7 +46,7 @@ struct Glyph {
     ushort2 size;   // bitmap size
     ushort2 uv;     // top-left in the glyph texture
     uint color;     // RGBA8 text colour
-    uint is_color;  // 1 = sample the colour (emoji) texture
+    uint is_color;  // bit 0: sample the colour (emoji) texture; the rest is the CPU's
 };
 
 struct GlyphOut {
@@ -65,7 +65,7 @@ vertex GlyphOut glyph_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     o.pos = to_clip(float2(g.pos) + corner * float2(g.size), u.viewport);
     o.uv = float2(g.uv) + corner * float2(g.size);
     o.color = unpack_unorm4x8_to_float(g.color);
-    o.is_color = g.is_color;
+    o.is_color = g.is_color & 1u;
     return o;
 }
 

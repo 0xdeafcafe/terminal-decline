@@ -55,7 +55,29 @@ pub struct GlyphInstance {
     pub u: u16,
     pub v: u16,
     pub color: Rgba,
+    /// Bit 0 ([`GlyphInstance::COLOR`]): sample the colour (emoji) texture.
+    /// The shader reads only that bit; frame building keeps the glyph's
+    /// cell in the others, for the overlays drawn over cached rows.
     pub is_color: u32,
+}
+
+impl GlyphInstance {
+    pub const COLOR: u32 = 1;
+    /// The cell is dim (its text colour has a lower alpha).
+    const DIM: u32 = 1 << 1;
+    const COL_SHIFT: u32 = 16;
+
+    /// `is_color` for a glyph from `slot` in column `col`.
+    #[inline]
+    fn flags(slot: &GlyphSlot, col: usize, dim: bool) -> u32 {
+        slot.color as u32 | (dim as u32) << 1 | (col.min(u16::MAX as usize) as u32) << Self::COL_SHIFT
+    }
+
+    /// The column it was built for.
+    #[inline]
+    fn col(&self) -> usize {
+        (self.is_color >> Self::COL_SHIFT) as usize
+    }
 }
 
 // These layouts must match `struct Rect` and `struct Glyph` in shaders.metal,
@@ -249,7 +271,7 @@ impl CellView for SnapCell<'_> {
 /// row cache entry, which also records each one's cell.
 trait RowSink {
     fn background(&mut self, r: RectInstance);
-    fn glyph(&mut self, g: GlyphInstance, mark: Mark);
+    fn glyph(&mut self, g: GlyphInstance);
     fn decoration(&mut self, r: RectInstance, mark: Mark);
 }
 
@@ -266,7 +288,7 @@ impl RowSink for Direct<'_> {
         self.rects.push(r);
     }
     #[inline]
-    fn glyph(&mut self, g: GlyphInstance, _: Mark) {
+    fn glyph(&mut self, g: GlyphInstance) {
         self.glyphs.push(g);
     }
     #[inline]
@@ -281,9 +303,8 @@ impl RowSink for Entry {
         self.backgrounds.push(r);
     }
     #[inline]
-    fn glyph(&mut self, g: GlyphInstance, mark: Mark) {
+    fn glyph(&mut self, g: GlyphInstance) {
         self.glyphs.push(g);
-        self.glyph_marks.push(mark);
     }
     #[inline]
     fn decoration(&mut self, r: RectInstance, mark: Mark) {
@@ -571,15 +592,17 @@ impl Frame {
             if on.is_empty() && hidden.is_empty() {
                 self.glyphs.extend_from_slice(&e.glyphs);
             } else {
-                for (g, mark) in e.glyphs.iter().zip(&e.glyph_marks) {
-                    let col = mark.col as usize;
+                for g in &e.glyphs {
+                    let col = g.col();
                     if hidden.contains(&col) {
                         continue;
                     }
-                    self.glyphs.push(GlyphInstance {
-                        color: if on.contains(&col) { under_cursor(*mark) } else { g.color },
-                        ..*g
-                    });
+                    let color = match () {
+                        _ if !on.contains(&col) => g.color,
+                        _ if g.is_color & GlyphInstance::DIM != 0 => with_alpha(theme.cursor_text, 160),
+                        _ => theme.cursor_text,
+                    };
+                    self.glyphs.push(GlyphInstance { color, ..*g });
                 }
             }
         }
@@ -830,19 +853,16 @@ fn row_cells<const OVERLAY: bool, C: CellView, S: RowSink>(
             && !(OVERLAY && ctx.covered.contains(&col))
             && let Some(g) = glyphs.glyph(c as u32, pen.face())
         {
-            out.glyph(
-                GlyphInstance {
-                    x: s16(x + g.left as i32),
-                    y: s16(y + m.baseline as i32 - g.top as i32),
-                    w: g.w,
-                    h: g.h,
-                    u: g.u,
-                    v: g.v,
-                    color: fg,
-                    is_color: g.color as u32,
-                },
-                pen.mark(col),
-            );
+            out.glyph(GlyphInstance {
+                x: s16(x + g.left as i32),
+                y: s16(y + m.baseline as i32 - g.top as i32),
+                w: g.w,
+                h: g.h,
+                u: g.u,
+                v: g.v,
+                color: fg,
+                is_color: GlyphInstance::flags(&g, col, pen.attrs.contains(Attrs::DIM)),
+            });
         }
         if pen.decorated {
             decorate(out, pen, theme, fg, x, y, m, pen.mark(col));

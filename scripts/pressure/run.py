@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pressure tests: runs decline with heavy or hostile workloads and records
+"""Pressure tests: runs Terminal Decline with heavy or hostile workloads and records
 time, CPU, memory (physical footprint) and whether it survived.
 
 usage: run.py BINARY WORKDIR [SCENARIO...]

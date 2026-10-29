@@ -1,5 +1,5 @@
 [package]
-name = "decline"
+name = "terminal-decline"
 edition.workspace = true
 version.workspace = true
 description = "A fast, GPU-accelerated terminal for macOS"
@@ -7,11 +7,12 @@ license.workspace = true
 repository.workspace = true
 
 [lib]
-name = "decline"
+name = "terminal_decline"
 path = "src/lib.rs"
 
+# The cask also links it as `decline`.
 [[bin]]
-name = "decline"
+name = "terminal-decline"
 path = "src/main.rs"
 
 [dependencies]
@@ -40,4 +41,4 @@ serde_json = "1"
 test-hooks = []
 
 [dev-dependencies]
-decline = { path = ".", features = ["test-hooks"] }
+terminal-decline = { path = ".", features = ["test-hooks"] }

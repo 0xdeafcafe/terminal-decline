@@ -1,5 +1,5 @@
 // Keypress-to-pixels latency of any app, measured from outside it, so
-// decline and Ghostty are measured the same way. Built by run.py with
+// Terminal Decline and Ghostty are measured the same way. Built by run.py with
 // `swiftc -O -swift-version 5`.
 //
 //   probe measure <pid> <n> <keycodes> [--window <id>] [--bottom <points>]

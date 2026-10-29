@@ -1744,7 +1744,7 @@ mod tests {
 
     /// The spec's legacy text key table for `i`, `3` and `;` (with Option
     /// as Meta), and the same keys under flag 1. (Its Ctrl+Shift column is
-    /// `CSI u` in kitty's legacy mode; decline keeps xterm's bytes there.)
+    /// `CSI u` in kitty's legacy mode; Terminal Decline keeps xterm's bytes there.)
     #[test]
     fn kitty_spec_text_key_examples() {
         let meta = KeyModes {

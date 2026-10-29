@@ -13,7 +13,7 @@ Use [Conventional Commits](https://www.conventionalcommits.org/):
 - Types: `feat`, `fix`, `perf`, `refactor`, `test`, `docs`, `build`, `ci`,
   `chore`. Use `perf` for changes whose point is speed or memory.
 - Scopes are the modules: `core` (term-core), `pty` (term-pty), `font`
-  (term-font), `render` (term-render), `app` (term-app, the `decline`
+  (term-font), `render` (term-render), `app` (term-app, the `terminal-decline`
   binary), `pin` (Dock pins), plus `ci`, `deps`, `docs` where they fit.
   Leave the scope out for changes across many modules.
 - Breaking changes: `feat(core)!: …` and a `BREAKING CHANGE:` footer.
@@ -31,10 +31,12 @@ Use [Conventional Commits](https://www.conventionalcommits.org/):
 
 ## Dogfooding
 
-Alex uses `~/Applications/Decline.app`, installed by `scripts/dogfood.sh`.
+Alex uses `~/Applications/Terminal Decline.app`, installed by `scripts/dogfood.sh`.
 After merging changes to `main` that affect the app, run
 `scripts/dogfood.sh`: the running copy restarts into the new build and
-reopens its windows in the same folders and places.
+reopens its windows in the same folders and places. The first run after
+the rename also runs `pin --update` and removes the old
+`~/Applications/Decline.app`, whose windows move to the new app.
 
 ## Agents in worktrees
 

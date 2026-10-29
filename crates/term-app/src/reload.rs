@@ -130,7 +130,7 @@ pub fn watch(exe: PathBuf, on_change: impl FnOnce() + Send + 'static) -> std::io
 
 fn restore_file() -> PathBuf {
     let base = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
-    base.join("Library/Caches/decline/restore.json")
+    base.join("Library/Caches/terminal-decline/restore.json")
 }
 
 pub fn save(windows: &[SavedWindow]) -> std::io::Result<PathBuf> {
@@ -175,7 +175,7 @@ mod tests {
 
     #[test]
     fn restore_round_trip() {
-        let dir = std::env::temp_dir().join(format!("decline-reload-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("terminal-decline-reload-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("r.json");
         let w = vec![
@@ -246,7 +246,7 @@ mod tests {
 
     #[test]
     fn restarts_into_the_renamed_bundle_once_this_one_is_gone() {
-        let dir = std::env::temp_dir().join(format!("decline-relaunch-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("terminal-decline-relaunch-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let app = |name: &str| {
             let b = dir.join(name);
@@ -271,9 +271,9 @@ mod tests {
 
     #[test]
     fn watch_fires_when_the_file_is_replaced() {
-        let dir = std::env::temp_dir().join(format!("decline-watch-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("terminal-decline-watch-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let exe = dir.join("decline");
+        let exe = dir.join("terminal-decline");
         std::fs::write(&exe, b"old").unwrap();
         let (tx, rx) = mpsc::channel();
         watch(exe.clone(), move || tx.send(()).unwrap()).unwrap();

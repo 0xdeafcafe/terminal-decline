@@ -51,7 +51,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: release
-      - run: cargo build --release --locked -p decline
+      - run: cargo build --release --locked -p terminal-decline
 
       - name: Make inputs
         run: |
@@ -70,7 +70,7 @@ jobs:
           SCENARIOS: ${{ inputs.scenarios }}
         run: |
           # shellcheck disable=SC2086 # word splitting of the scenario list is intended
-          python3 scripts/pressure/run.py target/release/decline "$WORK" $SCENARIOS | tee pressure.jsonl
+          python3 scripts/pressure/run.py target/release/terminal-decline "$WORK" $SCENARIOS | tee pressure.jsonl
 
       - name: Summary
         if: always()

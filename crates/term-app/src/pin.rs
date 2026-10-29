@@ -3,8 +3,8 @@
 //! A pin is a small app bundle holding an APFS clone of this binary (no extra
 //! disk space), its own bundle id (so macOS gives it its own Dock icon and
 //! Cmd+Tab entry) and an optional icon. What it runs, and any config setting
-//! it overrides, live in `~/.config/decline/pins/<id>.toml`, outside the
-//! bundle, so editing them doesn't break the bundle's code signature. The
+//! it overrides, live in `~/.config/terminal-decline/pins/<id>.toml`, outside
+//! the bundle, so editing them doesn't break the bundle's code signature. The
 //! binary knows it's a pin from its own file name, which is the pin's id.
 //!
 //! Every location comes in through [`Paths`] and every other program (cp,
@@ -17,7 +17,14 @@ use std::process::{Command, ExitStatus, Stdio};
 
 use crate::paths::Paths;
 
-pub const ID_PREFIX: &str = "red.forbes.decline.pin.";
+pub const ID_PREFIX: &str = "red.forbes.terminal-decline.pin.";
+
+/// Pins' bundle ids before the rename to Terminal Decline.
+pub const OLD_ID_PREFIX: &str = "red.forbes.decline.pin.";
+
+/// The executable's own names: `terminal-decline`, and the `decline` alias
+/// the cask links (and builds from before the rename). Never pin ids.
+const OWN_NAMES: [&str; 2] = ["terminal-decline", "decline"];
 
 const LSREGISTER: &str = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister";
 
@@ -35,8 +42,10 @@ fn succeeds(run: &mut Runner, cmd: &mut Command) -> bool {
 /// When running as a pin: its config file.
 pub fn own_pin_config(paths: &Paths) -> Option<PathBuf> {
     paths.contents_dir()?;
-    let id = paths.exe.file_name()?.to_str()?;
-    if id == "decline" {
+    // Through a link (the cask's `decline`): the name of what it leads to.
+    let exe = paths.exe.canonicalize().ok()?;
+    let id = exe.file_name()?.to_str()?;
+    if OWN_NAMES.contains(&id) {
         return None;
     }
     let p = paths.pin_config(id);
@@ -66,7 +75,10 @@ pub fn check_name(name: &str) -> Result<(), String> {
         return Err(format!("{name:?}: a pin name can't contain '/' or '..'"));
     }
     if slug(name).is_empty() {
-        return Err("give the pin a name with a letter or digit in it, e.g. `decline pin Rush -- ./rush`".into());
+        return Err("give the pin a name with a letter or digit in it, e.g. `terminal-decline pin Rush -- ./rush`".into());
+    }
+    if OWN_NAMES.contains(&slug(name).as_str()) {
+        return Err(format!("{name:?} is Terminal Decline's own name; pick another for the pin"));
     }
     Ok(())
 }
@@ -91,8 +103,8 @@ pub enum Request {
     Create(Options),
 }
 
-/// `decline pin …` arguments (after `pin`). `apps_dir` is the default for
-/// `--dir`.
+/// `terminal-decline pin …` arguments (after `pin`). `apps_dir` is the
+/// default for `--dir`.
 pub fn parse_args(args: &[String], apps_dir: &Path) -> Result<Request, String> {
     match args.first().map(String::as_str) {
         None | Some("-h" | "--help") => return Ok(Request::Help),
@@ -141,7 +153,7 @@ pub fn parse_args(args: &[String], apps_dir: &Path) -> Result<Request, String> {
         i += 1;
     }
     if o.name.is_empty() {
-        return Err("give the pin a name, e.g. `decline pin Rush -- ./rush`".into());
+        return Err("give the pin a name, e.g. `terminal-decline pin Rush -- ./rush`".into());
     }
     check_name(&o.name)?;
     if o.command.is_empty() {
@@ -175,9 +187,9 @@ pub fn run(args: &[String], paths: &Paths, run: &mut Runner) -> Result<(), Strin
     Ok(())
 }
 
-/// Whether `app` is a pin bundle decline made, so it is safe to delete: a
-/// `.app` inside the apps dir with `Contents/MacOS/<id>` in it. The pin's
-/// settings file names the bundle and can be edited, so this is checked
+/// Whether `app` is a pin bundle Terminal Decline made, so it is safe to
+/// delete: a `.app` inside the apps dir with `Contents/MacOS/<id>` in it. The
+/// pin's settings file names the bundle and can be edited, so this is checked
 /// rather than trusted.
 pub fn is_pin_bundle(app: &Path, id: &str, apps_dir: &Path) -> bool {
     let (Ok(app), Ok(apps)) = (app.canonicalize(), apps_dir.canonicalize()) else {
@@ -198,7 +210,7 @@ pub fn remove(name: &str, paths: &Paths) -> Result<PathBuf, String> {
         .ok_or(format!("no pin named {name}"))?;
     if !is_pin_bundle(&app, &id, &paths.apps_dir) {
         return Err(format!(
-            "{} is not a decline pin in {}; nothing removed (delete it and {} by hand)",
+            "{} is not a Terminal Decline pin in {}; nothing removed (delete it and {} by hand)",
             app.display(),
             paths.apps_dir.display(),
             paths.pin_config(&id).display()
@@ -282,7 +294,7 @@ pub fn create(o: Options, paths: &Paths, run: &mut Runner) -> Result<Created, St
     std::fs::create_dir_all(paths.pins_dir()).map_err(|e| e.to_string())?;
 
     let pin_toml = format!(
-        "# Made by `decline pin`. Any config.toml setting can go here.\n{}",
+        "# Made by `terminal-decline pin`. Any config.toml setting can go here.\n{}",
         toml::to_string_pretty(&table).map_err(|e| e.to_string())?
     );
     std::fs::write(&config_path, pin_toml).map_err(|e| e.to_string())?;
@@ -323,9 +335,10 @@ fn install_binary(exe: &Path, dest: &Path, run: &mut Runner) -> Result<(), Strin
     Ok(())
 }
 
-/// Drop the download quarantine copied from decline itself, sign the bundle
-/// with its own identifier (sealing its Info.plist), and register it with
-/// LaunchServices. Signing must work; registering is only worth a warning.
+/// Drop the download quarantine copied from Terminal Decline itself, sign the
+/// bundle with its own identifier (sealing its Info.plist), and register it
+/// with LaunchServices. Signing must work; registering is only worth a
+/// warning.
 fn finish_bundle(app: &Path, id: &str, run: &mut Runner) -> Result<(), String> {
     let _ = run(Command::new("/usr/bin/xattr").args(["-dr", "com.apple.quarantine"]).arg(app));
     let identifier = format!("{ID_PREFIX}{id}");
@@ -499,7 +512,9 @@ pub fn list(paths: &Paths) -> Vec<(PathBuf, String)> {
         .collect()
 }
 
-/// After upgrading decline, refresh the binary inside every pin.
+/// After upgrading Terminal Decline, refresh the binary inside every pin,
+/// and its Info.plist, so pins made before the rename (bundle ids
+/// `red.forbes.decline.pin.*`) get the current [`ID_PREFIX`].
 pub fn update(paths: &Paths, run: &mut Runner) -> Result<(), String> {
     for (id, app) in pins(paths) {
         let bin = app.join("Contents/MacOS").join(&id);
@@ -507,8 +522,18 @@ pub fn update(paths: &Paths, run: &mut Runner) -> Result<(), String> {
             eprintln!("skipping {}: not found", app.display());
             continue;
         }
+        // The bundle is `<name>.app`; its icon, if any, stays as it is.
+        let name = app.file_stem().map_or_else(|| id.clone(), |s| s.to_string_lossy().into_owned());
+        let has_icon = app.join("Contents/Resources/icon.icns").is_file();
+        let plist = app.join("Contents/Info.plist");
+        let renamed = std::fs::read_to_string(&plist).is_ok_and(|p| p.contains(OLD_ID_PREFIX));
+        std::fs::write(&plist, info_plist(&name, &id, has_icon)).map_err(|e| format!("{}: {e}", plist.display()))?;
         install_binary(&paths.exe, &bin, run)?;
         finish_bundle(&app, &id, run)?;
+        if renamed {
+            // Its Secure Keyboard Entry choice, kept under the old id.
+            crate::secure_input::carry_over(&format!("{ID_PREFIX}{id}"));
+        }
         println!("updated {}", app.display());
     }
     Ok(())
@@ -537,10 +562,10 @@ mod tests {
             let dir = TempDir::new(name);
             let apps = dir.join("Applications");
             std::fs::create_dir_all(&apps).unwrap();
-            let exe = dir.join("decline");
+            let exe = dir.join("terminal-decline");
             std::fs::write(&exe, b"not really a binary").unwrap();
             let paths = Paths {
-                config_dir: dir.join("config/decline"),
+                config_dir: dir.join("config/terminal-decline"),
                 apps_dir: apps,
                 exe,
             };
@@ -613,7 +638,7 @@ mod tests {
 
     #[test]
     fn names_that_name_other_paths_are_rejected() {
-        for bad in ["../evil", "a/b", "/abs", "..", "x..y", "!!!", ""] {
+        for bad in ["../evil", "a/b", "/abs", "..", "x..y", "!!!", "", "Terminal Decline", "decline"] {
             assert!(check_name(bad).is_err(), "{bad:?} accepted");
         }
         for good in ["Rush", "My Tool", "a.b", "émoji ✨"] {
@@ -715,7 +740,7 @@ mod tests {
         assert!(p.contains("<string>A &amp; &lt;B&gt; &quot;q&quot;</string>"), "{p}");
         for key in [
             "<key>CFBundleExecutable</key>\n\t<string>a-b</string>",
-            "<key>CFBundleIdentifier</key>\n\t<string>red.forbes.decline.pin.a-b</string>",
+            "<key>CFBundleIdentifier</key>\n\t<string>red.forbes.terminal-decline.pin.a-b</string>",
             "<key>CFBundlePackageType</key>\n\t<string>APPL</string>",
             "<key>CFBundleIconFile</key>",
             "<key>NSHighResolutionCapable</key>",
@@ -731,7 +756,7 @@ mod tests {
         let bundle = env.paths.apps_dir.join("Rush.app/Contents/MacOS");
         std::fs::create_dir_all(&bundle).unwrap();
         std::fs::write(bundle.join("rush"), b"").unwrap();
-        std::fs::write(bundle.join("decline"), b"").unwrap();
+        std::fs::write(bundle.join("terminal-decline"), b"").unwrap();
         std::fs::create_dir_all(env.paths.pins_dir()).unwrap();
         std::fs::write(env.paths.pin_config("rush"), "").unwrap();
         let with_exe = |exe: PathBuf| Paths { exe, ..env.paths.clone() };
@@ -739,8 +764,22 @@ mod tests {
         let pin = with_exe(bundle.join("rush"));
         assert_eq!(own_pin_config(&pin), Some(env.paths.pin_config("rush")));
         assert_eq!(own_app_name(&pin).as_deref(), Some("Rush"));
-        // decline itself inside a bundle (Decline.app) is not a pin.
+        // Terminal Decline itself inside a bundle (Terminal Decline.app) is
+        // not a pin.
+        assert_eq!(own_pin_config(&with_exe(bundle.join("terminal-decline"))), None);
+        // Nor through the cask's `decline` link, even with a settings file
+        // of that name, nor as a build from before the rename.
+        std::fs::write(env.paths.pin_config("decline"), "").unwrap();
+        std::fs::write(env.paths.pin_config("terminal-decline"), "").unwrap();
+        let link = env.dir.join("decline");
+        std::os::unix::fs::symlink(bundle.join("terminal-decline"), &link).unwrap();
+        assert_eq!(own_pin_config(&with_exe(link)), None);
+        std::fs::write(bundle.join("decline"), b"").unwrap();
         assert_eq!(own_pin_config(&with_exe(bundle.join("decline"))), None);
+        // A link to a pin's binary is that pin.
+        let pin_link = env.dir.join("rush-link");
+        std::os::unix::fs::symlink(bundle.join("rush"), &pin_link).unwrap();
+        assert_eq!(own_pin_config(&with_exe(pin_link)), Some(env.paths.pin_config("rush")));
         // Outside a bundle: neither a pin nor an app name.
         let plain = with_exe(env.paths.exe.clone());
         assert_eq!(own_pin_config(&plain), None);
@@ -762,10 +801,10 @@ mod tests {
         assert!(
             std::fs::read_to_string(app.join("Contents/Info.plist"))
                 .unwrap()
-                .contains("red.forbes.decline.pin.my-tool")
+                .contains("red.forbes.terminal-decline.pin.my-tool")
         );
         assert_eq!(rec.programs(), ["cp", "xattr", "codesign", "lsregister"]);
-        assert!(rec.calls[2].contains(&"red.forbes.decline.pin.my-tool".to_string()));
+        assert!(rec.calls[2].contains(&"red.forbes.terminal-decline.pin.my-tool".to_string()));
 
         assert_eq!(list(&env.paths), [(app.clone(), r#"["htop"]"#.to_string())]);
 
@@ -778,9 +817,17 @@ mod tests {
         assert!(e.contains("already uses the id \"my-tool\""), "{e}");
         assert!(!env.dir.join("elsewhere").exists());
 
+        // A pin from before the rename: `--update` gives it the new id.
+        let plist = app.join("Contents/Info.plist");
+        let old = std::fs::read_to_string(&plist).unwrap().replace(ID_PREFIX, OLD_ID_PREFIX);
+        std::fs::write(&plist, old).unwrap();
         let mut rec = Recorder::new();
         update(&env.paths, &mut rec.runner()).unwrap();
         assert_eq!(rec.programs(), ["cp", "xattr", "codesign", "lsregister"]);
+        assert!(rec.calls[2].contains(&"red.forbes.terminal-decline.pin.my-tool".to_string()));
+        let new = std::fs::read_to_string(&plist).unwrap();
+        assert_eq!(new, info_plist("My Tool", "my-tool", false));
+        assert!(!new.contains("red.forbes.decline."), "{new}");
 
         assert_eq!(remove("My Tool", &env.paths), Ok(app.clone()));
         assert!(!app.exists());
@@ -789,7 +836,7 @@ mod tests {
     }
 
     /// `--remove` trusts nothing in the editable settings file: anything but
-    /// a decline pin bundle inside the apps dir is left alone.
+    /// a Terminal Decline pin bundle inside the apps dir is left alone.
     #[test]
     fn remove_deletes_only_real_pin_bundles() {
         let env = Env::new("remove");
@@ -906,6 +953,6 @@ mod tests {
             .output()
             .unwrap();
         let text = String::from_utf8_lossy(&info.stderr);
-        assert!(text.contains("Identifier=red.forbes.decline.pin.real-pin"), "{text}");
+        assert!(text.contains("Identifier=red.forbes.terminal-decline.pin.real-pin"), "{text}");
     }
 }

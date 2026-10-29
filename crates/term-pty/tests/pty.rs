@@ -25,7 +25,7 @@ struct TempDir(PathBuf);
 
 impl TempDir {
     fn new(name: &str) -> TempDir {
-        let dir = std::env::temp_dir().join(format!("decline-pty-{}-{name}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("terminal-decline-pty-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         TempDir(dir.canonicalize().unwrap())
@@ -176,7 +176,7 @@ fn bare_program_found_via_path_gets_env() {
         "DECLINE_TEST=a b",
         "TERM=xterm-256color",
         "COLORTERM=truecolor",
-        "TERM_PROGRAM=decline",
+        "TERM_PROGRAM=terminal-decline",
     ] {
         assert!(lines.iter().any(|l| l == want), "missing {want:?} in {lines:?}");
     }

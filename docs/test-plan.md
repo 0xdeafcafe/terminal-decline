@@ -162,7 +162,7 @@ Two levels, both in CI on macOS:
    - each waits on screen content with a deadline (`wait_for(|screen| …)`),
      never fixed sleeps.
 2. **Real app smoke tests** (`scripts/smoke/` driven from a test):
-   launch the built `decline` with `DECLINE_DEBUG` and a test-only
+   launch the built `terminal-decline` with `DECLINE_DEBUG` and a test-only
    `DECLINE_TEST_DUMP=<file>` env var: on program exit the app writes the
    visible screen text, frame count, glyph-texture stats and its footprint to
    the file before quitting. Scenarios: `-e` program output, a pin bundle
@@ -196,7 +196,7 @@ Two levels, both in CI on macOS:
 
 Adopted all "must" items and most "should" items. Key changes:
 
-- **Structure**: `decline` becomes a library + thin `main.rs`. PTY start-up
+- **Structure**: `terminal-decline` becomes a library + thin `main.rs`. PTY start-up
   and the reader/writer threads move out of `view.rs` into an AppKit-free
   `session` module (takes a `wake` callback); the headless pipeline tests use
   that same code. The drawing decision (`dirty, visible, synchronized,

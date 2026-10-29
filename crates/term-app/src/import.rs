@@ -1,16 +1,16 @@
-//! `decline import`: settings from other terminals.
+//! `terminal-decline import`: settings from other terminals.
 //!
-//! - `decline import ghostty [PATH]` reads Ghostty's config (default
-//!   `~/.config/ghostty/config`) and gives the decline config for it:
+//! - `terminal-decline import ghostty [PATH]` reads Ghostty's config (default
+//!   `~/.config/ghostty/config`) and gives the Terminal Decline config for it:
 //!   theme, palette and colours, fonts, opacity and blur, option-as-meta,
-//!   copy-on-select, padding, window size and keybinds, where decline has
+//!   copy-on-select, padding, window size and keybinds, where Terminal Decline has
 //!   the setting.
-//! - `decline import iterm FILE.itermcolors` turns an iTerm2 colour preset
+//! - `terminal-decline import iterm FILE.itermcolors` turns an iTerm2 colour preset
 //!   into a theme file, `themes/<name>.toml`.
 //!
 //! Both print the TOML; `--write` also writes it, and an existing file is
-//! only replaced with `--force`. Settings with no decline equivalent are
-//! listed as comments at the end.
+//! only replaced with `--force`. Settings with no Terminal Decline equivalent
+//! are listed as comments at the end.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -20,14 +20,14 @@ use crate::Paths;
 use crate::keybind::Chord;
 
 pub const USAGE: &str = "\
-usage: decline import ghostty [PATH] [--write [--force]]
-       decline import iterm FILE.itermcolors [--name NAME] [--write [--force]]
+usage: terminal-decline import ghostty [PATH] [--write [--force]]
+       terminal-decline import iterm FILE.itermcolors [--name NAME] [--write [--force]]
 
-Prints the decline config (ghostty) or theme (iterm) for another terminal's
+Prints the Terminal Decline config (ghostty) or theme (iterm) for another terminal's
 settings. --write saves it (config.toml, or themes/NAME.toml); an existing
 file is replaced only with --force.";
 
-/// `decline import …` (the arguments after `import`).
+/// `terminal-decline import …` (the arguments after `import`).
 pub fn run(args: &[String], paths: &Paths) -> Result<(), String> {
     let mut write = false;
     let mut force = false;
@@ -89,11 +89,11 @@ pub fn run(args: &[String], paths: &Paths) -> Result<(), String> {
         }
         for (target, text) in &files {
             save(target, text, force)?;
-            eprintln!("decline import: wrote {}", target.display());
+            eprintln!("terminal-decline import: wrote {}", target.display());
         }
         if rest[0] == "iterm" {
             let name = files[0].0.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-            eprintln!("decline import: use it with theme = {}", quote(&name));
+            eprintln!("terminal-decline import: use it with theme = {}", quote(&name));
         }
     }
     Ok(())
@@ -153,7 +153,7 @@ fn hex(v: &str) -> Option<String> {
     (h.len() == 6 && h.chars().all(|c| c.is_ascii_hexdigit())).then(|| format!("#{}", h.to_ascii_lowercase()))
 }
 
-/// Colours read from a config or theme, by decline's names.
+/// Colours read from a config or theme, by Terminal Decline's names.
 #[derive(Default, Debug, Clone, PartialEq)]
 struct ColorSet {
     foreground: Option<String>,
@@ -217,7 +217,7 @@ fn ghostty_colour(key: &str, value: &str, colors: &mut ColorSet) -> Option<Resul
                 return Some(Err("not N=COLOUR".into()));
             };
             if n >= 16 {
-                return Some(Err("decline sets only the 16 ANSI colours".into()));
+                return Some(Err("Terminal Decline sets only the 16 ANSI colours".into()));
             }
             return Some(match hex(c) {
                 Some(c) => {
@@ -253,7 +253,7 @@ fn built_in_named(name: &str) -> Option<&'static str> {
     crate::theme::BUILT_IN.iter().map(|(n, _)| *n).find(|n| loose(n) == loose(name))
 }
 
-/// A Ghostty theme as a decline theme file, from a path or the theme
+/// A Ghostty theme as a Terminal Decline theme file, from a path or the theme
 /// folders.
 fn ghostty_theme(name: &str, dirs: &[PathBuf]) -> Option<String> {
     let candidates: Vec<PathBuf> = if Path::new(name).is_absolute() {
@@ -268,10 +268,10 @@ fn ghostty_theme(name: &str, dirs: &[PathBuf]) -> Option<String> {
         match ghostty_colour(&k, &v, &mut colors) {
             Some(Ok(())) => {}
             Some(Err(why)) => skipped.push(format!("# {k} = {v}  ({why})")),
-            None => skipped.push(format!("# {k} = {v}  (no decline setting does this)")),
+            None => skipped.push(format!("# {k} = {v}  (no Terminal Decline setting does this)")),
         }
     }
-    let mut out = format!("# Imported from the Ghostty theme {name:?} by `decline import ghostty`.\n");
+    let mut out = format!("# Imported from the Ghostty theme {name:?} by `terminal-decline import ghostty`.\n");
     colors.write(&mut out);
     if !skipped.is_empty() {
         out.push_str("\n# Not imported:\n");
@@ -283,7 +283,7 @@ fn ghostty_theme(name: &str, dirs: &[PathBuf]) -> Option<String> {
     Some(out)
 }
 
-/// A decline theme name for a Ghostty one: `Harbour Lights` →
+/// A Terminal Decline theme name for a Ghostty one: `Harbour Lights` →
 /// `harbour-lights`.
 fn theme_file_name(name: &str) -> String {
     let base = Path::new(name).file_name().map_or(name.into(), |n| n.to_string_lossy());
@@ -295,15 +295,16 @@ fn theme_file_name(name: &str) -> String {
     if words.is_empty() { "imported".into() } else { words.join("-") }
 }
 
-/// What `decline import ghostty` writes: the config, and a theme file for
-/// each Ghostty theme it names that isn't one of decline's (name, TOML).
+/// What `terminal-decline import ghostty` writes: the config, and a theme
+/// file for each Ghostty theme it names that isn't one of Terminal Decline's
+/// (name, TOML).
 #[derive(Debug)]
 pub struct GhosttyImport {
     pub config: String,
     pub themes: Vec<(String, String)>,
 }
 
-/// A Ghostty key name as decline's.
+/// A Ghostty key name as Terminal Decline's.
 fn ghostty_key(key: &str) -> Option<String> {
     let k = key.strip_prefix("key_").or_else(|| key.strip_prefix("digit_")).unwrap_or(key);
     let k = k.strip_prefix("arrow_").unwrap_or(k);
@@ -329,7 +330,7 @@ fn ghostty_key(key: &str) -> Option<String> {
     Some(named.to_string())
 }
 
-/// A Ghostty trigger (`super+shift+left_bracket`) as a decline chord.
+/// A Ghostty trigger (`super+shift+left_bracket`) as a Terminal Decline chord.
 fn ghostty_trigger(trigger: &str) -> Option<String> {
     let (mods, key) = if let Some(m) = trigger.strip_suffix("++") {
         (m, "+")
@@ -387,7 +388,7 @@ fn unescape(s: &str) -> Option<String> {
     Some(out)
 }
 
-/// A Ghostty action as the value of a decline `[keybind]` entry.
+/// A Ghostty action as the value of a Terminal Decline `[keybind]` entry.
 fn ghostty_action(action: &str) -> Option<String> {
     let (name, arg) = action.split_once(':').unwrap_or((action, ""));
     let menu = match name {
@@ -422,8 +423,8 @@ fn split_keybind(v: &str) -> Option<(&str, &str)> {
     Some((&v[..at], &v[at + 1..]))
 }
 
-/// The decline config for Ghostty config `text` (read from `path`), with
-/// themes looked for in `theme_dirs`.
+/// The Terminal Decline config for Ghostty config `text` (read from `path`),
+/// with themes looked for in `theme_dirs`.
 pub fn ghostty(text: &str, path: &Path, theme_dirs: &[PathBuf]) -> GhosttyImport {
     let mut top: Vec<(&str, String)> = Vec::new();
     let set = |k: &'static str, v: String, top: &mut Vec<(&str, String)>| {
@@ -432,8 +433,8 @@ pub fn ghostty(text: &str, path: &Path, theme_dirs: &[PathBuf]) -> GhosttyImport
     };
     let mut fonts: Vec<String> = Vec::new();
     let mut themes: Vec<(String, String)> = Vec::new();
-    // A theme by decline's name: built in, else a Ghostty theme made into
-    // a theme file.
+    // A theme by Terminal Decline's name: built in, else a Ghostty theme made
+    // into a theme file.
     let mut theme_named = |name: &str| -> Option<String> {
         if let Some(b) = built_in_named(name) {
             return Some(b.to_string());
@@ -470,11 +471,11 @@ pub fn ghostty(text: &str, path: &Path, theme_dirs: &[PathBuf]) -> GhosttyImport
                 match pair {
                     (Some(l), Some(d), None) => match (theme_named(&l), theme_named(&d)) {
                         (Some(l), Some(d)) => set("theme", format!("{{ light = {}, dark = {} }}", quote(&l), quote(&d)), &mut top),
-                        _ => skip("no built-in decline theme or Ghostty theme file for one of these"),
+                        _ => skip("no built-in Terminal Decline theme or Ghostty theme file for one of these"),
                     },
                     (None, None, Some(name)) => match theme_named(&name) {
                         Some(t) => set("theme", quote(&t), &mut top),
-                        None => skip("no built-in decline theme or Ghostty theme file of that name"),
+                        None => skip("no built-in Terminal Decline theme or Ghostty theme file of that name"),
                     },
                     _ => skip("not a theme name or light:NAME,dark:NAME"),
                 }
@@ -494,7 +495,7 @@ pub fn ghostty(text: &str, path: &Path, theme_dirs: &[PathBuf]) -> GhosttyImport
             },
             "adjust-cell-width" => match value.strip_suffix('%').and_then(|p| p.trim().parse::<f64>().ok()) {
                 Some(p) => set("cell_width", quote(&format!("{p}%")), &mut top),
-                _ => skip("only a percentage maps (Ghostty's other unit is pixels, decline's points)"),
+                _ => skip("only a percentage maps (Ghostty's other unit is pixels, Terminal Decline's points)"),
             },
             "background-opacity" => match number {
                 Some(n) => set("opacity", n.clamp(0.0, 1.0).to_string(), &mut top),
@@ -504,7 +505,7 @@ pub fn ghostty(text: &str, path: &Path, theme_dirs: &[PathBuf]) -> GhosttyImport
                 "true" => set("blur", "true".into(), &mut top),
                 "false" | "0" => set("blur", "false".into(), &mut top),
                 _ if number.is_some_and(|n| n > 0.0) => set("blur", "true".into(), &mut top),
-                _ => skip("not a blur decline has"),
+                _ => skip("not a blur Terminal Decline has"),
             },
             "macos-option-as-alt" => match value.as_str() {
                 "true" => set("option_as_meta", quote("both"), &mut top),
@@ -522,11 +523,11 @@ pub fn ghostty(text: &str, path: &Path, theme_dirs: &[PathBuf]) -> GhosttyImport
                     padding_x = Some(n);
                     set("padding", n.to_string(), &mut top);
                 }
-                _ => skip("decline has one padding for all sides"),
+                _ => skip("Terminal Decline has one padding for all sides"),
             },
             "window-padding-y" => {
                 if number.is_none() || number != padding_x {
-                    skip("decline has one padding for all sides (window-padding-x is used)");
+                    skip("Terminal Decline has one padding for all sides (window-padding-x is used)");
                 }
             }
             "window-width" => match value.parse::<u16>() {
@@ -549,8 +550,8 @@ pub fn ghostty(text: &str, path: &Path, theme_dirs: &[PathBuf]) -> GhosttyImport
                     skip("global, all and unconsumed keybinds aren't supported");
                 } else {
                     match (ghostty_trigger(trigger), ghostty_action(action)) {
-                        (None, _) => skip("a key decline can't bind"),
-                        (_, None) => skip("no decline action does this"),
+                        (None, _) => skip("a key Terminal Decline can't bind"),
+                        (_, None) => skip("no Terminal Decline action does this"),
                         (Some(chord), Some(act)) => {
                             keybinds.retain(|(c, _)| *c != chord);
                             keybinds.push((chord, act));
@@ -558,10 +559,10 @@ pub fn ghostty(text: &str, path: &Path, theme_dirs: &[PathBuf]) -> GhosttyImport
                     }
                 }
             }
-            "scrollback-limit" => skip("Ghostty counts bytes, decline lines (set scrollback)"),
-            "command" => skip("decline's command is a list: command = [\"program\", \"arg\"]"),
+            "scrollback-limit" => skip("Ghostty counts bytes, Terminal Decline lines (set scrollback)"),
+            "command" => skip("Terminal Decline's command is a list: command = [\"program\", \"arg\"]"),
             "config-file" => skip("other files aren't followed; import them too"),
-            _ => skip("no decline setting does this"),
+            _ => skip("no Terminal Decline setting does this"),
         }
     }
     if let Some((first, rest)) = fonts.split_first() {
@@ -572,7 +573,7 @@ pub fn ghostty(text: &str, path: &Path, theme_dirs: &[PathBuf]) -> GhosttyImport
         }
     }
 
-    let mut out = format!("# Imported from {} by `decline import ghostty`.\n", path.display());
+    let mut out = format!("# Imported from {} by `terminal-decline import ghostty`.\n", path.display());
     const ORDER: [&str; 17] = [
         "theme",
         "font_family",
@@ -815,7 +816,8 @@ fn to_srgb(space: &str, r: f64, g: f64, b: f64) -> (f64, f64, f64) {
     }
 }
 
-/// The decline theme file for an iTerm2 colour preset (read from `path`).
+/// The Terminal Decline theme file for an iTerm2 colour preset (read from
+/// `path`).
 pub fn iterm(plist: &Plist, path: &Path) -> Result<String, String> {
     let Plist::Dict(entries) = plist else {
         return Err("not a colour preset (no dictionary of colours)".into());
@@ -840,14 +842,14 @@ pub fn iterm(plist: &Plist, path: &Path) -> Result<String, String> {
             ("Background Color", _) => colors.background = Some(c),
             ("Cursor Color", _) => colors.cursor = Some(c),
             ("Selection Color", _) => colors.selection = Some(c),
-            _ => skipped.push(format!("# {key} = {c}  (no decline setting does this)")),
+            _ => skipped.push(format!("# {key} = {c}  (no Terminal Decline setting does this)")),
         }
     }
     if colors.is_empty() {
-        return Err("no colours decline uses in this preset".into());
+        return Err("no colours Terminal Decline uses in this preset".into());
     }
     let name = path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-    let mut out = format!("# Imported from the iTerm2 colour preset {name:?} by `decline import iterm`.\n");
+    let mut out = format!("# Imported from the iTerm2 colour preset {name:?} by `terminal-decline import iterm`.\n");
     colors.write(&mut out);
     if !skipped.is_empty() {
         out.push_str("\n# Not imported:\n");
@@ -873,8 +875,9 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
     }
 
-    /// `text` as a config file: what decline makes of it, and its errors.
-    /// What decline makes of an import, written out, and its errors.
+    /// `text` as a config file: what Terminal Decline makes of it, and its
+    /// errors. What Terminal Decline makes of an import, written out, and its
+    /// errors.
     fn load_import(import: &GhosttyImport) -> (config::Config, Vec<String>) {
         let dir = TempDir::new("import");
         let file = dir.join("config.toml");
@@ -904,7 +907,7 @@ mod tests {
         assert_eq!(name, "harbour-lights");
         assert!(theme.starts_with("# Imported from the Ghostty theme \"Harbour Lights\""), "{theme}");
         assert!(
-            theme.contains("# selection-foreground = ffffff  (no decline setting does this)"),
+            theme.contains("# selection-foreground = ffffff  (no Terminal Decline setting does this)"),
             "{theme}"
         );
         assert_eq!(c.font_family, "JetBrains Mono");
@@ -927,7 +930,7 @@ mod tests {
         assert_eq!(p.ansi[0], 0x101418);
         assert_eq!(p.ansi[1], 0xff5555, "the config's palette wins");
         assert_eq!(p.ansi[2], 0x27ae60);
-        assert_eq!(p.ansi[3], Palette::DEFAULT.ansi[3], "unset stays decline's");
+        assert_eq!(p.ansi[3], Palette::DEFAULT.ansi[3], "unset stays Terminal Decline's");
         assert_eq!(p.ansi[9], 0xff6e6e);
         assert_eq!(p.ansi[15], 0xfafafa);
         // Keybinds.
@@ -1037,7 +1040,10 @@ mod tests {
         let cursor = config::parse_hex(c.cursor.as_deref().unwrap()).unwrap();
         let (r, g, b) = (cursor >> 16, cursor >> 8 & 0xff, cursor & 0xff);
         assert!(r == g && g == b && (0x80..=0xa0).contains(&r), "{cursor:06x}");
-        assert!(out.contains("# Bold Color = #ffffff  (no decline setting does this)"), "{out}");
+        assert!(
+            out.contains("# Bold Color = #ffffff  (no Terminal Decline setting does this)"),
+            "{out}"
+        );
         assert!(out.contains("# Cursor Text Color = #000000  ("), "{out}");
         assert!(iterm(&parse_plist("<plist><dict></dict></plist>").unwrap(), Path::new("x")).is_err());
     }
@@ -1062,9 +1068,9 @@ mod tests {
     fn the_command_writes_where_it_should() {
         let dir = TempDir::new("import-run");
         let paths = Paths {
-            config_dir: dir.join("decline"),
+            config_dir: dir.join("terminal-decline"),
             apps_dir: dir.join("Applications"),
-            exe: PathBuf::from("decline"),
+            exe: PathBuf::from("terminal-decline"),
         };
         let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let iterm = fixtures().join("sample.itermcolors");

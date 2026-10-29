@@ -1,5 +1,5 @@
 [package]
-name = "decline-fuzz"
+name = "terminal-decline-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2024"

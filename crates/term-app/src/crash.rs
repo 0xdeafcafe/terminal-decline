@@ -1,6 +1,7 @@
 //! Crash handling. A panic hook writes the message, a backtrace and the
-//! version to `~/Library/Logs/decline/crash-<time>.log` and logs a fault to
-//! os_log (subsystem `red.forbes.decline`), then lets the panic go on.
+//! version to `~/Library/Logs/terminal-decline/crash-<time>.log` and logs a
+//! fault to os_log (subsystem `red.forbes.terminal-decline`), then lets the
+//! panic go on.
 //!
 //! What happens next depends on the thread. A panic while a session's
 //! reader thread parses output is caught there (see [`crate::session`]): that
@@ -24,9 +25,9 @@ thread_local! {
     static LAST_LOG: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
 }
 
-/// `~/Library/Logs/decline`.
+/// `~/Library/Logs/terminal-decline`.
 pub fn logs_dir(home: &Path) -> PathBuf {
-    home.join("Library/Logs/decline")
+    home.join("Library/Logs/terminal-decline")
 }
 
 /// Install the panic hook, writing logs into `dir` (created when needed).
@@ -72,7 +73,7 @@ pub fn tilde(path: &Path) -> String {
 fn report(info: &PanicHookInfo, backtrace: &Backtrace) -> String {
     let thread = std::thread::current();
     format!(
-        "decline {} hit a bug\nthread '{}' {info}\n\nbacktrace:\n{backtrace}\n",
+        "Terminal Decline {} hit a bug\nthread '{}' {info}\n\nbacktrace:\n{backtrace}\n",
         env!("CARGO_PKG_VERSION"),
         thread.name().unwrap_or("<unnamed>"),
     )
@@ -152,7 +153,7 @@ mod oslog {
 
     pub fn fault(msg: &str) {
         static LOG: OnceLock<Handle> = OnceLock::new();
-        let log = LOG.get_or_init(|| Handle(unsafe { os_log_create(c"red.forbes.decline".as_ptr(), c"crash".as_ptr()) }));
+        let log = LOG.get_or_init(|| Handle(unsafe { os_log_create(c"red.forbes.terminal-decline".as_ptr(), c"crash".as_ptr()) }));
         if log.0.is_null() {
             return;
         }
@@ -198,12 +199,12 @@ mod tests {
 
     #[test]
     fn summary_is_the_report_before_the_backtrace() {
-        let r = "decline 1 hit a bug\nthread 'x' panicked at a.rs:1:2:\nboom\n\nbacktrace:\n  0: f\n";
-        assert_eq!(first_lines(r), "decline 1 hit a bug thread 'x' panicked at a.rs:1:2: boom");
+        let r = "Terminal Decline 1 hit a bug\nthread 'x' panicked at a.rs:1:2:\nboom\n\nbacktrace:\n  0: f\n";
+        assert_eq!(first_lines(r), "Terminal Decline 1 hit a bug thread 'x' panicked at a.rs:1:2: boom");
     }
 
     #[test]
     fn os_log_does_not_crash() {
-        oslog::fault("decline unit test: os_log fault, ignore");
+        oslog::fault("terminal-decline unit test: os_log fault, ignore");
     }
 }

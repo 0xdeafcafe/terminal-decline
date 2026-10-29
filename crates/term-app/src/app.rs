@@ -21,8 +21,9 @@ use crate::reload::SavedWindow;
 use crate::secure_input::{self, SecureInput};
 use crate::view::{Launch, TerminalView, content_size, delegate_of};
 
-/// Every decline window shares this, so any two can be tabs of one window.
-const TABBING_ID: &str = "red.forbes.decline.terminal";
+/// Every Terminal Decline window shares this, so any two can be tabs of one
+/// window.
+const TABBING_ID: &str = "red.forbes.terminal-decline.terminal";
 
 /// Where a new window goes.
 enum Place {
@@ -51,7 +52,7 @@ pub struct AppIvars {
     /// installed (adding to `notices` if not).
     fonts_checked: std::cell::Cell<bool>,
     windows: RefCell<Vec<(Retained<NSWindow>, Retained<TerminalView>)>>,
-    /// Secure Keyboard Entry (decline menu).
+    /// Secure Keyboard Entry (Terminal Decline menu).
     secure: RefCell<SecureInput>,
 }
 
@@ -129,7 +130,8 @@ define_class!(
             self.new_tab_in_front();
         }
 
-        /// decline > Secure Keyboard Entry: on or off, kept in user defaults.
+        /// Terminal Decline > Secure Keyboard Entry: on or off, kept in user
+        /// defaults.
         #[unsafe(method(toggleSecureKeyboardEntry:))]
         fn toggle_secure_keyboard_entry(&self, _sender: Option<&AnyObject>) {
             let (call, on) = {
@@ -186,6 +188,10 @@ impl AppDelegate {
         origin: crate::config::Source,
         app_name: &str,
     ) -> Retained<AppDelegate> {
+        // A choice made before the rename, under the old bundle id.
+        if let Some(id) = objc2_foundation::NSBundle::mainBundle().bundleIdentifier() {
+            secure_input::carry_over(&id.to_string());
+        }
         let this = Self::alloc(mtm).set_ivars(AppIvars {
             config: RefCell::new(Rc::new(config)),
             origin,
@@ -218,7 +224,7 @@ impl AppDelegate {
         });
         match watcher {
             Ok(w) => *self.ivars().watcher.borrow_mut() = Some(w),
-            Err(e) => eprintln!("decline: can't watch the config for changes: {e}"),
+            Err(e) => eprintln!("terminal-decline: can't watch the config for changes: {e}"),
         }
     }
 
@@ -240,7 +246,7 @@ impl AppDelegate {
         *self.ivars().notices.borrow_mut() = shown.iter().cloned().collect();
         shown.extend(crate::config::new_windows_notice(&crate::config::new_windows_only(&old, &config)));
         for n in &shown {
-            eprintln!("decline: {n}");
+            eprintln!("terminal-decline: {n}");
         }
         if old.keybind != config.keybind {
             let mtm = MainThreadMarker::from(self);
@@ -278,13 +284,13 @@ impl AppDelegate {
 
     fn restart_into_new_build(&self, bundle: &std::path::Path) {
         let Some(bundle) = crate::reload::relaunch_target(bundle) else {
-            eprintln!("decline: {} is gone and no new build is beside it", bundle.display());
+            eprintln!("terminal-decline: {} is gone and no new build is beside it", bundle.display());
             return;
         };
         let saved = self.saved_windows();
         let restored = crate::reload::save(&saved).and_then(|file| crate::reload::relaunch(&bundle, &file));
         if let Err(e) = restored {
-            eprintln!("decline: couldn't start the new build: {e}");
+            eprintln!("terminal-decline: couldn't start the new build: {e}");
             return;
         }
         let mtm = MainThreadMarker::from(self);
@@ -443,7 +449,7 @@ impl AppDelegate {
             // the other config notices, in this window and later ones.
             let missing = config.missing_font_notices(fonts.missing());
             for n in &missing {
-                eprintln!("decline: {n}");
+                eprintln!("terminal-decline: {n}");
             }
             if !missing.is_empty() {
                 let mut notices = self.ivars().notices.borrow_mut();
@@ -468,7 +474,7 @@ impl AppDelegate {
         // tabs (Cmd+T is for tabs); tabbing is allowed again once it is on
         // screen, for Merge All Windows and dragging tabs together.
         window.setTabbingMode(NSWindowTabbingMode::Disallowed);
-        let title = config.title.clone().unwrap_or_else(|| "decline".into());
+        let title = config.title.clone().unwrap_or_else(|| "Terminal Decline".into());
         window.setTitle(&NSString::from_str(&title));
 
         let titlebar = window.frame().size.height - window.contentLayoutRect().size.height;
@@ -526,7 +532,7 @@ impl AppDelegate {
         window.setTabbingMode(NSWindowTabbingMode::Automatic);
         if std::env::var_os("DECLINE_DEBUG").is_some() {
             // Test tooling uses this to screenshot the window.
-            eprintln!("decline: window {}", window.windowNumber());
+            eprintln!("terminal-decline: window {}", window.windowNumber());
         }
 
         if let Err(e) = view.start(
@@ -538,7 +544,7 @@ impl AppDelegate {
                 notices: self.ivars().notices.borrow().clone(),
             },
         ) {
-            eprintln!("decline: could not open a window: {e}");
+            eprintln!("terminal-decline: could not open a window: {e}");
             window.close();
             return None;
         }

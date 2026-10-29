@@ -99,13 +99,13 @@ keys, resize).
   `red.forbes.terminal-decline.pin.<id>`; command `terminal-decline` with
   a `decline` alias (cask installs both; bare `cargo install` installs
   `terminal-decline`); config `~/.config/terminal-decline` (moved from
-  `~/.config/decline` on first run, leaving a note), logs
+  `~/.config/decline` on first run, leaving a link), logs
   `~/Library/Logs/terminal-decline`, `TERM_PROGRAM=terminal-decline`,
   defaults domain follows the bundle id.
 - Existing pins: `terminal-decline pin --update` re-creates each with the
   new id prefix (macOS sees new apps: permissions are asked again).
 - The dogfood script installs `~/Applications/Terminal Decline.app` and
-  removes the old `Decline.app`.
+  removes the old `Decline.app` (done: E.17).
 
 ## Open questions for review
 

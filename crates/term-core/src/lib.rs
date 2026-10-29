@@ -22,7 +22,7 @@ pub use cell::{Cell, Color, ColorKind, Mark, MarkKind, Row};
 
 pub use image::{ImageHost, ImageJob, ImageKey, ImagePool, JobDone, PixelBuffer};
 pub use rows::{CellRef, Content, RowRef, StyleKey, Width};
-pub use search::{Hit, HitBatch, Query, SearchJob, WordMatch};
+pub use search::{Filter, FilterJob, Hit, HitBatch, Query, SearchJob, WordMatch};
 pub use style::{Attrs, LinkId, Style, Underline};
 pub use style_table::StyleStats;
 pub use term::SearchCount;

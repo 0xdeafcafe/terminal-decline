@@ -3196,6 +3196,52 @@ standard benchmarks. Rows marked "estimate" are not measured yet.
   by region scrolls (screen hits are found again instead), the filter
   (13c), R.7's decompression, and regex (not in 1.0).
 
+**Landed (PR 13c).** The filter (§13.6) in `search/filter.rs`, the
+block's side in `scrollback.rs`:
+- **Built in the background only:** `Terminal::filter_job(max)` takes
+  up to `max` sealed blocks without a filter, newest first, under the
+  lock; `FilterJob::run()` builds them off it; `Terminal::add_filters`
+  stores them under the lock, leaving out blocks freed in between (the
+  entry's `Arc<BlockData>` must be the same one). Nothing on the output
+  path builds one. Not yet called by the app: its search worker is to
+  run a filter job when it is idle (E.7's worker).
+- **The filter** is §13.6's: 32,768 bits, one per 4-byte gram (ASCII
+  lower-cased), one multiplicative hash. A query's grams: its bytes for a
+  case-sensitive or ASCII query; for a non-ASCII query ignoring case,
+  only the grams of its folded text whose four bytes are ASCII (none:
+  scan). Under 4 bytes: scan.
+- **A block its filter rules out** still has its boundary with the next
+  block searched, since a match crossing it is in neither filter.
+  `SearchJob::skipped()` counts them.
+- **Memory:** a filter counts 4 KB against the 32 MB backstop in the
+  block's bytes, and goes when its block is freed (output, the limit, a
+  pop, ED 3). Dropping filters under memory pressure (R.5) isn't built.
+- **Non-ASCII queries ignoring case** are found by their longest ASCII
+  stretch: memmem in the text lower-cased (ASCII only), then back over
+  the scalars before the stretch and the whole query checked from
+  there. A query with no ASCII is still matched scalar by scalar.
+- **Measured** (`cargo bench -p term-core --bench search`, 100k log
+  lines at 160 columns, 150 blocks; `scan/` is without filters):
+
+  | Search over 100k lines | Before | Filters built | No filters |
+  |---|---|---|---|
+  | rare word | 645 µs | 52 µs | 557 µs |
+  | rare word, ignoring case | 1.11 ms | 70 µs | 769 µs |
+  | absent | 461 µs | 45 µs | 354 µs |
+  | absent, ignoring case | 623 µs | 71 µs | 569 µs |
+  | common word, ignoring case | 7.45 ms | 7.25 ms | 7.19 ms |
+  | non-ASCII, ignoring case ("Σigma") | 22.8 ms | 211 µs | 573 µs |
+  | building all 150 filters | | 11.1 ms (74 µs a block) | |
+
+- **Tests:** every gram of a text is in its filter, upper-cased too;
+  matchers never rule out a block holding a match; blocks skipped but
+  their boundaries searched; short and all-non-ASCII queries scan;
+  filters freed with their blocks and ED 3, and left out when their
+  block went while the job ran; the ASCII-stretch matcher; and property
+  tests: filtered search equals unfiltered and naive search, and the
+  13b property test with filters built at random (both run with 50,000
+  cases).
+
 ### 13.9 The find bar (Alex's decision: our own, not NSTextFinder)
 
 Cmd+F shows a native-style find bar of decline's own, made only of standard

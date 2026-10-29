@@ -1,7 +1,9 @@
 //! Searching 100k lines of history (§13.7): starting a search under the
 //! lock, and the whole job (every block scanned, hits turned into
 //! places), case-sensitive and ignoring case, for a rare word, a common
-//! one and a non-ASCII query.
+//! one and a non-ASCII query. History's filters (§13.6) are built first,
+//! as the background job would (`scan/` is without them), and building
+//! them is measured too.
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
@@ -32,6 +34,21 @@ fn terminal() -> Term {
 
 fn bench(c: &mut Criterion) {
     let mut t = terminal();
+    let mut plain = terminal();
+    let mut g = c.benchmark_group("search_100k");
+    g.sample_size(20);
+    g.bench_function("filters/build_all", |b| {
+        b.iter(|| {
+            let mut job = t.state.filter_job(usize::MAX).expect("blocks without filters");
+            job.run();
+            black_box(job)
+        });
+    });
+    let mut job = t.state.filter_job(usize::MAX).expect("blocks without filters");
+    let blocks = job.len();
+    job.run();
+    t.state.add_filters(job);
+    eprintln!("{blocks} blocks filtered");
     let cases = [
         ("rare", "needle", false),
         ("rare_ignore_case", "NEEDLE", true),
@@ -40,8 +57,6 @@ fn bench(c: &mut Criterion) {
         ("absent_ignore_case", "Zebra Crossing", true),
         ("non_ascii_ignore_case", "Σigma", true),
     ];
-    let mut g = c.benchmark_group("search_100k");
-    g.sample_size(20);
     for (name, text, ignore_case) in cases {
         let q = Query {
             text: text.into(),
@@ -54,6 +69,15 @@ fn bench(c: &mut Criterion) {
         g.bench_function(format!("job/{name}"), |b| {
             b.iter(|| {
                 let mut job = t.state.start_search(q.clone());
+                let mut n = 0;
+                job.run(|batch| n += batch.hits().len());
+                black_box(n)
+            });
+        });
+        // The same before the filters are built: every block scanned.
+        g.bench_function(format!("scan/{name}"), |b| {
+            b.iter(|| {
+                let mut job = plain.state.start_search(q.clone());
                 let mut n = 0;
                 job.run(|batch| n += batch.hits().len());
                 black_box(n)

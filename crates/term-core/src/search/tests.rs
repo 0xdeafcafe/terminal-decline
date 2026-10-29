@@ -23,6 +23,25 @@ fn search(t: &mut Term, query: Query) -> Vec<Hit> {
     t.state.search_hits()
 }
 
+/// Build every sealed block's filter, as the background job would.
+fn build_filters(t: &mut Term) {
+    while let Some(mut job) = t.state.filter_job(4) {
+        job.run();
+        t.state.add_filters(job);
+    }
+}
+
+/// A search's hits, and how many blocks the filters ruled out.
+fn search_counting_skips(t: &mut Term, query: Query) -> (Vec<Hit>, usize) {
+    let mut job = t.state.start_search(query);
+    let mut batches = Vec::new();
+    job.run(|b| batches.push(b));
+    for b in batches {
+        t.state.add_search_hits(b);
+    }
+    (t.state.search_hits(), job.skipped())
+}
+
 /// The reference: every place in the whole text where the query matches,
 /// scalar by scalar.
 fn naive(t: &Term, query: &Query) -> Vec<Hit> {
@@ -151,6 +170,104 @@ fn fold_by_ascii_stretch() {
     assert_eq!(find("σab", "ab σab"), [(3, 7)]);
     // Overlapping matches.
     assert_eq!(find("éaéa", "éaéaéa"), [(0, 6), (3, 9)]);
+}
+
+#[test]
+fn filter_has_every_gram_of_its_text() {
+    let text = "Hello, Wörld! ΣIGMA 中文 line\nnext ab".as_bytes();
+    let f = Filter::build(text);
+    for a in 0..text.len() {
+        for b in a + 4..=text.len() {
+            let sub = &text[a..b];
+            assert!(f.may_contain(&filter::grams(sub, false)), "{:?}", String::from_utf8_lossy(sub));
+            // Upper-cased ASCII: the filter is lower-cased.
+            let up = sub.to_ascii_uppercase();
+            assert!(f.may_contain(&filter::grams(&up, false)));
+        }
+    }
+    assert!(!f.may_contain(&filter::grams(b"zebra crossing", false)));
+    assert!(filter::grams(b"abc", false).is_empty(), "under 4 bytes: no grams");
+    assert!(filter::grams("éσ".as_bytes(), true).is_empty());
+}
+
+#[test]
+fn matchers_never_rule_out_a_block_holding_a_match() {
+    let text = "Ab Σigma xÉσAB Straße 中文字 ab\r\nCD".as_bytes();
+    let f = Filter::build(text);
+    for query in ["Σigma", "σIGMA", "xéΣab", "STRASSE", "straße", "中文字", "AB\r\nc", "b ab\r\ncd"] {
+        for ignore_case in [false, true] {
+            let m = Matcher::new(&q(query, ignore_case, WordMatch::Contains)).unwrap();
+            let mut out = Vec::new();
+            m.find(text, None, None, &mut Vec::new(), &mut out);
+            if !out.is_empty() {
+                assert!(m.may_match(&f), "{query:?} {ignore_case}");
+            }
+        }
+    }
+    let m = Matcher::new(&q("absent words", true, WordMatch::Contains)).unwrap();
+    assert!(!m.may_match(&f));
+}
+
+#[test]
+fn filters_skip_blocks_but_not_their_boundaries() {
+    let mut t = Term::new(40, 3, 10_000, crate::ImagePool::process());
+    for i in 0..400 {
+        let word = if i == 123 { "needle" } else { "thread" };
+        t.advance(format!("line {i} {word}\r\n").as_bytes());
+        if i % 50 == 49 {
+            t.state.seal_history_for_test();
+        }
+    }
+    // A match across a seal: "nee" ends one block, "dle" starts the next.
+    t.advance(b"xx nee");
+    t.state.seal_history_for_test();
+    t.advance(b"dle yy\r\n\r\n\r\n\r\n");
+    let query = q("NEEDLE", true, WordMatch::Contains);
+    let (plain, skipped) = search_counting_skips(&mut t, query.clone());
+    assert_eq!(skipped, 0, "no filters yet");
+    build_filters(&mut t);
+    assert!(t.state.filter_job(1).is_none(), "every block has one");
+    let (hits, skipped) = search_counting_skips(&mut t, query.clone());
+    assert_eq!(hits, plain);
+    assert_eq!(hits, naive(&t, &query));
+    assert_eq!(hits.len(), 2);
+    assert!(skipped >= 6, "{skipped} blocks skipped");
+    // Short queries and non-ASCII ones without four ASCII bytes scan.
+    for text in ["nee", "ΣΣΣ"] {
+        let (hits, skipped) = search_counting_skips(&mut t, q(text, true, WordMatch::Contains));
+        assert_eq!(skipped, 0, "{text}");
+        assert_eq!(hits, naive(&t, &q(text, true, WordMatch::Contains)));
+    }
+}
+
+#[test]
+fn filters_go_with_their_blocks() {
+    let mut t = Term::new(20, 3, 60, crate::ImagePool::process());
+    for i in 0..50 {
+        t.advance(format!("{i} one\r\n").as_bytes());
+        if i % 10 == 9 {
+            t.state.seal_history_for_test();
+        }
+    }
+    let job = t.state.filter_job(100).unwrap();
+    let mut built = job;
+    built.run();
+    // Blocks freed while the job ran are left out.
+    for i in 0..200 {
+        t.advance(format!("{i} two\r\n").as_bytes());
+        if i % 10 == 9 {
+            t.state.seal_history_for_test();
+        }
+    }
+    t.state.add_filters(built);
+    assert_eq!(t.state.history_for_test().filtered_blocks(), 0);
+    build_filters(&mut t);
+    let n = t.state.history_for_test().filtered_blocks();
+    assert!(n > 0);
+    t.state.history_for_test().check().unwrap();
+    t.advance(b"\x1b[3J");
+    assert_eq!(t.state.history_for_test().filtered_blocks(), 0);
+    t.state.history_for_test().check().unwrap();
 }
 
 #[test]
@@ -383,6 +500,17 @@ fn query() -> impl Strategy<Value = Query> {
     })
 }
 
+/// Queries of at least 4 bytes, mostly, so the filter is used.
+fn long_query() -> impl Strategy<Value = Query> {
+    let word = prop::sample::select(vec![WordMatch::Contains, WordMatch::FullWord]);
+    let pieces = prop::sample::select(vec!["a", "b", "A", "ab", "aaa", "é", "É", "σ", "Σ", " ", "中", "\n", "_"]);
+    (prop::collection::vec(pieces, 2..6), any::<bool>(), word).prop_map(|(t, ignore_case, word)| Query {
+        text: t.concat(),
+        ignore_case,
+        word,
+    })
+}
+
 fn feed(t: &mut Term, out: &[(usize, bool)]) {
     for &(p, seal) in out {
         t.advance(PIECES[p].as_bytes());
@@ -406,9 +534,13 @@ proptest! {
         later in output(),
         query in query(),
         resize in prop::option::of((4usize..16, 1usize..6)),
+        filters in any::<bool>(),
     ) {
         let mut t = Term::new(cols, 3, limit, crate::ImagePool::process());
         feed(&mut t, &before);
+        if filters {
+            build_filters(&mut t);
+        }
         let hits = search(&mut t, query.clone());
         prop_assert_eq!(&hits, &naive(&t, &query));
         feed(&mut t, &later);
@@ -419,5 +551,21 @@ proptest! {
             t.state.refresh_search();
             prop_assert_eq!(t.state.search_hits(), naive(&t, &query));
         }
+    }
+
+    /// Search with filters finds what search without them finds.
+    #[test]
+    fn filtered_equals_unfiltered(
+        cols in 6usize..14,
+        before in output(),
+        query in long_query(),
+    ) {
+        let mut t = Term::new(cols, 3, 1000, crate::ImagePool::process());
+        feed(&mut t, &before);
+        let plain = search(&mut t, query.clone());
+        build_filters(&mut t);
+        let filtered = search(&mut t, query.clone());
+        prop_assert_eq!(&filtered, &plain);
+        prop_assert_eq!(&filtered, &naive(&t, &query));
     }
 }

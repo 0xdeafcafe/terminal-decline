@@ -54,6 +54,7 @@ use std::sync::Arc;
 use crate::cell::{Cell, Color, ColorKind, Mark, MarkKind, Row, Width};
 use crate::image::ImageKey;
 use crate::links::LinkValue;
+use crate::search::Filter;
 use crate::style::{Attrs, Style, Underline};
 use crate::unicode;
 
@@ -258,6 +259,15 @@ struct BlockEntry {
     data: Arc<BlockData>,
     /// Lines still in use: `pop()` lowers it, the shared data is untouched.
     len: u32,
+    /// Its search filter (§13.6), built in the background; None = scan it.
+    filter: Option<Arc<Filter>>,
+}
+
+impl BlockEntry {
+    /// Bytes it counts against the backstop: its data and its filter.
+    fn bytes(&self) -> usize {
+        self.data.bytes() + self.filter.as_ref().map_or(0, |_| Filter::BYTES)
+    }
 }
 
 /// The block being written: the parts of a [`BlockData`] as growable
@@ -1869,7 +1879,11 @@ impl Scrollback {
         let len = self.open.lines() as u32;
         let data = self.open.seal();
         self.sealed_bytes += data.bytes();
-        self.blocks.push_back(BlockEntry { data: Arc::new(data), len });
+        self.blocks.push_back(BlockEntry {
+            data: Arc::new(data),
+            len,
+            filter: None,
+        });
         self.backstop();
     }
 
@@ -1908,7 +1922,7 @@ impl Scrollback {
     fn free_oldest(&mut self) {
         if let Some(b) = self.blocks.pop_front() {
             self.freed_images.extend_from_slice(&b.data.images);
-            self.sealed_bytes -= b.data.bytes();
+            self.sealed_bytes -= b.bytes();
             self.start = self.start.max(b.data.first + b.len as u64);
         }
     }
@@ -1932,7 +1946,7 @@ impl Scrollback {
             if b.len == 0 {
                 let b = self.blocks.pop_back().expect("a block");
                 self.freed_images.extend_from_slice(&b.data.images);
-                self.sealed_bytes -= b.data.bytes();
+                self.sealed_bytes -= b.bytes();
             }
             // The next push starts a new open block where this one ends.
             self.open = OpenBlock::new(line, self.open.ambiguous);
@@ -2120,7 +2134,7 @@ impl Scrollback {
                 ));
             }
             next += b.len as u64;
-            bytes += b.data.bytes();
+            bytes += b.bytes();
         }
         if self.open.first != next || next + self.open.lines() as u64 != self.end {
             return Err(format!(
@@ -2321,6 +2335,10 @@ fn get_style(data: &[u8]) -> Style {
     s
 }
 
+/// A block as a search takes it: its data, its lines in use and its
+/// filter.
+pub(crate) type SearchBlock = (Arc<BlockData>, usize, Option<Arc<Filter>>);
+
 /// What search reads (§13.4, §13.5).
 impl BlockData {
     /// Where each of the first `len` lines' text starts, and (last) where
@@ -2354,12 +2372,12 @@ impl Scrollback {
     /// number), oldest first, with how many lines of each are in use: the
     /// sealed ones shared, the open one copied (§13.4). Also the first
     /// visible line, so a search skips hidden ones.
-    pub(crate) fn search_blocks(&self, from: u64) -> (Vec<(Arc<BlockData>, usize)>, u64) {
-        let mut out: Vec<(Arc<BlockData>, usize)> = self
+    pub(crate) fn search_blocks(&self, from: u64) -> (Vec<SearchBlock>, u64) {
+        let mut out: Vec<SearchBlock> = self
             .blocks
             .iter()
             .filter(|b| b.data.first + b.len as u64 > from)
-            .map(|b| (b.data.clone(), b.len as usize))
+            .map(|b| (b.data.clone(), b.len as usize, b.filter.clone()))
             .collect();
         if self.open.lines() > 0 {
             let o = &self.open;
@@ -2378,9 +2396,40 @@ impl Scrollback {
                 has_marks: o.has_marks,
                 images: o.images.clone().into_boxed_slice(),
             };
-            out.push((Arc::new(data), o.lines()));
+            out.push((Arc::new(data), o.lines(), None));
         }
         (out, self.start)
+    }
+
+    /// Up to `max` sealed blocks without a filter, newest first (§13.6).
+    pub(crate) fn unfiltered(&self, max: usize) -> Vec<Arc<BlockData>> {
+        self.blocks
+            .iter()
+            .rev()
+            .filter(|b| b.filter.is_none())
+            .take(max)
+            .map(|b| b.data.clone())
+            .collect()
+    }
+
+    /// Store `filter` for `data`'s block, if it is still stored. Filters
+    /// count against the backstop, so this may free the oldest blocks.
+    pub(crate) fn set_filter(&mut self, data: &Arc<BlockData>, filter: Arc<Filter>) {
+        let i = self.blocks.partition_point(|b| b.data.first < data.first);
+        if let Some(b) = self.blocks.get_mut(i)
+            && Arc::ptr_eq(&b.data, data)
+            && b.filter.is_none()
+        {
+            b.filter = Some(filter);
+            self.sealed_bytes += Filter::BYTES;
+            self.backstop();
+        }
+    }
+
+    /// Sealed blocks with a filter.
+    #[doc(hidden)]
+    pub fn filtered_blocks(&self) -> usize {
+        self.blocks.iter().filter(|b| b.filter.is_some()).count()
     }
 
     /// The first line of the block holding stored line `line` (the key

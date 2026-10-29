@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::{Point, Selection, Terminal};
 use crate::cell::Row;
-use crate::search::{Cells, HIT_CAP, Hit, HitBatch, Mapper, Matcher, Query, SearchJob, Seg, WordMatch, char_at, scan_seg};
+use crate::search::{Cells, FilterJob, HIT_CAP, Hit, HitBatch, Mapper, Matcher, Query, SearchJob, Seg, WordMatch, char_at, scan_seg};
 
 /// Where a search is, for the find bar's count.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -145,6 +145,30 @@ impl SearchState {
 }
 
 impl Terminal {
+    /// Under the lock: up to `max` of history's sealed blocks that have
+    /// no search filter yet, newest first, for [`FilterJob::run`] to build
+    /// on a background thread (the search worker, when it is idle) and
+    /// [`Terminal::add_filters`] to store (§13.6). None if every block
+    /// has one. Never needed for searching: a block without a filter is
+    /// scanned.
+    pub fn filter_job(&self, max: usize) -> Option<FilterJob> {
+        let blocks = self.scrollback.unfiltered(max);
+        (!blocks.is_empty()).then(|| FilterJob { blocks, built: Vec::new() })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn history_for_test(&self) -> &crate::scrollback::Scrollback {
+        &self.scrollback
+    }
+
+    /// Under the lock: store the filters `job` built, for blocks still in
+    /// history. Searches started from now on use them.
+    pub fn add_filters(&mut self, job: FilterJob) {
+        for (data, filter) in job.blocks.iter().zip(job.built) {
+            self.scrollback.set_filter(data, filter);
+        }
+    }
+
     /// Under the lock: start searching for `q` (§13.4). The screen is
     /// searched now and its hits are drawn in the next frame; the job
     /// returned searches history on the search worker, its batches going
@@ -185,7 +209,14 @@ impl Terminal {
         let (mut segs, mut start, mut after) = (Vec::new(), 0, None);
         if matcher.is_some() && !self.alt_active {
             let (blocks, visible) = self.scrollback.search_blocks(0);
-            segs = blocks.into_iter().map(|(d, len)| Seg::new(d, len, visible)).collect();
+            segs = blocks
+                .into_iter()
+                .map(|(d, len, filter)| {
+                    let mut seg = Seg::new(d, len, visible);
+                    seg.filter = filter;
+                    seg
+                })
+                .collect();
             let top = self.point_at(0, 0).line;
             start = segs.partition_point(|s| s.data.first() <= top).saturating_sub(1);
             after = self.screen_first_char();
@@ -475,7 +506,7 @@ impl Terminal {
         let from_line = s.history_to;
         s.history_to = self.scrollback.total();
         let (blocks, visible) = self.scrollback.search_blocks(from_line.saturating_sub(1));
-        let mut segs: Vec<Seg> = blocks.into_iter().map(|(d, len)| Seg::new(d, len, visible)).collect();
+        let mut segs: Vec<Seg> = blocks.into_iter().map(|(d, len, _)| Seg::new(d, len, visible)).collect();
         let from_line = from_line.max(visible);
         let Some(j) = segs.iter().position(|g| g.data.first() + g.len as u64 > from_line) else {
             return;

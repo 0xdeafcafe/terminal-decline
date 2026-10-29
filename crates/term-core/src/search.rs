@@ -26,6 +26,10 @@ use crate::scrollback::{BlockData, SEARCH_SLOW_FLAGS, text_end};
 use crate::term::Point;
 use crate::unicode::{self, Gcb};
 
+mod filter;
+
+pub use filter::{Filter, FilterJob};
+
 /// Most hits a search keeps (§19).
 pub const HIT_CAP: usize = 100_000;
 
@@ -156,6 +160,10 @@ pub struct Matcher {
     word: WordMatch,
     /// Scalars in the query.
     chars: usize,
+    /// The query's 4-byte grams the filter checks (§13.6); none for a
+    /// query under 4 bytes, or a non-ASCII one ignoring case without four
+    /// ASCII bytes in a row.
+    grams: Vec<u32>,
 }
 
 impl Matcher {
@@ -165,14 +173,31 @@ impl Matcher {
             return None;
         }
         let chars = q.text.chars().count();
-        let kind = if !q.ignore_case || !q.text.chars().any(cased) {
-            Kind::Exact(memmem::Finder::new(q.text.as_bytes()).into_owned())
+        let (kind, grams) = if !q.ignore_case || !q.text.chars().any(cased) {
+            let grams = filter::grams(q.text.as_bytes(), false);
+            (Kind::Exact(memmem::Finder::new(q.text.as_bytes()).into_owned()), grams)
         } else if q.text.is_ascii() {
-            Kind::Ascii(memmem::Finder::new(q.text.to_ascii_lowercase().as_bytes()).into_owned())
+            let grams = filter::grams(q.text.as_bytes(), false);
+            (
+                Kind::Ascii(memmem::Finder::new(q.text.to_ascii_lowercase().as_bytes()).into_owned()),
+                grams,
+            )
         } else {
-            fold_kind(q.text.chars().map(fold).collect())
+            let q: Vec<char> = q.text.chars().map(fold).collect();
+            let folded: String = q.iter().collect();
+            (fold_kind(q), filter::grams(folded.as_bytes(), true))
         };
-        Some(Matcher { kind, word: q.word, chars })
+        Some(Matcher {
+            kind,
+            word: q.word,
+            chars,
+            grams,
+        })
+    }
+
+    /// Whether a block with this filter may hold a match (§13.6).
+    pub(crate) fn may_match(&self, f: &Filter) -> bool {
+        f.may_contain(&self.grams)
     }
 
     /// Bytes either side of a boundary that a match crossing it, and the
@@ -441,6 +466,8 @@ pub(crate) struct Seg {
     pub hidden: usize,
     starts: Option<Vec<u32>>,
     window: Option<(usize, usize)>,
+    /// The block's filter, if it had one when the search started.
+    pub filter: Option<Arc<Filter>>,
 }
 
 impl Seg {
@@ -452,6 +479,7 @@ impl Seg {
             hidden,
             starts: None,
             window: None,
+            filter: None,
         }
     }
 
@@ -687,6 +715,8 @@ pub struct SearchJob {
     generation: u64,
     cancel: Arc<AtomicU64>,
     finished: bool,
+    /// Blocks the filter ruled out.
+    skipped: usize,
     mapper: Mapper,
     scratch: Vec<u8>,
     raw: Vec<(usize, usize)>,
@@ -725,6 +755,7 @@ impl SearchJob {
             generation,
             cancel,
             finished: false,
+            skipped: 0,
             mapper: Mapper::default(),
             scratch: Vec::new(),
             raw: Vec::new(),
@@ -735,6 +766,12 @@ impl SearchJob {
     /// Whether a newer search has replaced this one (it should stop).
     pub fn cancelled(&self) -> bool {
         self.cancel.load(Ordering::Relaxed) != self.generation
+    }
+
+    /// Blocks their filters ruled out so far (only their boundaries with
+    /// the next block were searched).
+    pub fn skipped(&self) -> usize {
+        self.skipped
     }
 
     /// Blocks still to search.
@@ -758,12 +795,18 @@ impl SearchJob {
         };
         self.next += 1;
         self.found.clear();
+        // A block its filter rules out still has its boundary with the
+        // next searched: a match crossing it isn't in either filter.
+        let skip = self.segs[i].filter.as_ref().is_some_and(|f| !m.may_match(f));
+        if skip {
+            self.skipped += 1;
+        }
         scan_seg(
             &m,
             &mut self.segs,
             i,
             None,
-            false,
+            skip,
             self.after,
             &mut self.scratch,
             &mut self.raw,

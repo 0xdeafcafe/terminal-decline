@@ -327,6 +327,26 @@ fn bench(c: &mut Criterion) {
             })
         });
     }
+    // The unicode screens with Menlo's real fonts, so clusters are shaped
+    // (through term-font's cluster cache, warm) and drawn whole.
+    let mut menlo = Shaped::new("Menlo");
+    for (name, cols, lines) in [("80x24", 80, 24), ("300x100", 300, 100)] {
+        let mut t = screen(cols, lines, Colours::Unicode);
+        let mut frame = Frame::default();
+        c.bench_function(&format!("frame {name} unicode menlo"), |b| {
+            b.iter(|| {
+                frame.forget_rows();
+                frame.build(&mut t.state, black_box(&input), &mut menlo);
+                black_box(frame.glyphs.len())
+            })
+        });
+        c.bench_function(&format!("frame {name} unicode menlo unchanged"), |b| {
+            b.iter(|| {
+                frame.build(&mut t.state, black_box(&input), &mut menlo);
+                black_box(frame.glyphs.len())
+            })
+        });
+    }
     // One window, one 160×48 pane or four 80×24 panes (splits design
     // §3.4): the same cells, four terminals and frames.
     let mut t = screen(160, 48, Colours::Coloured);

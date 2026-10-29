@@ -10,6 +10,7 @@ pub mod rows;
 pub mod scrollback;
 pub mod style;
 pub mod term;
+pub mod unicode;
 pub mod word;
 
 pub use cell::{Cell, Color, ColorKind, Row, flags};

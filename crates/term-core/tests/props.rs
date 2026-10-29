@@ -9,6 +9,7 @@ use proptest::prelude::*;
 use proptest::sample::select;
 use proptest::test_runner::{Config, RngSeed};
 use term_core::scrollback::Scrollback;
+use term_core::term::GraphemeState;
 use term_core::{Cell, Color, Content, Row, RowRef, Selection, Style, Term, Width, flags};
 
 fn config() -> Config {
@@ -329,8 +330,26 @@ proptest! {
 /// Input that steers printable-ASCII runs into the cases the bulk path must
 /// get right: runs that wrap (often several times), runs over wide
 /// characters, insert mode, DEC line drawing, autowrap off, scroll regions,
-/// the alternate screen, repeat (REP) and history.
+/// the alternate screen, repeat (REP) and history; and ASCII followed by a
+/// combining mark, VS16 or U+20E3, which must join the run's last cell
+/// (the grapheme state is compared too).
 fn bulk_piece() -> impl Strategy<Value = Vec<u8>> {
+    let joining = select(vec![
+        "e\u{0301}",
+        "\u{0301}",
+        "\u{0308}\u{0301}",
+        "\u{FE0F}",
+        "\u{FE0E}",
+        "\u{20E3}",
+        "\u{FE0F}\u{20E3}",
+        "1\u{FE0F}\u{20E3}",
+        "#\u{20E3}",
+        "a\u{FE0F}",
+        "\u{200D}",
+        "\u{0600}",
+        "\u{0600}1",
+        "\u{093F}",
+    ]);
     let modes = select(vec![
         "\x1b[4h",
         "\x1b[4l",
@@ -379,6 +398,7 @@ fn bulk_piece() -> impl Strategy<Value = Vec<u8>> {
         3 => ascii(),
         4 => unicode(),
         3 => cluster(),
+        5 => joining.prop_map(|s| s.as_bytes().to_vec()),
         4 => movement(),
         2 => c0(),
         5 => modes.prop_map(|s| s.as_bytes().to_vec()),
@@ -405,9 +425,16 @@ fn bulk_step() -> impl Strategy<Value = BulkStep> {
     ]
 }
 
-/// Dump, rows cell by cell, cursor (row, col, pending wrap, pen), replies
-/// and scrollback length.
-type ScreenState = (String, Vec<(Vec<CellState>, bool)>, (usize, usize, bool, Style), Vec<u8>, usize);
+/// Dump, rows cell by cell, cursor (row, col, pending wrap, pen), replies,
+/// scrollback length and grapheme state.
+type ScreenState = (
+    String,
+    Vec<(Vec<CellState>, bool)>,
+    (usize, usize, bool, Style),
+    Vec<u8>,
+    usize,
+    GraphemeState,
+);
 
 /// One cell as a reader sees it: empty or not, character, width, style.
 type CellState = (bool, char, Width, Style);
@@ -430,6 +457,7 @@ fn screen_state(t: &Term) -> ScreenState {
         (c.row(), c.col(), c.pending_wrap(), c.pen()),
         t.state.replies().to_vec(),
         t.state.scrollback_len(),
+        t.state.grapheme_state(),
     )
 }
 
@@ -451,9 +479,9 @@ proptest! {
     #![proptest_config(config())]
 
     /// Printable ASCII written in bulk gives exactly what writing it one
-    /// character at a time gives. The reference also gets its input one byte
-    /// per `advance` call, so the parser's fast path is checked against its
-    /// byte-at-a-time handling at the same time.
+    /// character at a time gives, grapheme state included. The reference
+    /// also gets its input one byte per `advance` call, so the parser's fast
+    /// path is checked against its byte-at-a-time handling at the same time.
     #[test]
     fn bulk_ascii_matches_one_char_at_a_time(
         cols in 1usize..=90,
@@ -464,6 +492,10 @@ proptest! {
         let mut fast = Term::new(cols, lines, limit);
         let mut slow = Term::new(cols, lines, limit);
         slow.state.set_bulk_ascii(false);
+        // Recording clusters makes the reference keep its grapheme state
+        // up to date after every character, where the fast one leaves the
+        // last plain character to be worked out when it is needed.
+        slow.state.record_graphemes(true);
         for step in &steps {
             match step {
                 BulkStep::Output(bytes) => {
@@ -482,6 +514,7 @@ proptest! {
                 }
             }
             prop_assert_eq!(screen_state(&fast), screen_state(&slow), "after {:?}", step);
+            slow.state.take_graphemes();
         }
         prop_assert_eq!(history(&mut fast), history(&mut slow));
     }

@@ -4,13 +4,13 @@
 use std::borrow::Cow;
 use std::collections::VecDeque;
 
-use unicode_width::UnicodeWidthChar;
 use vte::{Params, Perform};
 
 use crate::cell::{Cell, Color, Row, flags};
 use crate::rows::{Content, RowRef, style_of};
 use crate::scrollback::Scrollback;
 use crate::style::Style;
+use crate::unicode::{self, Segmenter};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum CursorShape {
@@ -18,6 +18,30 @@ pub enum CursorShape {
     Block,
     Underline,
     Bar,
+}
+
+/// Enough to decide whether the next scalar printed joins the last printed
+/// cell's grapheme cluster, and what that cluster's width becomes (§6.2).
+///
+/// Clusters aren't stored yet: the cells are written as before (a joining
+/// scalar with a width still takes its own cell, and zero-width ones are
+/// dropped apart from VS16's widening), and this state only follows along.
+#[doc(hidden)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct GraphemeState {
+    /// Screen row and column of the cell holding the current cluster, if it
+    /// has one. Cleared by anything but a print.
+    pub at: Option<(usize, usize)>,
+    /// UAX #29 state of the current cluster.
+    pub seg: Segmenter,
+}
+
+impl GraphemeState {
+    #[inline]
+    fn clear(&mut self) {
+        self.at = None;
+        self.seg.reset();
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -217,6 +241,18 @@ pub struct Terminal {
     active_charset: usize,
     line_drawing: bool,
     last_char: Option<char>,
+    /// Grapheme segmentation of what is being printed (§6.2 of the cells
+    /// design).
+    grapheme: GraphemeState,
+    /// The last character printed, when it is a plain one (see
+    /// `Props::is_plain`) that started a cluster and was written in the
+    /// cell(s) just before the cursor with autowrap on: `grapheme` is out
+    /// of date while this is set. Lets printing most text, and a bulk
+    /// ASCII run, update the state with one store; `sync_grapheme` brings
+    /// `grapheme` up to date.
+    grapheme_plain: Option<char>,
+    /// Test aid: when set, every grapheme cluster as segmented.
+    grapheme_log: Option<Vec<String>>,
     /// Kitty keyboard protocol flags, a stack per screen.
     kitty_flags: [Vec<u8>; 2],
 
@@ -268,6 +304,9 @@ impl Terminal {
             active_charset: 0,
             line_drawing: false,
             last_char: None,
+            grapheme: GraphemeState::default(),
+            grapheme_plain: None,
+            grapheme_log: None,
             kitty_flags: [Vec::new(), Vec::new()],
             modes: Modes::default(),
             cursor_shape: CursorShape::Block,
@@ -689,6 +728,7 @@ impl Terminal {
         if cols == self.cols && lines == self.lines {
             return;
         }
+        self.clear_grapheme();
         // On the primary screen, rows pushed off the top go into scrollback so
         // the cursor stays visible.
         let removed = resize_screen(&mut self.screen, &mut self.cursor, cols, lines);
@@ -931,6 +971,7 @@ impl Terminal {
         fresh.default_colors = self.default_colors;
         fresh.cell_pixels = self.cell_pixels;
         fresh.bulk_ascii = self.bulk_ascii;
+        fresh.grapheme_log = self.grapheme_log.take();
         // Like xterm, a full reset clears scrollback too.
         fresh.scrollback = std::mem::replace(&mut self.scrollback, Scrollback::new(0));
         fresh.scrollback.clear();
@@ -943,21 +984,65 @@ impl Terminal {
 
     fn write_char(&mut self, c: char) {
         let c = if self.line_drawing { dec_line_drawing(c) } else { c };
-        let width = if (' '..='~').contains(&c) {
-            1
-        } else {
-            match c.width() {
-                Some(w) => w,
-                None => return,
+        let p = unicode::props(c);
+        // Most text: a plain character with a width starts a cluster
+        // unless a Prepend one came before it.
+        if p.is_plain()
+            && p.width() != 0
+            && self.modes.autowrap
+            && self.grapheme_log.is_none()
+            && (self.grapheme_plain.is_some() || !self.grapheme.seg.after_prepend())
+        {
+            let at = self.put_char(c, p.width() as usize);
+            self.grapheme_plain = at.map(|_| c);
+            if at.is_none() {
+                self.grapheme = GraphemeState {
+                    at,
+                    seg: Segmenter::start_plain(c, p),
+                };
             }
-        };
+            return;
+        }
+        self.write_char_rules(c, p);
+    }
+
+    /// [`Terminal::write_char`] for everything else: segment by the rules.
+    #[inline(never)]
+    fn write_char_rules(&mut self, c: char, p: unicode::Props) {
+        if p.is_control() {
+            // A C1 control that came as UTF-8: not printed.
+            self.clear_grapheme();
+            return;
+        }
+        self.sync_grapheme();
+        let joins = self.grapheme.seg.push(c, p);
+        if let Some(log) = &mut self.grapheme_log {
+            log_scalar(log, c, joins);
+        }
+        let width = p.width() as usize;
         if width == 0 {
             if c == '\u{FE0F}' {
                 self.widen_previous();
             }
-            // Other combining marks need grapheme storage, which cells don't have yet.
+            if !joins {
+                // A cluster that starts with a zero-width scalar has no cell.
+                self.grapheme.at = None;
+            }
+            // Joining marks need grapheme storage, which cells don't have yet.
             return;
         }
+        let at = self.put_char(c, width);
+        if !joins || self.grapheme.at.is_none() {
+            self.grapheme.at = at;
+        }
+    }
+
+    /// Write one character of `width` (1 or 2) cells at the cursor, wrapping
+    /// first if needed, and move the cursor past it. Returns the cell it went
+    /// in, or None if it didn't fit (a wide character in the last column with
+    /// autowrap off).
+    #[inline(always)]
+    fn put_char(&mut self, c: char, width: usize) -> Option<(usize, usize)> {
         if self.cursor.pending_wrap && self.modes.autowrap {
             self.screen[self.cursor.row].wrapped = true;
             self.cursor.col = 0;
@@ -965,7 +1050,7 @@ impl Terminal {
         }
         if width == 2 && self.cursor.col + 1 >= self.cols {
             if !self.modes.autowrap {
-                return;
+                return None;
             }
             self.erase_cells(self.cursor.row, self.cursor.col..self.cols);
             self.screen[self.cursor.row].wrapped = true;
@@ -1009,6 +1094,7 @@ impl Terminal {
             self.cursor.col = col + width;
         }
         self.last_char = Some(c);
+        Some((row, col))
     }
 
     /// Write a run of printable ASCII (0x20..=0x7E): the same result as
@@ -1041,9 +1127,9 @@ impl Terminal {
             rest = tail;
             let cells = &mut self.screen[row].cells[col..col + n];
             if cells.iter().fold(0, |a, c| a | c.packed) & (flags::WIDE | flags::WIDE_SPACER) != 0 {
-                // Overwriting part of a wide character: write_char cleans up.
+                // Overwriting part of a wide character: put_char cleans up.
                 for &b in segment {
-                    self.write_char(b as char);
+                    self.put_char(b as char, 1);
                 }
                 continue;
             }
@@ -1062,6 +1148,99 @@ impl Terminal {
             }
         }
         self.last_char = Some(last as char);
+        self.segment_ascii(bytes);
+    }
+
+    /// Bring the grapheme state up to date after `write_ascii` wrote `bytes`
+    /// (printable ASCII, at least one) in bulk. Printable ASCII after
+    /// anything but a Prepend scalar starts a cluster, and after ASCII
+    /// always does, so only the first and last bytes matter: the first may
+    /// join the cluster before it, and the last is the cluster now open
+    /// (a keycap base, say, that a VS16 and U+20E3 can still join). In the
+    /// usual case that is one store: the last byte, in `grapheme_plain`.
+    #[inline]
+    fn segment_ascii(&mut self, bytes: &[u8]) {
+        let after_prepend = self.grapheme_plain.is_none() && self.grapheme.seg.after_prepend();
+        if after_prepend || self.grapheme_log.is_some() {
+            return self.segment_ascii_slow(bytes);
+        }
+        self.grapheme_plain = Some(bytes[bytes.len() - 1] as char);
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn segment_ascii_slow(&mut self, bytes: &[u8]) {
+        self.sync_grapheme();
+        let first = bytes[0] as char;
+        let last = bytes[bytes.len() - 1] as char;
+        // Printable ASCII breaks from anything but Prepend (GB9b).
+        let joins = self.grapheme.seg.after_prepend() && self.grapheme.seg.push(first, unicode::props(first));
+        if let Some(log) = &mut self.grapheme_log {
+            for (i, &b) in bytes.iter().enumerate() {
+                log_scalar(log, b as char, i == 0 && joins);
+            }
+        }
+        if joins && bytes.len() == 1 && self.grapheme.at.is_some() {
+            return;
+        }
+        if !joins || bytes.len() > 1 {
+            self.grapheme.seg = Segmenter::start_plain(last, unicode::props(last));
+        }
+        self.grapheme.at = self.cell_before_cursor(1);
+    }
+
+    /// The cell a character `width` cells wide was just written in, with
+    /// autowrap on and the cursor right after it.
+    #[inline]
+    fn cell_before_cursor(&self, width: usize) -> Option<(usize, usize)> {
+        let end = if self.cursor.pending_wrap { self.cols } else { self.cursor.col };
+        end.checked_sub(width).map(|c| (self.cursor.row, c))
+    }
+
+    /// The grapheme state, with a pending plain character applied.
+    #[inline]
+    fn grapheme_now(&self) -> GraphemeState {
+        let Some(c) = self.grapheme_plain else { return self.grapheme };
+        let p = unicode::props(c);
+        GraphemeState {
+            at: self.cell_before_cursor(p.width() as usize),
+            seg: Segmenter::start_plain(c, p),
+        }
+    }
+
+    #[inline]
+    fn sync_grapheme(&mut self) {
+        if self.grapheme_plain.is_some() {
+            self.grapheme = self.grapheme_now();
+            self.grapheme_plain = None;
+        }
+    }
+
+    #[inline]
+    fn clear_grapheme(&mut self) {
+        self.grapheme.clear();
+        self.grapheme_plain = None;
+    }
+
+    /// Test aid: record every grapheme cluster as the terminal segments the
+    /// printed text (on), and stop (off).
+    #[doc(hidden)]
+    pub fn record_graphemes(&mut self, on: bool) {
+        self.grapheme_log = on.then(Vec::new);
+    }
+
+    /// Test aid: the clusters recorded since the last call.
+    #[doc(hidden)]
+    pub fn take_graphemes(&mut self) -> Vec<String> {
+        self.grapheme_log.as_mut().map(std::mem::take).unwrap_or_default()
+    }
+
+    /// Test aid: the grapheme segmentation state.
+    #[doc(hidden)]
+    pub fn grapheme_state(&self) -> GraphemeState {
+        let g = self.grapheme_now();
+        // A reset segmenter keeps stale fields; show it as the default.
+        if g.seg.is_reset() { GraphemeState::default() } else { g }
     }
 
     /// U+FE0F after a narrow symbol asks for emoji presentation, which is two
@@ -1397,6 +1576,14 @@ fn dec_line_drawing(c: char) -> char {
     }
 }
 
+/// Add a scalar to the recorded clusters: to the last one if it `joins`.
+fn log_scalar(log: &mut Vec<String>, c: char, joins: bool) {
+    match log.last_mut() {
+        Some(last) if joins => last.push(c),
+        _ => log.push(c.to_string()),
+    }
+}
+
 impl Perform for Terminal {
     fn print(&mut self, c: char) {
         self.write_char(c);
@@ -1414,7 +1601,16 @@ impl Perform for Terminal {
         }
     }
 
+    fn hook(&mut self, _params: &Params, _intermediates: &[u8], _ignore: bool, _action: char) {
+        self.clear_grapheme();
+    }
+
+    fn apc_start(&mut self) {
+        self.clear_grapheme();
+    }
+
     fn execute(&mut self, byte: u8) {
+        self.clear_grapheme();
         match byte {
             0x07 => self.bell = true,
             0x08 => {
@@ -1442,6 +1638,7 @@ impl Perform for Terminal {
     }
 
     fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], ignore: bool, action: char) {
+        self.clear_grapheme();
         if ignore {
             return;
         }
@@ -1705,6 +1902,7 @@ impl Perform for Terminal {
     }
 
     fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, byte: u8) {
+        self.clear_grapheme();
         match (intermediates, byte) {
             ([], b'7') => self.save_cursor(),
             ([], b'8') => self.restore_cursor(),
@@ -1737,6 +1935,7 @@ impl Perform for Terminal {
     }
 
     fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
+        self.clear_grapheme();
         match params {
             [code @ (b"10" | b"11" | b"12"), b"?"] => {
                 let i = (code[1] - b'0') as usize;

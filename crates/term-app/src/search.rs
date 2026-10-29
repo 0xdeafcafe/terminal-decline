@@ -105,20 +105,22 @@ pub trait Search {
 /// (below the `covered` rows the find bar is over), else with its line in
 /// the middle (as near as history allows).
 pub fn scroll_to(t: &mut Terminal, hit: Hit, covered: usize) {
-    let top = t.point_at(0, 0).line;
-    let lines = t.lines() as u64;
-    if (top + covered as u64..top + lines).contains(&hit.start.line) {
+    if t.view_position(hit.start).is_some_and(|(row, _)| row >= covered) {
         return;
     }
-    let screen_top = top + t.display_offset() as u64;
-    let want = hit.start.line.saturating_sub(lines / 2);
-    if want >= screen_top {
-        t.scroll_view_to_bottom();
-    } else {
-        t.set_view_top(ViewTop::At {
-            point: Point { line: want, col: 0 },
-            offset: 0,
-        });
+    let half = t.lines() / 2;
+    // Its row at the top (on the screen, the view follows output), then
+    // back until it is in the middle, as far as history goes.
+    t.set_view_top(ViewTop::At {
+        point: hit.start,
+        offset: 0,
+    });
+    let back = match t.view_top() {
+        ViewTop::At { .. } => half,
+        ViewTop::Bottom => half.saturating_sub(t.view_position(hit.start).map_or(half, |(row, _)| row)),
+    };
+    if back > 0 {
+        t.scroll_view(back as isize);
     }
 }
 
@@ -412,23 +414,32 @@ impl Search for TextSearch {
     }
 
     fn view_highlights(&self, t: &Terminal, out: &mut Vec<(u16, Range<u16>, HighlightKind)>) {
-        let top = t.point_at(0, 0).line;
-        let lines = t.lines() as u64;
+        let lines = t.lines();
         let cols = t.cols();
+        // The view's first and last cells: history may be laid out at
+        // another width, so rows are found through the view, not by line.
+        let top = t.point_at(0, 0);
+        let bottom = t.point_at(lines - 1, cols - 1);
         let current = self.current_hit();
-        let first = self.hits.partition_point(|h| h.end.line < top);
+        let first = self.hits.partition_point(|h| h.end <= top);
         let mut rows: Vec<(u16, Range<u16>, HighlightKind)> = Vec::new();
-        for h in self.hits[first..].iter().take_while(|h| h.start.line < top + lines) {
+        for h in self.hits[first..].iter().take_while(|h| h.start <= bottom) {
             let kind = if Some(*h) == current {
                 HighlightKind::CurrentSearchHit
             } else {
                 HighlightKind::SearchHit
             };
-            for line in h.start.line.max(top)..=h.end.line.min(top + lines - 1) {
-                let a = if line == h.start.line { h.start.col } else { 0 };
-                let b = if line == h.end.line { h.end.col } else { cols };
+            let last = Point {
+                line: h.end.line,
+                col: h.end.col.saturating_sub(1),
+            };
+            let (r0, c0) = t.view_position(h.start).unwrap_or((0, 0));
+            let (r1, c1) = t.view_position(last).map_or((lines - 1, cols), |(r, c)| (r, c + 1));
+            for r in r0..=r1 {
+                let a = if r == r0 { c0 } else { 0 };
+                let b = if r == r1 { c1 } else { cols };
                 if a < b {
-                    rows.push(((line - top) as u16, a as u16..b.min(cols) as u16, kind));
+                    rows.push((r as u16, a as u16..b.min(cols) as u16, kind));
                 }
             }
         }
@@ -450,70 +461,100 @@ struct Unit {
 /// [`MAX_ROWS`] rows above the bottom of the screen to its end. Trailing
 /// blank cells are left off.
 ///
-/// term-core reads rows only relative to the view (`visible_row`), so the
-/// view is scrolled all the way back to read them and put back after.
+/// term-core reads rows only through the view, laid out at the current
+/// width, so the view is moved back and read a page at a time, each
+/// cell's Point coming from the view, and put back after.
 fn each_logical_line(t: &mut Terminal, mut f: impl FnMut(&[Unit])) {
     let lines = t.lines();
-    let history = if t.alt_screen_active() { 0 } else { t.scrollback_len() };
-    let offset = t.display_offset();
-    // The line number of history's first row.
-    let base = t.point_at(0, 0).line + offset as u64 - history as u64;
-    if history > 0 {
-        t.scroll_view(history as isize - offset as isize);
+    let was = t.view_top();
+    t.scroll_view_to_bottom();
+    if MAX_ROWS > lines {
+        t.scroll_view((MAX_ROWS - lines) as isize);
     }
-    let total = history + lines;
-    let first = total.saturating_sub(MAX_ROWS);
+    // A logical line that started above the first row read is skipped:
+    // the row before it, if there is one, says whether it wraps onto it.
+    // That row is not read itself.
+    let mut skipping = false;
+    // The first cell of the last row read.
+    let mut done: Option<Point> = None;
+    if t.view_top() != ViewTop::Bottom {
+        let first = t.view_top();
+        t.scroll_view(1);
+        if t.view_top() != first {
+            skipping = t.visible_row(0).wrapped();
+            done = Some(t.point_at(0, 0));
+        }
+    }
     let mut units: Vec<Unit> = Vec::new();
     // Units up to here are not trailing blanks.
     let mut kept = 0;
-    // A logical line that started above the first row read is skipped.
-    let mut skipping = first > 0 && t.visible_row(first - 1).wrapped();
-    for i in first..total {
-        let row = t.visible_row(i);
-        let line = base + i as u64;
-        if !skipping {
-            for col in 0..row.len() {
-                let cell = row.cell(col);
-                if cell.is_spacer() {
-                    continue;
-                }
-                let width = if cell.width() == Width::Wide { 2 } else { 1 };
-                let unit = |ch| Unit {
-                    ch,
-                    line,
-                    col: col as u16,
-                    width,
-                };
-                match cell.content() {
-                    Content::Char(c) => units.push(unit(c)),
-                    Content::Cluster(s) => units.extend(s.chars().map(unit)),
-                    _ => units.push(unit(' ')),
-                }
-                if !cell.is_blank() {
-                    kept = units.len();
-                }
+    loop {
+        for r in 0..lines {
+            let at = t.point_at(r, 0);
+            if done.is_some_and(|d| at <= d) {
+                continue;
             }
-        }
-        if row.wrapped() {
-            // Blanks inside a logical line are part of it.
-            kept = units.len();
-        } else {
+            done = Some(at);
+            let row = t.visible_row(r);
+            let len = row.len();
+            // Where the row's cells are stored: one run of one line, or
+            // (where stored lines meet in the row) cell by cell.
+            let end = t.point_at(r, len.saturating_sub(1));
+            let one_run = end.line == at.line && end.col + 1 == at.col + len.max(1);
             if !skipping {
-                units.truncate(kept);
-                f(&units);
+                for col in 0..len {
+                    let cell = row.cell(col);
+                    if cell.is_spacer() {
+                        continue;
+                    }
+                    let p = if one_run {
+                        Point {
+                            line: at.line,
+                            col: at.col + col,
+                        }
+                    } else {
+                        t.point_at(r, col)
+                    };
+                    let width = if cell.width() == Width::Wide { 2 } else { 1 };
+                    let unit = |ch| Unit {
+                        ch,
+                        line: p.line,
+                        col: p.col as u16,
+                        width,
+                    };
+                    match cell.content() {
+                        Content::Char(c) => units.push(unit(c)),
+                        Content::Cluster(s) => units.extend(s.chars().map(unit)),
+                        _ => units.push(unit(' ')),
+                    }
+                    if !cell.is_blank() {
+                        kept = units.len();
+                    }
+                }
             }
-            units.clear();
-            kept = 0;
-            skipping = false;
+            if row.wrapped() {
+                // Blanks inside a logical line are part of it.
+                kept = units.len();
+            } else {
+                if !skipping {
+                    units.truncate(kept);
+                    f(&units);
+                }
+                units.clear();
+                kept = 0;
+                skipping = false;
+            }
         }
+        if t.view_top() == ViewTop::Bottom {
+            break;
+        }
+        t.scroll_view(-(lines as isize));
     }
     if !units.is_empty() && !skipping {
         units.truncate(kept);
         f(&units);
     }
-    if history > 0 {
-        t.scroll_view(offset as isize - history as isize);
-    }
+    t.set_view_top(was);
 }
 
 fn fold(c: char, ignore_case: bool) -> char {
@@ -642,6 +683,85 @@ mod tests {
         assert_eq!(t.state.display_offset(), before);
         scroll_to(&mut t.state, under, 2);
         assert!(t.state.display_offset() > before);
+    }
+
+    /// 50 lines of 30 cells, `hit N` in line N % 10 == 0, the rest `x`s:
+    /// written 20 columns wide (two stored lines each), then read at
+    /// `cols`.
+    fn wide_lines_at(cols: usize) -> Term {
+        let mut out = String::new();
+        for i in 0..50 {
+            let text = if i % 10 == 0 { format!("hit {i}") } else { String::new() };
+            out.push_str(&format!("{text:x<30}\r\n"));
+        }
+        let mut t = term(20, 6, &out);
+        t.state.resize(cols, 6);
+        t
+    }
+
+    /// The text of view row `row` from column `col`.
+    fn text_at(t: &Term, row: usize, col: usize) -> String {
+        let r = t.state.visible_row(row);
+        (col..r.len())
+            .filter(|&c| !r.cell(c).is_spacer())
+            .map(|c| match r.cell(c).content() {
+                Content::Char(ch) => ch,
+                _ => ' ',
+            })
+            .collect()
+    }
+
+    #[test]
+    fn find_next_lands_on_the_hit_after_a_width_change() {
+        for cols in [40, 12, 8] {
+            let mut t = wide_lines_at(cols);
+            let mut s = TextSearch::new();
+            s.search_for(&mut t.state, &q("hit"));
+            assert_eq!(s.counts().count, 5, "at {cols}");
+            for _ in 0..5 {
+                let h = s.step_hit(true).unwrap();
+                scroll_to(&mut t.state, h, 0);
+                let (row, col) = t.state.view_position(h.start).expect("the hit is in view");
+                let n = h.start.line / 2;
+                assert!(
+                    text_at(&t, row, col).starts_with(&format!("hit {n}")),
+                    "at {cols}: {:?}",
+                    text_at(&t, row, col)
+                );
+                // The highlight is on the same cells.
+                let mut marks = Vec::new();
+                s.view_highlights(&t.state, &mut marks);
+                assert!(
+                    marks.iter().any(|(r, c, _)| *r as usize == row && c.start as usize == col),
+                    "at {cols}: {marks:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn core_find_next_lands_on_the_hit_after_a_width_change() {
+        for cols in [40, 12, 8] {
+            let mut t = wide_lines_at(cols);
+            let mut job = t.state.start_search(core_query(&q("hit")));
+            let mut batches = Vec::new();
+            job.run(|b| batches.push(b));
+            for b in batches {
+                t.state.add_search_hits(b);
+            }
+            assert_eq!(t.state.search_count().total, 5, "at {cols}");
+            for _ in 0..5 {
+                assert!(t.state.search_next());
+                let h = core_hit(t.state.current_hit().unwrap());
+                let (row, col) = t.state.view_position(h.start).expect("the hit is in view");
+                let n = h.start.line / 2;
+                assert!(
+                    text_at(&t, row, col).starts_with(&format!("hit {n}")),
+                    "at {cols}: {:?}",
+                    text_at(&t, row, col)
+                );
+            }
+        }
     }
 
     #[test]

@@ -3,30 +3,36 @@
 //! Cmd+Down scroll the view to the prompt above or below its top line,
 //! and Select Command Output selects a command's output.
 
-use term_core::{MarkKind, Point, Terminal, Width};
+use term_core::{MarkKind, Point, Terminal, ViewTop, Width};
 
 /// Scroll the view so the nearest prompt above its top line (`up`), or
 /// below it, is at the top, as near as history allows (a prompt on the
 /// screen below the top can only bring the view to the bottom). False if
 /// the view didn't move: no prompt that way.
 pub fn jump(t: &mut Terminal, up: bool) -> bool {
-    let top = t.point_at(0, 0).line;
-    let target = if up { t.previous_prompt(top) } else { t.next_prompt(top) };
+    let top = t.point_at(0, 0);
+    let target = if up {
+        // The top row may start partway through a line (history laid out
+        // at another width): a prompt earlier on that line is above it.
+        t.previous_prompt(top.line + 1)
+            .filter(|p| *p < top)
+            .or_else(|| t.previous_prompt(top.line))
+    } else {
+        t.next_prompt(top.line)
+    };
     let Some(prompt) = target else { return false };
-    let before = t.display_offset();
-    // The screen's first line is `top + before`; the view shows the
-    // prompt's line at its top when scrolled back by the lines between.
-    let screen_top = top + before as u64;
-    let want = screen_top.saturating_sub(prompt.line) as isize;
-    t.scroll_view(want - before as isize);
-    t.display_offset() != before
+    // The prompt's row at the top of the view; a prompt on the screen
+    // brings the view to the bottom.
+    let before = t.view_top();
+    t.set_view_top(ViewTop::At { point: prompt, offset: 0 });
+    t.view_top() != before
 }
 
 /// Select a command's output: with the view scrolled back, the command
 /// at its top line (where a jump leaves its prompt); at the bottom, the
 /// one running, else the last one with output. False if there is none.
 pub fn select_output(t: &mut Terminal) -> bool {
-    if t.display_offset() > 0 {
+    if t.view_top() != ViewTop::Bottom {
         return t.select_output(t.point_at(0, 0));
     }
     let Some((row, col)) = t.cursor_in_view() else { return false };
@@ -62,7 +68,7 @@ pub fn has_output(t: &Terminal, p: Point) -> bool {
 /// Characters are counted as the shell sees them: a wide character or a
 /// cluster is one; a click past the end of the text is at its end.
 pub fn input_steps(t: &Terminal, line: usize, col: usize) -> Option<isize> {
-    if t.display_offset() != 0 {
+    if t.view_top() != ViewTop::Bottom {
         return None;
     }
     let (crow, ccol) = t.cursor_in_view()?;
@@ -191,6 +197,37 @@ mod tests {
         let mut plain = Term::new(20, 4, 100);
         plain.advance(b"a\r\nb\r\nc\r\nd\r\ne\r\nf");
         assert!(!jump(&mut plain.state, true));
+    }
+
+    #[test]
+    fn jumps_land_on_prompts_after_a_width_change() {
+        // Output lines of 30 cells: two stored lines each at 20 columns,
+        // so history read at another width has other rows than lines.
+        let long = "x".repeat(30);
+        let out = format!("{long}\r\n").repeat(6);
+        for cols in [40, 12] {
+            let mut t = Term::new(20, 4, 100);
+            session(&mut t, "one", &out);
+            session(&mut t, "two", &out);
+            session(&mut t, "three", &out);
+            t.advance(b"\x1b]133;A\x07$ ");
+            t.state.resize(cols, 4);
+            assert!(jump(&mut t.state, true), "at {cols}");
+            assert_eq!(top_text(&t), "$ three", "at {cols}");
+            assert!(jump(&mut t.state, true));
+            assert_eq!(top_text(&t), "$ two", "at {cols}");
+            assert!(jump(&mut t.state, true));
+            assert_eq!(top_text(&t), "$ one", "at {cols}");
+            assert!(!jump(&mut t.state, true), "no prompt above the first");
+            assert!(jump(&mut t.state, false));
+            assert_eq!(top_text(&t), "$ two", "at {cols}");
+            assert!(jump(&mut t.state, false));
+            assert_eq!(top_text(&t), "$ three", "at {cols}");
+            // The last prompt is on the screen: the view goes to the bottom.
+            assert!(jump(&mut t.state, false));
+            assert_eq!(t.state.view_top(), ViewTop::Bottom);
+            assert!(!jump(&mut t.state, false));
+        }
     }
 
     #[test]

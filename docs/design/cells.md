@@ -2645,10 +2645,13 @@ differs from the above:
   `RowKey::History { line, col }`, the stored line and column it starts
   at. A row whose line goes on in a stored line not yet written is always
   copied, since it can still grow.
-- **Not changed:** term-app still does line arithmetic with
-  `display_offset()` in `prompts.rs` (prompt jumps) and `search.rs`
-  (`scroll_to`, `each_logical_line`), which is right only while history is
-  at the current width.
+- **term-app** (after PR 12) goes through the view rather than line
+  arithmetic with `display_offset()`: prompt jumps set
+  `ViewTop::At { point: prompt }` and compare view positions; the find
+  bar's `scroll_to` (the fallback search and term-core's) puts the hit's
+  row at the top and scrolls back half a view in rows; the fallback
+  search reads history a page of the view at a time, taking each cell's
+  Point from the view.
 - **Tests:** `tests/history.rs` (a line at half the width, Points and
   selection, the view across width changes, output underneath, `FILL`,
   wide characters, links, snapshot keys and highlights) and a property

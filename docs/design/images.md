@@ -1082,6 +1082,11 @@ half of I.3.
 
 ## 12. Open questions (need Alex)
 
+Decided 29 Oct 2026: 1 the budget is the larger of 32 MB and two images
+the size of the largest window; 2 animation after 1.0; 3 pure-Rust
+decoders, fuzzed; 4 no HEIC in 1.0; 5–8, 10, 11 as proposed; 7 iTerm2
+images sized per point, as iTerm2; 9 still open (colour space).
+
 1. **Budget on large screens.** One full-screen image is about 59 MB on a
    5K display and 31 MB on a 16" MacBook Pro, and the kitty protocol asks
    for room for "a few full screen images". Keep 32 MB (kitty images

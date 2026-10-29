@@ -516,6 +516,11 @@ U-1, U-2 and U-3 run at once after U-0 (term-app, bundle.sh, release.yml).
 
 ## 10. Open questions (need Alex)
 
+Decided 29 Oct 2026: 1 a Quit and Install alert after 7 days waiting;
+3 stable only in 1.0; 5 the feed is GitHub's `releases/latest`, for good;
+9 updates only for Developer ID, notarized builds; the rest as the design
+picks. Alex generates the EdDSA key pair (secret plus two backups).
+
 1. **Users who never quit.** Updates install on quit, and a terminal can
    run for weeks. After an update has waited N days (Sparkle's
    `SUScheduledImpatientCheckInterval`, default 7), show a standard alert

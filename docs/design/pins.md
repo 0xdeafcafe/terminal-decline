@@ -902,6 +902,12 @@ P-6. P-2 can start any time.
 
 ## 11. Open questions (need Alex)
 
+Decided 29 Oct 2026: 1 accepted (as Terminal.app); 2 dogfood builds are
+signed with Developer ID once N.4's secrets exist; 3 the team added with
+the signing secrets is final; 6 running pins restart into new dogfood
+builds; 7 a folder dropped on a pin opens a window there; 8 the GitHub
+releases page, for good; 9 freeze at 0.1.0; 4, 5, 10 as the design picks.
+
 1. **Borrowed permissions.** A program running as you can borrow a pin's
    permissions (Full Disk Access, say) by editing the pin's settings file,
    as anything run in Terminal.app can use Terminal.app's. Acceptable? If

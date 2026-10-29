@@ -282,9 +282,11 @@ fn check(seed: u64) -> Result<(), TestCaseError> {
 
 /// Seeds that found bugs, run every time (the regressions file only
 /// keeps the shrunk inputs proptest persisted itself).
+const KNOWN_SEEDS: &[u64] = &[8796317076710775082];
+
 #[test]
 fn known_seeds() {
-    for seed in [8796317076710775082] {
+    for &seed in KNOWN_SEEDS {
         if let Err(e) = check(seed) {
             panic!("seed {seed}: {e}");
         }

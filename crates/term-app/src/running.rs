@@ -395,7 +395,9 @@ mod tests {
     /// once, for a script that never starts a job. A job's process group
     /// is in the foreground from the fork, before it execs the program, so
     /// waiting for any program would see the shell's own name; wait for
-    /// the one expected, up to a generous deadline for a busy machine.
+    /// the one expected, up to a deadline generous for a busy machine but
+    /// shorter than nextest's 60 s timeout, so a failure shows what was
+    /// seen.
     fn shell_running(script: &str, want: Option<&str>) -> (term_pty::Pty, Option<String>) {
         let cmd = term_pty::Command {
             argv: vec!["/bin/sh".into(), "-c".into(), script.into()],
@@ -411,7 +413,7 @@ mod tests {
             cell_height: 16,
         };
         let pty = term_pty::Pty::spawn(&cmd, size).unwrap();
-        let until = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
         loop {
             let seen = foreground_program(pty.pid());
             if want.is_none() || seen.as_deref() == want || std::time::Instant::now() >= until {
@@ -421,12 +423,12 @@ mod tests {
         }
     }
 
-    /// What `f` gives once it is `want`, or after a generous deadline for
-    /// a busy machine: between fork and exec, the job is still a copy of
-    /// the shell, with its name (`sh`) and arguments.
+    /// What `f` gives once it is `want`, or after the same deadline as
+    /// [`shell_running`]: between fork and exec, the job is still a copy
+    /// of the shell, with its name (`sh`) and arguments.
     fn settled(want: Option<&str>, f: impl Fn() -> Option<String>) -> Option<String> {
         let mut got = f();
-        let until = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
         while got.as_deref() != want && std::time::Instant::now() < until {
             std::thread::sleep(std::time::Duration::from_millis(10));
             got = f();
@@ -453,7 +455,10 @@ mod tests {
     fn the_command_line_of_the_job_in_the_foreground() {
         // `; :` keeps sh from exec'ing its last command, so the job stays
         // sh with these arguments (the sleep it starts isn't the shell's).
-        let (pty, _) = shell_running("set -m; /bin/sh -c 'sleep 120; :' 'a b' '' héllo \"it's\"; :", Some("sh"));
+        // Not waited for by name: macOS's /bin/sh is a launcher that execs
+        // bash, keeping the arguments, so the job is named `sh` only until
+        // then and `bash` after.
+        let (pty, _) = shell_running("set -m; /bin/sh -c 'sleep 120; :' 'a b' '' héllo \"it's\"; :", None);
         let want = r#"/bin/sh -c 'sleep 120; :' 'a b' '' héllo 'it'\''s'"#;
         assert_eq!(settled(Some(want), || foreground_command(pty.pid())).as_deref(), Some(want));
     }

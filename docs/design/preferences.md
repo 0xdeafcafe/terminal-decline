@@ -148,7 +148,9 @@ Every write:
    - a new table is made as a standard `[table]` (`toml_edit::table()`);
      indexing a missing one would write an inline `keybind = { … }`;
    - a file with CRLF line endings is written back with CRLF (toml_edit
-     writes LF);
+     writes LF); removing a file's only line leaves no line break to show
+     them, so its undo carries them (`Edit::LineEnds`, with whether the
+     last line ended with one) and gives the file back byte for byte;
    - integers stay integers (`13` → `14`, not `14.0`).
 3. Writes atomically: a temp file in the same folder, renamed over the
    target, keeping its permissions. A config.toml that is a symlink (into a

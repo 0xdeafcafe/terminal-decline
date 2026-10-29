@@ -85,10 +85,13 @@ pub enum MenuAction {
     /// Select the output of the command at the top of the view, or the
     /// last command's when the view is at the bottom.
     SelectOutput,
+    /// Terminal Decline > Check for Updates… (only while the updater is
+    /// on; unbound by default).
+    CheckForUpdates,
 }
 
 impl MenuAction {
-    pub const ALL: [MenuAction; 37] = [
+    pub const ALL: [MenuAction; 38] = [
         MenuAction::NewWindow,
         MenuAction::NewTab,
         MenuAction::Close,
@@ -126,6 +129,7 @@ impl MenuAction {
         MenuAction::PreviousPrompt,
         MenuAction::NextPrompt,
         MenuAction::SelectOutput,
+        MenuAction::CheckForUpdates,
     ];
 
     /// The name in the config.
@@ -168,6 +172,7 @@ impl MenuAction {
             MenuAction::PreviousPrompt => "previous_prompt",
             MenuAction::NextPrompt => "next_prompt",
             MenuAction::SelectOutput => "select_output",
+            MenuAction::CheckForUpdates => "check_for_updates",
         }
     }
 
@@ -211,6 +216,7 @@ impl MenuAction {
             MenuAction::PreviousPrompt => "Jump to Previous Prompt",
             MenuAction::NextPrompt => "Jump to Next Prompt",
             MenuAction::SelectOutput => "Select Command Output",
+            MenuAction::CheckForUpdates => "Check for Updates…",
         }
     }
 
@@ -256,6 +262,7 @@ impl MenuAction {
             MenuAction::PreviousPrompt => c"jumpToPreviousPrompt:",
             MenuAction::NextPrompt => c"jumpToNextPrompt:",
             MenuAction::SelectOutput => c"selectCommandOutput:",
+            MenuAction::CheckForUpdates => c"checkForUpdates:",
         }
     }
 

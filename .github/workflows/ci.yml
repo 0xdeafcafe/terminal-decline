@@ -75,6 +75,10 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: nextest
+      # The pinned Sparkle, for the updater's protocol test
+      # (docs/design/updater.md §5.1).
+      - name: Fetch Sparkle
+        run: scripts/sparkle.sh
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo nextest run --workspace --locked --profile ci
       # nextest does not run doctests

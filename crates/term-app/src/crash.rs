@@ -234,7 +234,7 @@ fn write_log(dir: &Path, report: &str) -> std::io::Result<PathBuf> {
 }
 
 /// `2026-10-28-153012` in local time.
-fn local_time() -> String {
+pub(crate) fn local_time() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())

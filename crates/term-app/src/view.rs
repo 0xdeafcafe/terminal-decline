@@ -2664,6 +2664,7 @@ impl WindowView {
                     }
                 }
                 Some(Control::Settings) => crate::app::show_settings_now(),
+                Some(Control::UpdateCheck) => crate::update::sparkle::check_in_background(),
                 Some(Control::TypeSettings(bytes)) => crate::app::type_into_settings(bytes),
                 Some(Control::Key { keycode, flags }) => post_key(MainThreadMarker::from(self), keycode, flags),
                 Some(Control::Menu(action)) => {
@@ -2963,6 +2964,7 @@ fn write_dump(st: &mut State, window: Window) {
         secure_input: window.secure_input,
         settings_ready: window.settings.0,
         settings_recording: window.settings.1,
+        update: crate::update::status(),
         screen,
         cols,
         lines,

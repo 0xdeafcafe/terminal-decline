@@ -1027,7 +1027,8 @@ fn flood_wakes_at_most_once_per_frame() {
 
 /// Dropping the session hangs up even on a program that ignores SIGHUP and
 /// a background job still holding the terminal: both threads end and the
-/// terminal is freed within 3 s.
+/// terminal is freed within a second of the grace period term-pty gives
+/// SIGHUP.
 #[test]
 fn drop_frees_everything() {
     let home = TempDir::new("drop");
@@ -1042,18 +1043,20 @@ fn drop_frees_everything() {
     };
     h.wait_for("the program to start", |d| has_line(d, "started"));
     let session = h.session.take().unwrap();
+    let pid = session.pid().expect("the program's pid");
     let weak = Arc::downgrade(session.term());
     let start = Instant::now();
     let threads = session.hang_up();
     assert_eq!(threads.len(), 2);
-    let limit = Duration::from_secs(3);
+    let limit = term_pty::HANG_UP_GRACE + Duration::from_secs(1);
     while !(threads.iter().all(|t| t.is_finished()) && weak.upgrade().is_none()) {
         assert!(
             start.elapsed() < limit,
-            "after {:?}: threads finished {:?}, terminal freed {}",
+            "after {:?}: threads finished {:?}, terminal freed {}, program's process group alive {}",
             start.elapsed(),
             threads.iter().map(|t| t.is_finished()).collect::<Vec<_>>(),
-            weak.upgrade().is_none()
+            weak.upgrade().is_none(),
+            unsafe { libc::kill(-pid, 0) == 0 }
         );
         std::thread::sleep(Duration::from_millis(10));
     }

@@ -31,6 +31,10 @@ impl Size {
     }
 }
 
+/// How long a dropped [`Pty`] gives its program to exit after SIGHUP before
+/// it SIGKILLs the program's process group.
+pub const HANG_UP_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
 pub struct Pty {
     master: OwnedFd,
     pid: libc::pid_t,
@@ -284,13 +288,21 @@ impl Drop for Pty {
     fn drop(&mut self) {
         let child = self.child.clone();
         child.signal(libc::SIGHUP, false);
-        // Reap off the main thread; force it after a grace period.
+        // Reap off the main thread; force it after a grace period. Timed
+        // against a deadline rather than by counting sleeps: on a loaded
+        // machine each sleep overruns, and twenty of them can add up to
+        // well over the grace period (as on CI runners).
+        let deadline = std::time::Instant::now() + HANG_UP_GRACE;
         let _ = std::thread::Builder::new().name("pty-reaper".into()).spawn(move || {
-            for _ in 0..20 {
+            loop {
                 if child.try_wait().is_some() {
                     return;
                 }
-                std::thread::sleep(std::time::Duration::from_millis(100));
+                let left = deadline.saturating_duration_since(std::time::Instant::now());
+                if left.is_zero() {
+                    break;
+                }
+                std::thread::sleep(left.min(std::time::Duration::from_millis(100)));
             }
             // The child leads its own session and process group (forkpty
             // calls setsid). Kill the group too, so programs it started that

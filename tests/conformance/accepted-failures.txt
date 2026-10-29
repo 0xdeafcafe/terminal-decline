@@ -12,9 +12,6 @@
 # esctest tests are the esctest2 class and method.
 
 # ---------------------------------------------------------------- vttest
-vttest:charsets-vt100:01                                                         to-fix       dec-graphics
-vttest:reports-decreqtparm:01                                                    to-fix       decreqtparm
-vttest:iso6429-rep:01                                                            to-fix       rep
 vttest:charsets-si-so:01                                                         not-planned  charsets-96
 vttest:charsets-vt220-locking:01                                                 not-planned  charsets-96
 vttest:charsets-vt220-single:01                                                  not-planned  charsets-96
@@ -66,39 +63,7 @@ vttest:vt52:02                                                                  
 vttest:vt52:03                                                                   not-planned  vt52
 
 # --------------------------------------------------------------- esctest
-esctest:DECALNTests.test_DECALN_ClearsMargins                                    to-fix       decaln
-esctest:DECALNTests.test_DECALN_MovesCursorHome                                  to-fix       decaln
-esctest:DECIDTests.test_DECID_Basic                                              to-fix       decid
-esctest:DECRQSSTests.test_DECRQSS_DECSCUSR                                       to-fix       decrqss
-esctest:DECRQSSTests.test_DECRQSS_DECSTBM                                        to-fix       decrqss
-esctest:DECRQSSTests.test_DECRQSS_SGR                                            to-fix       decrqss
-esctest:DECDSRTests.test_DECDSR_DECXCPR                                          to-fix       decxcpr
-esctest:ChangeColorTests.test_ChangeColor_Hash12                                 to-fix       osc-colors
-esctest:ChangeColorTests.test_ChangeColor_Hash3                                  to-fix       osc-colors
-esctest:ChangeColorTests.test_ChangeColor_Hash6                                  to-fix       osc-colors
-esctest:ChangeColorTests.test_ChangeColor_Hash9                                  to-fix       osc-colors
-esctest:ChangeColorTests.test_ChangeColor_Multiple                               to-fix       osc-colors
-esctest:ChangeColorTests.test_ChangeColor_RGB                                    to-fix       osc-colors
-esctest:ChangeDynamicColorTests.test_ChangeDynamicColor_Hash12                   to-fix       osc-colors
-esctest:ChangeDynamicColorTests.test_ChangeDynamicColor_Hash3                    to-fix       osc-colors
-esctest:ChangeDynamicColorTests.test_ChangeDynamicColor_Hash6                    to-fix       osc-colors
-esctest:ChangeDynamicColorTests.test_ChangeDynamicColor_Hash9                    to-fix       osc-colors
-esctest:ChangeDynamicColorTests.test_ChangeDynamicColor_Multiple                 to-fix       osc-colors
-esctest:ChangeDynamicColorTests.test_ChangeDynamicColor_RGB                      to-fix       osc-colors
-esctest:ChangeSpecialColorTests.test_ChangeSpecialColor_Hash12                   to-fix       osc-colors
-esctest:ChangeSpecialColorTests.test_ChangeSpecialColor_Hash3                    to-fix       osc-colors
-esctest:ChangeSpecialColorTests.test_ChangeSpecialColor_Hash6                    to-fix       osc-colors
-esctest:ChangeSpecialColorTests.test_ChangeSpecialColor_Hash9                    to-fix       osc-colors
-esctest:ChangeSpecialColorTests.test_ChangeSpecialColor_Multiple                 to-fix       osc-colors
-esctest:ChangeSpecialColorTests.test_ChangeSpecialColor_Multiple2                to-fix       osc-colors
-esctest:ChangeSpecialColorTests.test_ChangeSpecialColor_RGB                      to-fix       osc-colors
-esctest:ResetColorTests.test_ResetColor_All                                      to-fix       osc-colors
-esctest:ResetColorTests.test_ResetColor_Standard                                 to-fix       osc-colors
-esctest:ResetSpecialColorTests.test_ResetSpecialColor_Dynamic                    to-fix       osc-colors
-esctest:ResetSpecialColorTests.test_ResetSpecialColor_Multiple                   to-fix       osc-colors
-esctest:ResetSpecialColorTests.test_ResetSpecialColor_Multiple2                  to-fix       osc-colors
-esctest:ResetSpecialColorTests.test_ResetSpecialColor_Single                     to-fix       osc-colors
-esctest:ResetSpecialColorTests.test_ResetSpecialColor_Single2                    to-fix       osc-colors
+esctest:ResetSpecialColorTests.test_ResetSpecialColor_Dynamic                    to-fix       osc-reset-default
 esctest:DECDSRTests.test_DECDSR_DECCKSR                                          not-planned  dec-dsr
 esctest:DECDSRTests.test_DECDSR_DECMSR                                           not-planned  dec-dsr
 esctest:DECDSRTests.test_DECDSR_DSRDECLocatorStatus                              not-planned  dec-dsr

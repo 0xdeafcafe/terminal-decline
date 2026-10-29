@@ -15,12 +15,17 @@ use crate::style::{Attrs, LinkId, Style, Underline};
 use crate::style_table::{StyleStats, StyleTable};
 use crate::unicode::{self, Segmenter};
 
+mod replies;
 mod snapshot;
+pub use replies::DynamicColor;
 pub use snapshot::{Highlight, HighlightKind, RowFlags, RowKey, ScreenId, SnapCursor, SnapRow, Snapshot};
 
 /// A style table holding more ids than this gives its memory back when
 /// the screen is cleared.
 const GIVE_BACK_AT: usize = 256;
+
+/// Titles `CSI 22 t` keeps, as xterm.
+const TITLE_STACK: usize = 10;
 
 /// A desktop notification a program asked for: OSC 9 (`9;body`, iTerm2's
 /// form, no title) or OSC 777 (`777;notify;title;body`, rxvt's).
@@ -113,7 +118,29 @@ struct SavedCursor {
     /// to one screen's link table, so restoring looks the link up again.
     link: Option<Arc<LinkValue>>,
     origin: bool,
-    line_drawing: bool,
+    charset: Charset,
+}
+
+/// A character set that can be designated as G0 or G1 (SCS, `ESC ( F`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+enum Charset {
+    #[default]
+    Ascii,
+    /// `ESC ( 0`: DEC Special Graphics, the line drawing set.
+    DecGraphics,
+    /// `ESC ( A`: British, `#` is `£`.
+    British,
+}
+
+impl Charset {
+    fn map(self, c: char) -> char {
+        match self {
+            Charset::Ascii => c,
+            Charset::DecGraphics => dec_line_drawing(c),
+            Charset::British if c == '#' => '£',
+            Charset::British => c,
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -292,11 +319,13 @@ pub struct Terminal {
     scroll_top: usize,
     scroll_bottom: usize,
     tabs: Vec<bool>,
-    /// G0 and G1 character sets: true = DEC line drawing.
-    charsets: [bool; 2],
+    /// G0 and G1 character sets.
+    charsets: [Charset; 2],
     /// Which of G0/G1 is in use (SI/SO).
     active_charset: usize,
-    line_drawing: bool,
+    /// The set in use, `charsets[active_charset]` unless a cursor restore
+    /// brought back another.
+    charset: Charset,
     /// The last grapheme printed, for REP: its character, or None when it
     /// is a cluster, which is then `last_cluster` (kept by value, at most
     /// 128 bytes, so REP works after its cell has been overwritten), of
@@ -337,8 +366,14 @@ pub struct Terminal {
     progress: Option<Progress>,
     /// The program's working directory, if it reports it (OSC 7).
     cwd: Option<String>,
-    /// Default colours as 0xRRGGBB, for answering colour queries.
-    default_colors: [u32; 3],
+    /// The palette and foreground, background and cursor colours: the
+    /// theme's, with what programs set (OSC 4, 10–12) on top.
+    colors: Box<replies::ColorTable>,
+    colors_changed: bool,
+    /// A DCS query being collected (DECRQSS, XTGETTCAP).
+    dcs: Option<replies::Dcs>,
+    /// Titles saved by `CSI 22 t`, for `CSI 23 t` to put back.
+    title_stack: Vec<Option<String>>,
     /// Cell size in pixels, for answering size queries.
     cell_pixels: (u16, u16),
     /// Bytes the terminal must send back to the program (replies to queries).
@@ -394,9 +429,9 @@ impl Terminal {
             scroll_top: 0,
             scroll_bottom: lines - 1,
             tabs: default_tabs(cols),
-            charsets: [false; 2],
+            charsets: [Charset::Ascii; 2],
             active_charset: 0,
-            line_drawing: false,
+            charset: Charset::Ascii,
             last_char: None,
             last_cluster: String::new(),
             last_cluster_width: 1,
@@ -417,7 +452,10 @@ impl Terminal {
             notification: None,
             progress: None,
             cwd: None,
-            default_colors: [0xd8dee9, 0x16181c, 0xd8dee9],
+            colors: Box::new(replies::ColorTable::new([0xd8dee9, 0x16181c, 0xd8dee9])),
+            colors_changed: false,
+            dcs: None,
+            title_stack: Vec::new(),
             cell_pixels: (8, 16),
             replies: Vec::new(),
             generation: 1,
@@ -567,16 +605,6 @@ impl Terminal {
     /// The program's working directory, if it reports it (OSC 7).
     pub fn cwd(&self) -> Option<&str> {
         self.cwd.as_deref()
-    }
-
-    /// Foreground, background and cursor colours as 0xRRGGBB, for answering
-    /// colour queries.
-    pub fn default_colors(&self) -> [u32; 3] {
-        self.default_colors
-    }
-
-    pub fn set_default_colors(&mut self, colors: [u32; 3]) {
-        self.default_colors = colors;
     }
 
     /// How many cells (1 or 2) East Asian Ambiguous characters take.
@@ -1387,7 +1415,7 @@ impl Terminal {
             cursor: self.cursor,
             link: self.pen_link.clone(),
             origin: self.modes.origin,
-            line_drawing: self.line_drawing,
+            charset: self.charset,
         };
         if self.alt_active {
             self.saved_alt = Some(saved)
@@ -1406,7 +1434,7 @@ impl Terminal {
                 self.cursor = s.cursor;
                 self.pen_link = s.link;
                 self.modes.origin = s.origin;
-                self.line_drawing = s.line_drawing;
+                self.charset = s.charset;
             }
             None => {
                 self.cursor = Cursor::default();
@@ -1529,7 +1557,9 @@ impl Terminal {
         fresh.sweep_at_test = self.sweep_at_test;
         fresh.generation = self.generation.wrapping_add(1);
         fresh.replies = std::mem::take(&mut self.replies);
-        fresh.default_colors = self.default_colors;
+        // The theme's colours stay; what programs set goes.
+        fresh.colors = Box::new(self.colors.reset_all());
+        fresh.colors_changed = true;
         fresh.cell_pixels = self.cell_pixels;
         fresh.bulk_ascii = self.bulk_ascii;
         fresh.ambiguous = self.ambiguous;
@@ -1554,7 +1584,7 @@ impl Terminal {
     }
 
     fn write_char(&mut self, c: char) {
-        let c = if self.line_drawing { dec_line_drawing(c) } else { c };
+        let c = if self.charset != Charset::Ascii { self.charset.map(c) } else { c };
         let p = unicode::props(c);
         // Most text: a plain character with a width starts a cluster
         // unless a Prepend one came before it.
@@ -1630,12 +1660,12 @@ impl Terminal {
         self.touch_row(row);
         // REP repeats the whole cluster. The cell held `last_char` (its
         // first scalar) or `last_cluster` until now, so the copy grows
-        // with it.
+        // with it. After a REP it holds nothing, and stays so.
         if let Some(first) = self.last_char.take() {
             self.last_cluster.clear();
             self.last_cluster.push(first);
         }
-        if self.last_cluster.len() + c.len_utf8() <= crate::clusters::MAX_BYTES {
+        if !self.last_cluster.is_empty() && self.last_cluster.len() + c.len_utf8() <= crate::clusters::MAX_BYTES {
             self.last_cluster.push(c);
         }
         let have = if self.screen[row].cells[col].is_wide() { 2 } else { 1 };
@@ -1726,6 +1756,12 @@ impl Terminal {
         cells[col + 1] = cell.style_part();
         self.cursor.col = col + 1;
         self.cursor.pending_wrap = false;
+    }
+
+    /// Nothing for REP to repeat.
+    fn forget_last_char(&mut self) {
+        self.last_char = None;
+        self.last_cluster.clear();
     }
 
     /// REP of a cluster: `n` copies of `last_cluster`, each in its own slot.
@@ -1819,7 +1855,7 @@ impl Terminal {
             return self.write_ascii_after_prepend(bytes);
         }
         let Some(&last) = bytes.last() else { return };
-        if self.modes.insert || self.line_drawing || !self.modes.autowrap {
+        if self.modes.insert || self.charset != Charset::Ascii || !self.modes.autowrap {
             for &b in bytes {
                 self.write_char(b as char);
             }
@@ -2019,18 +2055,11 @@ impl Terminal {
         self.cursor.pending_wrap = false;
         self.scroll_top = 0;
         self.scroll_bottom = self.lines - 1;
-        self.charsets = [false; 2];
+        self.charsets = [Charset::Ascii; 2];
         self.active_charset = 0;
-        self.line_drawing = false;
+        self.charset = Charset::Ascii;
         self.saved_primary = None;
         self.saved_alt = None;
-    }
-
-    fn reply_color(&mut self, osc: &[u8], rgb: u32) {
-        let (r, g, b) = ((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF);
-        let os = String::from_utf8_lossy(osc);
-        let reply = format!("\x1b]{os};rgb:{r:02x}{r:02x}/{g:02x}{g:02x}/{b:02x}{b:02x}\x1b\\");
-        self.replies.extend_from_slice(reply.as_bytes());
     }
 
     fn set_private_mode(&mut self, mode: u16, on: bool) {
@@ -2265,8 +2294,14 @@ fn dec_line_drawing(c: char) -> char {
     match c {
         '`' => '◆',
         'a' => '▒',
+        'b' => '␉',
+        'c' => '␌',
+        'd' => '␍',
+        'e' => '␊',
         'f' => '°',
         'g' => '±',
+        'h' => '␤',
+        'i' => '␋',
         'j' => '┘',
         'k' => '┐',
         'l' => '┌',
@@ -2288,6 +2323,7 @@ fn dec_line_drawing(c: char) -> char {
         '|' => '≠',
         '}' => '£',
         '~' => '·',
+        '_' => ' ',
         c => c,
     }
 }
@@ -2351,8 +2387,21 @@ impl Perform for Terminal {
         }
     }
 
-    fn hook(&mut self, _params: &Params, _intermediates: &[u8], _ignore: bool, _action: char) {
+    fn hook(&mut self, _params: &Params, intermediates: &[u8], ignore: bool, action: char) {
         self.clear_grapheme();
+        self.dcs_hook(intermediates, ignore, action);
+    }
+
+    fn put(&mut self, byte: u8) {
+        self.dcs_put(&[byte]);
+    }
+
+    fn put_slice(&mut self, data: &[u8]) {
+        self.dcs_put(data);
+    }
+
+    fn dcs_end(&mut self, complete: bool) {
+        self.dcs_finish(complete);
     }
 
     fn apc_start(&mut self) {
@@ -2380,7 +2429,7 @@ impl Perform for Terminal {
             0x0D => self.goto_col(0),
             0x0E | 0x0F => {
                 self.active_charset = (byte == 0x0E) as usize;
-                self.line_drawing = self.charsets[self.active_charset];
+                self.charset = self.charsets[self.active_charset];
             }
             _ => return,
         }
@@ -2530,9 +2579,18 @@ impl Perform for Terminal {
                 } else if !self.last_cluster.is_empty() {
                     self.repeat_cluster(n);
                 }
+                // As in xterm, REP uses the character up: a second REP
+                // straight after repeats nothing.
+                self.forget_last_char();
             }
             ('c', []) => self.replies.extend_from_slice(b"\x1b[?62;22c"),
             ('c', [b'>']) => self.replies.extend_from_slice(b"\x1b[>1;10;0c"),
+            // DECREQTPARM: no parity, 8 bits, 38400 baud both ways, clock
+            // multiplier 1, no STP flags; solicited (3) for `1 x`.
+            ('x', []) if arg(0) <= 1 => {
+                let reply = format!("\x1b[{};1;1;128;128;1;0x", arg(0) + 2);
+                self.replies.extend_from_slice(reply.as_bytes());
+            }
             ('g', []) => match arg(0) {
                 0 => self.tabs[self.cursor.col] = false,
                 3 => self.tabs.fill(false),
@@ -2566,6 +2624,17 @@ impl Perform for Terminal {
                 }
                 _ => {}
             },
+            // DECXCPR: the cursor position. A VT400 adds the page (always
+            // 1); we answer DA as a VT220, which doesn't, as xterm does then.
+            ('n', [b'?']) if arg(0) == 6 => {
+                let row = if self.modes.origin {
+                    self.cursor.row.saturating_sub(self.scroll_top)
+                } else {
+                    self.cursor.row
+                };
+                let reply = format!("\x1b[?{};{}R", row + 1, self.cursor.col + 1);
+                self.replies.extend_from_slice(reply.as_bytes());
+            }
             ('r', []) => {
                 let top = arg(0).max(1) - 1;
                 let bottom = if arg(1) == 0 { self.lines } else { arg(1).min(self.lines) } - 1;
@@ -2638,6 +2707,22 @@ impl Perform for Terminal {
                     14 => format!("\x1b[4;{};{}t", self.lines * ch as usize, self.cols * cw as usize),
                     16 => format!("\x1b[6;{ch};{cw}t"),
                     18 => format!("\x1b[8;{};{}t", self.lines, self.cols),
+                    // Push and pop the title (0 or 2: the window title;
+                    // there is no icon label to keep).
+                    22 if arg(1) != 1 => {
+                        if self.title_stack.len() >= TITLE_STACK {
+                            self.title_stack.remove(0);
+                        }
+                        self.title_stack.push(self.title.clone());
+                        String::new()
+                    }
+                    23 if arg(1) != 1 => {
+                        if let Some(title) = self.title_stack.pop() {
+                            self.title = title;
+                            self.title_changed = true;
+                        }
+                        String::new()
+                    }
                     _ => String::new(),
                 };
                 self.replies.extend_from_slice(reply.as_bytes());
@@ -2664,15 +2749,27 @@ impl Perform for Terminal {
             ([], b'>') => self.modes.app_keypad = false,
             ([b'(' | b')'], b) => {
                 let g = (intermediates[0] == b')') as usize;
-                self.charsets[g] = b == b'0';
-                self.line_drawing = self.charsets[self.active_charset];
+                self.charsets[g] = match b {
+                    b'0' => Charset::DecGraphics,
+                    b'A' => Charset::British,
+                    _ => Charset::Ascii,
+                };
+                self.charset = self.charsets[self.active_charset];
             }
+            // DECALN: fill with `E`, reset the margins, cursor home.
             ([b'#'], b'8') => {
                 for row in &mut self.screen {
                     row.fill(Cell::BLANK.with_char('E'));
                 }
                 self.touch_screen_rows();
+                self.scroll_top = 0;
+                self.scroll_bottom = self.lines - 1;
+                self.cursor.row = 0;
+                self.cursor.col = 0;
+                self.cursor.pending_wrap = false;
             }
+            // DECID: answered as primary DA.
+            ([], b'Z') => self.replies.extend_from_slice(b"\x1b[?62;22c"),
             _ => return,
         }
         self.touch();
@@ -2684,12 +2781,10 @@ impl Perform for Terminal {
 
     fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
         self.clear_grapheme();
+        if self.osc_color(params) {
+            return;
+        }
         match params {
-            [code @ (b"10" | b"11" | b"12"), b"?"] => {
-                let i = (code[1] - b'0') as usize;
-                let rgb = self.default_colors[i];
-                self.reply_color(code, rgb);
-            }
             [b"52", _target, data] if *data != b"?" => {
                 if let Some(bytes) = base64_decode(data) {
                     self.clipboard = Some(String::from_utf8_lossy(&bytes).into_owned());

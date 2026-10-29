@@ -23,7 +23,7 @@ use objc2::runtime::{AnyObject, Bool, ProtocolObject, Sel};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSApplication, NSAutoresizingMaskOptions, NSBox, NSBoxType, NSButton, NSColor, NSControl, NSControlSize, NSControlTextEditingDelegate,
-    NSEvent, NSEventMask, NSEventModifierFlags, NSFont, NSImage, NSMenu, NSMenuItem, NSPasteboard, NSPasteboardNameFind,
+    NSEvent, NSEventMask, NSEventModifierFlags, NSEventType, NSFont, NSImage, NSMenu, NSMenuItem, NSPasteboard, NSPasteboardNameFind,
     NSPasteboardTypeString, NSPasteboardTypeTextFinderOptions, NSResponder, NSSearchField, NSSearchFieldDelegate, NSSegmentSwitchTracking,
     NSSegmentedControl, NSTextAlignment, NSTextField, NSTextFieldDelegate, NSTextFinderCaseInsensitiveKey, NSTextFinderMatchingTypeKey,
     NSTextView, NSView, NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectView,
@@ -298,6 +298,17 @@ impl FindBar {
         let bar = Weak::new(self);
         let handler = RcBlock::new(move |event: NonNull<NSEvent>| -> *mut NSEvent {
             let e = unsafe { event.as_ref() };
+            if e.r#type() == NSEventType::LeftMouseDown {
+                // A click in the bar focuses its pane (the keys stay in
+                // the field).
+                if let Some(bar) = bar.load()
+                    && bar.contains_click(e)
+                    && let Some(p) = bar.ivars().pane.load()
+                {
+                    p.bar_clicked();
+                }
+                return event.as_ptr();
+            }
             let plain = !e.modifierFlags().intersects(
                 NSEventModifierFlags::Command | NSEventModifierFlags::Control | NSEventModifierFlags::Option | NSEventModifierFlags::Shift,
             );
@@ -312,8 +323,50 @@ impl FindBar {
             }
             event.as_ptr()
         });
-        let monitor = unsafe { NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::KeyDown, &handler) };
+        let monitor =
+            unsafe { NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::KeyDown | NSEventMask::LeftMouseDown, &handler) };
         *self.ivars().monitor.borrow_mut() = monitor;
+    }
+
+    /// Whether the mouse-down `e` is on the bar.
+    fn contains_click(&self, e: &NSEvent) -> bool {
+        if e.window(MainThreadMarker::from(self))
+            .is_none_or(|w| self.window().is_none_or(|mine| !std::ptr::eq(&*w, &*mine)))
+        {
+            return false;
+        }
+        let at = self.convertPoint_fromView(e.locationInWindow(), None);
+        let size = self.bounds().size;
+        at.x >= 0.0 && at.y >= 0.0 && at.x < size.width && at.y < size.height
+    }
+
+    /// The test control's click: a left click on the search field, put on
+    /// the event queue as a real one arrives (the down first, so the
+    /// field's own tracking finds the up waiting).
+    pub(crate) fn post_click(&self) {
+        let Some(window) = self.window() else { return };
+        let f = self.ivars().field.frame();
+        let at = self.convertPoint_toView(
+            NSPoint::new(f.origin.x + f.size.width / 2.0, f.origin.y + f.size.height / 2.0),
+            None,
+        );
+        let app = NSApplication::sharedApplication(MainThreadMarker::from(self));
+        for kind in [NSEventType::LeftMouseDown, NSEventType::LeftMouseUp] {
+            let event = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+                kind,
+                at,
+                NSEventModifierFlags::empty(),
+                0.0,
+                window.windowNumber(),
+                None,
+                0,
+                1,
+                1.0,
+            );
+            if let Some(event) = event {
+                app.postEvent_atStart(&event, false);
+            }
+        }
     }
 
     /// The bar is closing: stop watching for Esc.

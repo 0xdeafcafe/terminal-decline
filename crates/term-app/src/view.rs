@@ -2759,6 +2759,15 @@ impl WindowView {
                         self.request_redraw(pane);
                     }
                 }
+                Some(Control::FindClick(index)) => {
+                    let view = self
+                        .with_state(|st| st.tree.ids().get(index).and_then(|id| st.panes.get(id)).map(|p| p.view.clone()))
+                        .flatten();
+                    match view {
+                        Some(view) => view.click_find_bar(),
+                        None => NSBeep(),
+                    }
+                }
                 Some(Control::Save) => {
                     let path = self.with_state(|st| st.win.test.as_ref().map(|t| t.path.clone())).flatten();
                     if let Some(path) = path {

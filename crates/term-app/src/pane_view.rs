@@ -959,6 +959,22 @@ impl PaneView {
         self.request_redraw();
     }
 
+    /// A click landed in the find bar: this pane is the focused one, the
+    /// keys staying in the bar's field.
+    pub(crate) fn bar_clicked(&self) {
+        if let Some(w) = self.window_view() {
+            w.pane_focused(self.pane(), false);
+        }
+    }
+
+    /// The test control's `find-click`: click the find bar's field.
+    pub(crate) fn click_find_bar(&self) {
+        match self.with(|_, p| p.find.as_ref().map(|f| f.bar.clone())).flatten() {
+            Some(bar) => bar.post_click(),
+            None => NSBeep(),
+        }
+    }
+
     /// Whether `q` isn't what was last searched for.
     pub(crate) fn find_query_differs(&self, q: &Query) -> bool {
         self.with(|_, p| p.find_query != *q).unwrap_or(false)

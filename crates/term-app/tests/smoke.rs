@@ -19,6 +19,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
+mod support;
+
 const APP: &str = env!("CARGO_BIN_EXE_terminal-decline");
 /// Longest a scenario may take before the app is killed.
 const TIMEOUT: Duration = Duration::from_secs(30);
@@ -101,7 +103,12 @@ fn run(cmd: &mut Command) -> (ExitStatus, Duration) {
 /// `terminal-decline -e sh -c <script>` with the dump file, a temp config
 /// home and any `env`.
 fn decline(dir: &TempDir, script: &str, dump: bool) -> (ExitStatus, Duration) {
-    let mut cmd = Command::new(APP);
+    decline_from(Path::new(APP), dir, script, dump)
+}
+
+/// [`decline`] with another executable: the bundled app's launcher.
+fn decline_from(program: &Path, dir: &TempDir, script: &str, dump: bool) -> (ExitStatus, Duration) {
+    let mut cmd = Command::new(program);
     cmd.args(["-e", "/bin/sh", "-c", script])
         .env("XDG_CONFIG_HOME", dir.config_home())
         .env_remove("DECLINE_TEST_DUMP")
@@ -158,6 +165,26 @@ fn smoke_program_output_is_drawn() {
     assert!(s.starts_with("hello from smoke|\nwide: 日本語|\n"), "{s}");
     // "hello from smoke" and "wide: " plus three wide glyphs, at least.
     assert!(num(&d[0], "glyphs") >= 17.0, "{}", d[0]);
+}
+
+/// The app as it ships (docs/design/pins.md §2): `scripts/bundle.sh`'s
+/// bundle, hardened, its launcher loading the library, which opens a
+/// window and draws.
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_bundled_app_draws() {
+    if !have_metal() {
+        return;
+    }
+    let dir = TempDir::new("bundled");
+    let app = support::bundle(&dir.path().join("out"), &[("HARDENED", "1")]);
+    let script = format!("echo 'hello from the bundle'; {}{}sleep 20", osc("dump"), osc("quit"));
+    let (status, _) = decline_from(&support::launcher(&app), &dir, &script, true);
+    assert!(status.success(), "{status}");
+    let d = dumps(&dir);
+    assert_eq!(d.len(), 1, "{d:?}");
+    check_dump(&d[0]);
+    assert!(screen(&d[0]).starts_with("hello from the bundle|\n"), "{}", screen(&d[0]));
 }
 
 #[test]

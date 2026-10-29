@@ -1,58 +1,137 @@
 #!/usr/bin/env bash
-# Build Terminal Decline.app from a compiled binary and ad-hoc codesign it.
-# Usage: scripts/bundle.sh <binary> <output-dir> [version] [build-number]
+# Build Terminal Decline.app from compiled parts and sign it, inside out
+# (docs/design/pins.md §2.1, §2.4).
+#
+# Usage: scripts/bundle.sh [--lib FILE] [--launcher FILE] [--stub FILE]
+#                          <output-dir> [version] [build-number]
+#
+#   --lib       libterminal_decline.dylib (crates/term-dylib; default
+#               target/release/libterminal_decline.dylib)
+#   --launcher  the launcher (crates/term-pin; default
+#               target/release-stub/terminal-decline-launcher)
+#   --stub      the pin stub (crates/term-pin; default
+#               target/release-stub/terminal-decline-pin)
+#
+# Build them with:
+#   cargo build --release -p term-dylib
+#   cargo build -p term-pin --bins --profile release-stub
+#
 # The build number must be an integer that only goes up (Sparkle and
 # LaunchServices compare it); it defaults to the commit count.
+#
+# Signing: CODESIGN_IDENTITY (default "-", ad-hoc). A real identity signs
+# with the hardened runtime and a timestamp, and packaging/entitlements.plist.
+# Ad-hoc builds are hardened only with HARDENED=1, then with
+# packaging/entitlements-dev.plist (library validation off: ad-hoc code
+# has no team ID to match). DOGFOOD=1 marks a local build that restarts
+# itself when a newer one is installed (crates/term-app/src/reload.rs).
 set -euo pipefail
 
-if [[ $# -lt 2 ]]; then
-  echo "usage: $0 <binary> <output-dir> [version] [build-number]" >&2
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+repo_root=$(dirname "$script_dir")
+
+lib="$repo_root/target/release/libterminal_decline.dylib"
+launcher="$repo_root/target/release-stub/terminal-decline-launcher"
+stub="$repo_root/target/release-stub/terminal-decline-pin"
+positional=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --lib) lib=$2; shift 2 ;;
+    --launcher) launcher=$2; shift 2 ;;
+    --stub) stub=$2; shift 2 ;;
+    -h|--help)
+      sed -n '2,27p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      exit 0
+      ;;
+    -*) echo "unknown option $1" >&2; exit 64 ;;
+    *) positional+=("$1"); shift ;;
+  esac
+done
+if [[ ${#positional[@]} -lt 1 ]]; then
+  echo "usage: $0 [--lib FILE] [--launcher FILE] [--stub FILE] <output-dir> [version] [build-number]" >&2
   exit 64
 fi
 
-binary=$1
-out_dir=$2
-version=${3:-0.0.0}
-build=${4:-$(git -C "$(dirname "$0")" rev-list --count HEAD 2>/dev/null || echo 1)}
+out_dir=${positional[0]}
+version=${positional[1]:-0.0.0}
+build=${positional[2]:-$(git -C "$script_dir" rev-list --count HEAD 2>/dev/null || echo 1)}
 if ! [[ "$build" =~ ^[0-9]+$ ]]; then
   echo "build number must be an integer: $build" >&2
   exit 64
 fi
 
-script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-repo_root=$(dirname "$script_dir")
-icon="$repo_root/packaging/icon.icns"
+for part in "$lib" "$launcher" "$stub"; do
+  if [[ ! -f "$part" ]]; then
+    echo "not found: $part (see $0 --help)" >&2
+    exit 66
+  fi
+done
 
-if [[ ! -f "$binary" ]]; then
-  echo "binary not found: $binary" >&2
-  exit 66
-fi
+icon="$repo_root/packaging/icon.icns"
 
 # The bundle's name (the .app and CFBundleName) and the name people see
 # in menus. Set here only.
 bundle_name="Terminal Decline"
 product_name="Terminal Decline"
+bundle_id="red.forbes.terminal-decline"
 
 app="$out_dir/$bundle_name.app"
+contents="$app/Contents"
 rm -rf "$app"
-mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-cp "$binary" "$app/Contents/MacOS/terminal-decline"
-chmod 755 "$app/Contents/MacOS/terminal-decline"
+mkdir -p "$contents/MacOS" "$contents/Frameworks" "$contents/Helpers" "$contents/Resources"
+# The launcher is named terminal-decline in the bundle (the cask links it
+# as `terminal-decline` and `decline`).
+cp "$launcher" "$contents/MacOS/terminal-decline"
+cp "$lib" "$contents/Frameworks/libterminal_decline.dylib"
+cp "$stub" "$contents/Helpers/terminal-decline-pin"
+chmod 755 "$contents/MacOS/terminal-decline" "$contents/Helpers/terminal-decline-pin"
+chmod 644 "$contents/Frameworks/libterminal_decline.dylib"
 
 icon_entry=""
 if [[ -f "$icon" ]]; then
-  cp "$icon" "$app/Contents/Resources/icon.icns"
+  cp "$icon" "$contents/Resources/icon.icns"
   icon_entry="  <key>CFBundleIconFile</key>
   <string>icon</string>"
 fi
 
-cat > "$app/Contents/Info.plist" <<EOF
+# Programs run in a terminal ask macOS for access as the terminal, so the
+# app declares every kind of access one might ask for (pins.md §2.3).
+usage_strings=""
+for entry in \
+  "NSMicrophoneUsageDescription:use the microphone" \
+  "NSCameraUsageDescription:use the camera" \
+  "NSAudioCaptureUsageDescription:record audio from other apps" \
+  "NSAppleEventsUsageDescription:control other apps" \
+  "NSAppleMusicUsageDescription:use your music library" \
+  "NSLocationUsageDescription:use your location" \
+  "NSLocationWhenInUseUsageDescription:use your location" \
+  "NSContactsUsageDescription:use your contacts" \
+  "NSCalendarsUsageDescription:use your calendars" \
+  "NSCalendarsFullAccessUsageDescription:use your calendars" \
+  "NSRemindersUsageDescription:use your reminders" \
+  "NSRemindersFullAccessUsageDescription:use your reminders" \
+  "NSPhotoLibraryUsageDescription:use your photos" \
+  "NSBluetoothAlwaysUsageDescription:use Bluetooth" \
+  "NSLocalNetworkUsageDescription:find and connect to devices on your local network" \
+  "NSSpeechRecognitionUsageDescription:use speech recognition" \
+  "NSDesktopFolderUsageDescription:use files in your Desktop folder" \
+  "NSDocumentsFolderUsageDescription:use files in your Documents folder" \
+  "NSDownloadsFolderUsageDescription:use files in your Downloads folder" \
+  "NSRemovableVolumesUsageDescription:use files on a removable volume" \
+  "NSNetworkVolumesUsageDescription:use files on a network volume" \
+  "NSSystemAdministrationUsageDescription:change system settings"; do
+  usage_strings+="  <key>${entry%%:*}</key>
+  <string>A program running in ${product_name} wants to ${entry#*:}.</string>
+"
+done
+
+cat > "$contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
   <key>CFBundleIdentifier</key>
-  <string>red.forbes.terminal-decline</string>
+  <string>${bundle_id}</string>
   <key>CFBundleName</key>
   <string>${bundle_name}</string>
   <key>CFBundleDisplayName</key>
@@ -125,24 +204,34 @@ cat > "$app/Contents/Info.plist" <<EOF
       </array>
     </dict>
   </array>
-${icon_entry}
+${usage_strings}${icon_entry}
 </dict>
 </plist>
 EOF
 
-# DOGFOOD=1 marks a local build that restarts itself when a newer one is
-# installed (see crates/term-app/src/reload.rs and scripts/dogfood.sh).
 if [[ "${DOGFOOD:-}" == "1" ]]; then
-  touch "$app/Contents/Resources/dogfood"
+  touch "$contents/Resources/dogfood"
 fi
 
-# CODESIGN_IDENTITY defaults to ad-hoc ("-"); set it for real Developer ID signing.
+# Inside out, never --deep (it would sign nested code with the app's
+# identifier, entitlements and options): the library, then the stub, then
+# the app, which signs the launcher and seals the bundle.
 identity=${CODESIGN_IDENTITY:--}
-sign_args=(--force --deep --sign "$identity")
+opts=()
+entitlements="$repo_root/packaging/entitlements.plist"
 if [[ "$identity" != "-" ]]; then
-  sign_args+=(--options runtime --timestamp)
+  opts=(--options runtime --timestamp)
+elif [[ "${HARDENED:-}" == "1" ]]; then
+  opts=(--options runtime)
+  entitlements="$repo_root/packaging/entitlements-dev.plist"
 fi
-codesign "${sign_args[@]}" "$app"
-codesign --verify --deep --strict "$app"
+sign() {
+  codesign --force --sign "$identity" ${opts[@]+"${opts[@]}"} "$@"
+}
+sign --identifier "$bundle_id.lib" "$contents/Frameworks/libterminal_decline.dylib"
+# B.4: Sparkle's parts, then Sparkle.framework (docs/design/updater.md §5.3).
+sign --identifier "$bundle_id.pin-stub" "$contents/Helpers/terminal-decline-pin"
+sign --entitlements "$entitlements" "$app"
+codesign --verify --strict --deep "$app"
 
 echo "$app"

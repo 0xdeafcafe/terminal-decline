@@ -76,9 +76,12 @@ jobs:
 
       - name: Build (Apple Silicon)
         run: |
-          cargo build --release --locked -p terminal-decline --target aarch64-apple-darwin
+          # The library (docs/design/pins.md §2.5), then the launcher and
+          # the pin stub in a cargo run of their own: their profile,
+          # release-stub, aborts on panic and is stripped.
+          cargo build --release --locked -p term-dylib --target aarch64-apple-darwin
+          cargo build --locked -p term-pin --bins --profile release-stub --target aarch64-apple-darwin
           mkdir -p dist
-          cp target/aarch64-apple-darwin/release/terminal-decline dist/terminal-decline
 
       - name: Import signing certificate
         id: cert
@@ -102,7 +105,11 @@ jobs:
           SIGN_IDENTITY: ${{ steps.cert.outputs.identity }}
         run: |
           # Falls back to ad-hoc signing when no certificate was imported.
-          CODESIGN_IDENTITY="${SIGN_IDENTITY:--}" scripts/bundle.sh dist/terminal-decline dist "${{ steps.meta.outputs.version }}" "${{ steps.meta.outputs.build }}"
+          CODESIGN_IDENTITY="${SIGN_IDENTITY:--}" scripts/bundle.sh \
+            --lib target/aarch64-apple-darwin/release/libterminal_decline.dylib \
+            --launcher target/aarch64-apple-darwin/release-stub/terminal-decline-launcher \
+            --stub target/aarch64-apple-darwin/release-stub/terminal-decline-pin \
+            dist "${{ steps.meta.outputs.version }}" "${{ steps.meta.outputs.build }}"
 
       - name: Notarize and staple
         if: steps.cert.outputs.identity != '' && env.APPLE_ID != '' && env.APPLE_APP_PASSWORD != ''
@@ -120,18 +127,31 @@ jobs:
           ditto -c -k --keepParent "dist/Terminal Decline.app" "dist/$zip_name"
           (cd dist && shasum -a 256 "$zip_name" > "$zip_name.sha256")
           # Debug symbols for symbolicating crash logs from this build
-          # (split-debuginfo = "packed" makes cargo run dsymutil). Their
-          # UUID must match the shipped binary's. Cargo's terminal-decline.dSYM is a
-          # symlink into deps/, so copy what it points to.
-          dsym=dist/terminal-decline.dSYM
-          cp -RL target/aarch64-apple-darwin/release/terminal-decline.dSYM "$dsym"
-          bin_uuid=$(dwarfdump --uuid "dist/Terminal Decline.app/Contents/MacOS/terminal-decline" | awk '{print $2}')
-          dsym_uuid=$(dwarfdump --uuid "$dsym" | awk '{print $2}')
-          if [[ -z "$bin_uuid" || "$bin_uuid" != "$dsym_uuid" ]]; then
-            echo "dSYM UUID $dsym_uuid doesn't match the binary's $bin_uuid" >&2
-            exit 1
-          fi
-          ditto -c -k --keepParent "$dsym" "dist/Terminal-Decline-${{ steps.meta.outputs.version }}-macos-arm64.dSYM.zip"
+          # (split-debuginfo = "packed" makes cargo run dsymutil), one per
+          # shipped image, named after it as crash logs name it: the
+          # library (where the code is), the launcher and the stub. Each
+          # UUID must match the shipped file's. Cargo's dSYMs are symlinks
+          # into deps/, so copy what they point to.
+          app="dist/Terminal Decline.app/Contents"
+          dsyms=dist/dSYMs
+          mkdir -p "$dsyms"
+          check() { # <shipped file> <cargo's dSYM> <name>
+            cp -RL "$2" "$dsyms/$3.dSYM"
+            bin_uuid=$(dwarfdump --uuid "$1" | awk '{print $2}')
+            dsym_uuid=$(dwarfdump --uuid "$dsyms/$3.dSYM" | awk '{print $2}')
+            if [[ -z "$bin_uuid" || "$bin_uuid" != "$dsym_uuid" ]]; then
+              echo "$3.dSYM UUID $dsym_uuid doesn't match the shipped $1's $bin_uuid" >&2
+              exit 1
+            fi
+          }
+          check "$app/Frameworks/libterminal_decline.dylib" target/aarch64-apple-darwin/release/libterminal_decline.dylib.dSYM libterminal_decline.dylib
+          check "$app/MacOS/terminal-decline" target/aarch64-apple-darwin/release-stub/terminal-decline-launcher.dSYM terminal-decline
+          check "$app/Helpers/terminal-decline-pin" target/aarch64-apple-darwin/release-stub/terminal-decline-pin.dSYM terminal-decline-pin
+          (cd "$dsyms" && ditto -c -k . "../Terminal-Decline-${{ steps.meta.outputs.version }}-macos-arm64.dSYM.zip")
+          # Every released stub is kept and run against later libraries
+          # (crates/term-pin/FROZEN.md, TD_PIN_TEST_STUB).
+          cp "$app/Helpers/terminal-decline-pin" "dist/terminal-decline-pin-${{ steps.meta.outputs.version }}-arm64"
+          ditto -c -k "dist/terminal-decline-pin-${{ steps.meta.outputs.version }}-arm64" "dist/terminal-decline-pin-${{ steps.meta.outputs.version }}-arm64.zip"
           echo "zip=$zip_name" >> "$GITHUB_OUTPUT"
           echo "sha256=$(cut -d' ' -f1 "dist/$zip_name.sha256")" >> "$GITHUB_OUTPUT"
 

@@ -297,8 +297,11 @@ impl Fonts {
             }
             if let Some(ch) = single_char(text) {
                 if let Some(mut key) = self.glyph_key(ch, face) {
+                    let mut cells = cells;
                     if key.font == crate::SPRITE_FONT {
                         key.cells = cells;
+                    } else if key.variant & GlyphKey::FITTED != 0 {
+                        cells = self.icon_cells(&mut key, cells, run, i);
                     }
                     out.push(ShapedGlyph {
                         cell,
@@ -387,10 +390,18 @@ impl Fonts {
             }
             let (cell, _) = run.cell(g.cluster);
             let next = (g.cluster + 1..run.len()).find(|&c| origin[c].is_some()).unwrap_or(run.len());
-            let cells = (run.cells[next] - cell).min(u8::MAX as u16) as u8;
-            let key = match single_char(text).and_then(SpriteId::for_char) {
+            let mut cells = (run.cells[next] - cell).min(u8::MAX as u16) as u8;
+            let ch = single_char(text);
+            let key = match ch.and_then(SpriteId::for_char) {
                 Some(id) => GlyphKey::sprite(id, cells),
-                None => self.font_key(g.font, g.glyph),
+                None => {
+                    let mut key = self.font_key(g.font, g.glyph);
+                    if key.cells == 1 && ch.is_some_and(|ch| self.is_icon(ch, g.font)) {
+                        key.variant |= GlyphKey::FITTED;
+                        cells = self.icon_cells(&mut key, cells, run, g.cluster);
+                    }
+                    key
+                }
             };
             let (ox, oy) = origin[g.cluster].unwrap_or((g.x, g.y));
             out.push(ShapedGlyph {
@@ -401,6 +412,17 @@ impl Fonts {
                 dy: -(g.y - oy).round() as i16,
             });
         }
+    }
+
+    /// The cells an icon in cell text `i` of `run` is fitted to, set in
+    /// `key` and returned: 2 when its cell is wide, or when its ink is wider
+    /// than a cell and the next cell is blank (Nerd Font's convention);
+    /// otherwise 1.
+    fn icon_cells(&self, key: &mut GlyphKey, cells: u8, run: &RunText, i: usize) -> u8 {
+        let next_blank = i + 1 < run.len() && run.cluster(i + 1) == [b' ' as u16];
+        let wide = cells >= 2 || (next_blank && self.wider_than_cell(key.font, key.glyph));
+        key.cells = if wide { 2 } else { 1 };
+        cells.max(key.cells)
     }
 
     /// The key for a glyph CTLine picked: 2 cells for colour glyphs.

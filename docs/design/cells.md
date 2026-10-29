@@ -1242,6 +1242,65 @@ result is cached by the row's `seq` (B.1). Both paths produce the same
   for ASCII but over 100 µs once emoji fall back, about 5 ms for 50 such
   rows: B.1's row cache by `seq` is needed, not optional.
 
+**Landed in E.4, font side** (`term_font::config`, `term_font::fit`;
+`FontConfig`, `CellWidth`, `Fonts::with_config`). The app's config reads
+into a `FontConfig` and calls `Fonts::with_config(&config, scale)`;
+`Fonts::new(family, size_px)` is now that with only family and size set,
+at scale 1.
+
+- **Fallback list: a custom cascade list on the faces.** Each of the four
+  faces is copied with `kCTFontCascadeListAttribute` set to the listed
+  fonts, then `CTFontCopyDefaultCascadeListForLanguages` for that face. So
+  `CTFontCreateForString` on the face, which F2.1's per-(character, style)
+  lookup already calls, tries them in order, and so does CTLine for
+  clusters and ligature runs: one mechanism, both paths agree, and the
+  cache is untouched. A manual lookup through the list would have covered
+  only the single-character path. The face's own glyphs still come first.
+  Fallback fonts are registered at construction (ids 4 onwards). Names
+  that aren't installed (Core Text substituted another font: none of its
+  family, full, PostScript or display names match) are skipped and listed
+  by `Fonts::missing()`.
+- **Face overrides by name.** `bold`, `italic`, `bold_italic`: a full or
+  PostScript name ("Menlo Bold", "Menlo-Bold") is that exact face; a family
+  name gets that family's face with the style's traits. Not found: the
+  family's own face, as before, and the name goes in `missing()`.
+- **Icon fitting**, after Ghostty's Nerd Font constraints and WezTerm's
+  `allow_square_glyphs_to_overflow_width = "WhenFollowedBySpace"`. An icon
+  is a Private Use Area character (U+E000–F8FF, planes 15–16) from any
+  font, or a symbol (U+2190–2BFF, U+1F300–1FAFF) drawn from a font on the
+  fallback list; colour glyphs keep their own rule. It gets one cell, or
+  two when its ink is wider than a cell and the next cell in the run is
+  blank (then `ShapedGlyph::cells` is 2 as well); `rasterize(ch, style)`,
+  with no neighbours, always gives one. It is scaled down, keeping its
+  proportions, never up, until its ink fits the cells' width by the cell
+  height, and centred both ways. It is drawn into a bitmap the size of
+  those cells, then trimmed to its ink, so it can't reach a neighbour. The
+  key says so with `variant = GlyphKey::FITTED`, so the fitted and unfitted
+  bitmaps of one glyph never share a key.
+- **Line height** multiplies the font's cell height (rounded); the
+  baseline uses the same centring as before, so the extra height is split
+  above and below the text. Underline and strike are measured from the
+  baseline, so they move with it; in a cell shorter than the font's own
+  they are clamped inside it.
+- **Cell width adjust**: `CellWidth::Points(p)` adds `p × scale` pixels,
+  `CellWidth::Percent(p)` adds `p`% of the advance (both rounded, never
+  under 1 px; `CellWidth::parse` reads `"1"`, `"-0.5"`, `"10%"`). Coverage
+  glyphs move right by half the change, so they stay centred.
+- With nothing set, metrics and bitmaps are the same as before (a unit
+  test compares with the old metrics code for Menlo, Monaco and Courier at
+  three sizes; `cargo bench -p term-font` is unchanged, 160 ASCII cells in
+  1.26 µs).
+- Tests (`term-font/tests/config.rs`): ⨀ (U+2A00), which Core Text's own
+  cascade takes from Apple Symbols, comes from STIX Two Math when that is
+  listed first and Apple Symbols when it is, in all four styles and on
+  both shaping paths; ⏻ falls to the second font on the list; overrides by
+  family, PostScript and full name load those faces and draw their
+  glyphs; unknown names are reported; U+E000 (STIX Two Math) and U+F8FF
+  stay inside their cell and centred at three line heights and widths; an
+  icon wider than its cell gets two cells before a blank and one before
+  text, on both paths; line heights 1.1–2 keep the baseline centred to a
+  pixel; widths change by the adjustment and glyphs move by half.
+
 ### 10.3 Ligatures: one glyph, one instance per cell
 
 Most coding fonts implement `=>` with contextual alternates, one glyph per

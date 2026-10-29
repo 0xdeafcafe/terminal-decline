@@ -103,3 +103,22 @@ fn wrapper_matches_the_old_bitmaps() {
         }
     }
 }
+
+#[test]
+fn default_config_gives_the_fonts_own_metrics() {
+    // `natural_metrics` is the metrics code from before E.4, unchanged.
+    for family in ["Menlo", "Monaco", "Courier"] {
+        for size in [13.0, 26.0, 37.0] {
+            let font = unsafe { CTFont::with_name(&CFString::from_str(family), size, std::ptr::null()) };
+            let old = natural_metrics(&font);
+            let mut c = FontConfig::new(family, size);
+            for w in [CellWidth::default(), CellWidth::Percent(0.0)] {
+                c.cell_width = w;
+                let (new, shift) = metrics(&font, &c, 1.0);
+                assert_eq!(format!("{new:?}"), format!("{old:?}"), "{family} {size}");
+                assert_eq!(shift, 0);
+            }
+            assert_eq!(format!("{:?}", Fonts::new(family, size).metrics), format!("{old:?}"));
+        }
+    }
+}

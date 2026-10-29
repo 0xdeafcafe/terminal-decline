@@ -35,11 +35,16 @@ pub struct GlyphKey {
     /// fitted to these cells and sprites drawn across them; coverage glyphs
     /// are drawn at the font's size whatever this says.
     pub cells: u8,
-    /// Spare (synthetic bold, a later subpixel phase); 0 today.
+    /// Flags for how the glyph is drawn: [`GlyphKey::FITTED`] for icons;
+    /// the other bits are spare (synthetic bold, a later subpixel phase).
     pub variant: u8,
 }
 
 impl GlyphKey {
+    /// `variant` flag: an icon, scaled down and centred to fit `cells`
+    /// cells and never drawn past them (E.4; see `term_font::fit`).
+    pub const FITTED: u8 = 1;
+
     /// The key for a code-drawn shape across `cells` cells.
     pub fn sprite(id: SpriteId, cells: u8) -> GlyphKey {
         GlyphKey {

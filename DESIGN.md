@@ -250,6 +250,11 @@ tables and landing pads: 1.34 → 1.50 MB) and no measurable parse speed.
   a line at a time, and while it is shown term-core holds, and the
   renderer draws, the run of text between its corners rather than the
   rectangle itself.
+- Right-click, or Control-click, opens a menu (Copy, Paste, Select All,
+  Clear Scrollback; Copy only with a selection, Paste only with text on
+  the clipboard) while the program isn't taking the mouse
+  (`mouse::opens_menu`); with mouse reporting on, the click goes to the
+  program as before, and Shift still overrides.
 
 ## Windows and tabs
 
@@ -291,6 +296,44 @@ A dogfood restart saves each window's directory and frame, plus, for tabs,
 the index of their tab group and which tab was in front
 (`reload::SavedWindow`); they reopen as tabs of one window, in order. Files
 from builds before tabs restore as plain windows.
+
+## Files, folders and Services
+
+What the app does with files and folders from the rest of macOS
+(`desktop`, used by `view` and `app`):
+
+- Files or folders dragged onto a window are typed into it as a paste
+  (bracketed when the program asked for bracketed paste): each path quoted
+  for the shell the way Terminal.app does it (`My\ File.txt`; a name with
+  a control character, which a paste would drop, as `$'…'`), separated by
+  spaces. Finder's file reference URLs are resolved to paths. A dragged
+  URL or text is typed as it is.
+- A folder dropped on the Dock icon, or `open -a "Terminal Decline" DIR`
+  (`application:openURLs:`; the bundle declares `public.folder` in
+  `CFBundleDocumentTypes`): a new window whose shell starts there; a file
+  opens in its folder. It is a tab of the window in front when macOS's
+  "Prefer tabs when opening documents" says so (Always, or In Full Screen
+  while that window is full screen; `NSWindow.userTabbingPreference`). An
+  app not yet running opens those windows instead of its first one.
+- Services (`NSServices` in the Info.plist that `scripts/bundle.sh`
+  writes): "New Terminal Decline Window at Folder" and "New Terminal
+  Decline Tab at Folder", for folders in Finder (its right-click menu's
+  Services, or Finder > Services). The app delegate is the services
+  provider (`newWindowAtFolder:userData:error:`,
+  `newTabAtFolder:userData:error:`); the tab one falls back to a window
+  when none is open. The app menu has the standard Services submenu.
+  `scripts/dogfood.sh` runs `pbs -update` so a new build's items show.
+- `confirm_close = true` (off by default): closing a window or tab while a
+  program other than the shell runs in its foreground asks first, in a
+  sheet ("vim is still running in it"), and quitting asks once for all of
+  them. "Running" is read from the shell's `proc_bsdinfo`: the terminal's
+  foreground process group (`e_tpgid`) isn't the shell's own (`running`).
+  A window started with `-e PROGRAM` counts only while that program runs
+  another in the foreground. A dogfood restart and the test-only `quit`
+  never ask.
+
+The product's name in these strings is `PRODUCT_NAME` in the code and
+`product_name` in `scripts/bundle.sh`.
 
 ## Notifications and progress
 
@@ -422,6 +465,8 @@ contents, so only a real change reloads. A reload reads every layer again
   `columns`, `lines`, `blur` (a view set up with the window), `title`, and
   `scrollback` (term-core has no way to change a running terminal's
   limit; once it does, the new limit can apply from the next line).
+
+`confirm_close` (see Files, folders and Services) applies at once.
 
 Errors in the edited file are notices in every window, written after the
 program's output, as at startup; new windows show the errors of the

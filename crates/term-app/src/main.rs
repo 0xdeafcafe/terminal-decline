@@ -82,7 +82,7 @@ fn main() {
     for e in &errors {
         eprintln!("decline: {e}");
     }
-    let name = pin::own_app_name(&paths).unwrap_or_else(|| "decline".into());
+    let name = pin::own_app_name(&paths).unwrap_or_else(|| decline::PRODUCT_NAME.into());
     // Shown in each window too: an app started from the Dock has no stderr.
     app::run(config, errors, &name, restore, from);
 }

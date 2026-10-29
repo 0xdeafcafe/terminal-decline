@@ -31,6 +31,13 @@ pub fn reports(mode: MouseMode, shift: bool) -> bool {
     !shift && mode != MouseMode::Off
 }
 
+/// Whether a button press opens the context menu: a right click, or a
+/// Control-click as everywhere in macOS, while the program isn't taking
+/// the mouse (`reporting`, which Shift turns off).
+pub fn opens_menu(reporting: bool, button: u8, ctrl: bool) -> bool {
+    !reporting && (button == RIGHT || (button == LEFT && ctrl))
+}
+
 /// One mouse report for a 0-based `line` and `col`. `None` when X10 can't
 /// carry the position.
 pub fn encode(code: u8, line: usize, col: usize, press: bool, sgr: bool) -> Option<Vec<u8>> {
@@ -70,6 +77,20 @@ pub fn wheel_code(lines: isize, mods: u8) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn right_and_control_clicks_open_the_menu_unless_reported() {
+        for (reporting, button, ctrl, want) in [
+            (false, RIGHT, false, true),
+            (false, LEFT, true, true),
+            (false, LEFT, false, false),
+            (false, MIDDLE, true, false),
+            (true, RIGHT, false, false),
+            (true, LEFT, true, false),
+        ] {
+            assert_eq!(opens_menu(reporting, button, ctrl), want, "{reporting} {button} {ctrl}");
+        }
+    }
 
     fn x10(b: u8, col: u8, line: u8) -> Vec<u8> {
         vec![0x1b, b'[', b'M', b, col, line]

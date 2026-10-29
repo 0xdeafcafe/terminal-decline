@@ -29,6 +29,8 @@ fi
 mv "$stage/Decline.app" "$dest"
 rm -rf "$dest.old"
 /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$dest" || true
+# Read its Services menu items (Info.plist NSServices) again.
+/System/Library/CoreServices/pbs -update || true
 
 echo "installed $dest ($version)"
 if [[ $open_after == 1 ]] && ! pgrep -f "$dest/Contents/MacOS/decline" >/dev/null; then

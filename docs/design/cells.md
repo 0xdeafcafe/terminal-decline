@@ -40,7 +40,7 @@ Modules named here:
 | Row cache: cursor, selection, search, hovered link, placeholder images and blink are overlays; rows are drawn relative to their top; highlight ranges in the snapshot | §9.3 |
 | The snapshot copies only newly interned styles | §9.2 |
 | A small cache from screen style id to block slot when writing history; parse-speed gate on a fixed Mac | §11.2, §17.4 |
-| Shaped-cluster cache per process | §10.2 |
+| Shaped-cluster cache per process (F2.2: per `Fonts`, so per window) | §10.2 |
 | The view position as `ViewTop::At { point, offset }` | §12.3 |
 | A "fills to the end of the row" flag for full-width backgrounds | §11.3, §12.2 |
 | Sixel and iTerm2 images become placeholder cells | §8.3 |
@@ -1186,6 +1186,33 @@ pub struct ShapedGlyph {
 }
 ```
 
+**Landed in F2.1** (`term_font::registry`, private; the API is on `Fonts`):
+
+- `Fonts::glyph_key(ch, style)` gives the key for one character drawn
+  alone, `Fonts::rasterize_key(key)` draws it, and `rasterize(ch, style)`
+  is now just `rasterize_key(glyph_key(ch, style)?)`. A test compares its
+  bitmaps with the code it replaced, for 33 characters × 4 styles × Menlo
+  and Monaco × 3 sizes: identical. `Fonts::font_id(&CTFont)` is the entry
+  for F2.2's CTRun fonts; `family_of(id)` and `face_id(style)` go with it.
+- Ids 0–3 are always the four configured faces in `Style` order, even when
+  two are the same font (a family with no bold); a lookup by font finds the
+  first. Fallbacks get 4 onwards. `SPRITE_FONT` is never handed out: once
+  65535 fonts are registered a new fallback simply has no glyph.
+- The registry sits in a `RefCell` inside `Fonts`, so `rasterize` keeps
+  `&self`. `Fonts` stays `Send` and not `Sync`, as before. Font ids belong
+  to one `Fonts`: a new `Fonts` (a font or size change) starts again from
+  4, so whatever caches by `GlyphKey` must be emptied with it, as
+  `Renderer::set_fonts` already does.
+- The fallback lookup is cached per (character, style), not per character:
+  a bold face can fall back to a different font than the regular one. ASCII
+  goes through a 128 × 4 table, everything else a hash map. Misses are
+  cached too.
+- `cells` only changes the bitmap for colour glyphs (fitted to the cells)
+  and sprites (drawn across them). `glyph_key` sets 2 for colour glyphs and
+  1 for everything else, wide CJK included, so the same coverage glyph has
+  one key whatever its width. F2.2's `shape()` and F3.2 should keep to that
+  rule, or the glyph texture holds the same bitmap twice.
+
 `Fonts::shape(text: &[u16], face, features, out: &mut Vec<ShapedGlyph>)`:
 1. builds a CTLine from the run's text, with the face and `font_features`;
 2. walks its CTRuns, putting each run's font through the registry;
@@ -1196,10 +1223,10 @@ Glyphs are placed on the cell grid: each sits at its cell's x plus its
 offset inside its cluster, not at Core Text's accumulated advance. So a
 fallback font with a different advance can't drift.
 
-**Shaped-cluster cache.** A least-recently-used map per process (shared by
-all panes, like B.2's single glyph atlas) maps (font face, cluster text) to
-the shaped glyphs, up to 4096 entries. An emoji or an Indic word is shaped
-once, not once per row that contains it.
+**Shaped-cluster cache.** A least-recently-used map per `Fonts`, so per
+window (planned per process; "Landed in F2.2" below says why not) maps (font face, cluster text) to the shaped glyphs, up to
+4096 entries. An emoji or an Indic word is shaped once, not once per row
+that contains it.
 
 **Fast path.** When the configured font has no ligature features turned on
 (Menlo, SF Mono), or ligatures are off:
@@ -1211,6 +1238,137 @@ once, not once per row that contains it.
 With a ligature font (JetBrains Mono, Fira Code), rows are shaped and the
 result is cached by the row's `seq` (B.1). Both paths produce the same
 `GlyphKey`s.
+
+**Landed in F2.2** (`term_font::shape`; `Fonts::shape`, `RunText`,
+`Features`, `ShapedGlyph`). What changed from the plan above:
+
+- **The signature.** `shape(&RunText, face, Features, &mut Vec<ShapedGlyph>)`.
+  The renderer pushes each cell's text into a `RunText` with its width
+  (`push(cluster, width)`, `push_char`; a blank cell is a space, a spacer
+  cell adds nothing), and the `RunText` builds the UTF-16-to-cell table as
+  it goes, so the renderer never builds it itself. `clear()` keeps the
+  memory for the next run.
+- **Both paths are inside `shape()`, chosen by `Features::ligatures`.** Off
+  (today, and with ligatures turned off): every cell's text is shaped alone;
+  a single character goes through `glyph_key` (F2.1's 128 × 4 ASCII table
+  and per-character cache), a cluster through CTLine and the cache. On:
+  the whole run is one CTLine. B.1 sets `ligatures: true` for ligature
+  fonts and adds the row cache by `seq`; nothing else in `shape()` changes.
+  `Features` is where E.4's `font_features` list goes.
+- **No ligature attribute is set.** A cluster shaped alone can't join its
+  neighbours, so the font's defaults are what clusters need (emoji ZWJ
+  sequences, Indic conjuncts). With ligatures on, the defaults are the
+  ligatures wanted.
+- **Placement.** Each glyph's offset is from its cluster's first glyph in
+  string order, rounded to whole pixels. With ligatures on, a cell whose
+  text left no glyph of its own was swallowed by the glyph before it, and
+  that glyph's `cells` covers it, which is the n-cell ligature §10.3 draws.
+  Spaces give no glyphs. Code-drawn characters give sprite keys whose
+  `cells` is the cell's width; font glyphs follow F2.1's rule (2 only for
+  colour glyphs). CTRun's deleted glyphs (0xFFFF) are skipped.
+- **The cache is per `Fonts`, not per process.** Font ids belong to one
+  `Fonts`, and the app has one per window (and a new one on a font or size
+  change), so a process-wide cache keyed by font id would hand one window
+  another's glyphs. Per `Fonts` it is emptied with the glyph texture, as
+  F2.1 requires of anything keyed by `GlyphKey`. A process-wide cache would
+  need B.2's shared atlas and one shared `Fonts` first. It is a slab of
+  entries in a linked list with a hash map from face and UTF-16 to slot; a
+  hit allocates nothing. At the cap it holds about 0.7 MB (estimated:
+  ~170 bytes an entry).
+- **A correction to F2.1: the registry can't recognise fonts by `CFEqual`
+  alone.** The `CTFont` that `CTFontCreateForString` returns for 😀 and the
+  one CTLine puts in its run have identical descriptors but aren't
+  `CFEqual`, so Apple Color Emoji and PingFang got two ids each and every
+  glyph from them would have been rasterised twice. The registry now also
+  looks fonts up by PostScript name, size and variation axes, and
+  remembers each new object for the cheap `CFEqual` lookup next time. Core
+  Text hands out a stable object per face and lookup path, so that adds a
+  few entries, not one per line (400 lines of emoji: one emoji font id).
+- Tests (`term-font/tests/shape.rs`, Menlo), on both paths: `e` + U+0301
+  is one glyph, Menlo's é; a flag, a ZWJ family, 👍🏽 and the keycap 1️⃣
+  are one Apple Color Emoji glyph each, keyed at 2 cells, unlike their
+  first scalar's glyph; `x` + U+0301 is two glyphs in one cell; a mixed run
+  (CJK, a blank cell, combining marks, a box-drawing sprite, emoji) gives
+  the same glyphs on both paths and the per-character keys; sprites cover
+  their cells; the cache gives the same keys warm, cold and again after
+  clearing, keys by face, and stays at 4096 after 5824 different clusters.
+  The LRU order is unit-tested in the module.
+- Measured (`cargo bench -p term-font`, M1 Max, Menlo 26 px):
+
+  | | time |
+  |---|---|
+  | ZWJ family cluster, cold (CTLine) | 20 µs |
+  | ZWJ family cluster, cached | 50 ns |
+  | `x` + U+0301, cold | 3.5 µs |
+  | `x` + U+0301, cached | 38 ns |
+  | 160 ASCII cells | 1.2 µs (7.5 ns a cell) |
+  | 160 cells, 16 clusters, cached | 1.5 µs |
+  | 160 cells, 16 clusters, cache empty | 38 µs |
+  | 160 ASCII cells as one CTLine | 6.1 µs |
+  | 160 cells, 16 clusters, as one CTLine | 111 µs |
+
+  So the cache is worth 400× per cluster. A whole CTLine per row is cheap
+  for ASCII but over 100 µs once emoji fall back, about 5 ms for 50 such
+  rows: B.1's row cache by `seq` is needed, not optional.
+
+**Landed in E.4, font side** (`term_font::config`, `term_font::fit`;
+`FontConfig`, `CellWidth`, `Fonts::with_config`). The app's config reads
+into a `FontConfig` and calls `Fonts::with_config(&config, scale)`;
+`Fonts::new(family, size_px)` is now that with only family and size set,
+at scale 1.
+
+- **Fallback list: a custom cascade list on the faces.** Each of the four
+  faces is copied with `kCTFontCascadeListAttribute` set to the listed
+  fonts, then `CTFontCopyDefaultCascadeListForLanguages` for that face. So
+  `CTFontCreateForString` on the face, which F2.1's per-(character, style)
+  lookup already calls, tries them in order, and so does CTLine for
+  clusters and ligature runs: one mechanism, both paths agree, and the
+  cache is untouched. A manual lookup through the list would have covered
+  only the single-character path. The face's own glyphs still come first.
+  Fallback fonts are registered at construction (ids 4 onwards). Names
+  that aren't installed (Core Text substituted another font: none of its
+  family, full, PostScript or display names match) are skipped and listed
+  by `Fonts::missing()`.
+- **Face overrides by name.** `bold`, `italic`, `bold_italic`: a full or
+  PostScript name ("Menlo Bold", "Menlo-Bold") is that exact face; a family
+  name gets that family's face with the style's traits. Not found: the
+  family's own face, as before, and the name goes in `missing()`.
+- **Icon fitting**, after Ghostty's Nerd Font constraints and WezTerm's
+  `allow_square_glyphs_to_overflow_width = "WhenFollowedBySpace"`. An icon
+  is a Private Use Area character (U+E000–F8FF, planes 15–16) from any
+  font, or a symbol (U+2190–2BFF, U+1F300–1FAFF) drawn from a font on the
+  fallback list; colour glyphs keep their own rule. It gets one cell, or
+  two when its ink is wider than a cell and the next cell in the run is
+  blank (then `ShapedGlyph::cells` is 2 as well); `rasterize(ch, style)`,
+  with no neighbours, always gives one. It is scaled down, keeping its
+  proportions, never up, until its ink fits the cells' width by the cell
+  height, and centred both ways. It is drawn into a bitmap the size of
+  those cells, then trimmed to its ink, so it can't reach a neighbour. The
+  key says so with `variant = GlyphKey::FITTED`, so the fitted and unfitted
+  bitmaps of one glyph never share a key.
+- **Line height** multiplies the font's cell height (rounded); the
+  baseline uses the same centring as before, so the extra height is split
+  above and below the text. Underline and strike are measured from the
+  baseline, so they move with it; in a cell shorter than the font's own
+  they are clamped inside it.
+- **Cell width adjust**: `CellWidth::Points(p)` adds `p × scale` pixels,
+  `CellWidth::Percent(p)` adds `p`% of the advance (both rounded, never
+  under 1 px; `CellWidth::parse` reads `"1"`, `"-0.5"`, `"10%"`). Coverage
+  glyphs move right by half the change, so they stay centred.
+- With nothing set, metrics and bitmaps are the same as before (a unit
+  test compares with the old metrics code for Menlo, Monaco and Courier at
+  three sizes; `cargo bench -p term-font` is unchanged, 160 ASCII cells in
+  1.26 µs).
+- Tests (`term-font/tests/config.rs`): ⨀ (U+2A00), which Core Text's own
+  cascade takes from Apple Symbols, comes from STIX Two Math when that is
+  listed first and Apple Symbols when it is, in all four styles and on
+  both shaping paths; ⏻ falls to the second font on the list; overrides by
+  family, PostScript and full name load those faces and draw their
+  glyphs; unknown names are reported; U+E000 (STIX Two Math) and U+F8FF
+  stay inside their cell and centred at three line heights and widths; an
+  icon wider than its cell gets two cells before a blank and one before
+  text, on both paths; line heights 1.1–2 keep the baseline centred to a
+  pixel; widths change by the adjustment and glyphs move by half.
 
 ### 10.3 Ligatures: one glyph, one instance per cell
 
@@ -1235,11 +1393,44 @@ box drawing and blocks, 0x100–0x1FF braille, 0x200–0x21F Powerline,
 0x300–0x38B legacy computing). Ids from 0x1000 up are kept for shapes that
 aren't characters. Still to come for this design:
 
-- the curly, dotted and dashed underline patterns as sprites from 0x1000
-  (F2.3);
 - caching sprites under `GlyphKey { font: SPRITE_FONT, glyph: id, cells }`
-  in the same mask texture as text (F3.2). Today the renderer reaches them
-  through the per-character path.
+  in the same mask texture as text (F3.2). The key exists since F2.1
+  (`GlyphKey::sprite(id, cells)`, and `glyph_key` returns it for code-drawn
+  characters); today the renderer still reaches sprites through the
+  per-character path.
+
+**Landed in F2.3:** the underline patterns, `SpriteId::UNDERLINE_CURLY`
+(0x1000), `UNDERLINE_DOTTED` (0x1001) and `UNDERLINE_DASHED` (0x1002),
+drawn through the same `rasterize(id, metrics, cells)`:
+
+- Unlike the character sprites, their bitmap is not the whole cell: it is
+  the cells' width and only as tall as the pattern, a band under the
+  baseline (`top` negative, so the renderer places it like any glyph). That
+  keeps a row of underlined text from filling the glyph texture with empty
+  cells.
+- The pattern repeats every cell: a sprite across `cells` cells is exactly
+  the one-cell sprite repeated, so the renderer can use one quad per cell or
+  one per wide cell and the result is the same.
+- Dotted and dashed sit exactly where the single underline's rectangle
+  does (`baseline + underline_offset`, `underline_thickness` rows) and are
+  whole pixels. Dots are thickness-wide squares, as many as fit with a gap
+  at least a dot wide, each centred in an equal share of the cell, so the
+  gap across a cell edge is within a pixel of the gaps inside. Dashed is one
+  dash per cell, two thirds of it, with half the gap at each side.
+- Curly is one cosine period per cell, `underline_thickness` thick,
+  anti-aliased. Peak to peak it is a third of the cell width (at least 1.5
+  thicknesses), lowest at the cell edges and highest in the middle, so the
+  slope is zero where cells meet. It is centred on the single underline,
+  moved up and flattened when the room below the baseline is short, and
+  only crosses the baseline when even a flat wave doesn't fit beneath it.
+- No sprite for double underline: §10.5 keeps it as two rectangles.
+- Tests (`term-font/tests/underline.rs`), at 8 cell sizes from 6×13 to
+  24×50: every pattern stays inside the cell and below the baseline;
+  dotted and dashed are on the single underline's rows; multi-cell sprites
+  are the one-cell sprite repeated; and across three tiled cells the dots
+  are all alike with even gaps, the dashes and gaps are all alike, and the
+  wave has ink in every column, and the step in its height between the two
+  columns either side of a cell edge is no bigger than anywhere inside.
 
 ### 10.5 Decorations
 
@@ -2393,9 +2584,9 @@ go in order, and the font and render agents run alongside.
 | 13c | core | **search filters** (§13.6): 4-byte grams in 4 KB, built in the background only; still in 1.0 | S | 13b |
 | 14 | core (+ app for the decoder) | placement table and decline's own images (§8) for B.3/B.5, with the `ImageDecoder` trait and the 32 MB budget; the ImageIO decoder is a term-app part | M | 12 |
 | 15 | app | settings: `ambiguous_width` (and later `image_memory` with B.3), read by config and passed to term-core; main session | S | 7 |
-| F2.1 | font | font registry, `GlyphKey`, rasterise by (font, glyph); `rasterize(char, style)` kept as a wrapper | M | 1 |
-| F2.2 | font | CTLine shaping of runs (`shape()`) and the shaped-cluster cache; clusters now, ligatures in B.1 | M | F2.1 |
-| F2.3 | font | underline pattern sprites (curly, dotted, dashed) from id 0x1000; box/block/Powerline/braille shapes are done (F.6, `c4033dd`) | S | F2.1 |
+| F2.1 | font | font registry, `GlyphKey`, rasterise by (font, glyph); `rasterize(char, style)` kept as a wrapper. **Landed** (§10.2) | M | 1 |
+| F2.2 | font | CTLine shaping of runs (`shape()`) and the shaped-cluster cache; clusters now, ligatures in B.1. **Landed** (§10.2) | M | F2.1 |
+| F2.3 | font | underline pattern sprites (curly, dotted, dashed) from id 0x1000; box/block/Powerline/braille shapes are done (F.6, `c4033dd`). **Landed** (§10.4) | S | F2.1 |
 | F3.1 | render | resolve through `Style`: underline colour, double underline, overline, strike | S | 1 |
 | F3.2 | render | glyph cache keyed by `GlyphKey` (sprites included); runs (§10.1); cluster cells via F2.2; curly/dotted/dashed via F2.3; ambiguous characters at two cells | M | 6, F2.2, F2.3 |
 | F3.3 | render | build frames from the snapshot with overlays (§9.3), still under the lock (R.1 moves it out) | M | 8 |

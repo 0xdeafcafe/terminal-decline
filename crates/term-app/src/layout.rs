@@ -35,6 +35,14 @@ pub const MAX_COLS: usize = 4000;
 pub const MIN_LINES: usize = 1;
 pub const MAX_LINES: usize = 2000;
 
+/// How far the window's content is overlapped at the top, in points: the
+/// title bar, plus the tab bar while one shows. The content view extends
+/// under both (full-size content), so this is the window's height less the
+/// height of its `contentLayoutRect`, the part nothing covers.
+pub fn top_inset(window_height: f64, layout_height: f64) -> f64 {
+    (window_height - layout_height).max(0.0)
+}
+
 /// `padding` and `titlebar` are in points.
 pub fn padding(padding: f64, titlebar: f64, scale: f64) -> Padding {
     let p = (padding * scale).round() as u32;
@@ -103,6 +111,41 @@ mod tests {
         ] {
             let p = padding(pad, titlebar, scale);
             assert_eq!((p.x, p.top, p.bottom), want, "pad={pad} titlebar={titlebar} scale={scale}");
+        }
+    }
+
+    /// A tab bar appearing under the title bar pushes the grid down: the top
+    /// padding grows by its height, and the grid loses the lines it covers.
+    #[test]
+    fn the_tab_bar_shrinks_the_grid() {
+        // A 1018 pt high window: a 28 pt title bar, then a 25 pt tab bar.
+        let window = 1018.0;
+        let plain = top_inset(window, window - 28.0);
+        let tabbed = top_inset(window, window - 28.0 - 25.0);
+        assert_eq!((plain, tabbed), (28.0, 53.0));
+        assert_eq!(top_inset(100.0, 120.0), 0.0, "never negative");
+        for scale in [1.0, 2.0] {
+            let c = cell(scale);
+            let (p0, p1) = (padding(6.0, plain, scale), padding(6.0, tabbed, scale));
+            assert_eq!(p1.top - p0.top, (25.0 * scale) as u32, "scale={scale}");
+            assert_eq!((p0.x, p0.bottom), (p1.x, p1.bottom));
+            // The window shows exactly 100x30 without the tab bar.
+            let size = content_size(100, 30, scale, c, p0);
+            let (cols0, lines0) = grid_size(size, scale, c, p0);
+            let (cols1, lines1) = grid_size(size, scale, c, p1);
+            assert_eq!((cols0, lines0), (100, 30));
+            // 25 pt covers one 16 pt line and part of another: two lines go.
+            assert_eq!((cols1, lines1), (100, 28), "scale={scale}");
+            // The first line starts below the tab bar, and the last ends
+            // above the bottom padding.
+            assert_eq!(cell_origin(0, 0, c, p1).1, ((6.0 + tabbed) * scale) as u32);
+            let bottom = cell_origin(lines1 - 1, 0, c, p1).1 + c.height + p1.bottom;
+            assert!(bottom as f64 <= size.1 * scale, "scale={scale}");
+            // Closing the last other tab gives the lines back.
+            assert_eq!(
+                grid_size(size, scale, c, padding(6.0, top_inset(window, window - 28.0), scale)),
+                (100, 30)
+            );
         }
     }
 

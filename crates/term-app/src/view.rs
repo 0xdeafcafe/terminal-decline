@@ -16,11 +16,12 @@ use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, ProtocolObject, Sel};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSCursor, NSEvent, NSEventModifierFlags, NSPasteboard, NSPasteboardTypeString, NSResponder, NSTextInputClient, NSView, NSWindowDelegate,
+    NSCursor, NSEvent, NSEventModifierFlags, NSPasteboard, NSPasteboardTypeString, NSResponder, NSTextInputClient, NSView, NSWindow,
+    NSWindowDelegate,
 };
 use objc2_foundation::{
-    NSArray, NSAttributedString, NSAttributedStringKey, NSNotFound, NSNotification, NSObjectProtocol, NSPoint, NSRange, NSRect, NSRunLoop,
-    NSRunLoopCommonModes, NSSize, NSString,
+    NSArray, NSAttributedString, NSAttributedStringKey, NSKeyValueObservingOptions, NSNotFound, NSNotification,
+    NSObjectNSKeyValueObserverRegistration, NSObjectProtocol, NSPoint, NSRange, NSRect, NSRunLoop, NSRunLoopCommonModes, NSSize, NSString,
 };
 use objc2_metal::{MTLCommandBuffer, MTLDrawable};
 use objc2_quartz_core::{CADisplayLink, CALayer, CAMetalDrawable, CAMetalLayer};
@@ -36,9 +37,12 @@ use crate::keys::{KeyAction, KeyInput, KeyModes, Mods, encode_key, paste_bytes};
 use crate::latency::{self, FrameKeys, Latency};
 use crate::layout::{self, CellSize, Padding};
 use crate::mouse;
-use crate::session::{Hooks, Outcome, Session};
+use crate::select::{self, Block, Gesture};
+use crate::session::{Events, Hooks, Outcome, Session};
 
 const BLINK_INTERVAL: Duration = Duration::from_millis(530);
+/// How long a tick waits for the echo of input before drawing without it.
+const ECHO_WAIT: Duration = Duration::from_millis(8);
 
 struct State {
     session: Session,
@@ -63,7 +67,17 @@ struct State {
     scroll_accum: f64,
     /// Mouse button held while reporting to the program.
     mouse_button: Option<u8>,
-    selecting: bool,
+    /// The gesture that started the selection while the left button is
+    /// held for it.
+    selecting: Option<Gesture>,
+    /// Whether the selection being made changed since the button went down.
+    dragged: bool,
+    /// A rectangular selection (Option-drag); see [`crate::select`].
+    block: Option<Block>,
+    /// Scrolling while a selection is dragged past the top or bottom edge.
+    autoscroll: Option<AutoScroll>,
+    /// An auto-scroll step is waiting to run.
+    autoscroll_scheduled: bool,
     /// The session has ended, but the window stays open to show why; a key
     /// closes it.
     held: bool,
@@ -72,6 +86,27 @@ struct State {
     /// Only with `DECLINE_LATENCY_LOG` set: the key event being handled,
     /// its timestamp and when `keyDown` got it (see [`crate::latency`]).
     key_t0: Option<(f64, f64)>,
+    /// When input was last sent and its echo not yet drawn: the first
+    /// output after it is drawn at once, not on the next tick.
+    awaiting_echo: Option<Instant>,
+    /// The title bar's height, plus the tab bar's while one shows (points),
+    /// as of the last resize.
+    top_inset: f64,
+    /// Times the window was hidden or covered and gave back its drawables.
+    hidden: u64,
+    /// Whether the window could be seen when last checked
+    /// (`sync_visibility`), so hiding and showing happen once each.
+    shown: bool,
+}
+
+struct AutoScroll {
+    /// Lines a second; positive scrolls back into history.
+    speed: f64,
+    /// The column under the mouse, for extending the selection.
+    col: usize,
+    last: Instant,
+    /// Part of a line not yet scrolled.
+    carry: f64,
 }
 
 /// Test-only control commands waiting to run, and the dump in progress.
@@ -95,7 +130,13 @@ pub struct Ivars {
     id: usize,
     layer: Retained<CAMetalLayer>,
     state: RefCell<Option<State>>,
+    /// The window whose `contentLayoutRect` this view observes (it changes
+    /// when the tab bar shows or hides), until the window closes.
+    observed: RefCell<Option<Retained<NSWindow>>>,
 }
+
+/// The key path observed for the tab bar showing or hiding.
+const LAYOUT_RECT: &str = "contentLayoutRect";
 
 thread_local! {
     static VIEWS: RefCell<HashMap<usize, Weak<TerminalView>>> = RefCell::new(HashMap::new());
@@ -109,9 +150,34 @@ fn with_view(id: usize, f: impl FnOnce(&TerminalView)) {
     }
 }
 
+/// On the next turn of the main queue, hide or show every window as it
+/// can now be seen: a tab switch changes the key window, but the group's
+/// selected tab may change after the key notifications are sent.
+pub(crate) fn sync_visibility_soon() {
+    DispatchQueue::main().exec_async(|| {
+        let views: Vec<_> = VIEWS.with(|v| v.borrow().values().filter_map(|w| w.load()).collect());
+        for v in views {
+            v.sync_visibility();
+        }
+    });
+}
+
+/// Bring view `id`'s window or tab to the front (a click on its
+/// notification).
+pub(crate) fn bring_to_front(id: usize) {
+    with_view(id, |v| {
+        if let Some(window) = v.window() {
+            window.makeKeyAndOrderFront(None);
+            objc2_app_kit::NSApplication::sharedApplication(MainThreadMarker::from(v)).activate();
+            // An inactive app gets no key notifications to notice the switch.
+            sync_visibility_soon();
+        }
+    });
+}
+
 /// Wake the main thread to draw (called from any thread).
 fn wake(id: usize) {
-    DispatchQueue::main().exec_async(move || with_view(id, |v| v.unpause()));
+    DispatchQueue::main().exec_async(move || with_view(id, |v| v.output_arrived()));
 }
 
 define_class!(
@@ -156,6 +222,23 @@ define_class!(
         #[unsafe(method(viewDidChangeBackingProperties))]
         fn did_change_backing(&self) {
             self.reload_fonts(None);
+        }
+
+        /// The window's `contentLayoutRect` changed: with full-size content
+        /// the view keeps its size when the tab bar shows or hides, so the
+        /// grid has to follow the part nothing covers.
+        #[unsafe(method(observeValueForKeyPath:ofObject:change:context:))]
+        fn observe_value(
+            &self,
+            _key_path: Option<&NSString>,
+            _object: Option<&AnyObject>,
+            _change: Option<&AnyObject>,
+            _context: *mut std::ffi::c_void,
+        ) {
+            let inset = self.titlebar_height();
+            if self.with_state(|st| st.top_inset != inset) == Some(true) {
+                self.resize();
+            }
         }
 
         #[unsafe(method(tick:))]
@@ -215,12 +298,7 @@ define_class!(
 
         #[unsafe(method(copy:))]
         fn copy(&self, _sender: Option<&AnyObject>) {
-            let text = self.with_state(|st| st.session.lock_term().state.selection_text()).flatten();
-            if let Some(text) = text.filter(|t| !t.is_empty()) {
-                let pb = NSPasteboard::generalPasteboard();
-                pb.clearContents();
-                pb.setString_forType(&NSString::from_str(&text), unsafe { NSPasteboardTypeString });
-            }
+            self.copy_selection();
         }
 
         #[unsafe(method(paste:))]
@@ -268,23 +346,25 @@ define_class!(
     unsafe impl NSWindowDelegate for TerminalView {
         #[unsafe(method(windowDidBecomeKey:))]
         fn window_did_become_key(&self, _n: &NSNotification) {
+            // A tab brought to the front becomes key: show it now, so its
+            // first frame is drawn before it reaches the screen.
+            self.sync_visibility();
             self.set_focus(true);
+            sync_visibility_soon();
         }
 
         #[unsafe(method(windowDidResignKey:))]
         fn window_did_resign_key(&self, _n: &NSNotification) {
             self.set_focus(false);
+            // The tab put behind resigns key before its group selects
+            // another tab; look again once that has happened.
+            sync_visibility_soon();
         }
 
         #[unsafe(method(windowDidChangeOcclusionState:))]
         fn window_did_change_occlusion(&self, _n: &NSNotification) {
-            if self.visible() {
+            if self.sync_visibility() {
                 self.request_redraw();
-            } else {
-                // Free what can be rebuilt while nothing can be seen.
-                let minimised = self.window().is_some_and(|w| w.isMiniaturized());
-                self.with_state(|st| st.renderer.hide(minimised));
-                self.trim_drawables();
             }
         }
 
@@ -299,10 +379,12 @@ define_class!(
         fn insert_text(&self, string: &AnyObject, _range: NSRange) {
             let text = string_of(string);
             self.with_state(|st| st.marked.clear());
-            if !text.is_empty() {
+            if text.is_empty() {
+                self.request_redraw();
+            } else {
+                // Drawn with the echo (see `send_input`).
                 self.send_input(text.into_bytes());
             }
-            self.request_redraw();
         }
 
         #[unsafe(method(doCommandBySelector:))]
@@ -399,6 +481,7 @@ impl TerminalView {
             id,
             layer: CAMetalLayer::new(),
             state: RefCell::new(None),
+            observed: RefCell::new(None),
         });
         let view: Retained<TerminalView> = unsafe { msg_send![super(this), initWithFrame: frame] };
         view.setWantsLayer(true);
@@ -444,6 +527,9 @@ impl TerminalView {
         if let Some(lat) = latency::get() {
             hooks.on_parsed = Some(Box::new(move || lat.parsed(id)));
         }
+        hooks.on_events = Some(Box::new(move |events| {
+            DispatchQueue::main().exec_async(move || with_view(id, |v| v.events(events)));
+        }));
         let session = Session::spawn(&launch.command, pty_size(cols, lines, m), t, hooks)?;
 
         let link = unsafe { self.displayLinkWithTarget_selector(self, sel!(tick:)) };
@@ -469,13 +555,71 @@ impl TerminalView {
             marked: String::new(),
             scroll_accum: 0.0,
             mouse_button: None,
-            selecting: false,
+            selecting: None,
+            dragged: false,
+            block: None,
+            autoscroll: None,
+            autoscroll_scheduled: false,
             held: false,
             test,
             key_t0: None,
+            awaiting_echo: None,
+            top_inset: self.titlebar_height(),
+            hidden: 0,
+            shown: true,
         });
+        if let Some(window) = self.window() {
+            unsafe {
+                window.addObserver_forKeyPath_options_context(
+                    self,
+                    &NSString::from_str(LAYOUT_RECT),
+                    NSKeyValueObservingOptions::empty(),
+                    std::ptr::null_mut(),
+                )
+            };
+            *self.ivars().observed.borrow_mut() = Some(window);
+        }
         self.resize();
         Ok(())
+    }
+
+    /// What the program asked for, taken as it was parsed (see
+    /// [`crate::session::Events`]): drawn or not, a tab's title is shown
+    /// in the tab bar, a bell bounces the Dock icon, a notification is
+    /// shown if this window or tab isn't the one in front, and progress
+    /// goes on the Dock icon.
+    fn events(&self, events: Events) {
+        let mtm = MainThreadMarker::from(self);
+        let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
+        let fixed_title = self.with_state(|st| st.config.title.is_some()).unwrap_or(true);
+        let window = self.window();
+        if let Some(window) = &window
+            && !fixed_title
+            && let Some(title) = &events.title
+        {
+            window.setTitle(&NSString::from_str(title));
+        }
+        if events.bell {
+            // Bounce the Dock icon if the app isn't in front.
+            if !app.isActive() {
+                app.requestUserAttention(objc2_app_kit::NSRequestUserAttentionType::InformationalRequest);
+            }
+        }
+        if let Some(n) = events.notification {
+            let in_front = app.isActive() && window.as_ref().is_some_and(|w| w.isKeyWindow());
+            if !in_front {
+                // OSC 9 has no title: use the window's (programs set it).
+                let title = n
+                    .title
+                    .filter(|t| !t.is_empty())
+                    .or_else(|| window.as_ref().map(|w| w.title().to_string()))
+                    .unwrap_or_else(|| "decline".into());
+                crate::notify::post(mtm, self.ivars().id, &title, &n.body);
+            }
+        }
+        if let Some(p) = events.progress {
+            crate::notify::set_progress(mtm, self.ivars().id, p);
+        }
     }
 
     fn with_state<R>(&self, f: impl FnOnce(&mut State) -> R) -> Option<R> {
@@ -495,9 +639,10 @@ impl TerminalView {
         .flatten()
     }
 
+    /// The title bar's height, plus the tab bar's while one shows.
     fn titlebar_height(&self) -> f64 {
         match self.window() {
-            Some(w) => (w.frame().size.height - w.contentLayoutRect().size.height).max(0.0),
+            Some(w) => layout::top_inset(w.frame().size.height, w.contentLayoutRect().size.height),
             None => 0.0,
         }
     }
@@ -519,14 +664,64 @@ impl TerminalView {
         }
     }
 
+    /// The program wrote something (the dirty flag was clear). If it may be
+    /// the echo of input, draw now rather than on the next tick.
+    fn output_arrived(&self) {
+        let echo = self.with_state(|st| st.awaiting_echo.take().is_some());
+        if echo == Some(true) {
+            self.with_state(|st| {
+                st.idle_ticks = 0;
+                st.link.setPaused(false);
+            });
+            self.draw();
+        } else {
+            self.unpause();
+        }
+    }
+
     fn request_redraw(&self) {
         self.with_state(|st| st.session.mark_dirty());
         self.unpause();
     }
 
+    /// Whether the window can be seen. A tab behind another tab of its
+    /// group can't, whatever its occlusion state says: macOS doesn't
+    /// reliably report a background tab as covered. The key window can,
+    /// even before its occlusion state catches up with a tab switch.
     fn visible(&self) -> bool {
-        self.window()
-            .is_some_and(|w| w.occlusionState().contains(objc2_app_kit::NSWindowOcclusionState::Visible))
+        self.window().is_some_and(|w| {
+            let behind = w
+                .tabGroup()
+                .and_then(|g| g.selectedWindow())
+                .is_some_and(|front| !std::ptr::eq::<NSWindow>(&*front, &*w));
+            !behind && (w.isKeyWindow() || w.occlusionState().contains(objc2_app_kit::NSWindowOcclusionState::Visible))
+        })
+    }
+
+    /// Hide or show after the window was covered, uncovered, or its tab put
+    /// behind or brought to the front. Hiding frees what can be rebuilt
+    /// while nothing can be seen; showing draws at once, so the window
+    /// never shows a stale frame. Returns whether the window can be seen.
+    fn sync_visibility(&self) -> bool {
+        let visible = self.visible();
+        let minimised = self.window().is_some_and(|w| w.isMiniaturized());
+        let changed = self.with_state(|st| {
+            let changed = st.shown != visible;
+            st.shown = visible;
+            if changed && !visible {
+                st.hidden += 1;
+                st.renderer.hide(minimised);
+            }
+            changed
+        });
+        if changed == Some(true) {
+            if visible {
+                self.request_redraw();
+            } else {
+                self.trim_drawables();
+            }
+        }
+        visible
     }
 
     fn draw(&self) {
@@ -539,7 +734,18 @@ impl TerminalView {
         // dump never waits forever for a frame.
         let visible = visible || st.test.is_some();
         let term = st.session.term().clone();
-        let dirty = st.session.take_dirty();
+        let mut dirty = st.session.take_dirty();
+        if let Some(sent) = st.awaiting_echo {
+            if sent.elapsed() >= ECHO_WAIT {
+                // No echo: draw what the input changed (cursor, scroll).
+                st.awaiting_echo = None;
+                dirty = true;
+            } else if !dirty {
+                // Keep ticking until the echo comes or the wait is over.
+                st.idle_ticks = 0;
+                return;
+            }
+        }
         // Only a frame that may be drawn needs the terminal's lock.
         let mut t = (dirty && visible).then(|| crate::session::lock(&term));
         let synchronized = t.as_ref().is_some_and(|t| t.state.modes().synchronized);
@@ -604,16 +810,10 @@ impl TerminalView {
             });
         }
         let pad = padding_for(&st.config, titlebar, st.scale);
-        let mut title = None;
         let blink;
-        let bell;
         let clipboard;
         {
             let Some(t) = t.as_mut() else { return };
-            if let Some(new) = t.state.take_title() {
-                title = Some(new);
-            }
-            bell = t.state.take_bell();
             clipboard = t.state.take_clipboard();
             blink = t.state.cursor_blink();
             let input = FrameInput {
@@ -647,14 +847,7 @@ impl TerminalView {
         if need_blink {
             st.blink_scheduled = true;
         }
-        let fixed_title = st.config.title.clone();
         drop(guard);
-        if let Some(window) = self.window()
-            && fixed_title.is_none()
-            && let Some(title) = title
-        {
-            window.setTitle(&NSString::from_str(&title));
-        }
         if need_blink {
             self.schedule_blink();
         }
@@ -662,13 +855,6 @@ impl TerminalView {
             let pb = NSPasteboard::generalPasteboard();
             pb.clearContents();
             pb.setString_forType(&NSString::from_str(&text), unsafe { NSPasteboardTypeString });
-        }
-        if bell {
-            // Bounce the Dock icon if the app isn't in front.
-            let app = objc2_app_kit::NSApplication::sharedApplication(MainThreadMarker::from(self));
-            if !app.isActive() {
-                app.requestUserAttention(objc2_app_kit::NSRequestUserAttentionType::InformationalRequest);
-            }
         }
         if poll_dump {
             self.poll_dump();
@@ -719,6 +905,7 @@ impl TerminalView {
         let titlebar = self.titlebar_height();
         self.with_state(|st| {
             st.scale = window.backingScaleFactor();
+            st.top_inset = titlebar;
             let size = self.frame().size;
             let layer = &self.ivars().layer;
             layer.setContentsScale(st.scale);
@@ -742,7 +929,9 @@ impl TerminalView {
             }
             st.font_size = size;
             st.scale = scale;
-            st.renderer.set_fonts(Fonts::new(&st.config.font_family, size * scale));
+            // Only the size changes: fallbacks, faces, line height and
+            // cell width stay as configured.
+            st.renderer.set_fonts(Fonts::with_config(&st.config.font_config(size), scale));
             true
         });
         if changed == Some(true) {
@@ -763,10 +952,15 @@ impl TerminalView {
     }
 
     fn shut_down(&self) {
+        let observed = self.ivars().observed.borrow_mut().take();
+        if let Some(window) = observed {
+            unsafe { window.removeObserver_forKeyPath(self, &NSString::from_str(LAYOUT_RECT)) };
+        }
         let st = self.ivars().state.borrow_mut().take();
         if let Some(st) = st {
             st.link.invalidate();
             drop(st); // hangs up on the program
+            crate::notify::set_progress(MainThreadMarker::from(self), self.ivars().id, term_core::Progress::Clear);
         }
         VIEWS.with(|v| v.borrow_mut().remove(&self.ivars().id));
     }
@@ -815,7 +1009,24 @@ impl TerminalView {
             lat.key_sent(self.ivars().id, t0, key_down, len);
         }
         self.send_raw(bytes);
-        self.request_redraw();
+        // Don't draw yet: the echo is usually well under a millisecond away.
+        // A frame now would take the free drawable and clear the dirty flag,
+        // so the echo would wait for the next tick. Instead the first output
+        // after this is drawn as soon as it's parsed (`output_arrived`);
+        // with none, a tick draws after `ECHO_WAIT`.
+        self.with_state(|st| {
+            st.awaiting_echo = Some(Instant::now());
+            st.idle_ticks = 0;
+            st.link.setPaused(false);
+        });
+    }
+
+    /// Bytes typed for the latency harness (its `type` command).
+    pub fn latency_type(&self, bytes: Vec<u8>) {
+        let t = latency::now();
+        self.with_state(|st| st.key_t0 = Some((t, t)));
+        self.send_input(bytes);
+        self.with_state(|st| st.key_t0 = None);
     }
 
     fn send_raw(&self, bytes: Vec<u8>) {
@@ -905,64 +1116,202 @@ impl TerminalView {
     fn mouse_button_event(&self, event: &NSEvent, button: u8, press: bool) {
         self.with_state(|st| st.last_input = Instant::now());
         let Some((line, col)) = self.cell_at(event) else { return };
+        // A selection being made ends on its own button's release, even
+        // if Shift (which kept the program from the mouse) is let go first.
+        if button == mouse::LEFT && !press && self.with_state(|st| st.selecting.is_some()) == Some(true) {
+            self.end_selection();
+            return;
+        }
         if let Some((_, sgr)) = self.reporting(event) {
             self.with_state(|st| st.mouse_button = press.then_some(button));
             self.send_mouse(button + Self::mods_of(event), line, col, press, sgr);
             return;
         }
-        if button != mouse::LEFT {
+        if button != mouse::LEFT || !press {
             return;
         }
-        if !press {
-            self.with_state(|st| st.selecting = false);
-            return;
-        }
-        let clicks = event.clickCount();
+        let flags = event.modifierFlags();
+        let gesture = select::gesture(
+            event.clickCount(),
+            flags.contains(NSEventModifierFlags::Shift),
+            flags.contains(NSEventModifierFlags::Option),
+        );
         self.with_state(|st| {
-            st.selecting = true;
+            st.selecting = Some(gesture);
+            st.dragged = false;
+            st.autoscroll = None;
+            let block = st.block.take();
             let mut t = st.session.lock_term();
             let s = &mut t.state;
             let point = s.point_at(line, col);
-            match clicks {
-                1 => {
+            match gesture {
+                Gesture::Start => {
                     // Remember the anchor in an empty selection; dragging extends it.
                     s.set_selection(Some(Selection::new(point, point)));
                     st.scroll_accum = 0.0;
                 }
-                2 => s.select_word(point),
-                _ => s.select_line(point),
+                Gesture::Block => {
+                    let b = Block::at(point);
+                    s.set_selection(Some(b.stream()));
+                    st.block = Some(b);
+                }
+                Gesture::Word => s.select_word(point),
+                Gesture::Line => s.select_line(point),
+                Gesture::Extend => {
+                    // A rectangle still shown grows as a rectangle.
+                    match block.filter(|b| s.selection() == Some(b.stream())) {
+                        Some(mut b) => {
+                            b.head = point;
+                            s.set_selection(Some(b.stream()));
+                            st.block = Some(b);
+                        }
+                        None => s.extend_selection(point),
+                    }
+                }
             }
         });
         self.request_redraw();
     }
 
+    /// The left button was let go after making a selection: stop
+    /// auto-scrolling, and copy it if `copy_on_select` is on.
+    fn end_selection(&self) {
+        let copy = self.with_state(|st| {
+            let gesture = st.selecting.take();
+            st.autoscroll = None;
+            st.config.copy_on_select && gesture.is_some_and(|g| select::copies_on_release(g, st.dragged))
+        });
+        if copy == Some(true) {
+            self.copy_selection();
+        }
+    }
+
+    /// Put the selection (or the rectangle being shown) on the clipboard.
+    fn copy_selection(&self) {
+        let text = self
+            .with_state(|st| {
+                let mut t = st.session.lock_term();
+                match st.block.filter(|b| t.state.selection() == Some(b.stream())) {
+                    Some(b) => Some(b.text(&mut t.state)),
+                    None => t.state.selection_text(),
+                }
+            })
+            .flatten();
+        if let Some(text) = text.filter(|t| !t.is_empty()) {
+            let pb = NSPasteboard::generalPasteboard();
+            pb.clearContents();
+            pb.setString_forType(&NSString::from_str(&text), unsafe { NSPasteboardTypeString });
+        }
+    }
+
+    /// Move the selection being made to the cell at view `line`, `col`.
+    /// Whether it changed.
+    fn extend_selection_to(st: &mut State, line: usize, col: usize) -> bool {
+        let mut t = st.session.lock_term();
+        let before = t.state.selection();
+        let Some(sel) = before else { return false };
+        let to = t.state.point_at(line, col);
+        match st.block.as_mut().filter(|b| sel == b.stream()) {
+            Some(b) => {
+                b.head = to;
+                t.state.set_selection(Some(b.stream()));
+            }
+            None => t.state.extend_selection(to),
+        }
+        let changed = t.state.selection() != before;
+        st.dragged |= changed;
+        changed
+    }
+
+    /// Auto-scroll speed for a drag at `event`'s height (lines a second;
+    /// positive scrolls back), 0 while it is over the rows.
+    fn autoscroll_speed(&self, event: &NSEvent) -> f64 {
+        let p = self.convertPoint_fromView(event.locationInWindow(), None);
+        let titlebar = self.titlebar_height();
+        self.with_state(|st| {
+            let m = st.renderer.metrics();
+            let pad = padding_for(&st.config, titlebar, st.scale);
+            let lines = st.session.lock_term().state.lines();
+            let top = pad.top as f64;
+            let bottom = top + (lines as u32 * m.cell_height) as f64;
+            select::autoscroll_speed(p.y * st.scale, top, bottom, m.cell_height as f64)
+        })
+        .unwrap_or(0.0)
+    }
+
+    /// One auto-scroll step, then the next one while the mouse is still
+    /// held past the edge. Nothing is scheduled once it is back over the
+    /// rows or the button is let go.
+    fn autoscroll_tick(&self) {
+        let step = self.with_state(|st| {
+            st.autoscroll_scheduled = false;
+            if st.selecting.is_none() {
+                st.autoscroll = None;
+            }
+            let a = st.autoscroll.as_mut()?;
+            let now = Instant::now();
+            let lines = select::autoscroll_step(a.speed, (now - a.last).as_secs_f64(), &mut a.carry);
+            a.last = now;
+            let (up, col) = (a.speed > 0.0, a.col);
+            let mut changed = false;
+            if lines != 0 {
+                let mut t = st.session.lock_term();
+                let before = t.state.view_top();
+                t.state.scroll_view(lines);
+                changed = t.state.view_top() != before;
+                let row = if up { 0 } else { t.state.lines() - 1 };
+                drop(t);
+                changed |= Self::extend_selection_to(st, row, col);
+            }
+            st.autoscroll_scheduled = true;
+            Some(changed)
+        });
+        let Some(Some(changed)) = step else { return };
+        if changed {
+            self.request_redraw();
+        }
+        self.schedule_autoscroll();
+    }
+
+    fn schedule_autoscroll(&self) {
+        let id = self.ivars().id;
+        let at = DispatchTime::NOW.time(select::INTERVAL.as_nanos() as i64);
+        let _ = DispatchQueue::main().after(at, move || with_view(id, |v| v.autoscroll_tick()));
+    }
+
     fn mouse_motion(&self, event: &NSEvent, button: Option<u8>) {
         let Some((line, col)) = self.cell_at(event) else { return };
-        if let Some((mode, sgr)) = self.reporting(event) {
+        let selecting = self.with_state(|st| st.selecting.is_some()) == Some(true);
+        if !selecting && let Some((mode, sgr)) = self.reporting(event) {
             let held = self.with_state(|st| st.mouse_button).flatten();
             if mouse::reports_motion(mode, held) {
                 self.send_mouse(mouse::motion_code(held, button, Self::mods_of(event)), line, col, true, sgr);
             }
             return;
         }
-        if button != Some(mouse::LEFT) {
+        if button != Some(mouse::LEFT) || !selecting {
             return;
         }
-        let changed = self.with_state(|st| {
-            if !st.selecting {
-                return false;
-            }
-            let mut t = st.session.lock_term();
-            let before = t.state.selection();
-            if before.is_none() {
-                return false;
-            }
-            let to = t.state.point_at(line, col);
-            t.state.extend_selection(to);
-            t.state.selection() != before
-        });
-        if changed == Some(true) {
+        let speed = self.autoscroll_speed(event);
+        let (changed, start_timer) = self
+            .with_state(|st| {
+                // Past the top or bottom edge, a timer keeps scrolling
+                // while the mouse is held still; it stops once back over
+                // the rows or the button is let go.
+                st.autoscroll = (speed != 0.0).then(|| {
+                    let (last, carry) = st.autoscroll.as_ref().map_or((Instant::now(), 0.0), |a| (a.last, a.carry));
+                    AutoScroll { speed, col, last, carry }
+                });
+                let start = st.autoscroll.is_some() && !st.autoscroll_scheduled;
+                st.autoscroll_scheduled |= start;
+                (Self::extend_selection_to(st, line, col), start)
+            })
+            .unwrap_or((false, false));
+        if changed {
             self.request_redraw();
+        }
+        if start_timer {
+            self.schedule_autoscroll();
         }
     }
 
@@ -1127,6 +1476,12 @@ impl TerminalView {
                     let size = self.with_state(|st| (st.font_size + delta as f64).max(6.0));
                     self.reload_fonts(size);
                 }
+                Some(Control::Tab) => {
+                    if let Some(window) = self.window() {
+                        crate::app::open_tab_beside(&window);
+                    }
+                }
+                Some(Control::Front) => bring_to_front(self.ivars().id),
                 Some(Control::Quit) => {
                     objc2_app_kit::NSApplication::sharedApplication(MainThreadMarker::from(self)).terminate(None);
                     return;
@@ -1162,15 +1517,46 @@ impl TerminalView {
                 let _ = DispatchQueue::main().after(DispatchTime::NOW.time(2_000_000), move || with_view(id, |v| v.poll_dump()));
             }
             Some(true) => {
-                self.with_state(write_dump);
+                let me = self.window();
+                let tabs = me.as_ref().and_then(|w| w.tabbedWindows());
+                let window = Window {
+                    id: self.ivars().id,
+                    tabs: tabs.as_ref().map_or(1, |t| t.len()),
+                    tab: tabs
+                        .zip(me)
+                        .and_then(|(t, me)| t.iter().position(|w| std::ptr::eq::<NSWindow>(&*w, &*me)))
+                        .unwrap_or(0),
+                    visible: self.visible(),
+                    top_inset: self.titlebar_height(),
+                    badge: objc2_app_kit::NSApplication::sharedApplication(MainThreadMarker::from(self))
+                        .dockTile()
+                        .badgeLabel()
+                        .map(|b| b.to_string()),
+                    active: objc2_app_kit::NSApplication::sharedApplication(MainThreadMarker::from(self)).isActive(),
+                    secure_input: crate::app::secure_input_held(),
+                };
+                self.with_state(|st| write_dump(st, window));
                 self.run_controls();
             }
         }
     }
 }
 
-fn write_dump(st: &mut State) {
+/// What a dump says about the window, read from AppKit.
+struct Window {
+    id: usize,
+    tabs: usize,
+    tab: usize,
+    visible: bool,
+    top_inset: f64,
+    badge: Option<String>,
+    active: bool,
+    secure_input: bool,
+}
+
+fn write_dump(st: &mut State, window: Window) {
     use std::io::Write;
+    let pad_top = padding_for(&st.config, window.top_inset, st.scale).top;
     let Some(test) = &mut st.test else { return };
     test.seq += 1;
     test.dump = DumpState::Idle;
@@ -1182,6 +1568,16 @@ fn write_dump(st: &mut State) {
     let (mask_texture, color_texture) = st.renderer.glyphs.texture_sizes();
     let dump = Dump {
         seq: test.seq,
+        window: window.id,
+        tabs: window.tabs,
+        tab: window.tab,
+        visible: window.visible,
+        hidden: st.hidden,
+        pad_top,
+        notifications: crate::notify::stats(),
+        badge: window.badge,
+        active: window.active,
+        secure_input: window.secure_input,
         screen,
         cols,
         lines,

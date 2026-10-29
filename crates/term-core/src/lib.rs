@@ -16,4 +16,6 @@ pub mod word;
 pub use cell::{Cell, Color, ColorKind, Row, flags};
 pub use rows::{CellRef, Content, RowRef, StyleKey, Width};
 pub use style::{Attrs, LinkId, Style, Underline};
-pub use term::{Cursor, CursorShape, LinkValue, Modes, MouseMode, Point, Selection, SelectionKind, Term, Terminal, ViewTop};
+pub use term::{
+    Cursor, CursorShape, LinkValue, Modes, MouseMode, Notification, Point, Progress, Selection, SelectionKind, Term, Terminal, ViewTop,
+};

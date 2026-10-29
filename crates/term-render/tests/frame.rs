@@ -250,6 +250,22 @@ fn run_breaks_at_selection() {
 }
 
 #[test]
+fn selection_covers_short_history_rows_to_the_edge() {
+    // "ab" scrolls into history, which may store it shorter than the
+    // screen: the selection still reaches the last column.
+    let mut t = term(10, 2, &format!("{NO_CURSOR}ab\r\ncd\r\nef"));
+    t.state.scroll_view(1);
+    assert!(t.state.visible_row(0).len() < 10, "history row stored short");
+    let line = t.state.point_at(0, 0).line;
+    t.state
+        .set_selection(Some(Selection::new(Point { line, col: 1 }, Point { line, col: 9 })));
+    let theme = Theme::default();
+    let f = build(&t.state);
+    assert_eq!(f.rects, [rect(1, 0, 9, theme.selection)]);
+    assert_eq!(decoded(&f, 10, 2, (0, 0)), ["ab        ", "cd        "]);
+}
+
+#[test]
 fn run_breaks_at_inverse() {
     let t = term(10, 1, &format!("{NO_CURSOR}\x1b[41mab\x1b[7mcd\x1b[27mef"));
     let theme = Theme::default();
@@ -339,6 +355,24 @@ fn underline_positions_from_metrics() {
     let double_gap = 2 * M.underline_thickness as i16;
     let strike_y = CH + M.baseline as i16 - M.strike_offset as i16;
     assert_eq!(f.rects, [line(0, uy), line(1, uy), line(1, uy + double_gap), line(2, strike_y)]);
+}
+
+#[test]
+fn decorations_take_the_text_colour_as_drawn() {
+    // Red underline; inverse strike (the text colour is the background);
+    // a dim underline (the text colour's alpha). Underline colours set
+    // with SGR 58 are tested in frame.rs until term-core keeps them.
+    let t = term(10, 1, &format!("{NO_CURSOR}\x1b[31;4ma\x1b[0;7;9mb\x1b[0;2;4mc"));
+    let theme = Theme::default();
+    let f = build(&t.state);
+    let thin: Vec<_> = f
+        .rects
+        .iter()
+        .filter(|r| r.h == M.underline_thickness as u16)
+        .map(|r| (r.x / CW, r.color))
+        .collect();
+    let dim = (theme.foreground & 0x00FF_FFFF) | 160 << 24;
+    assert_eq!(thin, [(0, theme.palette[1]), (1, theme.background), (2, dim)]);
 }
 
 #[test]

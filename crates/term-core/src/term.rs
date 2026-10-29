@@ -12,6 +12,25 @@ use crate::scrollback::Scrollback;
 use crate::style::Style;
 use crate::unicode::{self, Segmenter};
 
+/// A desktop notification a program asked for: OSC 9 (`9;body`, iTerm2's
+/// form, no title) or OSC 777 (`777;notify;title;body`, rxvt's).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Notification {
+    pub title: Option<String>,
+    pub body: String,
+}
+
+/// Progress a program reported with OSC 9;4 (ConEmu's form): a percentage
+/// from 0 to 100 where the state has one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Progress {
+    Clear,
+    Normal(u8),
+    Error(u8),
+    Indeterminate,
+    Paused(u8),
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum CursorShape {
     #[default]
@@ -265,6 +284,9 @@ pub struct Terminal {
     selection: Option<Selection>,
     /// Text a program asked to put on the clipboard (OSC 52).
     clipboard: Option<String>,
+    /// A notification (OSC 9 / OSC 777) and progress (OSC 9;4) not yet taken.
+    notification: Option<Notification>,
+    progress: Option<Progress>,
     /// The program's working directory, if it reports it (OSC 7).
     cwd: Option<String>,
     /// Default colours as 0xRRGGBB, for answering colour queries.
@@ -316,6 +338,8 @@ impl Terminal {
             bell: false,
             selection: None,
             clipboard: None,
+            notification: None,
+            progress: None,
             cwd: None,
             default_colors: [0xd8dee9, 0x16181c, 0xd8dee9],
             cell_pixels: (8, 16),
@@ -439,6 +463,16 @@ impl Terminal {
 
     pub fn take_clipboard(&mut self) -> Option<String> {
         self.clipboard.take()
+    }
+
+    /// The last notification a program asked for (OSC 9 / OSC 777).
+    pub fn take_notification(&mut self) -> Option<Notification> {
+        self.notification.take()
+    }
+
+    /// The last progress a program reported (OSC 9;4).
+    pub fn take_progress(&mut self) -> Option<Progress> {
+        self.progress.take()
     }
 
     /// The program's working directory, if it reports it (OSC 7).
@@ -1971,6 +2005,33 @@ impl Perform for Terminal {
             [b"52", _target, data] if *data != b"?" => {
                 if let Some(bytes) = base64_decode(data) {
                     self.clipboard = Some(String::from_utf8_lossy(&bytes).into_owned());
+                }
+            }
+            // ConEmu's progress: `9;4;state;percent`.
+            [b"9", b"4", state, rest @ ..] => {
+                let pct = || {
+                    rest.first()
+                        .and_then(|p| std::str::from_utf8(p).ok()?.parse::<u8>().ok())
+                        .unwrap_or(0)
+                        .min(100)
+                };
+                self.progress = match *state {
+                    b"0" => Some(Progress::Clear),
+                    b"1" => Some(Progress::Normal(pct())),
+                    b"2" => Some(Progress::Error(pct())),
+                    b"3" => Some(Progress::Indeterminate),
+                    b"4" => Some(Progress::Paused(pct())),
+                    _ => self.progress,
+                };
+            }
+            [b"9", body @ ..] | [b"777", b"notify", _, body @ ..] => {
+                let body = body.iter().map(|p| String::from_utf8_lossy(p)).collect::<Vec<_>>().join(";");
+                let title = match params {
+                    [b"777", _, title, ..] => Some(String::from_utf8_lossy(title).into_owned()),
+                    _ => None,
+                };
+                if !body.is_empty() || title.as_deref().is_some_and(|t| !t.is_empty()) {
+                    self.notification = Some(Notification { title, body });
                 }
             }
             [b"7", url, ..] => {

@@ -75,6 +75,10 @@ pub struct Hooks {
     /// Latency harness only: called after each parse with the terminal
     /// still locked (see [`crate::latency`]).
     pub on_parsed: Option<Box<dyn Fn() + Send>>,
+    /// Called after a parse that produced [`Events`], which are taken out
+    /// of the terminal. Unlike drawing, this happens while the window is
+    /// hidden too (a background tab's title is in the tab bar).
+    pub on_events: Option<Box<dyn Fn(Events) + Send>>,
 }
 
 impl Hooks {
@@ -84,7 +88,36 @@ impl Hooks {
             on_exit,
             on_control: None,
             on_parsed: None,
+            on_events: None,
         }
+    }
+}
+
+/// What the program asked for that the window acts on whether or not it
+/// is drawn.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Events {
+    /// A new title (OSC 0/2).
+    pub title: Option<String>,
+    pub bell: bool,
+    /// OSC 9 / OSC 777.
+    pub notification: Option<term_core::Notification>,
+    /// OSC 9;4.
+    pub progress: Option<term_core::Progress>,
+}
+
+impl Events {
+    fn take(t: &mut Term) -> Events {
+        Events {
+            title: t.state.take_title(),
+            bell: t.state.take_bell(),
+            notification: t.state.take_notification(),
+            progress: t.state.take_progress(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        *self == Events::default()
     }
 }
 
@@ -113,10 +146,11 @@ pub fn lock(term: &Mutex<Term>) -> MutexGuard<'_, Term> {
 /// Decline hit a bug while parsing.
 struct Bug;
 
-/// Parse `bytes` into the terminal, returning replies for the program. A
-/// panic is caught before the lock is released, and the terminal, possibly
-/// half-updated, is replaced by a fresh one of the same size.
-fn parse(term: &Mutex<Term>, bytes: &[u8], on_parsed: Option<&(dyn Fn() + Send)>) -> Result<Vec<u8>, Bug> {
+/// Parse `bytes` into the terminal, returning replies for the program and,
+/// if `events` is set, the [`Events`] taken out of it. A panic is caught
+/// before the lock is released, and the terminal, possibly half-updated, is
+/// replaced by a fresh one of the same size.
+fn parse(term: &Mutex<Term>, bytes: &[u8], on_parsed: Option<&(dyn Fn() + Send)>, events: bool) -> Result<(Vec<u8>, Events), Bug> {
     let mut t = lock(term);
     let parsed = catch_unwind(AssertUnwindSafe(|| {
         test_panic(bytes);
@@ -126,7 +160,10 @@ fn parse(term: &Mutex<Term>, bytes: &[u8], on_parsed: Option<&(dyn Fn() + Send)>
         f();
     }
     match parsed {
-        Ok(()) => Ok(t.state.take_replies()),
+        Ok(()) => {
+            let events = if events { Events::take(&mut t) } else { Events::default() };
+            Ok((t.state.take_replies(), events))
+        }
         Err(_) => {
             replace_term(&mut t);
             Err(Bug)
@@ -211,6 +248,7 @@ impl Session {
             on_exit,
             mut on_control,
             on_parsed,
+            on_events,
         } = hooks;
         let reader = std::thread::Builder::new().name("pty-reader".into()).spawn(move || {
             // A panic anywhere else in the loop stops the session too.
@@ -222,9 +260,14 @@ impl Session {
                     if bytes.is_empty() {
                         return Ok(());
                     }
-                    let replies = parse(&term2, bytes, on_parsed.as_deref())?;
+                    let (replies, events) = parse(&term2, bytes, on_parsed.as_deref(), on_events.is_some())?;
                     if !replies.is_empty() {
                         let _ = tx2.send(replies);
+                    }
+                    if let Some(f) = &on_events
+                        && !events.is_empty()
+                    {
+                        f(events);
                     }
                     Ok(())
                 };

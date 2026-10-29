@@ -7,6 +7,8 @@
 //!   JSON to the file (see [`Dump`]);
 //! - `resize C L`: resize the window to C columns × L lines;
 //! - `font +1` / `font -1`: change the font size by one point;
+//! - `tab`: open a new tab beside this window, running the same program;
+//! - `front`: bring this window or tab to the front;
 //! - `quit`: quit the app.
 //!
 //! While this is on, the window draws even when covered by other windows,
@@ -104,6 +106,10 @@ pub enum Control {
     },
     /// Change the font size by this many points.
     Font(i32),
+    /// Open a tab beside this window (Shell > New Tab).
+    Tab,
+    /// Bring this window or tab to the front (as a notification click does).
+    Front,
     Quit,
 }
 
@@ -113,6 +119,8 @@ impl Control {
         let c = match words.next()? {
             "dump" => Control::Dump,
             "quit" => Control::Quit,
+            "tab" => Control::Tab,
+            "front" => Control::Front,
             "resize" => Control::Resize {
                 cols: words.next()?.parse().ok().filter(|&c| c > 0)?,
                 lines: words.next()?.parse().ok().filter(|&l| l > 0)?,
@@ -127,8 +135,29 @@ impl Control {
 /// One dump, written as a line of JSON.
 #[derive(Clone, Debug, Serialize)]
 pub struct Dump {
-    /// 1 for the first dump of this run, then 2, …
+    /// 1 for the first dump of this window, then 2, …
     pub seq: u64,
+    /// Which window (or tab) this is: 1 for the first opened, then 2, …
+    pub window: usize,
+    /// Tabs in this window's tab group (1 without tabs).
+    pub tabs: usize,
+    /// This tab's place in the tab bar, from 0 (0 without tabs).
+    pub tab: usize,
+    /// Whether the window can be seen (a background tab can't).
+    pub visible: bool,
+    /// Times the window was hidden or covered and gave back its drawables.
+    pub hidden: u64,
+    /// Top padding in pixels: the title bar, the tab bar while one shows,
+    /// and the configured padding.
+    pub pad_top: u32,
+    /// Notifications so far, for the whole app (see [`crate::notify`]).
+    pub notifications: crate::notify::Stats,
+    /// The Dock icon's badge (progress).
+    pub badge: Option<String>,
+    /// Whether the app is active, and whether it holds Secure Keyboard
+    /// Entry (only while active, when turned on).
+    pub active: bool,
+    pub secure_input: bool,
     /// `Terminal::dump()`: the visible rows and a status line.
     pub screen: String,
     pub cols: usize,
@@ -234,6 +263,9 @@ mod tests {
             ("font +1", Some(Control::Font(1))),
             ("font -2", Some(Control::Font(-2))),
             ("font", None),
+            ("tab", Some(Control::Tab)),
+            ("tab 2", None),
+            ("front", Some(Control::Front)),
             ("dump now", None),
             ("rm -rf", None),
             ("", None),

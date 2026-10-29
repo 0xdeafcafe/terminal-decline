@@ -376,7 +376,15 @@ impl AppDelegate {
     fn quit_without_asking(&self) {
         self.ivars().quit_without_asking.set(true);
         let mtm = MainThreadMarker::from(self);
-        NSApplication::sharedApplication(mtm).terminate(None);
+        let app = NSApplication::sharedApplication(mtm);
+        // AppKit puts off terminating while a window shows a sheet (a
+        // close question, say), so end those first.
+        for window in app.windows().iter() {
+            if let Some(sheet) = window.attachedSheet() {
+                window.endSheet(&sheet);
+            }
+        }
+        app.terminate(None);
     }
 
     /// A window in `dir`, or a tab of the window in front: as `how` says,

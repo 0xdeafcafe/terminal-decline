@@ -42,3 +42,4 @@ test-hooks = []
 
 [dev-dependencies]
 terminal-decline = { path = ".", features = ["test-hooks"] }
+proptest = { version = "1.12", default-features = false, features = ["std"] }

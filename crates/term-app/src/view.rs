@@ -858,7 +858,9 @@ impl TerminalView {
             }
             st.font_size = size;
             st.scale = scale;
-            st.renderer.set_fonts(Fonts::new(&st.config.font_family, size * scale));
+            // Only the size changes: fallbacks, faces, line height and
+            // cell width stay as configured.
+            st.renderer.set_fonts(Fonts::with_config(&st.config.font_config(size), scale));
             true
         });
         if changed == Some(true) {

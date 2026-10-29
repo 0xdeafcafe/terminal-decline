@@ -592,6 +592,44 @@ fn smoke_config_errors_show_in_the_window() {
     assert!(s.contains("ignored|\nprogram output|"), "{s}");
 }
 
+/// Font settings reach the window: `line_height = 1.5` makes cells half
+/// as tall again as the default config's, keeps doing so after a font
+/// size change, and a fallback font that isn't installed is reported in
+/// the window.
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_font_settings_from_the_config() {
+    if !have_metal() {
+        return;
+    }
+    let script = format!("echo text; {}{}{}{}sleep 20", osc("dump"), osc("font +1"), osc("dump"), osc("quit"));
+    let run_with = |name: &str, config: &str| {
+        let dir = TempDir::new(name);
+        std::fs::create_dir_all(dir.config_home().join("decline")).unwrap();
+        std::fs::write(dir.config_home().join("decline/config.toml"), config).unwrap();
+        let (status, _) = decline(&dir, &script, true);
+        assert!(status.success(), "{status}");
+        let d = dumps(&dir);
+        assert_eq!(d.len(), 2, "{d:?}");
+        check_dump(&d[0]);
+        d
+    };
+    let plain = run_with("font-default", "");
+    let tall = run_with("font-tall", "line_height = 1.5\nfont_fallback = ['No Such Font For Decline']\n");
+    assert_eq!(num(&plain[0], "scale"), num(&tall[0], "scale"));
+    for (p, t) in plain.iter().zip(&tall) {
+        let (hp, ht) = (num(p, "cell_height"), num(t, "cell_height"));
+        assert!((ht - hp * 1.5).abs() <= 1.0, "{hp} vs {ht}");
+        assert_eq!(num(p, "cell_width"), num(t, "cell_width"));
+    }
+    let s = screen(&tall[0]);
+    assert!(
+        s.starts_with("decline: config: font_fallback: no font named \"No Such Font For Decline\" is installed; ignored|"),
+        "{s}"
+    );
+    assert!(screen(&plain[0]).starts_with("text|"), "{}", screen(&plain[0]));
+}
+
 /// A pin bundle made by the pin module in a temp dir, with a unique bundle
 /// id, launched the way the Dock does (LaunchServices, via `open`).
 #[test]

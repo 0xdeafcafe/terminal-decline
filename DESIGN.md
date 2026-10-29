@@ -321,6 +321,19 @@ the installed `Decline.app`.
 selection), padding, opacity/blur, option-as-meta, scrollback lines, shell.
 Read once at start; later: reload on file change (FSEvents, no polling).
 
+Fonts (`config::Config::font_config` → `term_font::Fonts::with_config`):
+`font_family`, `font_size`, `font_fallback = [..]` (tried in order before
+the system's fallback), `font_bold` / `font_italic` / `font_bold_italic`
+(faces by name; unset, the family's own), `line_height = 1.0` (multiplies
+the cell height; must be above 0) and `cell_width = "0"` (points, e.g.
+`"1.5"` or `-1`, or a percentage of the advance, `"10%"`). A bad
+`line_height` or `cell_width` is reported like any other bad setting. The
+first window checks the named fonts are installed (`Fonts::missing`); any
+that aren't become config notices in that window and later ones
+(`decline: config: font_fallback: no font named "X" is installed;
+ignored`). Cmd+= / Cmd+- change only the size; the other font settings
+stay.
+
 ## Performance testing
 
 - `term-core` benchmarks (criterion): plain ASCII, coloured output (SGR-heavy),

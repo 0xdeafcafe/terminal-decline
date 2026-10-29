@@ -4,7 +4,8 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
+use term_font::{CellWidth, FontConfig};
 use term_render::Theme;
 
 /// Which Option key acts as Meta (sends ESC + key). Off by default, like
@@ -53,6 +54,20 @@ impl Default for Colors {
 pub struct Config {
     pub font_family: String,
     pub font_size: f64,
+    /// Fonts tried in order for characters `font_family` lacks, before the
+    /// system's own fallback.
+    pub font_fallback: Vec<String>,
+    /// The bold, italic and bold italic faces by name; unset, the family's
+    /// own.
+    pub font_bold: Option<String>,
+    pub font_italic: Option<String>,
+    pub font_bold_italic: Option<String>,
+    /// Multiplies the cell height; 1.0 is the font's own line height.
+    #[serde(deserialize_with = "line_height")]
+    pub line_height: f64,
+    /// Widens or narrows cells: `"1.5"` points or `"10%"` of the advance.
+    #[serde(deserialize_with = "cell_width")]
+    pub cell_width: CellWidth,
     /// Space around the text, in points.
     pub padding: f64,
     pub scrollback: usize,
@@ -80,6 +95,12 @@ impl Default for Config {
         Config {
             font_family: "Menlo".into(),
             font_size: 13.0,
+            font_fallback: Vec::new(),
+            font_bold: None,
+            font_italic: None,
+            font_bold_italic: None,
+            line_height: 1.0,
+            cell_width: CellWidth::default(),
             padding: 6.0,
             scrollback: 10_000,
             option_as_meta: OptionAsMeta::None,
@@ -94,6 +115,36 @@ impl Default for Config {
             colors: Colors::default(),
             pin_app: None,
         }
+    }
+}
+
+fn line_height<'de, D: Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
+    let v = f64::deserialize(d)?;
+    if v.is_finite() && v > 0.0 {
+        Ok(v)
+    } else {
+        Err(serde::de::Error::custom(format!("{v} is not above 0")))
+    }
+}
+
+/// `cell_width` as a string (`"1.5"`, `"-1"`, `"10%"`) or a plain number
+/// of points.
+fn cell_width<'de, D: Deserializer<'de>>(d: D) -> Result<CellWidth, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Raw {
+        Text(String),
+        Int(i64),
+        Float(f64),
+    }
+    let bad = |what: &dyn std::fmt::Display| {
+        serde::de::Error::custom(format!("{what} is not a width: use points (\"1.5\") or a percentage (\"10%\")"))
+    };
+    match Raw::deserialize(d).map_err(|_| bad(&"this"))? {
+        Raw::Text(s) => CellWidth::parse(&s).ok_or_else(|| bad(&format_args!("{s:?}"))),
+        Raw::Int(n) => Ok(CellWidth::Points(n as f64)),
+        Raw::Float(f) if f.is_finite() => Ok(CellWidth::Points(f)),
+        Raw::Float(f) => Err(bad(&f)),
     }
 }
 
@@ -192,6 +243,39 @@ pub fn parse_hex(s: &str) -> Option<u32> {
 }
 
 impl Config {
+    /// The font settings at `size` points (the window's current size,
+    /// which Cmd+= and Cmd+- change).
+    pub fn font_config(&self, size: f64) -> FontConfig {
+        FontConfig {
+            fallback: self.font_fallback.clone(),
+            bold: self.font_bold.clone(),
+            italic: self.font_italic.clone(),
+            bold_italic: self.font_bold_italic.clone(),
+            line_height: self.line_height,
+            cell_width: self.cell_width,
+            ..FontConfig::new(&self.font_family, size)
+        }
+    }
+
+    /// A notice for each font named in the config that isn't installed
+    /// (`missing`, from `Fonts::missing`), naming the setting it came from.
+    pub fn missing_font_notices(&self, missing: &[String]) -> Vec<String> {
+        missing
+            .iter()
+            .map(|name| {
+                let key = [
+                    ("font_bold", &self.font_bold),
+                    ("font_italic", &self.font_italic),
+                    ("font_bold_italic", &self.font_bold_italic),
+                ]
+                .into_iter()
+                .find(|(_, v)| v.as_deref() == Some(name.as_str()))
+                .map_or("font_fallback", |(k, _)| k);
+                format!("config: {key}: no font named {name:?} is installed; ignored")
+            })
+            .collect()
+    }
+
     pub fn theme(&self) -> Theme {
         let d = Colors::default();
         let c = &self.colors;
@@ -370,6 +454,94 @@ mod tests {
         for (r, g, b) in [(0x12, 0x34, 0x56), (0xff, 0, 0), (0, 0, 0xff)] {
             assert_eq!(rgb_of(term_render::rgb(r << 16 | g << 8 | b)), r << 16 | g << 8 | b);
         }
+    }
+
+    fn parse(text: &str) -> (Config, Vec<String>) {
+        let (good, errors) = keep_valid(text.parse().unwrap());
+        (toml::Value::Table(good).try_into().unwrap(), errors)
+    }
+
+    #[test]
+    fn font_settings_default_to_the_fonts_own() {
+        let c = Config::default();
+        assert_eq!(c.font_config(13.0), FontConfig::new("Menlo", 13.0));
+        assert_eq!(c.font_config(20.0).size, 20.0);
+    }
+
+    #[test]
+    fn font_settings_are_read() {
+        let (c, errors) = parse(
+            "font_family = 'JetBrains Mono'\nfont_fallback = ['Symbols Nerd Font Mono', 'Apple Color Emoji']\n\
+             font_bold = 'JetBrains Mono ExtraBold'\nfont_italic = 'Menlo Italic'\nfont_bold_italic = 'Menlo Bold Italic'\n\
+             line_height = 1.2\ncell_width = '10%'",
+        );
+        assert!(errors.is_empty(), "{errors:?}");
+        let fc = c.font_config(15.0);
+        assert_eq!(fc.family, "JetBrains Mono");
+        assert_eq!(fc.size, 15.0);
+        assert_eq!(fc.fallback, ["Symbols Nerd Font Mono", "Apple Color Emoji"]);
+        assert_eq!(fc.bold.as_deref(), Some("JetBrains Mono ExtraBold"));
+        assert_eq!(fc.italic.as_deref(), Some("Menlo Italic"));
+        assert_eq!(fc.bold_italic.as_deref(), Some("Menlo Bold Italic"));
+        assert_eq!(fc.line_height, 1.2);
+        assert_eq!(fc.cell_width, CellWidth::Percent(10.0));
+    }
+
+    #[test]
+    fn cell_width_values() {
+        for (text, want) in [
+            ("'0'", Some(CellWidth::Points(0.0))),
+            ("'1.5'", Some(CellWidth::Points(1.5))),
+            ("'-1'", Some(CellWidth::Points(-1.0))),
+            ("'10%'", Some(CellWidth::Percent(10.0))),
+            ("2", Some(CellWidth::Points(2.0))),
+            ("0.5", Some(CellWidth::Points(0.5))),
+            ("'wide'", None),
+            ("'10px'", None),
+            ("true", None),
+        ] {
+            let (c, errors) = parse(&format!("cell_width = {text}\nline_height = 2"));
+            assert_eq!(c.line_height, 2.0, "{text}");
+            match want {
+                Some(w) => assert_eq!((c.cell_width, errors.len()), (w, 0), "{text}: {errors:?}"),
+                None => {
+                    assert_eq!(c.cell_width, CellWidth::default(), "{text}");
+                    assert_eq!(errors.len(), 1, "{text}: {errors:?}");
+                    assert!(errors[0].starts_with("config: cell_width: "), "{errors:?}");
+                    assert!(errors[0].contains("not a width"), "{errors:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn line_height_must_be_above_zero() {
+        for text in ["0", "-1.5", "'tall'", "nan"] {
+            let (c, errors) = parse(&format!("line_height = {text}"));
+            assert_eq!(c.line_height, 1.0, "{text}");
+            assert_eq!(errors.len(), 1, "{text}: {errors:?}");
+            assert!(errors[0].starts_with("config: line_height: "), "{errors:?}");
+        }
+    }
+
+    #[test]
+    fn missing_fonts_name_their_setting() {
+        let c = Config {
+            font_fallback: vec!["Nope Mono".into()],
+            font_bold: Some("Nope Bold".into()),
+            font_bold_italic: Some("Nope Bold Italic".into()),
+            ..Config::default()
+        };
+        let notices = c.missing_font_notices(&["Nope Bold".into(), "Nope Bold Italic".into(), "Nope Mono".into()]);
+        assert_eq!(
+            notices,
+            [
+                "config: font_bold: no font named \"Nope Bold\" is installed; ignored",
+                "config: font_bold_italic: no font named \"Nope Bold Italic\" is installed; ignored",
+                "config: font_fallback: no font named \"Nope Mono\" is installed; ignored",
+            ]
+        );
+        assert!(c.missing_font_notices(&[]).is_empty());
     }
 
     #[test]

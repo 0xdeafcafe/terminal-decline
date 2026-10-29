@@ -38,7 +38,10 @@ pub struct AppIvars {
     /// Windows to reopen after a dogfood build restarted into a newer one.
     restore: RefCell<Vec<crate::reload::SavedWindow>>,
     /// Config errors, shown at the top of each window.
-    notices: Rc<[String]>,
+    notices: RefCell<Rc<[String]>>,
+    /// Whether the first window has checked the configured fonts are
+    /// installed (adding to `notices` if not).
+    fonts_checked: std::cell::Cell<bool>,
     windows: RefCell<Vec<(Retained<NSWindow>, Retained<TerminalView>)>>,
     /// Secure Keyboard Entry (decline menu).
     secure: RefCell<SecureInput>,
@@ -175,7 +178,8 @@ impl AppDelegate {
         let this = Self::alloc(mtm).set_ivars(AppIvars {
             config: Rc::new(config),
             restore: RefCell::new(restore),
-            notices: notices.into(),
+            notices: RefCell::new(notices.into()),
+            fonts_checked: std::cell::Cell::new(false),
             windows: RefCell::new(Vec::new()),
             secure: RefCell::new(SecureInput::new(
                 objc2_foundation::NSUserDefaults::standardUserDefaults().boolForKey(&NSString::from_str(secure_input::DEFAULTS_KEY)),
@@ -360,8 +364,20 @@ impl AppDelegate {
         let mtm = MainThreadMarker::from(self);
         let config = self.ivars().config.clone();
         let scale = NSScreen::mainScreen(mtm).map(|s| s.backingScaleFactor()).unwrap_or(2.0);
-        let fonts = Fonts::new(&config.font_family, config.font_size * scale);
+        let fonts = Fonts::with_config(&config.font_config(config.font_size), scale);
         let metrics = fonts.metrics;
+        if !self.ivars().fonts_checked.replace(true) {
+            // Fonts the config names but that aren't installed: shown with
+            // the other config notices, in this window and later ones.
+            let missing = config.missing_font_notices(fonts.missing());
+            for n in &missing {
+                eprintln!("decline: {n}");
+            }
+            if !missing.is_empty() {
+                let mut notices = self.ivars().notices.borrow_mut();
+                *notices = notices.iter().cloned().chain(missing).collect();
+            }
+        }
 
         let style = NSWindowStyleMask::Titled
             | NSWindowStyleMask::Closable
@@ -447,7 +463,7 @@ impl AppDelegate {
                 command,
                 fonts,
                 scale,
-                notices: self.ivars().notices.clone(),
+                notices: self.ivars().notices.borrow().clone(),
             },
         ) {
             eprintln!("decline: could not open a window: {e}");

@@ -51,6 +51,31 @@ impl Image {
             .count()
     }
 
+    /// Where `self` and `other` (the same size) differ, for failure
+    /// messages: how many pixels, the first few with both values, and the
+    /// glyph ink in each.
+    fn diff(&self, other: &Image) -> String {
+        let (xs, ys) = ((0, self.width), (0, self.height));
+        let differ: Vec<(usize, usize)> = (0..self.height)
+            .flat_map(|y| (0..self.width).map(move |x| (x, y)))
+            .filter(|&(x, y)| self.at(x, y) != other.at(x, y))
+            .collect();
+        let first: Vec<String> = differ
+            .iter()
+            .take(8)
+            .map(|&(x, y)| format!("({x},{y}) {:?} vs {:?}", self.at(x, y), other.at(x, y)))
+            .collect();
+        format!(
+            "{} of {}x{} pixels differ, first: {}; ink {} vs {}",
+            differ.len(),
+            self.width,
+            self.height,
+            first.join(", "),
+            self.inked(xs, ys),
+            other.inked(xs, ys)
+        )
+    }
+
     /// Pixels in `x0..x1` × `y0..y1` brighter than the dark backgrounds
     /// used here: glyph ink.
     fn inked(&self, (x0, x1): (usize, usize), (y0, y1): (usize, usize)) -> usize {
@@ -360,7 +385,14 @@ fn a_texture_grow_keeps_pixels_without_a_rebuild() {
 
     assert!(r1.is_current(&a), "growing keeps slots");
     let after = alone(&mut r1, &a, size);
-    assert!(after == before, "pixels changed after the texture grew");
+    let device = r1.device();
+    assert!(
+        after == before,
+        "pixels changed after the texture grew ({}, unified memory {}): after vs before: {}",
+        device.name(),
+        device.hasUnifiedMemory(),
+        after.diff(&before)
+    );
 }
 
 /// Emptying a texture at its cap makes every pane built before stale: it

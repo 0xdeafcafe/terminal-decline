@@ -495,3 +495,14 @@ builds:
 | blinking cursor idle, 20 s | 20 s | 0.17 s | 41 MB | 36 MB |
 | 10 windows idle (separate processes) | – | 0% | – | 286 MB total |
 | 56 resizes during 1 GB output; 60 in htop | – | – | – | survived |
+
+### Frame building after the cell interface (F3.1)
+
+`cargo bench -p term-render --bench frame`, best of 5 alternating runs under
+load: 80×24 plain 8.31 → 6.55 µs, 300×100 plain 126.4 → 97.0 µs, 300×100
+coloured 113.5 → 110.4 µs (before PR 1 → after F3.1). Rows are built from
+their stored cells, with selection/cursor/IME checks only on rows that need
+them, and runs of same-styled cells share one resolved style. Text whose
+style changes every one or two cells is still 10–25% slower than before PR 1
+(each change re-reads the style); PR 5's style ids make that a single
+compare.

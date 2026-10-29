@@ -179,6 +179,7 @@ fn main() {
         cwd: std::env::current_dir().ok().map(|d| d.to_string_lossy().into_owned()),
         env: vec![("ENV".into(), String::new())],
         shell: Some("/bin/sh".into()),
+        direct: false,
     };
     let pty = Pty::spawn(&cmd, size).expect("spawn");
     let child = pty.child();

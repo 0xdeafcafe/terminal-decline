@@ -1,0 +1,25 @@
+[package]
+name = "term-image"
+description = "Parsers and decoders for terminal images: kitty graphics keys, base64, zlib, iTerm2 arguments, Sixel, image headers"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
+
+[dev-dependencies]
+criterion = { version = "0.7", default-features = false }
+png = "0.18"
+
+[[bench]]
+name = "probe"
+harness = false
+
+[[bench]]
+name = "sixel"
+harness = false
+
+[[bench]]
+name = "stream"
+harness = false

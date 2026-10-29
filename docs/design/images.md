@@ -448,6 +448,12 @@ pub trait ImageHost: Send + Sync {
 }
 ```
 
+As built (I.1): the decoders are generic over the target type, with
+`AllocWith<'a, T> = &'a mut dyn FnMut(u32, u32) -> Option<T>` and `Alloc`
+its boxed form, so term-core gets its own `Box<dyn PixelBuffer>` back
+from the Sixel decoder without a downcast. `term_image::VecPixels` is the
+`Vec`-backed target for tests and the pure-Rust test host.
+
 term-core has no threads of its own. Work that must leave the lock is
 queued on the terminal:
 
@@ -880,6 +886,13 @@ slices (`put_slice` from vte's DCS passthrough, cells §14):
   of the string is skipped, and the image is dropped.
 - At the end, the image is cropped to the area painted (or the raster
   size if larger, as xterm does).
+- As built (I.1): with `P2 ≠ 1`, unset pixels take register 0 as it is
+  at the end of the string (programs define `#0` after the raster
+  attributes); painted pixels are always opaque, so alpha 0 marks unset
+  ones and no mask is kept. Decoding chafa-style data (a 1000 × 1000
+  photo-like image, 216 colours) runs at ~215 MB/s on an M-series Mac
+  (`cargo bench -p term-image --bench sixel`), through a fast path for
+  runs of single sixels at 1:1.
 
 The decoder writes BGRA premultiplied straight into the `PixelTarget`
 (§4.2; the Metal buffer the GPU reads). Decoding runs on the reader

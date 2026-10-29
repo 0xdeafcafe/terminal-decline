@@ -12,6 +12,7 @@ cargo-fuzz = true
 arbitrary = "1"
 libfuzzer-sys = "0.4"
 term-core = { path = "../crates/term-core" }
+term-image = { path = "../crates/term-image" }
 
 # Its own workspace, so the main workspace (and `cargo test --workspace`)
 # never builds this crate, which needs a nightly toolchain to link.
@@ -21,6 +22,41 @@ members = ["."]
 [[bin]]
 name = "parse"
 path = "fuzz_targets/parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sixel"
+path = "fuzz_targets/sixel.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "kitty_keys"
+path = "fuzz_targets/kitty_keys.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "iterm_args"
+path = "fuzz_targets/iterm_args.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "inflate"
+path = "fuzz_targets/inflate.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sniff"
+path = "fuzz_targets/sniff.rs"
 test = false
 doc = false
 bench = false

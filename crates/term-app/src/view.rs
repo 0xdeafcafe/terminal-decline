@@ -34,7 +34,7 @@ use term_render::{FrameInput, Renderer, Theme};
 
 use crate::config::Config;
 use crate::control::{self, Control, Dump};
-use crate::frame_policy::{self, Decision};
+use crate::frame_policy::{self, Decision, ECHO_WAIT};
 use crate::keybind::{self, Keybinds};
 use crate::keys::{KeyAction, KeyEventType, KeyInput, KeyModes, KeysDown, Mods, encode_key, paste_bytes};
 use crate::latency::{self, FrameKeys, Latency};
@@ -45,8 +45,6 @@ use crate::session::{Events, Hooks, Outcome, Session};
 use crate::theme::Appearance;
 
 const BLINK_INTERVAL: Duration = Duration::from_millis(530);
-/// How long a tick waits for the echo of input before drawing without it.
-const ECHO_WAIT: Duration = Duration::from_millis(8);
 
 struct State {
     session: Session,

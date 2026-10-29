@@ -317,8 +317,8 @@ pub(crate) fn sync_visibility_soon() {
 pub(crate) fn bring_to_front(id: usize) {
     with_view(id, |v| {
         if let Some(window) = v.window() {
-            window.makeKeyAndOrderFront(None);
-            objc2_app_kit::NSApplication::sharedApplication(MainThreadMarker::from(v)).activate();
+            crate::background::make_key_and_order_front(&window);
+            crate::background::activate(MainThreadMarker::from(v));
             // An inactive app gets no key notifications to notice the switch.
             sync_visibility_soon();
         }
@@ -861,7 +861,7 @@ impl WindowView {
             }
         }
         if let Some(n) = events.notification {
-            let in_front = app.isActive() && window.as_ref().is_some_and(|w| w.isKeyWindow());
+            let in_front = app.isActive() && window.as_ref().is_some_and(|w| crate::background::is_key(w));
             if !in_front {
                 // OSC 9 has no title: use the window's (programs set it).
                 let title = n
@@ -1005,7 +1005,10 @@ impl WindowView {
                 .tabGroup()
                 .and_then(|g| g.selectedWindow())
                 .is_some_and(|front| !std::ptr::eq::<NSWindow>(&*front, &*w));
-            !behind && (w.isKeyWindow() || w.occlusionState().contains(objc2_app_kit::NSWindowOcclusionState::Visible))
+            !behind
+                && (crate::background::is_key(&w)
+                    || crate::background::on()
+                    || w.occlusionState().contains(objc2_app_kit::NSWindowOcclusionState::Visible))
         })
     }
 
@@ -2233,9 +2236,9 @@ impl WindowView {
         };
         // Asked again while waiting: the old monitor goes, silently.
         if let Some(old) = self.with_state(|st| st.win.recording.take()).flatten() {
-            unsafe { NSEvent::removeMonitor(&old.monitor) };
+            crate::background::remove_monitor(&old.monitor);
         }
-        if !self.window().is_some_and(|w| w.isKeyWindow()) {
+        if !self.window().is_some_and(|w| crate::background::is_key(&w)) {
             view.send_raw(keybind::chord_reply(None).into_bytes());
             return;
         }
@@ -2245,7 +2248,7 @@ impl WindowView {
             with_view(id, |v| taken = v.recorded_key(unsafe { event.as_ref() }));
             if taken { std::ptr::null_mut() } else { event.as_ptr() }
         });
-        let monitor = unsafe { NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::KeyDown, &handler) };
+        let monitor = crate::background::add_local_monitor(NSEventMask::KeyDown, handler);
         let Some(monitor) = monitor else {
             view.send_raw(keybind::chord_reply(None).into_bytes());
             return;
@@ -2302,7 +2305,7 @@ impl WindowView {
         }) else {
             return;
         };
-        unsafe { NSEvent::removeMonitor(&rec.monitor) };
+        crate::background::remove_monitor(&rec.monitor);
         if let Some(view) = view {
             view.send_raw(keybind::chord_reply(chord.as_ref()).into_bytes());
         }
@@ -2336,6 +2339,7 @@ impl WindowView {
             }
         });
         alert.beginSheetModalForWindow_completionHandler(window, Some(&done));
+        crate::background::hide(&alert.window());
     }
 }
 
@@ -2939,7 +2943,7 @@ fn post_key(mtm: MainThreadMarker, keycode: u16, flags: u64) {
             keycode,
         );
         if let Some(event) = event {
-            app.sendEvent(&event);
+            crate::background::send_key(&app, &window, &event);
         }
     }
 }

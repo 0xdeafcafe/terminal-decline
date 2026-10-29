@@ -317,8 +317,7 @@ impl FindBar {
             }
             event.as_ptr()
         });
-        let monitor =
-            unsafe { NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::KeyDown | NSEventMask::LeftMouseDown, &handler) };
+        let monitor = crate::background::add_local_monitor(NSEventMask::KeyDown | NSEventMask::LeftMouseDown, handler);
         *self.ivars().monitor.borrow_mut() = monitor;
     }
 
@@ -366,7 +365,7 @@ impl FindBar {
     /// The bar is closing: stop watching for Esc.
     pub(crate) fn stop(&self) {
         if let Some(m) = self.ivars().monitor.borrow_mut().take() {
-            unsafe { NSEvent::removeMonitor(&m) };
+            crate::background::remove_monitor(&m);
         }
     }
 

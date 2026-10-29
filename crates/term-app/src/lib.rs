@@ -7,6 +7,7 @@
 
 pub mod app;
 mod ascii_layout;
+mod background;
 pub mod config;
 pub mod control;
 pub mod crash;

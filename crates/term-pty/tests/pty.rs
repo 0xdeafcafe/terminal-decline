@@ -266,6 +266,26 @@ fn foreground_cwd_is_canonical() {
     s.wait_exit();
 }
 
+/// A terminal reads lines and echoes them until a program turns that off
+/// (as `stty raw -echo` does here, and a line editor at its prompt).
+#[test]
+fn modes_say_when_keys_are_read_one_at_a_time() {
+    let mut s = spawn(
+        "modes",
+        &["sh", "-c", "echo lines; read _; stty raw -echo; echo keys; read _"],
+        |_, _| {},
+    );
+    let modes = s.pty().modes().unwrap();
+    s.wait_for_text("lines");
+    assert!(!modes.reading_keys());
+    s.write(b"\n");
+    s.wait_for_text("keys");
+    assert!(modes.reading_keys());
+    // Raw mode: a newline doesn't end a line any more, so hang up.
+    drop(s.pty.take());
+    s.wait_exit();
+}
+
 #[cfg(not(target_vendor = "apple"))]
 #[test]
 fn foreground_cwd_is_none_off_macos() {

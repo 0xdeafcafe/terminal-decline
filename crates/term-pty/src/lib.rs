@@ -233,6 +233,13 @@ impl Pty {
         })
     }
 
+    /// A handle for asking how the program has set up the terminal.
+    pub fn modes(&self) -> io::Result<Modes> {
+        Ok(Modes {
+            file: File::from(self.master.try_clone()?),
+        })
+    }
+
     pub fn resize(&self, size: Size) -> io::Result<()> {
         let ws = size.winsize();
         if unsafe { libc::ioctl(self.master.as_raw_fd(), libc::TIOCSWINSZ, &ws) } < 0 {
@@ -343,6 +350,25 @@ impl BatchReader {
                 Err(_) => return 0,
             }
         }
+    }
+}
+
+/// How the program has set up the terminal (its termios).
+pub struct Modes {
+    file: File,
+}
+
+impl Modes {
+    /// Whether the program reads keys one at a time without the terminal
+    /// echoing them (canonical mode and echo off), as a shell's line
+    /// editor does while it waits at its prompt. A terminal just opened,
+    /// or one a program reads lines from, reads lines and echoes.
+    pub fn reading_keys(&self) -> bool {
+        let mut t: libc::termios = unsafe { std::mem::zeroed() };
+        if unsafe { libc::tcgetattr(self.file.as_raw_fd(), &mut t) } != 0 {
+            return false;
+        }
+        t.c_lflag & (libc::ICANON | libc::ECHO) == 0
     }
 }
 

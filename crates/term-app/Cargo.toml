@@ -6,8 +6,10 @@ description = "A fast, GPU-accelerated terminal for macOS"
 license.workspace = true
 repository.workspace = true
 
+# Not `terminal_decline`: that is crates/term-dylib's, whose file must be
+# libterminal_decline.dylib (docs/design/pins.md §2.5).
 [lib]
-name = "terminal_decline"
+name = "terminal_decline_app"
 path = "src/lib.rs"
 
 # The cask also links it as `decline`.

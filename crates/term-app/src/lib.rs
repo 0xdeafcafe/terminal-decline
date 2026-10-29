@@ -12,6 +12,7 @@ pub mod control;
 pub mod crash;
 pub mod desktop;
 mod divider_view;
+pub mod entry;
 mod find_bar;
 pub mod frame_policy;
 pub mod import;
@@ -40,6 +41,7 @@ pub mod theme;
 mod view;
 pub mod watch;
 
+pub use entry::{PinInfo, Role, run};
 pub use paths::Paths;
 
 /// The product's name as people see it, in menus, Services and questions.

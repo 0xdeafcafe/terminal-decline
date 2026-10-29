@@ -10,8 +10,22 @@ pub struct Paths {
     pub config_dir: PathBuf,
     /// Where pins are created by default: `~/Applications`.
     pub apps_dir: PathBuf,
-    /// This binary.
+    /// This process's executable: the static binary, the app's launcher
+    /// or a pin's stub (or a clone pin's copy of the static binary).
     pub exe: PathBuf,
+    /// The Terminal Decline.app whose code is running, if any
+    /// ([`crate::entry::Role::app_bundle`]): where the pin stub
+    /// (`Contents/Helpers/terminal-decline-pin`) and the app's own
+    /// executable are. `None` for a bare binary outside the app.
+    pub app_bundle: Option<PathBuf>,
+}
+
+/// The paths [`crate::entry::run`] started with.
+static CURRENT: std::sync::OnceLock<Paths> = std::sync::OnceLock::new();
+
+/// Remember `paths` as this process's (the first call only).
+pub fn set_current(paths: Paths) {
+    let _ = CURRENT.set(paths);
 }
 
 /// The config directory's name, under `~/.config`.
@@ -63,15 +77,27 @@ impl Paths {
     /// `~/.config/terminal-decline`), `~/Applications` and the running
     /// executable.
     pub fn from_env() -> Paths {
+        Paths::from_env_as(&crate::entry::Role::Bare)
+    }
+
+    /// The paths [`crate::entry::run`] started with, else [`Paths::from_env`].
+    pub fn current() -> Paths {
+        CURRENT.get().cloned().unwrap_or_else(Paths::from_env)
+    }
+
+    /// [`Paths::from_env`] for a process started in `role`.
+    pub fn from_env_as(role: &crate::entry::Role) -> Paths {
         let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
         let config_base = std::env::var_os("XDG_CONFIG_HOME")
             .filter(|v| !v.is_empty())
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join(".config"));
+        let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("terminal-decline"));
         Paths {
             config_dir: config_base.join(CONFIG_DIR),
             apps_dir: home.join("Applications"),
-            exe: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("terminal-decline")),
+            app_bundle: role.app_bundle(&exe),
+            exe,
         }
     }
 
@@ -189,6 +215,13 @@ impl Paths {
     }
 }
 
+/// The `.app` an executable at `<app>/Contents/MacOS/<name>` is in, links
+/// followed (the cask links `terminal-decline` into its bin directory).
+pub fn bundle_of(exe: &Path) -> Option<PathBuf> {
+    let exe = exe.canonicalize().ok()?;
+    contents_dir_of(&exe)?.parent().map(Path::to_path_buf)
+}
+
 fn contents_dir_of(exe: &Path) -> Option<PathBuf> {
     let macos = exe.parent()?;
     let contents = macos.parent()?;
@@ -205,6 +238,7 @@ mod tests {
             config_dir: dir.join("config/terminal-decline"),
             apps_dir: dir.join("Applications"),
             exe: dir.join("terminal-decline"),
+            app_bundle: None,
         }
     }
 

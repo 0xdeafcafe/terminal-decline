@@ -22,7 +22,9 @@ cask "terminal-decline" do
   caveats <<~EOS
     Dock pins made with `terminal-decline pin` load Terminal Decline from
     Terminal Decline.app, so keep it installed while you use pins. Pins made
-    before the rename (from Decline.app) need `terminal-decline pin --update`.
+    by earlier versions (copies of the whole app, including those from
+    Decline.app) keep working as they are; `terminal-decline pin --repair`
+    rebuilds them as pins that load the installed app.
   EOS
 
   zap trash: [

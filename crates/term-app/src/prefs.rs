@@ -336,6 +336,7 @@ mod tests {
             config_dir: dir.join("config"),
             apps_dir: dir.join("Applications"),
             exe: dir.join("terminal-decline"),
+            app_bundle: None,
         };
         let app = paths.apps_dir.join("Rush.app");
         std::fs::create_dir_all(app.join("Contents/MacOS")).unwrap();

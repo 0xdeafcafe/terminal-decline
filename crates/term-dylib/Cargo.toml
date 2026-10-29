@@ -1,0 +1,19 @@
+[package]
+name = "term-dylib"
+description = "Terminal Decline as libterminal_decline.dylib, with the entry points the launcher and pin stubs call"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish = false
+
+# The file is libterminal_decline.dylib (docs/design/pins.md §2.5); the
+# term-app library it wraps is terminal_decline_app, so the names don't
+# collide.
+[lib]
+name = "terminal_decline"
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+terminal-decline = { path = "../term-app" }
+term-pin = { path = "../term-pin" }

@@ -174,7 +174,7 @@ jobs:
       contents: write
     env:
       GH_TOKEN: ${{ github.token }}
-      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      HOMEBREW_TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
       VERSION: ${{ needs.build.outputs.version }}
       SHA256: ${{ needs.build.outputs.sha256 }}
     steps:
@@ -191,9 +191,15 @@ jobs:
             --notes "SHA-256 of the zip: \`$SHA256\`"
 
       - name: Update Homebrew cask
-        if: env.HOMEBREW_TAP_TOKEN != ''
+        if: env.HOMEBREW_TAP_DEPLOY_KEY != ''
         run: |
-          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/0xdeafcafe/homebrew-tap.git" tap
+          # A deploy key with write access to the tap only (no personal
+          # token to expire).
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$HOMEBREW_TAP_DEPLOY_KEY" > ~/.ssh/tap_key
+          chmod 600 ~/.ssh/tap_key
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/tap_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+          git clone git@github.com:0xdeafcafe/homebrew-tap.git tap
           mkdir -p tap/Casks
           sed -e "s/@VERSION@/$VERSION/" -e "s/@SHA256@/$SHA256/" packaging/homebrew/terminal-decline.rb > tap/Casks/terminal-decline.rb
           cd tap

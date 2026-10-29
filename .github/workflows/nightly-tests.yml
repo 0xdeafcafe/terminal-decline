@@ -4,6 +4,10 @@ name: Nightly tests
 # an optimised build that keeps debug assertions (so `check_invariants` runs)
 # and overflow checks. A failure uploads proptest's regression files: commit
 # them so the case runs on every PR from then on.
+#
+# Also vttest and esctest2 (the conformance job): a failure not in
+# tests/conformance/accepted-failures.txt, or a listed one that now passes,
+# fails it.
 
 on:
   schedule:
@@ -88,4 +92,27 @@ jobs:
           name: proptest-regressions-${{ matrix.os }}
           path: |
             **/proptest-regressions/
+          if-no-files-found: warn
+
+  conformance:
+    # vttest and esctest2 against the headless terminal, checked against
+    # tests/conformance/accepted-failures.txt (see docs/conformance.md).
+    needs: changed
+    if: needs.changed.outputs.run == 'true'
+    name: conformance (vttest, esctest2)
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: conformance
+      - name: vttest and esctest2
+        run: python3 scripts/conformance/run.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: conformance
+          path: target/conformance/results/
           if-no-files-found: warn

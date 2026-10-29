@@ -648,7 +648,15 @@ end.
   `command_output(p)` / `select_output(p)`: from the C mark of the
   command `p` is in (on its output, prompt or command line) to the cell
   before the next D or A, or up to the cursor while it runs; `None` for
-  an empty output. They read screen lines only for now.
+  an empty output. They read history too since E.5 (below).
+- **Marks in history before v2** (E.5): until PR 7, `Scrollback` keeps
+  the marks of each line it stores that has any, by line number, beside
+  the v1 lines (`marks(i)`, `marked()`); they go when their line is
+  trimmed and on clear. `marks_at`, the prompt lookups and
+  `command_output` read them, so jumps and output selection reach
+  history. A row's marks are copied only when it has some; `parse_1k`
+  plain and `seq` showed no change (p 0.55 and 0.29, a loaded machine).
+  PR 7 replaces this with its `MARKS` section.
 - **Not done here: plain-URL detection.** The design doesn't place it,
   and the roadmap has it in E.2; since it needs logical lines, it would
   fit in term-core next to `select_word` as `url_at(p)`.
@@ -3204,9 +3212,9 @@ in that app:
 
 - **Between PRs 5 and 7,** history still uses v1. As built, v1 keeps
   underline colour, underline style and overline (§5.4, Landed); only
-  links are lost. With PR 9 before PR 7, OSC 8 links and OSC 133 marks
-  work on the screen and are dropped when their lines scroll into
-  history, so prompt jumps and selecting output reach only the screen.
+  links are lost. With PR 9 before PR 7, OSC 8 links work on the screen
+  and are dropped when their lines scroll into history; OSC 133 marks
+  are kept beside v1 history since E.5.
 
 - **Between PRs 6 and 7,** clusters work on the screen, but v1 history keeps
   only each cluster's first scalar: a family emoji scrolled into history

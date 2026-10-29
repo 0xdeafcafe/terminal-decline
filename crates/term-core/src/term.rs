@@ -726,12 +726,15 @@ impl Terminal {
 
     /// The OSC 133 marks on line `line`, in the order they were written
     /// (by column; at the same column a command's output and end come
-    /// before the next prompt). History lines have none until history stores marks
-    /// (scrollback v2).
+    /// before the next prompt). History keeps the marks of its lines
+    /// beside them, at the width they were written.
     pub fn marks_at(&self, line: u64) -> Vec<Mark> {
         let mut marks: Vec<Mark> = match self.screen_line(line) {
             Some(row) => row.marks().collect(),
-            None => Vec::new(),
+            None => match self.history_index(line) {
+                Some(i) => self.scrollback.marks(i).to_vec(),
+                None => Vec::new(),
+            },
         };
         marks.sort_by_key(|m| (m.col, mark_rank(m.kind)));
         marks
@@ -752,29 +755,49 @@ impl Terminal {
         }
     }
 
+    /// History line `line`'s index in the scrollback, if it is there
+    /// (the primary screen's history; the alternate screen has none).
+    fn history_index(&self, line: u64) -> Option<usize> {
+        if self.alt_active || line >= self.top_line {
+            return None;
+        }
+        line.checked_sub(self.first_line()).map(|i| i as usize)
+    }
+
+    /// History's lines holding marks, oldest first, from its list of them.
+    fn history_marked(&self) -> impl DoubleEndedIterator<Item = u64> + '_ {
+        let first = self.first_line();
+        let marked = if self.alt_active { None } else { Some(self.scrollback.marked()) };
+        marked.into_iter().flatten().map(move |i| first + i as u64)
+    }
+
     /// Lines holding marks, nearest first: before `line` going up, or
-    /// after it going down. (With history v2 this skips blocks without
-    /// marks, §11.6; today history holds none, so only screen lines are
-    /// read.)
-    fn marked_lines(&self, line: u64, up: bool) -> Box<dyn Iterator<Item = u64> + '_> {
-        let lo = self.first_line().max(self.top_line);
-        let hi = self.top_line + self.lines as u64;
+    /// after it going down (`None`: every one, oldest first).
+    fn marked_lines(&self, line: Option<u64>, up: bool) -> Box<dyn Iterator<Item = u64> + '_> {
+        let top = self.top_line;
+        let hi = top + self.lines as u64;
         let has = move |l: &u64| self.screen_line(*l).is_some_and(Row::has_marks);
-        if up {
-            Box::new((lo..line.min(hi)).rev().filter(has))
-        } else {
-            Box::new((line.saturating_add(1).max(lo)..hi).filter(has))
+        match line {
+            Some(line) if up => {
+                let screen = (top..line.min(hi)).rev().filter(has);
+                Box::new(screen.chain(self.history_marked().rev().filter(move |&l| l < line)))
+            }
+            Some(line) => {
+                let screen = (line.saturating_add(1).max(top)..hi).filter(has);
+                Box::new(self.history_marked().filter(move |&l| l > line).chain(screen))
+            }
+            None => Box::new(self.history_marked().chain((top..hi).filter(has))),
         }
     }
 
     /// Where the nearest prompt (OSC 133 A) above line `line` starts.
     pub fn previous_prompt(&self, line: u64) -> Option<Point> {
-        self.marked_lines(line, true).find_map(|l| self.prompt_on(l))
+        self.marked_lines(Some(line), true).find_map(|l| self.prompt_on(l))
     }
 
     /// Where the nearest prompt (OSC 133 A) below line `line` starts.
     pub fn next_prompt(&self, line: u64) -> Option<Point> {
-        self.marked_lines(line, false).find_map(|l| self.prompt_on(l))
+        self.marked_lines(Some(line), false).find_map(|l| self.prompt_on(l))
     }
 
     fn prompt_on(&self, line: u64) -> Option<Point> {
@@ -790,12 +813,9 @@ impl Terminal {
     /// and last cell. `None` if there is no C mark for it or the output
     /// is empty.
     pub fn command_output(&self, p: Point) -> Option<(Point, Point)> {
-        // Every mark in the order written. (Screen lines only, until
-        // history keeps marks; then this reads only the lines of blocks
-        // with marks.)
-        let lines = self.top_line..self.top_line + self.lines as u64;
-        let marks: Vec<(Point, MarkKind)> = lines
-            .filter(|&l| self.screen_line(l).is_some_and(Row::has_marks))
+        // Every mark in the order written, history's then the screen's.
+        let marks: Vec<(Point, MarkKind)> = self
+            .marked_lines(None, false)
             .flat_map(|line| {
                 self.marks_at(line)
                     .into_iter()

@@ -12,7 +12,7 @@
 
 use std::collections::VecDeque;
 
-use crate::cell::{Cell, Color, Row, Width};
+use crate::cell::{Cell, Color, Mark, Row, Width};
 use crate::style::{Attrs, Style, Underline};
 
 const BLOCK_BYTES: usize = 64 * 1024;
@@ -41,6 +41,10 @@ pub struct Scrollback {
     /// Reused while encoding, so pushing a line allocates nothing.
     text: Vec<u8>,
     runs: Vec<(Look, u32)>,
+    /// The OSC 133 marks of the lines that have any, by line number,
+    /// oldest first. They sit beside the encoded lines until history
+    /// stores them itself (scrollback v2, §11.6).
+    marks: VecDeque<(u64, Vec<Mark>)>,
 }
 
 impl Scrollback {
@@ -52,6 +56,7 @@ impl Scrollback {
             end: 0,
             text: Vec::new(),
             runs: Vec::new(),
+            marks: VecDeque::new(),
         }
     }
 
@@ -83,6 +88,7 @@ impl Scrollback {
 
     pub fn clear(&mut self) {
         self.blocks = VecDeque::new();
+        self.marks = VecDeque::new();
         self.start = self.end;
     }
 
@@ -110,10 +116,16 @@ impl Scrollback {
         let block = self.blocks.back_mut().unwrap();
         block.starts.push(block.data.len() as u32);
         encode(row, styles, &mut block.data, &mut self.text, &mut self.runs);
+        if row.has_marks() {
+            self.marks.push_back((self.end, row.marks().collect()));
+        }
         self.end += 1;
 
         if self.len() > self.limit {
             self.start = self.end - self.limit as u64;
+            while self.marks.front().is_some_and(|&(line, _)| line < self.start) {
+                self.marks.pop_front();
+            }
             // Free blocks whose lines are all gone.
             while self.blocks.len() > 1 && self.blocks[1].first <= self.start {
                 self.blocks.pop_front();
@@ -136,6 +148,20 @@ impl Scrollback {
         row.cells.clear();
         decode(data, row, styles);
         true
+    }
+
+    /// The OSC 133 marks of line `i` (0..len), in no particular order.
+    pub fn marks(&self, i: usize) -> &[Mark] {
+        let line = self.start + i as u64;
+        match self.marks.binary_search_by_key(&line, |&(l, _)| l) {
+            Ok(at) => &self.marks[at].1,
+            Err(_) => &[],
+        }
+    }
+
+    /// The lines (0..len) that have marks, oldest first.
+    pub fn marked(&self) -> impl DoubleEndedIterator<Item = usize> + '_ {
+        self.marks.iter().map(|&(line, _)| (line - self.start) as usize)
     }
 
     /// Whether line `i` soft-wraps onto the next, without decoding it.

@@ -413,6 +413,47 @@ fn select_a_commands_output() {
     assert_eq!(plain.state.command_output(plain.state.point_at(0, 1)), None);
 }
 
+/// Marks scrolled into history are kept beside its lines: prompts there
+/// are found going up and down, outputs there are selected, and they go
+/// with their lines when history drops them or is cleared.
+#[test]
+fn marks_in_history() {
+    let mut t = Term::new(20, 4, 6);
+    session(&mut t, "one", "1\r\n", 0);
+    session(&mut t, "two", "2\r\n22\r\n", 1);
+    t.advance(b"\x1b]133;A\x07$ ");
+    // Lines 0..7: prompts at 0, 2 and 5; the screen is lines 2..6.
+    let top = t.state.point_at(0, 0).line;
+    assert_eq!(top, 2);
+    let at = |line: u64| Point { line, col: 0 };
+    assert_eq!(t.state.marks_at(0), vec![mark(MarkKind::Prompt, 0), mark(MarkKind::Input, 2)]);
+    assert_eq!(t.state.previous_prompt(5), Some(at(2)));
+    assert_eq!(t.state.previous_prompt(2), Some(at(0)));
+    assert_eq!(t.state.previous_prompt(0), None);
+    assert_eq!(t.state.next_prompt(0), Some(at(2)));
+    assert_eq!(t.state.next_prompt(1), Some(at(2)));
+    let copy = |t: &mut Term, at: Point| t.state.select_output(at).then(|| t.state.selection_text().unwrap());
+    assert_eq!(copy(&mut t, at(0)), Some("1".into()));
+    assert_eq!(copy(&mut t, at(3)), Some("2\n22".into()));
+    // History holds 6 lines: 6 more lines drop lines 0 and 1, the first
+    // command's.
+    t.advance(b"\r\n\r\n\r\n\r\n\r\n\r\n");
+    assert_eq!(t.state.scrollback_len(), 6);
+    assert_eq!(t.state.marks_at(0), vec![]);
+    assert_eq!(t.state.marks_at(1), vec![]);
+    assert_eq!(t.state.previous_prompt(5), Some(at(2)));
+    assert_eq!(t.state.previous_prompt(2), None);
+    // ED 3 clears history and its marks.
+    t.advance(b"\x1b[3J");
+    assert_eq!(t.state.previous_prompt(10), None);
+    // The alternate screen has no history to jump into.
+    let mut t = Term::new(20, 2, 10);
+    session(&mut t, "one", "1\r\n", 0);
+    t.advance(b"\x1b[?1049h");
+    assert_eq!(t.state.previous_prompt(t.state.point_at(1, 0).line), None);
+    check(&t);
+}
+
 #[test]
 fn osc8_and_133_split_across_reads() {
     let input = b"\x1b]8;id=q;https://split/a;b\x1b\\link\x1b]8;;\x1b\\\x1b]133;A\x07$ ";

@@ -2,7 +2,8 @@
 //! under the lock plus building from it (cells design §9), when every row
 //! changed, when none did, when one row did (a spinner) and when the
 //! screen scrolled by a line; and the reference path that reads the live
-//! terminal (`build_live`, what frames were built with before).
+//! terminal (`build_live`, what frames were built with before); and one
+//! 160×48 pane against four 80×24 panes.
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
@@ -113,6 +114,43 @@ fn bench(c: &mut Criterion) {
             })
         });
     }
+    // One window, one 160×48 pane or four 80×24 panes (splits design
+    // §3.4): the same cells, four terminals and frames.
+    let mut t = screen(160, 48, Colours::Coloured);
+    let mut frame = Frame::default();
+    c.bench_function("frame 1 pane 160x48 coloured", |b| {
+        b.iter(|| {
+            frame.forget_rows();
+            frame.build(&mut t.state, black_box(&input), &mut Cached);
+            black_box(frame.glyphs.len())
+        })
+    });
+    c.bench_function("frame 1 pane 160x48 coloured unchanged", |b| {
+        b.iter(|| {
+            frame.build(&mut t.state, black_box(&input), &mut Cached);
+            black_box(frame.glyphs.len())
+        })
+    });
+    let mut terms: Vec<Term> = (0..4).map(|_| screen(80, 24, Colours::Coloured)).collect();
+    let mut frames: Vec<Frame> = (0..4).map(|_| Frame::default()).collect();
+    c.bench_function("frame 4 panes 80x24 coloured", |b| {
+        b.iter(|| {
+            for (f, t) in frames.iter_mut().zip(&mut terms) {
+                f.forget_rows();
+                f.build(&mut t.state, black_box(&input), &mut Cached);
+            }
+            black_box(frames[3].glyphs.len())
+        })
+    });
+    c.bench_function("frame 4 panes 80x24 coloured unchanged", |b| {
+        b.iter(|| {
+            for (f, t) in frames.iter_mut().zip(&mut terms) {
+                f.build(&mut t.state, black_box(&input), &mut Cached);
+            }
+            black_box(frames[3].glyphs.len())
+        })
+    });
+
     for (name, cols, lines, colours) in [cases[0], cases[2]] {
         // One row changes per frame: a spinner on the middle row.
         let mut t = screen(cols, lines, colours);

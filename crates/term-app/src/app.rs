@@ -65,6 +65,11 @@ pub struct AppIvars {
     /// Quit without asking, even with `confirm_close` (a restart into a
     /// new build, or the test-only `quit`).
     quit_without_asking: Cell<bool>,
+    /// The Settings tab, while it is open: Cmd+, brings it to the front.
+    settings: RefCell<Option<Retained<NSWindow>>>,
+    /// The errors of the config in effect, so a reload writes only new
+    /// ones into the windows.
+    errors: RefCell<Vec<String>>,
 }
 
 define_class!(
@@ -203,6 +208,32 @@ define_class!(
             self.new_tab_in_front();
         }
 
+        /// Terminal Decline > Settings… (Cmd+,).
+        #[unsafe(method(showSettings:))]
+        fn show_settings_item(&self, _sender: Option<&AnyObject>) {
+            self.show_settings();
+        }
+
+        /// Terminal Decline > Edit config.toml: the file in the default
+        /// text editor, for anyone who prefers it to Settings….
+        #[unsafe(method(editConfig:))]
+        fn edit_config(&self, _sender: Option<&AnyObject>) {
+            let Some(file) = self.ivars().origin.edited().map(std::path::Path::to_path_buf) else { return };
+            if !file.exists() {
+                // `open` needs a file to open.
+                let made = file
+                    .parent()
+                    .map_or(Ok(()), std::fs::create_dir_all)
+                    .and_then(|()| std::fs::OpenOptions::new().create_new(true).write(true).open(&file).map(drop));
+                if let Err(e) = made {
+                    eprintln!("terminal-decline: {}: {e}", file.display());
+                }
+            }
+            if let Err(e) = std::process::Command::new("/usr/bin/open").arg("-t").arg(&file).spawn() {
+                eprintln!("terminal-decline: open -t {}: {e}", file.display());
+            }
+        }
+
         /// Terminal Decline > Secure Keyboard Entry: on or off, kept in user
         /// defaults.
         #[unsafe(method(toggleSecureKeyboardEntry:))]
@@ -247,7 +278,12 @@ define_class!(
         #[unsafe(method(windowClosed:))]
         fn window_closed(&self, n: &NSNotification) {
             let closed = n.object();
-            self.ivars().windows.borrow_mut().retain(|(w, _)| closed.as_deref().map(|o| !std::ptr::eq(o, w.as_ref() as &AnyObject)).unwrap_or(true));
+            let is_closed = |w: &NSWindow| closed.as_deref().is_some_and(|o| std::ptr::eq(o, w as &AnyObject));
+            self.ivars().windows.borrow_mut().retain(|(w, _)| !is_closed(w));
+            let mut settings = self.ivars().settings.borrow_mut();
+            if settings.as_deref().is_some_and(is_closed) {
+                *settings = None;
+            }
         }
     }
 );
@@ -274,6 +310,8 @@ impl AppDelegate {
             launched: Cell::new(false),
             opened_at_launch: RefCell::new(Vec::new()),
             quit_without_asking: Cell::new(false),
+            settings: RefCell::new(None),
+            errors: RefCell::new(notices.clone()),
             notices: RefCell::new(notices.into()),
             fonts_checked: std::cell::Cell::new(false),
             windows: RefCell::new(Vec::new()),
@@ -305,8 +343,11 @@ impl AppDelegate {
     }
 
     /// Read the config again and apply it: to every window what can change
-    /// while it runs, the rest to new windows (with a notice saying so).
-    /// Errors are notices, as at startup.
+    /// while it runs, the rest to new windows. Errors new since the last
+    /// load are written into the windows, except while the Settings tab is
+    /// open (it shows the same messages) and into full-screen programs;
+    /// that a setting waits for new windows only goes to stderr (the
+    /// Settings tab marks those settings).
     fn reload_config(&self) {
         let (config, errors) = self.ivars().origin.load();
         let config = Rc::new(config);
@@ -320,10 +361,13 @@ impl AppDelegate {
         }
         // New windows show the errors, as they would at startup.
         *self.ivars().notices.borrow_mut() = shown.iter().cloned().collect();
-        shown.extend(crate::config::new_windows_notice(&crate::config::new_windows_only(&old, &config)));
-        for n in &shown {
+        let before = self.ivars().errors.replace(shown.clone());
+        let later = crate::config::new_windows_notice(&crate::config::new_windows_only(&old, &config));
+        for n in shown.iter().chain(&later) {
             eprintln!("terminal-decline: {n}");
         }
+        let settings_open = self.ivars().settings.borrow().is_some();
+        shown.retain(|n| !settings_open && !before.contains(n));
         if old.keybind != config.keybind {
             let mtm = MainThreadMarker::from(self);
             let menus = build_menus(mtm, &self.ivars().app_name, &config.keybinds());
@@ -331,7 +375,9 @@ impl AppDelegate {
         }
         let windows: Vec<_> = self.ivars().windows.borrow().clone();
         for (window, view) in windows {
-            apply_opacity(&window, &config);
+            if !view.is_settings() {
+                apply_opacity(&window, &config);
+            }
             view.apply_config(config.clone(), &shown);
         }
         if let Some(w) = self.ivars().watcher.borrow().as_ref() {
@@ -504,6 +550,33 @@ impl AppDelegate {
         }
     }
 
+    /// Terminal Decline > Settings…: the Settings tab to the front, else a
+    /// new one in the front window running the preferences.
+    fn show_settings(&self) {
+        let open = self.ivars().settings.borrow().clone();
+        if let Some(window) = open {
+            window.makeKeyAndOrderFront(None);
+            let mtm = MainThreadMarker::from(self);
+            NSApplication::sharedApplication(mtm).activate();
+            crate::view::sync_visibility_soon();
+            return;
+        }
+        let place = match self.front_window() {
+            Some(window) => Place::TabOf(window),
+            None => Place::Cascade,
+        };
+        let opened = self.open_window_as(None, place, None, true);
+        *self.ivars().settings.borrow_mut() = opened;
+    }
+
+    /// Bytes typed into the Settings tab (test-only `type-settings`).
+    fn type_into_settings(&self, bytes: Vec<u8>) {
+        let window = self.ivars().settings.borrow().clone();
+        if let Some(view) = window.and_then(|w| self.view_of(&w)) {
+            view.type_bytes(bytes);
+        }
+    }
+
     /// A new tab after `window`'s current one, in its directory.
     pub(crate) fn open_tab(&self, window: &NSWindow) {
         let cwd = self.view_of(window).and_then(|v| v.foreground_cwd());
@@ -567,6 +640,13 @@ impl AppDelegate {
     /// Open a window in `cwd` (else the configured one) at `place`, running
     /// `argv` (else the configured program).
     fn open_window(&self, cwd: Option<String>, place: Place, argv: Option<Vec<String>>) -> Option<Retained<NSWindow>> {
+        self.open_window_as(cwd, place, argv, false)
+    }
+
+    /// [`Self::open_window`], or with `settings` the Settings tab: the
+    /// main app's binary running the preferences directly (not through
+    /// the login shell), titled "Settings", opaque, without notices.
+    fn open_window_as(&self, cwd: Option<String>, place: Place, argv: Option<Vec<String>>, settings: bool) -> Option<Retained<NSWindow>> {
         let mtm = MainThreadMarker::from(self);
         let config = self.ivars().config.borrow().clone();
         let scale = NSScreen::mainScreen(mtm).map(|s| s.backingScaleFactor()).unwrap_or(2.0);
@@ -602,7 +682,10 @@ impl AppDelegate {
         // tabs (Cmd+T is for tabs); tabbing is allowed again once it is on
         // screen, for Merge All Windows and dragging tabs together.
         window.setTabbingMode(NSWindowTabbingMode::Disallowed);
-        let title = config.title.clone().unwrap_or_else(|| "Terminal Decline".into());
+        let title = match settings {
+            true => "Settings".into(),
+            false => config.title.clone().unwrap_or_else(|| "Terminal Decline".into()),
+        };
         window.setTitle(&NSString::from_str(&title));
 
         let titlebar = window.frame().size.height - window.contentLayoutRect().size.height;
@@ -612,8 +695,10 @@ impl AppDelegate {
 
         let view = TerminalView::new(mtm, bounds);
         view.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable);
-        apply_opacity(&window, &config);
-        if config.opacity < 1.0 && config.blur {
+        if !settings {
+            apply_opacity(&window, &config);
+        }
+        if config.opacity < 1.0 && config.blur && !settings {
             let blur = NSVisualEffectView::initWithFrame(NSVisualEffectView::alloc(mtm), bounds);
             blur.setMaterial(NSVisualEffectMaterial::UnderWindowBackground);
             blur.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
@@ -627,12 +712,21 @@ impl AppDelegate {
         window.makeFirstResponder(Some(&view));
         window.setAcceptsMouseMovedEvents(true);
 
-        let mut command = Command {
-            argv: argv.unwrap_or_else(|| config.command.clone()),
-            cwd: cwd.or_else(|| config.cwd.clone()),
-            env: config.env.clone().into_iter().collect(),
-            shell: None,
-            direct: false,
+        let mut command = match settings {
+            true => Command {
+                argv: std::iter::once(prefs_binary().display().to_string())
+                    .chain(self.ivars().origin.prefs_args())
+                    .collect(),
+                direct: true,
+                ..Command::default()
+            },
+            false => Command {
+                argv: argv.unwrap_or_else(|| config.command.clone()),
+                cwd: cwd.or_else(|| config.cwd.clone()),
+                env: config.env.clone().into_iter().collect(),
+                shell: None,
+                direct: false,
+            },
         };
         if let Some(dir) = &command.cwd {
             command.cwd = Some(expand_home(dir));
@@ -670,7 +764,11 @@ impl AppDelegate {
                 command,
                 fonts,
                 scale,
-                notices: self.ivars().notices.borrow().clone(),
+                notices: match settings {
+                    true => Rc::from([]),
+                    false => self.ivars().notices.borrow().clone(),
+                },
+                settings,
             },
         ) {
             eprintln!("terminal-decline: could not open a window: {e}");
@@ -689,6 +787,26 @@ impl AppDelegate {
         self.ivars().windows.borrow_mut().push((window.clone(), view));
         Some(window)
     }
+}
+
+/// The binary the Settings tab runs: the main app's, also in a pin (whose
+/// own executable is a clone today and a launcher after P.2), found by its
+/// bundle id; else this one.
+fn prefs_binary() -> std::path::PathBuf {
+    let exe = std::env::current_exe()
+        .and_then(|e| e.canonicalize())
+        .unwrap_or_else(|_| "terminal-decline".into());
+    let paths = crate::Paths::from_env();
+    if crate::pin::own_pin_config(&paths).is_none() {
+        return exe;
+    }
+    let workspace = objc2_app_kit::NSWorkspace::sharedWorkspace();
+    workspace
+        .URLForApplicationWithBundleIdentifier(&NSString::from_str(crate::BUNDLE_ID))
+        .and_then(|u| u.path())
+        .map(|app| std::path::PathBuf::from(app.to_string()).join("Contents/MacOS/terminal-decline"))
+        .filter(|p| p.is_file())
+        .unwrap_or(exe)
 }
 
 /// A window lets the desktop show through when `opacity` is below 1.
@@ -725,6 +843,22 @@ pub(crate) fn quit_now() {
     let delegate = DELEGATE.with(|d| d.borrow().as_ref().and_then(|w| w.load()));
     if let Some(delegate) = delegate {
         delegate.quit_without_asking();
+    }
+}
+
+/// Terminal Decline > Settings… (the test-only `settings` control command).
+pub(crate) fn show_settings_now() {
+    let delegate = DELEGATE.with(|d| d.borrow().as_ref().and_then(|w| w.load()));
+    if let Some(delegate) = delegate {
+        delegate.show_settings();
+    }
+}
+
+/// Type into the Settings tab (the test-only `type-settings` command).
+pub(crate) fn type_into_settings(bytes: Vec<u8>) {
+    let delegate = DELEGATE.with(|d| d.borrow().as_ref().and_then(|w| w.load()));
+    if let Some(delegate) = delegate {
+        delegate.type_into_settings(bytes);
     }
 }
 
@@ -833,15 +967,23 @@ pub fn build_menus(mtm: MainThreadMarker, app_name: &str, binds: &Keybinds) -> R
         &bar,
         app_name,
         &[
-            item(mtm, "Secure Keyboard Entry", Some(sel!(toggleSecureKeyboardEntry:)), ""),
-            NSMenuItem::separatorItem(mtm),
-            services_item(mtm),
-            NSMenuItem::separatorItem(mtm),
-            f(&format!("Hide {app_name}"), sel!(hide:), "cmd+h"),
-            f("Hide Others", sel!(hideOtherApplications:), "alt+cmd+h"),
-            NSMenuItem::separatorItem(mtm),
-            f(&format!("Quit {app_name}"), sel!(terminate:), "cmd+q"),
-        ],
+            b(MenuAction::Settings.label(), MenuAction::Settings),
+            vec![
+                item(mtm, "Edit config.toml", Some(sel!(editConfig:)), ""),
+                NSMenuItem::separatorItem(mtm),
+                item(mtm, "Secure Keyboard Entry", Some(sel!(toggleSecureKeyboardEntry:)), ""),
+            ],
+            vec![
+                NSMenuItem::separatorItem(mtm),
+                services_item(mtm),
+                NSMenuItem::separatorItem(mtm),
+                f(&format!("Hide {app_name}"), sel!(hide:), "cmd+h"),
+                f("Hide Others", sel!(hideOtherApplications:), "alt+cmd+h"),
+                NSMenuItem::separatorItem(mtm),
+                f(&format!("Quit {app_name}"), sel!(terminate:), "cmd+q"),
+            ],
+        ]
+        .concat(),
     );
     let shell = [
         b("New Window", MenuAction::NewWindow),

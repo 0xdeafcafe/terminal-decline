@@ -13,6 +13,12 @@
 //!   window (paths separated by tabs, so they may hold spaces);
 //! - `close`: close the window as Cmd+W does (asking first with
 //!   `confirm_close`);
+//! - `settings`: Terminal Decline > Settings… (Cmd+,);
+//! - `type-settings TEXT`: type TEXT into the Settings tab, as keys would
+//!   (`\r`, `\e` and `\\` stand for Return, Esc and a backslash);
+//! - `key CODE [MODS]`: put a key press on the app's event queue, where a
+//!   real key arrives: monitors and menus first (MODS: `cmd`, `ctrl`, `alt`,
+//!   `shift` joined by `+`);
 //! - `quit`: quit the app, without asking.
 //!
 //! While this is on, the window draws even when covered by other windows,
@@ -33,12 +39,24 @@ const PREFIX: &[u8] = b"\x1b]7770;";
 /// Longer commands are dropped.
 const MAX_LEN: usize = 256;
 
-/// Finds control sequences in program output, across reads.
-#[derive(Debug, Default)]
+/// Finds control sequences in program output, across reads: `7770`'s
+/// (by default), or another OSC's ([`ControlScanner::new`]).
+#[derive(Debug)]
 pub struct ControlScanner {
+    prefix: &'static [u8],
     state: State,
     payload: Vec<u8>,
 }
+
+impl Default for ControlScanner {
+    fn default() -> ControlScanner {
+        ControlScanner::new(PREFIX)
+    }
+}
+
+/// The preferences' OSC (see [`crate::prefs`]): `record-chord` asks the
+/// app to record the next key, honoured only in the Settings tab.
+pub const PREFS_PREFIX: &[u8] = b"\x1b]7771;";
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 enum State {
@@ -52,6 +70,16 @@ enum State {
 }
 
 impl ControlScanner {
+    /// A scanner for `ESC ] <number> ;` sequences, `prefix` being those
+    /// bytes.
+    pub fn new(prefix: &'static [u8]) -> ControlScanner {
+        ControlScanner {
+            prefix,
+            state: State::Ground,
+            payload: Vec::new(),
+        }
+    }
+
     /// Scan `bytes`, pushing `(end, command)` for each sequence that ends in
     /// them, `end` being the offset just past its last byte.
     pub fn feed(&mut self, bytes: &[u8], out: &mut Vec<(usize, String)>) {
@@ -66,8 +94,8 @@ impl ControlScanner {
             let b = bytes[i];
             self.state = match self.state {
                 State::Ground => State::Prefix(1),
-                State::Prefix(k) if b == PREFIX[k] => {
-                    if k + 1 == PREFIX.len() {
+                State::Prefix(k) if b == self.prefix[k] => {
+                    if k + 1 == self.prefix.len() {
                         self.payload.clear();
                         State::Payload
                     } else {
@@ -118,7 +146,35 @@ pub enum Control {
     Drop(Vec<String>),
     /// Shell > Close.
     Close,
+    /// Terminal Decline > Settings….
+    Settings,
+    /// Bytes typed into the Settings tab.
+    TypeSettings(Vec<u8>),
+    /// A key event for the app: key code and `NSEventModifierFlags`.
+    Key {
+        keycode: u16,
+        flags: u64,
+    },
     Quit,
+}
+
+/// `\r`, `\e` and `\\` as the bytes they stand for.
+fn unescape(s: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut bytes = s.bytes();
+    while let Some(b) = bytes.next() {
+        if b != b'\\' {
+            out.push(b);
+            continue;
+        }
+        match bytes.next() {
+            Some(b'r') => out.push(b'\r'),
+            Some(b'e') => out.push(0x1b),
+            Some(other) => out.push(other),
+            None => out.push(b'\\'),
+        }
+    }
+    out
 }
 
 impl Control {
@@ -127,6 +183,9 @@ impl Control {
             let paths: Vec<String> = paths.split('\t').filter(|p| !p.is_empty()).map(str::to_owned).collect();
             return (!paths.is_empty()).then_some(Control::Drop(paths));
         }
+        if let Some(text) = s.trim_start().strip_prefix("type-settings ") {
+            return Some(Control::TypeSettings(unescape(text)));
+        }
         let mut words = s.split_whitespace();
         let c = match words.next()? {
             "dump" => Control::Dump,
@@ -134,11 +193,28 @@ impl Control {
             "tab" => Control::Tab,
             "front" => Control::Front,
             "close" => Control::Close,
+            "settings" => Control::Settings,
             "resize" => Control::Resize {
                 cols: words.next()?.parse().ok().filter(|&c| c > 0)?,
                 lines: words.next()?.parse().ok().filter(|&l| l > 0)?,
             },
             "font" => Control::Font(words.next()?.parse().ok()?),
+            "key" => {
+                let keycode = words.next()?.parse().ok()?;
+                let mut flags = 0;
+                if let Some(mods) = words.next() {
+                    for m in mods.split('+') {
+                        flags |= match m {
+                            "cmd" => 1 << 20,
+                            "alt" => 1 << 19,
+                            "ctrl" => 1 << 18,
+                            "shift" => 1 << 17,
+                            _ => return None,
+                        };
+                    }
+                }
+                Control::Key { keycode, flags }
+            }
             _ => return None,
         };
         words.next().is_none().then_some(c)
@@ -268,6 +344,18 @@ mod tests {
     }
 
     #[test]
+    fn finds_the_preferences_osc() {
+        let mut s = ControlScanner::new(PREFS_PREFIX);
+        let mut out = Vec::new();
+        s.feed(
+            b"\x1b]7770;dump\x07\x1b[?1049h\x1b]7771;record-chord\x1b\\x\x1b]7771;other\x07",
+            &mut out,
+        );
+        let found: Vec<&str> = out.iter().map(|(_, c)| c.as_str()).collect();
+        assert_eq!(found, ["record-chord", "other"]);
+    }
+
+    #[test]
     fn parses_commands() {
         for (text, want) in [
             ("dump", Some(Control::Dump)),
@@ -289,6 +377,20 @@ mod tests {
             ("drop /x", Some(Control::Drop(vec!["/x".into()]))),
             ("drop ", None),
             ("drop", None),
+            ("settings", Some(Control::Settings)),
+            (
+                "key 45 cmd+shift",
+                Some(Control::Key {
+                    keycode: 45,
+                    flags: 1 << 20 | 1 << 17,
+                }),
+            ),
+            ("key 53", Some(Control::Key { keycode: 53, flags: 0 })),
+            ("key 45 hyper", None),
+            (
+                "type-settings /fg\\r\\e\\\\x",
+                Some(Control::TypeSettings(b"/fg\r\x1b\\x".to_vec())),
+            ),
             ("dump now", None),
             ("rm -rf", None),
             ("", None),

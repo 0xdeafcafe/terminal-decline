@@ -1057,6 +1057,103 @@ fn resize_under_flood() {
     term.lock().unwrap().state.check_invariants().unwrap();
 }
 
+// --- The preferences (Settings…) -------------------------------------------
+
+const APP: &str = env!("CARGO_BIN_EXE_terminal-decline");
+
+/// `terminal-decline prefs` on `config`, run directly (not through a
+/// login shell) as the Settings tab runs it, then `exit=$?` printed.
+/// `recorded` counts the `record-chord` requests heard.
+fn prefs(home: TempDir, config: &Path, recorded: Arc<AtomicU64>) -> Harness {
+    let script = format!(
+        "'{APP}' prefs --layer '{}' --edit 0 --in-app; echo \"exit=$?\"; sleep 30",
+        config.display()
+    );
+    let cmd = Command {
+        argv: vec!["/bin/sh".into(), "-c".into(), script],
+        cwd: Some(home.path().to_str().unwrap().into()),
+        env: vec![
+            ("HOME".into(), home.path().to_str().unwrap().into()),
+            ("XDG_CONFIG_HOME".into(), home.path().join("config").to_str().unwrap().into()),
+        ],
+        shell: Some("/nonexistent/shell".into()),
+        direct: true,
+    };
+    let signal = Arc::new(Signal::default());
+    let mut hooks = signal.hooks();
+    hooks.on_record_chord = Some(Box::new(move || {
+        recorded.fetch_add(1, Ordering::SeqCst);
+    }));
+    let session = Session::spawn(&cmd, size(80, 24), Term::new(80, 24, 100), hooks).unwrap();
+    Harness {
+        session: Some(session),
+        signal,
+        _home: home,
+    }
+}
+
+fn wait_file(path: &Path, what: &str, pred: impl Fn(&str) -> bool) -> String {
+    let until = Instant::now() + DEADLINE;
+    loop {
+        let text = std::fs::read_to_string(path).unwrap_or_default();
+        if pred(&text) {
+            return text;
+        }
+        assert!(Instant::now() < until, "timed out waiting for {what}; file:\n{text}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Keys into the preferences through the PTY: an edit is written to the
+/// file, a chord is asked of the app (the hook only the Settings tab has)
+/// and the reply recorded, and `q` exits with status 0.
+#[test]
+fn prefs_edits_records_chords_and_quits() {
+    let home = TempDir::new("prefs");
+    let config = home.path().join("config.toml");
+    std::fs::write(&config, "# mine\nfont_size = 13 # big\n[colors]\nbackground = '#000000'\n").unwrap();
+    let recorded = Arc::new(AtomicU64::new(0));
+    let h = prefs(home, &config, recorded.clone());
+    h.wait_for("the sections", |d| d.contains("Sections") && d.contains("Appearance"));
+    // As the Settings smoke test types it.
+    h.session().send(b"/background\r\x7f\x7f\x7f\x7f\x7f\x7f\x7f102030\r".to_vec());
+    wait_file(&config, "the background", |t| t.contains("background = \"#102030\""));
+    h.session().send(b"\x1b[27u/copy on\r".to_vec());
+    wait_file(&config, "copy_on_select", |t| t.contains("copy_on_select = true"));
+    // Keys > New Tab's shortcut, recorded by the app.
+    h.session().send(b"\x1b[27u\x1b[C\x1b[C\x1b[B\x1b[B".to_vec());
+    h.wait_for("New Tab selected", |d| d.lines().any(|l| l.contains('▸') && l.contains("cmd+t")));
+    h.session().send(b"c".to_vec());
+    h.wait_for("the prompt to press a shortcut", |d| d.contains("press the shortcut"));
+    assert_eq!(recorded.load(Ordering::SeqCst), 1);
+    let chord = terminal_decline::keybind::Chord::parse("ctrl+cmd+t").unwrap();
+    h.session().send(terminal_decline::keybind::chord_reply(Some(&chord)).into_bytes());
+    let text = wait_file(&config, "the recorded chord", |t| t.contains("\"ctrl+cmd+t\" = \"new_tab\""));
+    assert!(text.starts_with("# mine\nfont_size = 13 # big\n"), "{text}");
+    h.session().send(b"q".to_vec());
+    let d = h.wait_for("the exit status", |d| d.contains("exit="));
+    assert!(d.contains("exit=0"), "{d}");
+}
+
+/// The tab closed (SIGHUP) while a text is half typed: the file is as
+/// the last committed edit left it, and still parses.
+#[test]
+fn prefs_hangup_mid_edit_leaves_a_valid_file() {
+    let home = TempDir::new("prefs-hup");
+    let config = home.path().join("config.toml");
+    std::fs::write(&config, "font_size = 14\n").unwrap();
+    let mut h = prefs(home, &config, Arc::default());
+    h.wait_for("the sections", |d| d.contains("Sections"));
+    h.session().send(b"/copy on\r".to_vec());
+    wait_file(&config, "copy_on_select", |t| t.contains("copy_on_select = true"));
+    h.session().send(b"\x1b[27u/bold face\rMenlo Bo".to_vec());
+    h.wait_for("the text being typed", |d| d.contains("Menlo Bo"));
+    h.session.take().unwrap().shut_down();
+    let text = std::fs::read_to_string(&config).unwrap();
+    assert_eq!(text, "font_size = 14\ncopy_on_select = true\n");
+    text.parse::<toml::Table>().unwrap();
+}
+
 /// The test-only control OSC: each command reaches the hook after the
 /// output before it has been parsed, and the terminal itself ignores it.
 #[test]

@@ -50,9 +50,12 @@ fn main() {
     }
 
     let mut layers: Vec<PathBuf> = vec![paths.config_file()];
-    // Running as a pin: its settings, on top of the user's config.
+    // Running as a pin: its settings, on top of the user's config, and
+    // the file Settings… edits.
+    let mut edit = 0;
     if let Some(p) = pin::own_pin_config(&paths) {
         layers.push(p);
+        edit = 1;
     }
     let mut command = None;
     let mut restore = Vec::new();
@@ -96,6 +99,7 @@ fn main() {
         layers,
         themes_dir: paths.themes_dir(),
         command,
+        edit,
     };
     let (config, mut errors) = from.load();
     errors.splice(0..0, moved);

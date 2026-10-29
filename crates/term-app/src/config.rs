@@ -388,6 +388,9 @@ pub struct Source {
     pub themes_dir: PathBuf,
     /// `-e PROGRAM ARGS...`, which replaces `command` whatever the files say.
     pub command: Option<Vec<String>>,
+    /// The layer Settings… and Edit config.toml edit: the user's file, or
+    /// in a pin the pin's own (an index into `layers`).
+    pub edit: usize,
 }
 
 impl Source {
@@ -399,6 +402,20 @@ impl Source {
             config.command = cmd.clone();
         }
         (config, errors)
+    }
+
+    /// The file Settings… and Edit config.toml edit.
+    pub fn edited(&self) -> Option<&Path> {
+        self.layers.get(self.edit).map(PathBuf::as_path)
+    }
+
+    /// `terminal-decline prefs` arguments for editing this config with
+    /// the app there to record chords.
+    pub fn prefs_args(&self) -> Vec<String> {
+        let mut args = vec!["prefs".to_string(), "--layer".to_string()];
+        args.extend(self.layers.iter().map(|l| l.display().to_string()));
+        args.extend(["--edit".to_string(), self.edit.to_string(), "--in-app".to_string()]);
+        args
     }
 
     /// The files whose changes reload the config: its layers and the
@@ -784,6 +801,7 @@ mod tests {
             layers: vec![file.clone()],
             themes_dir: themes.clone(),
             command: None,
+            edit: 0,
         };
         let (c, _) = with("theme = { light = 'mine', dark = 'tokyo-night' }\n");
         assert_eq!(
@@ -1000,6 +1018,32 @@ mod tests {
         assert!(errors.is_empty(), "{errors:?}");
         assert_eq!((c.command.as_slice(), c.font_size), (["htop".to_string()].as_slice(), 15.0));
         assert_eq!(source.watched(&c), [file]);
+    }
+
+    #[test]
+    fn settings_edit_the_pins_file_over_yours() {
+        let source = Source {
+            layers: vec!["/u/config.toml".into(), "/u/pins/rush.toml".into(), "/tmp/extra.toml".into()],
+            edit: 1,
+            ..Source::default()
+        };
+        assert_eq!(source.edited(), Some(Path::new("/u/pins/rush.toml")));
+        assert_eq!(
+            source.prefs_args(),
+            [
+                "prefs",
+                "--layer",
+                "/u/config.toml",
+                "/u/pins/rush.toml",
+                "/tmp/extra.toml",
+                "--edit",
+                "1",
+                "--in-app"
+            ]
+        );
+        // What term-prefs reads them as.
+        let args = term_prefs::Args::parse(&source.prefs_args()[1..]).unwrap();
+        assert_eq!((args.layers.len(), args.edit, args.in_app), (3, 1, true));
     }
 
     #[test]

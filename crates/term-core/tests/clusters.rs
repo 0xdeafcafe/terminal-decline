@@ -159,10 +159,11 @@ fn a_wide_character_that_doesnt_fit_leaves_an_edge_spacer() {
             (String::new(), Width::Narrow)
         ]
     );
-    // Growing the row blanks one that is no longer in the last column.
+    // Growing the row joins the line back up: the edge spacer goes.
     let mut t = term(4, 2, "abc漢");
     t.state.resize(6, 2);
-    assert_eq!(cell(&t, 0, 3), (String::new(), Width::Narrow));
+    assert_eq!(cell(&t, 0, 3), ("漢".into(), Width::Wide));
+    assert_eq!(cell(&t, 0, 5), (String::new(), Width::Narrow));
     t.state.check_invariants().unwrap();
 }
 
@@ -315,14 +316,14 @@ fn resizing_narrower_frees_cut_off_clusters() {
     t.state.check_invariants().unwrap();
     t.state.resize(10, 1);
     t.state.check_invariants().unwrap();
-    // A wide cluster in the new last column is blanked.
+    // A wide cluster that no longer fits goes to the next row whole.
     let mut t = term(10, 1, "ab👍\u{1F3FD}");
     t.state.resize(3, 1);
     assert_eq!(
         cells(&t, 0),
         [
-            ("a".into(), Width::Narrow),
-            ("b".into(), Width::Narrow),
+            ("👍\u{1F3FD}".into(), Width::Wide),
+            (String::new(), Width::Spacer),
             (String::new(), Width::Narrow)
         ]
     );

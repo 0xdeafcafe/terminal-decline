@@ -15,6 +15,7 @@ use crate::style::{Attrs, LinkId, Style, Underline};
 use crate::style_table::{StyleStats, StyleTable};
 use crate::unicode::{self, Segmenter};
 
+mod reflow;
 mod replies;
 mod search;
 mod snapshot;
@@ -294,6 +295,10 @@ pub struct Terminal {
     /// Test aid: sweep tables once they hold this many ids.
     sweep_at_test: Option<u32>,
     alt_active: bool,
+    /// The window was resized while the alternate screen was active: the
+    /// primary screen keeps its old size until the program leaves it, and
+    /// is reflowed once then (§12.1).
+    primary_stale: bool,
     /// Lines that scrolled off the top (primary screen only). Its total
     /// count of lines ever pushed is the base for [`Point`] line numbers.
     scrollback: Scrollback,
@@ -419,6 +424,7 @@ impl Terminal {
             epochs: 2,
             sweep_at_test: None,
             alt_active: false,
+            primary_stale: false,
             scrollback: Scrollback::with_widths_as_written(scrollback_limit),
             display_offset: 0,
             top_line: 0,
@@ -1076,7 +1082,9 @@ impl Terminal {
             let Some(row) = self.row_at(line) else { continue };
             let start = if line == a.line { a.col } else { 0 };
             let wrapped = row.wrapped() && line != b.line;
-            let mut end = if line == b.line { b.col + 1 } else { self.cols };
+            // History rows keep the width they were written at, which may
+            // be wider than the screen's now.
+            let mut end = if line == b.line { b.col + 1 } else { self.cols.max(row.len()) };
             if wrapped {
                 // Empty cells at the end of a wrapped row (where a wide
                 // character didn't fit) aren't part of the line's text.
@@ -1115,35 +1123,17 @@ impl Terminal {
         // past `sweep_at` for a moment, and are swept once at the end.
         self.styles.set_sweeps_blocked(true);
         self.other_styles.set_sweeps_blocked(true);
-        // On the primary screen, rows pushed off the top go into scrollback so
-        // the cursor stays visible.
-        let removed = resize_screen(&mut self.screen, &mut self.cursor, cols, lines);
-        self.top_line += removed.len() as u64;
         if self.alt_active {
-            // The primary screen is hidden; its cursor is the saved one.
-            let mut cursor = self.saved_primary.as_ref().map(|s| s.cursor).unwrap_or_default();
-            let mut other = std::mem::take(&mut self.other_screen);
-            let removed = resize_screen(&mut other, &mut cursor, cols, lines);
-            self.other_screen = other;
-            self.other_top_line += removed.len() as u64;
-            // Those rows' ids are in the primary screen's table.
-            for row in removed {
-                self.scrollback.push_keyed(
-                    &row,
-                    self.other_styles.styles(),
-                    self.other_styles.links().as_slice(),
-                    self.other_styles.version(),
-                );
-                self.follow_history();
-            }
-            if let Some(saved) = &mut self.saved_primary {
-                saved.cursor.row = cursor.row;
-                saved.cursor.col = cursor.col.min(cols - 1);
-            }
+            // The alternate screen isn't reflowed (programs redraw it on
+            // SIGWINCH); the primary one waits until the program leaves.
+            resize_screen(&mut self.screen, &mut self.cursor, cols, lines);
+            self.primary_stale = true;
+            self.selection = None;
+            self.cursor.pending_wrap = false;
         } else {
-            for row in removed {
-                self.push_scrollback(&row);
-            }
+            // Rows, the cursor, the selection and the view move with the
+            // text (§12.2).
+            self.reflow(cols, lines);
             resize_screen(&mut self.other_screen, &mut Cursor::default(), cols, lines);
         }
 
@@ -1151,12 +1141,10 @@ impl Terminal {
         self.lines = lines;
         self.cursor.col = self.cursor.col.min(cols - 1);
         self.cursor.row = self.cursor.row.min(lines - 1);
-        self.cursor.pending_wrap = false;
         self.scroll_top = 0;
         self.scroll_bottom = lines - 1;
         self.tabs = default_tabs(cols);
         self.display_offset = self.display_offset.min(self.scrollback.len());
-        self.selection = None;
 
         self.styles.set_sweeps_blocked(false);
         self.other_styles.set_sweeps_blocked(false);
@@ -1593,6 +1581,32 @@ impl Terminal {
         self.drop_pen_link_id();
         self.erase_cell = None;
         std::mem::swap(&mut self.top_line, &mut self.other_top_line);
+        self.alt_active = on;
+        if !on && self.primary_stale {
+            // Resized while the alternate screen was up: reflow once now.
+            self.primary_stale = false;
+            self.clear_grapheme();
+            self.styles.set_sweeps_blocked(true);
+            // The cursor that belongs to the primary screen is the saved
+            // one, if there is one (1049 restores it next): its line is
+            // the one kept whole. The live cursor is moved with the text
+            // like the other positions.
+            let swap = |t: &mut Terminal| {
+                if let Some(s) = &mut t.saved_primary {
+                    std::mem::swap(&mut s.cursor.row, &mut t.cursor.row);
+                    std::mem::swap(&mut s.cursor.col, &mut t.cursor.col);
+                    std::mem::swap(&mut s.cursor.pending_wrap, &mut t.cursor.pending_wrap);
+                }
+            };
+            swap(self);
+            self.reflow(self.cols, self.lines);
+            swap(self);
+            self.styles.set_sweeps_blocked(false);
+            if self.styles.needs_sweep() {
+                self.sweep_styles(false);
+            }
+            self.touch_all_rows();
+        }
         if on {
             // Number the alternate screen's rows after the primary's, so a
             // point on one can't be taken for a point on the other.
@@ -2932,8 +2946,8 @@ impl Terminal {
     }
 
     /// Test aid: pull the newest `n` history lines back onto the top of
-    /// the primary screen, as they were stored (no reflow; that comes with
-    /// PR 11), dropping as many rows from the bottom. Their line numbers
+    /// the primary screen, as they were stored and without the reflow a
+    /// resize does, dropping as many rows from the bottom. Their line numbers
     /// are handed out again as output pushes them back, which is what the
     /// snapshot's `popped_from` is for.
     #[doc(hidden)]
@@ -3057,6 +3071,10 @@ impl Terminal {
             ("other screen", &self.other_screen, &self.other_styles),
         ] {
             styles.check().map_err(|e| format!("{name}'s style table: {e}"))?;
+            if name == "other screen" && self.primary_stale {
+                // The primary screen keeps its size until it is shown.
+                continue;
+            }
             if screen.len() != lines {
                 return Err(format!("{name} has {} rows, expected {lines}", screen.len()));
             }

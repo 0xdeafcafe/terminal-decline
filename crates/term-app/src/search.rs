@@ -124,6 +124,16 @@ pub fn scroll_to(t: &mut Terminal, hit: Hit, covered: usize) {
     }
 }
 
+/// If `at` is in view but under the `covered` rows the find bar is over,
+/// scroll back just far enough to bring it out from under.
+pub fn keep_clear(t: &mut Terminal, at: Point, covered: usize) {
+    if let Some((row, _)) = t.view_position(at)
+        && row < covered
+    {
+        t.scroll_view((covered - row) as isize);
+    }
+}
+
 /// Put `extra` (view row, columns, kind; in row order) into `snap`'s
 /// highlights, keeping each row's left to right.
 pub fn add_highlights(snap: &mut Snapshot, extra: &[(u16, Range<u16>, HighlightKind)]) {
@@ -171,6 +181,12 @@ impl CoreSearch {
     }
 }
 
+fn keep_clear_of_current(t: &mut Terminal, covered: usize) {
+    if let Some(h) = t.current_hit() {
+        keep_clear(t, h.start(), covered);
+    }
+}
+
 fn core_query(q: &Query) -> term_core::Query {
     term_core::Query {
         text: q.text.clone(),
@@ -194,15 +210,15 @@ fn core_hit(h: term_core::Hit) -> Hit {
 }
 
 impl Search for CoreSearch {
-    fn start(&mut self, t: &mut Terminal, q: &Query, _covered: usize) {
+    fn start(&mut self, t: &mut Terminal, q: &Query, covered: usize) {
         let job = t.start_search(core_query(q));
         if q.text.is_empty() {
             return;
         }
         // A hit on the screen at or after the view's top becomes current
         // as you type; history's arrive from the worker.
-        if t.search_count().total > 0 {
-            t.search_next();
+        if t.search_count().total > 0 && t.search_next() {
+            keep_clear_of_current(t, covered);
         }
         run_on_worker(job, self.deliver.clone());
     }
@@ -227,8 +243,12 @@ impl Search for CoreSearch {
         }
     }
 
-    fn step(&mut self, t: &mut Terminal, forward: bool, _covered: usize) -> bool {
-        if forward { t.search_next() } else { t.search_previous() }
+    fn step(&mut self, t: &mut Terminal, forward: bool, covered: usize) -> bool {
+        let stepped = if forward { t.search_next() } else { t.search_previous() };
+        if stepped {
+            keep_clear_of_current(t, covered);
+        }
+        stepped
     }
 
     fn current(&self, t: &Terminal) -> Option<Hit> {
@@ -882,5 +902,27 @@ mod tests {
         assert_eq!(kinds(0), vec![(0..2, HighlightKind::Selection), (3..6, HighlightKind::SearchHit)]);
         assert!(kinds(1).is_empty());
         assert_eq!(kinds(2), vec![(0..1, HighlightKind::CurrentSearchHit)]);
+    }
+
+    #[test]
+    fn core_search_keeps_the_current_hit_out_from_under_the_bar() {
+        // 41 lines: the screen (5 rows) shows lines 37..41, and the hit
+        // is on line 37, its top row.
+        let mut out = String::new();
+        for i in 0..41 {
+            out.push_str(&format!("{}\r\n", if i == 37 { "hit" } else { "miss" }));
+        }
+        let search = |covered: usize| {
+            let mut t = term(20, 5, &out);
+            let mut s = CoreSearch::new(Arc::new(|_| {}));
+            s.start(&mut t.state, &q("hit"), covered);
+            let h = s.current(&t.state).expect("a current hit");
+            let row = t.state.view_position(h.start).expect("in view").0;
+            (row, t.state.display_offset())
+        };
+        // Not covered: where it is.
+        assert_eq!(search(0), (0, 0));
+        // Two rows covered: scrolled back until it is just below them.
+        assert_eq!(search(2), (2, 2));
     }
 }

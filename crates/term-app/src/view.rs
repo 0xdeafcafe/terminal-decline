@@ -951,11 +951,20 @@ impl WindowView {
     /// A batch of history hits from the search worker for `pane`'s
     /// search: added under the lock, and drawn (with the bar's count).
     pub(crate) fn search_batch(&self, pane: PaneId, batch: term_core::HitBatch) {
-        let added = self.with_pane(pane, |_, p| {
-            p.find.is_some() && {
-                p.session.lock_term().state.add_search_hits(batch);
-                true
+        let titlebar = self.titlebar_height();
+        let added = self.with_pane(pane, |win, p| {
+            if p.find.is_none() {
+                return false;
             }
+            let covered = rows_under_find_bar(win, p, titlebar);
+            let mut t = p.session.lock_term();
+            let before = t.state.current_hit();
+            t.state.add_search_hits(batch);
+            // A step that waited for this batch jumped to its hit.
+            if let Some(h) = t.state.current_hit().filter(|h| before != Some(*h)) {
+                crate::search::keep_clear(&mut t.state, h.start(), covered);
+            }
+            true
         });
         if added == Some(true) {
             self.request_redraw(pane);

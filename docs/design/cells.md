@@ -1312,6 +1312,81 @@ pub enum HighlightKind { Selection, SearchHit, CurrentSearchHit, HoveredLink }
     only in the "on" phase.
 - So the cache key is just `RowKey`. The cache is dropped as §9.1 says.
 
+**Landed (F3.3).** Frames are built from the snapshot, still under the
+lock, with the row cache above (`term-render/src/row_cache.rs`). What
+changed from the design, and what is left:
+
+- **API:** `Renderer::prepare(&mut Terminal, &FrameInput)` and
+  `Frame::build(&mut Terminal, &FrameInput, glyphs)`; `FrameInput` no
+  longer carries the terminal. For R.1 the snapshot call moves out of
+  `build`.
+- **What a cached row is:** its backgrounds, glyphs and decorations,
+  placed where the row was last drawn (not at y = 0): a row that stayed is
+  one `memcpy` into the frame, and a row that moved (a scroll, or other
+  top padding) is moved in place once. Rows whose top is past 16k pixels
+  are built every frame, as positions there may be clamped to i16.
+- **Each cached instance knows its cell:** glyphs in the spare bits of
+  `is_color` (the shader reads only bit 0), decorations in a parallel
+  list with a "drawn in the text colour" flag. The block cursor is a
+  cursor-coloured rectangle drawn after the highlights, and the glyphs and
+  text-coloured decorations in its cells are **recoloured in place**
+  (cursor-text colour, dim alpha kept), not drawn again: drawing a glyph
+  twice would leave a fringe of the old colour on antialiased edges.
+  Clipping to the cell comes with ligature pieces (ligatures.md §4.1).
+  Input-method text hides the cached glyphs under it.
+- **Overlays drawn:** the selection highlight, the cursor (all shapes)
+  and input-method text. Search hits and the hovered link are in the
+  snapshot but drawn once E.7 and PR 9 set them; blinking text and
+  placeholder images come with the renderer support for them.
+- **Dropped whole** when the theme, metrics, left padding or the glyph
+  textures' generation change (a texture emptied or replaced, other
+  fonts; `GlyphSource::generation`), and by the snapshot's rules: a new
+  `terminal_id` also clears both style mirrors. Under the lock, a frame
+  that ran out of glyph texture space just builds again: the cache was
+  dropped, so the snapshot copies every row. After R.1 the cache must also
+  keep each row's cells to rebuild without the terminal.
+- **Rows not in view are dropped each frame,** their buffers reused: the
+  cache holds at most the visible rows (720 KB of instances at 300×100,
+  §16.1).
+- **A fix in term-core:** a renderer new to a terminal (a fresh
+  `Snapshot`) wasn't sent the styles earlier snapshots had drained. Each
+  `Snapshot` now remembers which epoch of each screen's table it has been
+  sent whole, and gets the whole table otherwise.
+- **The old path is kept as `Frame::build_live`** for one PR. It also
+  stopped giving an edge spacer next to a narrow cursor the cursor's
+  colours; it now uses the cursor's own width, as the snapshot does.
+- **Tests:** every `tests/frame.rs` frame is built both ways and compared
+  drawn on the CPU (and instance for instance when nothing is drawn over
+  the rows); a property test keeps one frame across random output,
+  alternate screen, RIS, ED 3, resizes, style sweeps every 8 styles,
+  scrolling, padding, selection, cursor and input-method text (invariant
+  7). The GPU test `snapshot_frames_draw_like_the_live_terminal` compares
+  both paths pixel for pixel with Menlo; the caught-panic pipeline test
+  checks that the frame after the terminal is replaced matches it.
+- **Measured** (`cargo bench -p term-render --bench frame`, main's binary
+  and this one interleaved, 3 rounds, best, a shared machine at load
+  5–13):
+
+  | case | main | snapshot | live path, same binary |
+  |---|---|---|---|
+  | 80×24 plain, every row changed | 6.4 µs | 8.3 µs | 6.7 µs |
+  | 300×100 plain, every row changed | 94.6 µs | 127.2 µs | 100.9 µs |
+  | 300×100 coloured, every row changed | 108.2 µs | 143.6 µs | 113.5 µs |
+  | 300×100 a style per cell, every row changed | 142.1 µs | 179.3 µs | 150.6 µs |
+  | 80×24 nothing changed | 6.4 µs | 1.2 µs | |
+  | 300×100 nothing changed (plain / coloured / per cell) | 95 / 108 / 142 µs | 22.0 / 26.1 / 21.2 µs | |
+  | 80×24 one row (a spinner, with its `advance`) | | 1.6 µs | 6.8 µs |
+  | 300×100 coloured, one row | | 24.4 µs | 113.8 µs |
+  | 80×24 scrolled a line (with its `advance`) | | 2.5 µs | 6.8 µs |
+  | 300×100 coloured, scrolled a line | | 43.7 µs | 117.5 µs |
+
+  A frame where every row changed costs 30–35 µs more at 300×100: the
+  snapshot's copy (~7 µs) and copying the rows' instances into the frame
+  (~600 KB, ~20 µs). Keeping instances in GPU buffers (R.2) takes the
+  copy away; the per-glyph cell pushed to a second list cost another
+  15 µs before it moved into `is_color`. Every other frame is 4–5×
+  cheaper, and a frame where nothing changed is the copy alone.
+
 ---
 
 ## 10. Shaping runs, ligatures, glyph keys (term-font and term-render)
@@ -2770,7 +2845,7 @@ go in order, and the font and render agents run alongside.
 | F2.3 | font | underline pattern sprites (curly, dotted, dashed) from id 0x1000; box/block/Powerline/braille shapes are done (F.6, `c4033dd`). **Landed** (§10.4) | S | F2.1 |
 | F3.1 | render | resolve through `Style`: underline colour, double underline, overline, strike | S | 1 |
 | F3.2 | render | glyph cache keyed by `GlyphKey` (sprites included); runs (§10.1); cluster cells via F2.2; curly/dotted/dashed via F2.3; ambiguous characters at two cells | M | 6, F2.2, F2.3 |
-| F3.3 | render | build frames from the snapshot with overlays (§9.3), still under the lock (R.1 moves it out) | M | 8 |
+| F3.3 | render | build frames from the snapshot with overlays (§9.3), still under the lock (R.1 moves it out). **Landed**; what changed from the design is at the end of §9.3 | M | 8 |
 
 PR 13 as a whole is L, so it is split as above. E.7 (our find bar, §13.9, in
 term-app) builds on 13b; E.12 (VoiceOver, term-app) builds on 13a, and its

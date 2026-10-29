@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 
 use term_core::{Attrs, ColorKind, Term, Terminal};
 use term_pty::{Command, Size};
+use term_render::{Frame, FrameInput, GlyphSlot, GlyphSource, Theme};
 use terminal_decline::frame_policy::{self, Decision};
 use terminal_decline::keys::{self, KeyAction, KeyInput, KeyModes, flags};
 use terminal_decline::session::{Hooks, Outcome, Session};
@@ -621,22 +622,79 @@ fn config_errors_show_before_the_output() {
     assert_eq!(h.signal.outcome(), Some(Outcome::Closed));
 }
 
+/// Every glyph is in the texture, at its codepoint, for building frames
+/// without a GPU.
+struct FakeGlyphs;
+impl GlyphSource for FakeGlyphs {
+    fn glyph(&mut self, cp: u32, _: term_font::Style) -> Option<GlyphSlot> {
+        Some(GlyphSlot {
+            u: cp as u16,
+            v: (cp >> 16) as u16,
+            w: 8,
+            h: 16,
+            left: 0,
+            top: 12,
+            color: false,
+        })
+    }
+}
+
+/// Build `t`'s frame into `frame` from a snapshot, as the app does, and
+/// check it against the frame built from the live terminal.
+fn build_frame(frame: &mut Frame, t: &mut Terminal) {
+    let theme = Theme::default();
+    let input = FrameInput {
+        theme: &theme,
+        metrics: term_font::Metrics {
+            cell_width: 8,
+            cell_height: 16,
+            baseline: 12,
+            underline_offset: 2,
+            underline_thickness: 1,
+            strike_offset: 4,
+        },
+        padding: (4, 4),
+        cursor_on: true,
+        // Unfocused: the hollow cursor is drawn the same way by both.
+        focused: false,
+        preedit: None,
+    };
+    frame.build(t, &input, &mut FakeGlyphs);
+    let mut live = Frame::default();
+    live.build_live(t, &input, &mut FakeGlyphs);
+    assert_eq!(frame.glyphs, live.glyphs, "{}", t.dump());
+    assert_eq!(frame.rects, live.rects, "{}", t.dump());
+}
+
 /// A panic while parsing one session's output (forced through the
 /// `test-hooks` feature) stops that session only: it shows where the crash
 /// log is, its program is killed, its terminal's lock isn't poisoned, and
-/// another session keeps working.
+/// another session keeps working. Its terminal is a new one, so the
+/// renderer drops what it cached of the old one (cells design §9.1).
 #[test]
 fn parser_panic_stops_only_that_session() {
     let logs = TempDir::new("crash-logs");
     terminal_decline::crash::install(logs.path().to_path_buf(), false);
 
     let other = Harness::shell("survivor");
-    let script = "printf 'before the bug\\n'; printf '\\033]7770;test-panic\\007'; echo after; sleep 30";
+    let script = "printf 'before the bug\\n'; sleep 1; printf '\\033]7770;test-panic\\007'; echo after; sleep 30";
     let mut broken = Harness::start_sized("panic", &["/bin/sh", "-c", script], size(300, 24), |_| {});
     let pid = broken.session().pid().unwrap();
+    broken.wait_for("output before the bug", |d| has_line(d, "before the bug"));
+    let mut frame = Frame::default();
+    let old_id = {
+        let mut t = broken.session().lock_term();
+        build_frame(&mut frame, &mut t.state);
+        t.state.terminal_id()
+    };
     broken.wait_exit();
     assert_eq!(broken.signal.outcome(), Some(Outcome::Hold));
     assert!(!broken.session().term().is_poisoned());
+    {
+        let mut t = broken.session().lock_term();
+        assert_ne!(t.state.terminal_id(), old_id, "a new terminal");
+        build_frame(&mut frame, &mut t.state);
+    }
 
     // Other tests failing in this process would leave logs here too.
     let (log, text) = std::fs::read_dir(logs.path())

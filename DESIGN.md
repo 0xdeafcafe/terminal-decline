@@ -941,3 +941,16 @@ style every cell 152.8 → 140.9 µs. Memory: 8 B a cell (was 12); style
 tables 92 B for plain text, 14 KB for 256 colours, 117 KB / 1.83 MB at
 80×24 / 300×100 for a truecolour gradient, back under 4 KB once the screen
 is cleared.
+
+### Frames from the snapshot (cells design F3.3)
+
+Frames are built from term-core's snapshot with a row cache keyed by each
+row's change counter; the cursor, selection and input-method text are
+drawn over the cached rows (cells.md §9.3, "Landed (F3.3)"). Still under
+the lock. `cargo bench -p term-render --bench frame`, main and this
+interleaved, best of 3, load 5–13: when nothing changed 80×24 6.4 → 1.2 µs
+and 300×100 coloured 108 → 26 µs; one row changed (a spinner) at 300×100
+coloured 114 → 24 µs; scrolled a line 118 → 44 µs. When every row changed
+it costs more, 80×24 6.4 → 8.3 µs and 300×100 plain 94.6 → 127.2 µs,
+coloured 108.2 → 143.6 µs, a style per cell 142.1 → 179.3 µs: the snapshot
+copy and copying the rows' instances into the frame, which R.2 removes.

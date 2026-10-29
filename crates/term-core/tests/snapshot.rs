@@ -290,6 +290,36 @@ fn style_updates_follow_each_screens_table() {
     assert!(snap.style_updates.is_empty());
 }
 
+/// A renderer new to a terminal (a fresh `Snapshot`) is sent each screen's
+/// whole table the first time it sees that screen, whatever earlier
+/// snapshots were sent.
+#[test]
+fn a_new_renderer_is_sent_each_table_whole() {
+    let mut t = Term::new(10, 3, 0);
+    t.advance(b"\x1b[31mred\x1b[0m");
+    let mut old = Snapshot::default();
+    t.state.snapshot(&mut old, |_| false);
+    t.advance(b"\x1b[?1049h\x1b[32mgreen");
+    t.state.snapshot(&mut old, |_| false);
+    let styles = |s: &Snapshot| s.style_updates.iter().map(|u| u.1.fg).collect::<Vec<_>>();
+    let (red, green) = (Color::indexed(1), Color::indexed(2));
+
+    let mut new = Snapshot::default();
+    t.state.snapshot(&mut new, |_| false);
+    assert_eq!(new.screen, ScreenId::Alternate);
+    assert!(styles(&new).contains(&green), "{:?}", new.style_updates);
+    t.state.snapshot(&mut new, |_| false);
+    assert!(new.style_updates.is_empty(), "then only what's new");
+
+    // The primary table was sent to the old renderer only.
+    t.advance(b"\x1b[?1049l");
+    t.state.snapshot(&mut new, |_| false);
+    assert_eq!(new.screen, ScreenId::Primary);
+    assert!(styles(&new).contains(&red), "{:?}", new.style_updates);
+    t.state.snapshot(&mut new, |_| false);
+    assert!(new.style_updates.is_empty());
+}
+
 #[test]
 fn history_rows_bring_their_own_styles() {
     let mut t = Term::new(10, 2, 100);

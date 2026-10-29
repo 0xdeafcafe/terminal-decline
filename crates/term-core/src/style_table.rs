@@ -441,6 +441,13 @@ impl StyleTable {
         }
     }
 
+    /// The next [`drain_updates`](Self::drain_updates) sends the whole
+    /// table: for a renderer that hasn't been sent this table yet.
+    pub fn resend_all(&mut self) {
+        self.send_all = true;
+        self.new_ids.clear();
+    }
+
     /// [`StyleTable::take_updates`] appended to `out`, keeping the list's
     /// memory, so a snapshot allocates nothing in steady state. Returns
     /// whether `out` got the whole table.

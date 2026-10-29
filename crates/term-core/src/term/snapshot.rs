@@ -149,6 +149,11 @@ pub struct Snapshot {
     pub history_styles: Vec<Style>,
     pub highlights: Vec<Highlight>,
     pub cursor: SnapCursor,
+    /// The epoch of each screen's table (primary, alternate) whose styles
+    /// have all been sent through this snapshot, so a renderer that is new
+    /// to the terminal, or hasn't seen a screen's table yet, is sent the
+    /// whole table.
+    mirrored: [Option<u64>; 2],
     /// Decoding buffers for history rows, kept to save allocating.
     row: Row,
     row_styles: Vec<Style>,
@@ -205,6 +210,14 @@ impl Terminal {
         out.history_epoch = self.history_epoch;
         out.popped_from = self.popped_from.take();
         out.screen = if self.alt_active { ScreenId::Alternate } else { ScreenId::Primary };
+        if !same_terminal {
+            out.mirrored = [None; 2];
+        }
+        let mirrored = &mut out.mirrored[self.alt_active as usize];
+        if *mirrored != Some(self.styles.epoch()) {
+            self.styles.resend_all();
+            *mirrored = Some(self.styles.epoch());
+        }
         self.styles.drain_updates(&mut out.style_updates);
         out.styles_epoch = self.styles.epoch();
         out.counter = self.counter;

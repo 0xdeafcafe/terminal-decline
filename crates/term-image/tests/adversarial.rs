@@ -200,3 +200,48 @@ fn bright_profile_in_a_png_decodes_without_overflow() {
     assert_eq!(r, Ok(true));
     assert_eq!(t.pixel(0, 0), WHITE);
 }
+
+/// A Sixel string through a decoder with the default limits: the image's
+/// size, and the bytes allocated at the peak.
+fn sixel(data: &[u8]) -> (Option<(u32, u32)>, usize) {
+    use term_image::sixel::{Decoder, Limits, Palette};
+    let start = NOW.load(Ordering::Relaxed);
+    PEAK.store(start, Ordering::Relaxed);
+    let mut d = Decoder::<VecPixels>::new(7, 1, Palette::vt340(), Limits::default());
+    let mut alloc = |w: u32, h: u32| (w as usize * h as usize * 4 <= 64 << 20).then(|| VecPixels::new(w, h));
+    d.put_slice(data, &mut alloc);
+    let size = d.finish(&mut alloc).image.map(|s| (s.width, s.height));
+    (size, PEAK.load(Ordering::Relaxed) - start)
+}
+
+// Pins for what the review tried and found holding.
+
+/// Repeat counts past u32 clamp to the largest width.
+#[test]
+fn sixel_giant_repeat_clamps() {
+    let _g = lock();
+    let (size, _) = sixel(b"#1!99999999999999~");
+    assert_eq!(size, Some((term_image::MAX_SIDE, 6)));
+}
+
+/// Raster attributes with Pad = 0 (a division, if taken as is).
+#[test]
+fn sixel_raster_with_zero_pad() {
+    let _g = lock();
+    let (size, _) = sixel(b"\"1;0;5;5#1~");
+    assert_eq!(size, Some((5, 6)));
+    let (size, _) = sixel(b"\"0;0#1~");
+    assert_eq!(size, Some((1, 6)));
+}
+
+/// 300,000 graphics newlines: painting past the limits is clipped, and
+/// nothing large is allocated.
+#[test]
+fn sixel_band_flood_stays_within_limits() {
+    let _g = lock();
+    let data = [&b"#1~"[..], &b"-".repeat(300_000), b"~"].concat();
+    let (size, used) = sixel(&data);
+    let (w, h) = size.unwrap();
+    assert!(w <= term_image::MAX_SIDE && h <= term_image::MAX_SIDE, "{w} × {h}");
+    assert!(used <= 1 << 20, "{used} bytes at the peak");
+}

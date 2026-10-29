@@ -21,12 +21,14 @@ use objc2_foundation::{
 };
 use term_core::{Point, Selection};
 
+use crate::find_bar::{Find, FindBar};
 use crate::keybind;
 use crate::keys::{KeyAction, KeyEventType, KeyInput, KeyModes, Mods, encode_key, paste_bytes};
 use crate::latency;
 use crate::layout;
 use crate::mouse;
 use crate::panes::PaneId;
+use crate::search::Query;
 use crate::select::{self, Block, Gesture};
 use crate::view::{AutoScroll, Pane, Win, WindowView, pane_padding, with_view};
 
@@ -232,6 +234,50 @@ define_class!(
         fn select_clicked_output(&self, _sender: Option<&AnyObject>) {
             if let Some(at) = self.ivars().menu_point.take() {
                 self.select_output_at(Some(at));
+            }
+        }
+
+        /// Edit > Find > Find… (Cmd+F): show the find bar, or give its
+        /// field the keys again.
+        #[unsafe(method(showFindBar:))]
+        fn show_find_bar(&self, _sender: Option<&AnyObject>) {
+            self.open_find();
+        }
+
+        #[unsafe(method(findNextMatch:))]
+        fn find_next_match(&self, _sender: Option<&AnyObject>) {
+            self.find_step(true);
+        }
+
+        #[unsafe(method(findPreviousMatch:))]
+        fn find_previous_match(&self, _sender: Option<&AnyObject>) {
+            self.find_step(false);
+        }
+
+        /// Edit > Find > Use Selection for Find (Cmd+E): search for the
+        /// selected text.
+        #[unsafe(method(useSelectionForFind:))]
+        fn use_selection_for_find(&self, _sender: Option<&AnyObject>) {
+            self.use_selection();
+        }
+
+        /// The standard NSTextFinderAction tags, for menus that send them
+        /// (cells design §13.9).
+        #[unsafe(method(performTextFinderAction:))]
+        fn perform_text_finder_action(&self, sender: Option<&AnyObject>) {
+            let tag = sender
+                .and_then(|s| {
+                    let item = s.downcast_ref::<NSMenuItem>().map(|m| m.tag());
+                    item.or_else(|| s.downcast_ref::<objc2_app_kit::NSControl>().map(|c| c.tag()))
+                })
+                .unwrap_or(1);
+            match tag {
+                1 => self.open_find(),
+                2 => self.find_step(true),
+                3 => self.find_step(false),
+                7 => self.use_selection(),
+                11 => self.close_find(),
+                _ => NSBeep(),
             }
         }
 
@@ -827,6 +873,184 @@ impl PaneView {
             Some(true) => self.request_redraw(),
             _ => NSBeep(),
         }
+    }
+
+    /// Show the find bar (with the text last searched for here, or the
+    /// shared find text), give its field the keys and search.
+    pub(crate) fn open_find(&self) {
+        let mtm = MainThreadMarker::from(self);
+        let Some((bar, query, opened)) = self.with(|_, p| {
+            let opened = p.find.is_none();
+            if opened && p.find_query.text.is_empty() {
+                p.find_query.text = crate::find_bar::shared_text().unwrap_or_default();
+            }
+            (p.find.as_ref().map(|f| f.bar.clone()), p.find_query.clone(), opened)
+        }) else {
+            return;
+        };
+        let bar = match bar {
+            Some(bar) => bar,
+            None => {
+                let bar = FindBar::new(mtm, self, &query);
+                self.addSubview(&bar);
+                let search = self.new_search();
+                self.with(|_, p| p.find = Some(Find::new(bar.clone(), search)));
+                self.place_find_bar();
+                bar
+            }
+        };
+        bar.focus();
+        if opened {
+            self.find_query_changed(query);
+        }
+    }
+
+    /// Put the find bar at the pane's top, below the title bar if the
+    /// pane touches it.
+    pub(crate) fn place_find_bar(&self) {
+        let top = self.with(|_, p| p.rect.y == 0).unwrap_or(false);
+        let inset = match (top, self.window_view()) {
+            (true, Some(w)) => w.titlebar_height(),
+            _ => 0.0,
+        };
+        if let Some(bar) = self.with(|_, p| p.find.as_ref().map(|f| f.bar.clone())).flatten() {
+            bar.place(self.frame().size.width, inset);
+        }
+    }
+
+    /// term-core's search, its batches added on the main thread.
+    fn new_search(&self) -> Box<dyn crate::search::Search> {
+        let window = self.window_view().map_or(0, |w| w.id());
+        let pane = self.pane();
+        let deliver: crate::search::Deliver = std::sync::Arc::new(move |batch| {
+            dispatch2::DispatchQueue::main().exec_async(move || {
+                crate::view::with_view(window, |v| v.search_batch(pane, batch));
+            });
+        });
+        Box::new(crate::search::CoreSearch::new(deliver))
+    }
+
+    /// How many of the grid's top rows the find bar is over.
+    fn rows_under_find_bar(&self) -> usize {
+        let titlebar = self.window_view().map_or(0.0, |w| w.titlebar_height());
+        self.with(|win, p| {
+            let top = p.rect.y == 0;
+            let bottom = (if top { titlebar } else { 0.0 } + crate::find_bar::HEIGHT) * win.scale;
+            let grid_top = pane_padding(&win.config, titlebar, win.scale, p.rect).top as f64;
+            let cell = win.renderer.metrics().cell_height.max(1) as f64;
+            ((bottom - grid_top) / cell).ceil().max(0.0) as usize
+        })
+        .unwrap_or(0)
+    }
+
+    /// Hide the find bar and drop its hits; the keys go back to the pane.
+    pub(crate) fn close_find(&self) {
+        let Some(Some(f)) = self.with(|_, p| {
+            let f = p.find.take()?;
+            let mut t = p.session.lock_term();
+            let mut f = f;
+            f.search.cancel(&mut t.state);
+            Some(f)
+        }) else {
+            return;
+        };
+        let had_keys = f.bar.has_focus();
+        f.bar.stop();
+        f.bar.removeFromSuperview();
+        if had_keys && let Some(w) = self.window() {
+            w.makeFirstResponder(Some(self));
+        }
+        self.request_redraw();
+    }
+
+    /// Whether `q` isn't what was last searched for.
+    pub(crate) fn find_query_differs(&self, q: &Query) -> bool {
+        self.with(|_, p| p.find_query != *q).unwrap_or(false)
+    }
+
+    /// Search for `q`: the hits are drawn, the current one (the first at
+    /// or after the view's top) scrolled into view, the count shown.
+    pub(crate) fn find_query_changed(&self, q: Query) {
+        let covered = self.rows_under_find_bar();
+        let Some(Some((bar, status))) = self.with(|_, p| {
+            let f = p.find.as_mut()?;
+            let mut t = p.session.lock_term();
+            f.search.start(&mut t.state, &q, covered);
+            p.find_query = q.clone();
+            Some((f.bar.clone(), f.search.status(&t.state)))
+        }) else {
+            return;
+        };
+        if !q.text.is_empty() {
+            crate::find_bar::share_text(&q.text);
+        }
+        bar.show_status(status);
+        self.request_redraw();
+    }
+
+    /// Find Next / Find Previous: the next or previous hit becomes
+    /// current and is scrolled into view; with the bar closed, it opens.
+    pub(crate) fn find_step(&self, forward: bool) {
+        if self.with(|_, p| p.find.is_none()).unwrap_or(true) {
+            self.open_find();
+            return;
+        }
+        let covered = self.rows_under_find_bar();
+        let stepped = self.with(|_, p| {
+            let f = p.find.as_mut()?;
+            let mut t = p.session.lock_term();
+            let stepped = f.search.step(&mut t.state, forward, covered);
+            let status = f.search.status(&t.state);
+            // None yet, but some may come: it jumps when one arrives.
+            (stepped || status.running).then(|| (f.bar.clone(), status))
+        });
+        match stepped.flatten() {
+            Some((bar, status)) => {
+                bar.show_status(status);
+                self.request_redraw();
+            }
+            None => NSBeep(),
+        }
+    }
+
+    /// The test control's `find TEXT`: open the bar, put TEXT in it and
+    /// search.
+    pub(crate) fn find_text(&self, text: &str) {
+        self.open_find();
+        let Some(Some(bar)) = self.with(|_, p| p.find.as_ref().map(|f| f.bar.clone())) else {
+            return;
+        };
+        let q = Query {
+            text: text.to_string(),
+            ..bar.query()
+        };
+        bar.set_query(&q);
+        self.find_query_changed(q);
+    }
+
+    /// Use Selection for Find: the selected text becomes the query.
+    fn use_selection(&self) {
+        let Some(Some(text)) = self.with(|_, p| p.session.lock_term().state.selection_text()) else {
+            NSBeep();
+            return;
+        };
+        let q = self
+            .with(|_, p| Query {
+                text: text.clone(),
+                ..p.find_query.clone()
+            })
+            .unwrap_or_default();
+        crate::find_bar::share_text(&text);
+        let open = self.with(|_, p| p.find.as_ref().map(|f| f.bar.clone())).flatten();
+        match open {
+            Some(bar) => bar.set_query(&q),
+            None => {
+                self.with(|_, p| p.find_query = q.clone());
+                self.open_find();
+                return;
+            }
+        }
+        self.find_query_changed(q);
     }
 
     /// Cmd-click or Open Link: open `uri` if it is a link that may open

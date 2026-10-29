@@ -157,6 +157,10 @@ pub struct Theme {
     pub cursor: Rgba,
     pub cursor_text: Rgba,
     pub selection: Rgba,
+    /// Search hits (E.7), and the current one: the background mixed
+    /// with yellow and orange, so they suit light and dark themes.
+    pub search_hit: Rgba,
+    pub search_current: Rgba,
     /// 0..16 are the configurable ANSI colours, the rest is the xterm cube.
     pub palette: [Rgba; 256],
     /// 0–255; below 255 the window background shows through.
@@ -195,6 +199,8 @@ impl Theme {
             cursor: rgb(cursor),
             cursor_text: rgb(bg),
             selection: rgb(selection),
+            search_hit: rgb(mix(bg, 0xe5c07b, 0.45)),
+            search_current: rgb(mix(bg, 0xff9f43, 0.85)),
             palette,
             background_opacity: 255,
         }
@@ -208,6 +214,15 @@ impl Theme {
             ColorKind::Rgb(r, g, b) => r as u32 | (g as u32) << 8 | (b as u32) << 16 | 0xFF << 24,
         }
     }
+}
+
+/// `a` (0xRRGGBB) moved `t` of the way to `b`.
+fn mix(a: u32, b: u32, t: f32) -> u32 {
+    let ch = |shift: u32| {
+        let (x, y) = (((a >> shift) & 0xFF) as f32, ((b >> shift) & 0xFF) as f32);
+        ((x + (y - x) * t).round() as u32) << shift
+    };
+    ch(16) | ch(8) | ch(0)
 }
 
 /// What a row needs from the frame around it.
@@ -533,6 +548,13 @@ impl Frame {
         self.snapped_with = generation;
     }
 
+    /// The last [`snapshot`](Frame::snapshot), for adding to its
+    /// highlights before it is built (the app's search hits, until
+    /// term-core's search puts them in itself).
+    pub fn snapshot_mut(&mut self) -> &mut term_core::Snapshot {
+        &mut self.rows.snap
+    }
+
     /// Build the frame from the last [`snapshot`](Frame::snapshot), taken
     /// with the same `input`, without the terminal: shape the rows it
     /// copied in faces with ligatures, build them and draw the overlays.
@@ -705,7 +727,18 @@ impl Frame {
         for &slot in rows.order.iter().filter(|&&s| s != MISSING) {
             self.rects.extend_from_slice(&rows.entry(slot).backgrounds);
         }
-        // Highlights, then the block cursor over them.
+        // Highlights (search hits under the selection), then the block
+        // cursor over them.
+        for (line, row) in snap.rows.iter().enumerate() {
+            for h in snap.row_highlights(row) {
+                let (a, b) = (h.cols.start as usize, (h.cols.end as usize).min(cols));
+                match h.kind {
+                    HighlightKind::SearchHit if a < b => self.rects.push(full(line, a..b, theme.search_hit)),
+                    HighlightKind::CurrentSearchHit if a < b => self.rects.push(full(line, a..b, theme.search_current)),
+                    _ => {}
+                }
+            }
+        }
         for (line, row) in snap.rows.iter().enumerate() {
             for h in snap.row_highlights(row) {
                 let (a, b) = (h.cols.start as usize, (h.cols.end as usize).min(cols));
@@ -718,7 +751,6 @@ impl Frame {
                         h: m.underline_thickness.max(1) as u16,
                         ..full(line, a..b, theme.foreground)
                     }),
-                    // Drawn once search (E.7) sets them.
                     HighlightKind::SearchHit | HighlightKind::CurrentSearchHit => {}
                 }
             }

@@ -1033,3 +1033,46 @@ fn background_opacity_sets_clear_alpha() {
     let f = build_with(&mut t.state, &theme, Opts::default());
     assert_eq!(f.clear, (theme.background & 0x00FF_FFFF) | 128 << 24);
 }
+
+/// Search hits added to the snapshot are drawn under the selection, in
+/// the theme's search colours.
+#[test]
+fn search_hits_are_drawn_under_the_selection() {
+    use term_core::{Highlight, HighlightKind};
+    let mut t = term(8, 2, "abcdef");
+    t.state
+        .set_selection(Some(Selection::new(Point { line: 0, col: 2 }, Point { line: 0, col: 2 })));
+    let theme = Theme::default();
+    let o = Opts::default();
+    let input = input(&theme, &o);
+    let mut f = Frame::default();
+    f.snapshot(&mut t.state, &input, 0);
+    let snap = f.snapshot_mut();
+    // Row 0 already holds the selection's highlight; put the hits around it.
+    let sel = snap.highlights.clone();
+    snap.highlights = vec![
+        Highlight {
+            cols: 0..2,
+            kind: HighlightKind::CurrentSearchHit,
+        },
+        Highlight {
+            cols: 2..5,
+            kind: HighlightKind::SearchHit,
+        },
+    ];
+    snap.highlights.extend(sel);
+    let n = snap.highlights.len() as u32;
+    snap.rows[0].highlights = 0..n;
+    snap.rows[1].highlights = n..n;
+    assert!(f.build_snapshot(&input, &mut Fake));
+    // Then the block cursor, after the text.
+    let rects: Vec<RectInstance> = f.rects.iter().copied().filter(|r| r.color != theme.cursor).collect();
+    assert_eq!(
+        rects,
+        [
+            rect(0, 0, 2, theme.search_current),
+            rect(2, 0, 3, theme.search_hit),
+            rect(2, 0, 1, theme.selection)
+        ]
+    );
+}

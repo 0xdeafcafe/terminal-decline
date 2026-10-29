@@ -58,6 +58,18 @@ snippet unconditionally.
 Right-clicking a command's prompt, command line or output also offers
 **Select Command Output** for that command. Cmd+C then copies it.
 
+**Option-click** on the command line you are typing moves the shell's
+cursor to the cell you click, as in iTerm2 and Ghostty. The app types the
+Left or Right arrow keys, as many as there are characters between the
+cursor and the click (a wide character or an emoji is one; in application
+cursor mode it sends the keys that mode asks for), so the shell does the
+move itself. It works only on the command line: after the prompt's B mark,
+on the rows of the line being edited (a line that wraps counts as one), while
+no command is running. A click past the end of the text moves to the end.
+Anywhere else, with no marks, or on a command line of several lines, the
+Option-click is the usual rectangular selection. Shift, Cmd or Ctrl held
+with Option, or a program that has taken the mouse, leave it alone too.
+
 With no prompt that way, or no output to select, the app beeps. The
 shortcuts can be changed in `[keybind]` (`previous_prompt`,
 `next_prompt`, `select_output`); importing a Ghostty config maps

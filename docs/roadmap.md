@@ -77,7 +77,7 @@ Design: docs/design/pins.md.
 | E.2 | OSC 8 links + Cmd-click; plain URLs | M |
 | E.3 | Keyboard: non-Latin layouts for Ctrl/Meta; kitty protocol levels Neovim/Helix use (table tests from the spec + real-app checks); `keybind` config (remap/unbind/send text; per pin) | M |
 | E.4 | Fonts: fallback list, bold/italic overrides, Nerd Font icon fitting, line height / cell width adjust | M |
-| E.5 | Shell integration (OSC 133) via documented snippets for zsh/bash/fish (not injected): jump between prompts, select output, Option-click to move the cursor | M |
+| E.5 | Shell integration (OSC 133) via documented snippets for zsh/bash/fish (not injected): ~~jump between prompts, select output, Option-click to move the cursor~~ (all done) | M |
 | E.6 | Notifications: OSC 9/777 and bell when unfocused (named: what Claude Code sends); guarded for the bare binary; Dock progress (OSC 9;4) | S |
 | E.7 | Search: Cmd+F with our own native-style find bar (standard search field, previous/next, count, options; Edit > Find, Cmd+G/Cmd+E and the shared find text work as usual) over all of history; in-view hits first, then history outwards, using fast block search (SIMD substring search plus a per-block filter so most blocks are skipped) | M |
 | E.8 | Selection: auto-scroll past the edge, rectangular (Option-drag), copy-on-select option | S |
@@ -85,7 +85,7 @@ Design: docs/design/pins.md.
 | E.10 | macOS: drag files in → escaped paths; folder on Dock icon / `open -a` → window there; Services "New Terminal Decline Window/Tab at Folder"; right-click menu when mouse reporting is off; confirm before closing a running program (config off) | M |
 | E.11 | Secure Keyboard Entry (menu) | S |
 | E.19 | Conformance fixes: the `to-fix` entries in docs/conformance-failures.md (OSC 4/10/11 colours, DECRQSS, DEC graphics glyphs, REP, DECALN, DECID, DECXCPR) | M |
-| E.14 | Small bugs: ~~VS16 with autowrap off~~ (fixed by cells design PR 6); CSI M on the top row | S |
+| E.14 | Small bugs: ~~VS16 with autowrap off~~ (fixed by cells design PR 6); ~~CSI M on the top row~~ (already right since the cells design; pinned by a conformance test) | S |
 | E.18 | Preferences: Cmd+, opens a tab running the built-in settings TUI (hand-rolled, its own process; sectioned list, live preview, keeps comments in config.toml), with the change to the reload's notices and chord recording through the app; the Pins section after P.2; design in docs/design/preferences.md | M |
 | E.16 | Release: make repo + tap public, **then** tag `0.1.0`; changelog (git-cliff); cask caveats + `zap`; smoke on macOS 14 | S |
 

@@ -427,6 +427,52 @@ authentication, so a check fails and logs the HTTP error. Updates also
 wait for the Developer ID secrets (N.4), since nothing ad-hoc is
 published.
 
+**Landed (U-3, with U-2's remaining parts).** What was built, and where
+it differs from the above:
+- **`scripts/appcast.py`** (Python's standard library only): `check-release`,
+  `public-key`, `newest`, `verify`, `verify-feed`, `write` and
+  `--self-test` (in CI's fmt job). It verifies Ed25519 signatures itself
+  (RFC 8032, checked against its test vectors and against `sign_update`'s
+  output), so no package is installed in the job that holds the key.
+- **The key comparison works the other way round from step 3**: the
+  secret never reaches Python. `sign_update` signs the zip with the key on
+  stdin, and `appcast.py verify` checks that signature against
+  `packaging/sparkle-public-key`; `check-release` checks the app's
+  `SUPublicEDKey` is that key, and the `sign` job reads `SUPublicEDKey`
+  from the zip the current appcast's newest item points at. A wrong
+  secret, a wrong committed key or a key users don't have all fail the
+  job before anything is published. The embedded feed signature is
+  checked against the committed key too (`verify-feed`).
+- **Without the Apple secrets** (or without `SPARKLE_ED_PRIVATE_KEY`) the
+  `sign` job doesn't fail: it lists the missing pieces in the job summary
+  and as warnings, and the release goes out without an appcast. Once the
+  latest release has an appcast, the same case fails the job, and the
+  release isn't made. The build job reports `signing` and `notarized`;
+  the `sign` job checks them again on the app (`TeamIdentifier` of the
+  app and of Sparkle's `Autoupdate` equal to `APPLE_TEAM_ID`, `spctl`
+  saying "Notarized Developer ID", `stapler validate`).
+- **Release checks on every tag** (`check-release`, whether or not updates
+  are published): bundle id, the tag's version, an integer build number,
+  the committed public key, the release feed URL, signed feeds and
+  verification before extraction on, profiling off, the one-week
+  impatient interval, no `NSAppTransportSecurity`, no dogfood marker,
+  Sparkle embedded.
+- **Carried forward**: up to 5 items in all, newest first, older items
+  copied as they were (a bridge's `sparkle:minimumUpdateVersion`
+  included). A bridge older than the 5 newest would drop out; keep it in
+  mind when rotating the key.
+- **U-2's rest**: the cask's caveat explains `brew upgrade --greedy` and
+  that it can install an older version than the app updated itself to;
+  `zap` gains `~/Library/Caches/red.forbes.terminal-decline` and
+  `~/Library/HTTPStorages/red.forbes.terminal-decline`.
+  `THIRD-PARTY-NOTICES.md` carries Sparkle's licence (with bsdiff,
+  sais-lite, ed25519 and SUSignatureVerifier), and bundle.sh copies it to
+  `Contents/Resources/` and refuses a Sparkle version it has no section
+  for.
+- **Still needs Alex**: the `release` environment limited to `v*` tags,
+  with `SPARKLE_ED_PRIVATE_KEY` moved into it (as a repository secret it
+  is readable by any job); and the Apple secrets (N.4).
+
 ---
 
 ## 7. Costs, and how to measure them

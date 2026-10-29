@@ -7,10 +7,10 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject, Sel};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSAlert, NSAlertFirstButtonReturn, NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSApplicationTerminateReply,
-    NSAutoresizingMaskOptions, NSBackingStoreType, NSColor, NSEventModifierFlags, NSMenu, NSMenuItem, NSPasteboard, NSScreen,
-    NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView, NSWindow, NSWindowOrderingMode,
-    NSWindowStyleMask, NSWindowTabbingMode, NSWindowTitleVisibility, NSWindowUserTabbingPreference,
+    NSAlert, NSAlertFirstButtonReturn, NSApplication, NSApplicationDelegate, NSApplicationTerminateReply, NSAutoresizingMaskOptions,
+    NSBackingStoreType, NSColor, NSEventModifierFlags, NSMenu, NSMenuItem, NSPasteboard, NSScreen, NSVisualEffectBlendingMode,
+    NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView, NSWindow, NSWindowOrderingMode, NSWindowStyleMask,
+    NSWindowTabbingMode, NSWindowTitleVisibility, NSWindowUserTabbingPreference,
 };
 use objc2_foundation::{NSArray, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSString, NSURL};
 use term_font::Fonts;
@@ -114,8 +114,7 @@ define_class!(
                     delegate.latency_command(cmd);
                 }
             });
-            #[allow(deprecated)]
-            NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
+            crate::background::activate_ignoring_other_apps(mtm);
         }
 
         #[unsafe(method(applicationShouldHandleReopen:hasVisibleWindows:))]
@@ -159,6 +158,7 @@ define_class!(
             alert.setInformativeText(&NSString::from_str(&text));
             alert.addButtonWithTitle(&NSString::from_str("Quit"));
             alert.addButtonWithTitle(&NSString::from_str("Cancel"));
+            crate::background::hide(&alert.window());
             if alert.runModal() == NSAlertFirstButtonReturn {
                 NSApplicationTerminateReply::TerminateNow
             } else {
@@ -291,7 +291,7 @@ define_class!(
             let Some(window) = self.key_window() else { return };
             let Some(tabs) = window.tabbedWindows() else { return };
             if let Some(i) = tab_index(item.tag(), tabs.len()) {
-                tabs.objectAtIndex(i).makeKeyAndOrderFront(None);
+                crate::background::make_key_and_order_front(&tabs.objectAtIndex(i));
             }
         }
 
@@ -300,6 +300,10 @@ define_class!(
             let closed = n.object();
             let is_closed = |w: &NSWindow| closed.as_deref().is_some_and(|o| std::ptr::eq(o, w as &AnyObject));
             self.ivars().windows.borrow_mut().retain(|(w, _)| !is_closed(w));
+            if let Some(window) = closed.as_deref().and_then(|o| o.downcast_ref::<NSWindow>()) {
+                let open = self.ivars().windows.borrow().iter().map(|(w, _)| w.clone()).collect();
+                crate::background::closed(window, open);
+            }
             let mut settings = self.ivars().settings.borrow_mut();
             if settings.as_deref().is_some_and(is_closed) {
                 *settings = None;
@@ -481,7 +485,7 @@ impl AppDelegate {
             _ => Place::Cascade,
         };
         self.open_window(Some(dir), place, None);
-        NSApplication::sharedApplication(mtm).activate();
+        crate::background::activate(mtm);
     }
 
     /// The key window if it is ours, else the frontmost of ours (an
@@ -570,7 +574,7 @@ impl AppDelegate {
                 }
             }
             if let Some(front) = front {
-                front.makeKeyAndOrderFront(None);
+                crate::background::make_key_and_order_front(&front);
             }
         }
     }
@@ -590,12 +594,11 @@ impl AppDelegate {
     fn show_settings(&self) {
         let open = self.ivars().settings.borrow().clone();
         if let Some(window) = open {
-            window.makeKeyAndOrderFront(None);
+            crate::background::make_key_and_order_front(&window);
             if let Some(view) = self.view_of(&window) {
                 view.focus_settings();
             }
-            let mtm = MainThreadMarker::from(self);
-            NSApplication::sharedApplication(mtm).activate();
+            crate::background::activate(MainThreadMarker::from(self));
             crate::view::sync_visibility_soon();
             return;
         }
@@ -800,7 +803,7 @@ impl AppDelegate {
                 parent.addTabbedWindow_ordered(&window, NSWindowOrderingMode::Above);
             }
         }
-        window.makeKeyAndOrderFront(None);
+        crate::background::make_key_and_order_front(&window);
         // A new tab puts the one in front behind it, without key
         // notifications while the app is inactive.
         crate::view::sync_visibility_soon();
@@ -1221,8 +1224,8 @@ pub fn run(
     role: crate::entry::Role,
 ) {
     let mtm = MainThreadMarker::new().expect("must run on the main thread");
-    let app = NSApplication::sharedApplication(mtm);
-    app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+    // Under the test control, in the background (see `crate::background`).
+    let app = crate::background::shared_application(mtm);
     crate::notify::on_click(crate::view::bring_to_front);
     let menus = build_menus(mtm, app_name, &config.keybinds());
     let delegate = AppDelegate::new(mtm, config, notices, restore, origin, app_name, role);

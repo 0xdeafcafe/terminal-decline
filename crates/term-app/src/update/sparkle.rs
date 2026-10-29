@@ -326,8 +326,7 @@ fn alert(title: &str, text: &str, buttons: &[&str]) -> Option<usize> {
 
 fn focus() {
     if let Some(mtm) = MainThreadMarker::new() {
-        #[allow(deprecated)]
-        NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
+        crate::background::activate_ignoring_other_apps(mtm);
     }
 }
 

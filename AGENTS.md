@@ -35,3 +35,9 @@ Alex uses `~/Applications/Decline.app`, installed by `scripts/dogfood.sh`.
 After merging changes to `main` that affect the app, run
 `scripts/dogfood.sh`: the running copy restarts into the new build and
 reopens its windows in the same folders and places.
+
+## Agents in worktrees
+
+Each worktree builds its own `target/` (several GB). When your work is
+committed, run `rm -rf target` in your worktree before reporting, so the
+disk doesn't fill up while several agents run.

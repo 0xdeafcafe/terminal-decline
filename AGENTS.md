@@ -24,6 +24,11 @@ Use [Conventional Commits](https://www.conventionalcommits.org/):
 ## Working here
 
 - Read `DESIGN.md` first; update it when behaviour or measurements change.
+- Benchmarks before and after only for changes whose point is speed or
+  memory, or that touch the parser, frame building or the GPU path; other
+  changes need fmt, clippy and tests only. DESIGN.md is brought up to date
+  at the end of each roadmap phase, not in every PR (design docs under
+  docs/design still get their "Landed" notes).
 - Performance claims need numbers: `cargo bench -p term-core`,
   `cargo bench -p term-render`, `scripts/pressure/run.py`, and
   `/usr/bin/footprint -p <pid>` for memory (not RSS).

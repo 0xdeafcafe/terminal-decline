@@ -146,6 +146,26 @@ fn bench(c: &mut Criterion) {
             })
         });
     }
+    // Scrolled back: every row comes from history, expanded from its
+    // stored form, copied and built.
+    for (name, cols, lines, colours) in [cases[1], cases[2], cases[4]] {
+        let mut t = Term::new(cols, lines, 10_000);
+        let mut s = String::new();
+        for l in 0..lines * 3 {
+            line(l, cols, colours, &mut s);
+            s.push_str("\x1b[0m\r\n");
+        }
+        t.advance(s.as_bytes());
+        t.state.scroll_view(lines as isize * 2);
+        let mut frame = Frame::default();
+        c.bench_function(&format!("frame {name} history"), |b| {
+            b.iter(|| {
+                frame.forget_rows();
+                frame.build(&mut t.state, black_box(&input), &mut Cached);
+                black_box(frame.glyphs.len())
+            })
+        });
+    }
     // One window, one 160×48 pane or four 80×24 panes (splits design
     // §3.4): the same cells, four terminals and frames.
     let mut t = screen(160, 48, Colours::Coloured);

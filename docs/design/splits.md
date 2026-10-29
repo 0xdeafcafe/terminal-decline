@@ -339,6 +339,49 @@ what B2.3 needs to know:
   encode 15.0 → 14.7 µs); the same cells as four 80×24 panes cost 57.6 µs
   to build, 5.8 µs unchanged and 16.8 µs to encode with two dividers.
 
+### 3.6 Landed (B2.3a)
+
+term-app's view is split in two, still with one pane per window:
+
+- **`WindowView`** (`view.rs`, `DeclineWindowView`): the layer, display
+  link, window delegate, title-bar observer, font size, theme and test
+  control. Its state is `Win` (what the window keeps), the `Panes` tree
+  and the panes by `PaneId`. It lays the panes out with
+  `Panes::layout` on every `setFrameSize:` (one pane gets the view's own
+  frame, so its grid is worked out exactly as before).
+- **`PaneView`** (`pane_view.rs`, `DeclinePaneView`): a plain `NSView`
+  with no autoresizing mask that draws nothing; first responder,
+  `NSTextInputClient`, mouse, scroll, drag and drop, the context menu.
+  Its `Pane` holds the session, its `PaneRender`, rect, blink, marked
+  text, selection and mouse state, the echo wait, keys down and `held`.
+  The app makes the pane view first responder
+  (`WindowView::first_responder`).
+- **Hooks** carry (window id, `PaneId`) and do nothing once the pane is
+  gone. The latency log still counts by window (B2.5 keys it by pane).
+- **Drawing**: each tick asks `frame_policy::pane` per shown pane and
+  `combine` for the window; panes that build (or that
+  `Renderer::is_current` says are stale) are built with `build_pane`,
+  then all are drawn with `present_panes` (the latency path with
+  `encode_panes`). One pane clears to its own background, several to 0.
+  A held pane keeps its change; a pane waiting for its echo isn't marked
+  dirty.
+- **Fonts**: the app makes the window's renderer with
+  `Renderer::with_font_config` and Cmd+= / reloads use
+  `set_font_config`, so windows with the same fonts share them. A
+  throwaway `Fonts` for the missing-font notices is built only when the
+  config names fallbacks or faces.
+- **Measured** (release, M1 Max under heavy load from other agents,
+  load average 6–56; before = main with B1.3, after = this; interleaved,
+  full screen 223×72 at 2×): a key whose program redraws every row,
+  parsed → frame built p50 0.07–0.08 ms both, encode p50 0.11 ms both,
+  bytes sent → commit p50 0.7–1.5 ms before, 0.7–2.0 after (p99 tails
+  of 10–37 ms in both, from the load); `yes` flooding 59 frames/s both
+  while key; footprint full screen 101–133 MB both (bimodal in both),
+  after the flood 108–110 MB both, idle 66–68 MB both; idle 0% CPU and 0
+  wake-ups (`top idlew`) in every run. No new IOSurface for the pane
+  view. Whether full screen is shown direct or composited (Metal HUD)
+  wasn't checked.
+
 ## 4. Input and focus
 
 - The focused pane's PaneView is the window's first responder. Focus

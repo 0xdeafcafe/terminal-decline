@@ -453,6 +453,32 @@ fn split_keybind(v: &str) -> Option<(&str, &str)> {
     Some((&v[..at], &v[at + 1..]))
 }
 
+/// A Ghostty `font-feature` entry: Terminal Decline's syntax (`liga`,
+/// `+liga`, `-liga`, `liga=0`) or CSS's, which Ghostty also takes
+/// (`"liga" off`, `liga on`, `cv05 2`).
+fn ghostty_feature(entry: &str) -> Option<(term_font::Tag, u32)> {
+    if let Some(f) = term_font::Tag::parse_feature(entry) {
+        return Some(f);
+    }
+    let (tag, value) = entry.split_once(char::is_whitespace)?;
+    let tag = term_font::Tag::new(tag.trim_matches(|c| c == '"' || c == '\''))?;
+    let value = match value.trim() {
+        "on" => 1,
+        "off" => 0,
+        n => n.parse().ok()?,
+    };
+    Some((tag, value))
+}
+
+/// A feature as `font_features` spells it: `liga`, `-liga` or `cv05=2`.
+fn feature_text((tag, value): (term_font::Tag, u32)) -> String {
+    match value {
+        0 => format!("-{tag}"),
+        1 => tag.to_string(),
+        n => format!("{tag}={n}"),
+    }
+}
+
 /// The Terminal Decline config for Ghostty config `text` (read from `path`),
 /// with themes looked for in `theme_dirs`.
 pub fn ghostty(text: &str, path: &Path, theme_dirs: &[PathBuf]) -> GhosttyImport {
@@ -462,6 +488,7 @@ pub fn ghostty(text: &str, path: &Path, theme_dirs: &[PathBuf]) -> GhosttyImport
         top.push((k, v));
     };
     let mut fonts: Vec<String> = Vec::new();
+    let mut features: Vec<String> = Vec::new();
     let mut themes: Vec<(String, String)> = Vec::new();
     // A theme by Terminal Decline's name: built in, else a Ghostty theme made
     // into a theme file.
@@ -512,6 +539,20 @@ pub fn ghostty(text: &str, path: &Path, theme_dirs: &[PathBuf]) -> GhosttyImport
             }
             "font-family" if value.is_empty() => fonts.clear(),
             "font-family" => fonts.push(value.clone()),
+            // Repeatable; empty clears the list. One line may hold several,
+            // comma-separated.
+            "font-feature" if value.is_empty() => features.clear(),
+            "font-feature" => {
+                for entry in value.split(',').map(str::trim).filter(|e| !e.is_empty()) {
+                    match ghostty_feature(entry) {
+                        Some(f) => {
+                            features.retain(|old| term_font::Tag::parse_feature(old).map(|(t, _)| t) != Some(f.0));
+                            features.push(feature_text(f));
+                        }
+                        None => skipped.push((key.clone(), entry.to_string(), "not a font feature".to_string())),
+                    }
+                }
+            }
             "font-family-bold" => set("font_bold", quote(&value), &mut top),
             "font-family-italic" => set("font_italic", quote(&value), &mut top),
             "font-family-bold-italic" => set("font_bold_italic", quote(&value), &mut top),
@@ -607,12 +648,17 @@ pub fn ghostty(text: &str, path: &Path, theme_dirs: &[PathBuf]) -> GhosttyImport
             set("font_fallback", format!("[{}]", list.join(", ")), &mut top);
         }
     }
+    if !features.is_empty() {
+        let list: Vec<String> = features.iter().map(|f| quote(f)).collect();
+        set("font_features", format!("[{}]", list.join(", ")), &mut top);
+    }
 
     let mut out = format!("# Imported from {} by `terminal-decline import ghostty`.\n", path.display());
-    const ORDER: [&str; 18] = [
+    const ORDER: [&str; 19] = [
         "theme",
         "font_family",
         "font_fallback",
+        "font_features",
         "font_bold",
         "font_italic",
         "font_bold_italic",
@@ -950,6 +996,7 @@ mod tests {
         assert_eq!(c.font_fallback, ["Symbols Nerd Font Mono"]);
         assert_eq!(c.font_bold.as_deref(), Some("JetBrains Mono ExtraBold"));
         assert_eq!(c.font_size, 14.5);
+        assert_eq!(c.font_features, ["zero", "ss01", "cv05=2", "calt"], "the last calt wins");
         assert_eq!(c.line_height, 1.2);
         assert_eq!(c.cell_width, term_font::CellWidth::Percent(5.0));
         assert_eq!(c.opacity, 0.92);
@@ -999,6 +1046,7 @@ mod tests {
         let notes = &out[out.find("# Not imported:").expect(out)..];
         for k in [
             "font-thicken = true",
+            "font-feature = nope!",
             "cursor-text = #11111b",
             "palette = 200=#123456",
             "scrollback-limit = 10000000",
@@ -1009,7 +1057,7 @@ mod tests {
         ] {
             assert!(notes.contains(&format!("# {k}  (")), "{k} missing:\n{notes}");
         }
-        assert_eq!(notes.lines().count(), 9, "{notes}");
+        assert_eq!(notes.lines().count(), 10, "{notes}");
     }
 
     #[test]

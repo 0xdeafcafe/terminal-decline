@@ -1,107 +1,79 @@
-//! The terminal view: one per window. Owns the session (program, PTY,
-//! terminal state) and the renderer, and turns AppKit events into the inputs
-//! of the pure modules (`keys`, `mouse`, `layout`, `frame_policy`).
+//! The window view: one per window (or tab). Its backing layer is the
+//! window's only `CAMetalLayer`, with one display link, and it draws every
+//! pane of the window in one frame (splits design §1). The panes are
+//! [`PaneView`]s laid over it, which take the keys, the input method and
+//! the mouse; each owns a session (program, PTY and terminal). For now a
+//! window has one pane, filling it.
 
 use std::cell::{Cell as StdCell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::ptr::NonNull;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use block2::RcBlock;
 use dispatch2::{DispatchQueue, DispatchTime};
 use objc2::rc::{Retained, Weak};
-use objc2::runtime::{AnyObject, ProtocolObject, Sel};
+use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSAlert, NSAlertFirstButtonReturn, NSApplication, NSCursor, NSDragOperation, NSDraggingInfo, NSEvent, NSEventMask,
-    NSEventModifierFlags, NSMenu, NSMenuItem, NSModalResponse, NSPasteboard, NSPasteboardTypeFileURL, NSPasteboardTypeString,
-    NSPasteboardTypeURL, NSResponder, NSTextInputClient, NSView, NSWindow, NSWindowDelegate,
+    NSAlert, NSAlertFirstButtonReturn, NSApplication, NSEvent, NSEventMask, NSEventModifierFlags, NSModalResponse, NSPasteboard,
+    NSPasteboardTypeString, NSResponder, NSView, NSWindow, NSWindowDelegate,
 };
 use objc2_foundation::{
-    NSArray, NSAttributedString, NSAttributedStringKey, NSKeyValueObservingOptions, NSNotFound, NSNotification,
-    NSObjectNSKeyValueObserverRegistration, NSObjectProtocol, NSPoint, NSRange, NSRect, NSRunLoop, NSRunLoopCommonModes, NSSize, NSString,
-    NSURL,
+    NSArray, NSKeyValueObservingOptions, NSNotification, NSObjectNSKeyValueObserverRegistration, NSObjectProtocol, NSPoint, NSRect,
+    NSRunLoop, NSRunLoopCommonModes, NSSize, NSString,
 };
 use objc2_metal::{MTLCommandBuffer, MTLDrawable};
 use objc2_quartz_core::{CADisplayLink, CALayer, CAMetalDrawable, CAMetalLayer};
-use term_core::{Selection, Term};
-use term_font::Fonts;
+use term_core::Term;
 use term_pty::{Command, Size};
-use term_render::{FrameInput, Renderer, Theme};
+use term_render::{FrameInput, PaneDraw, PaneRender, Renderer, Theme};
 
 use crate::config::Config;
 use crate::control::{self, Control, Dump};
-use crate::frame_policy::{self, Decision, ECHO_WAIT};
+use crate::frame_policy::{self, Decision, ECHO_WAIT, PaneFrame, WindowTick};
 use crate::keybind::{self, Keybinds};
-use crate::keys::{KeyAction, KeyEventType, KeyInput, KeyModes, KeysDown, Mods, encode_key, paste_bytes};
+use crate::keys::{KeyInput, KeyModes, KeysDown};
 use crate::latency::{self, FrameKeys, Latency};
 use crate::layout::{self, CellSize, Padding};
-use crate::mouse;
-use crate::select::{self, Block, Gesture};
+use crate::pane_view::PaneView;
+use crate::panes::{Geometry, PaneId, Panes, PxRect};
+use crate::select::{Block, Gesture};
 use crate::session::{Events, Hooks, Outcome, Session};
 use crate::theme::Appearance;
 
-const BLINK_INTERVAL: Duration = Duration::from_millis(530);
+pub(crate) const BLINK_INTERVAL: Duration = Duration::from_millis(530);
 
-struct State {
-    session: Session,
-    renderer: Renderer,
-    link: Retained<CADisplayLink>,
-    config: Rc<Config>,
+/// What the window keeps: its layer's renderer and display link, and what
+/// is the same for all its panes (splits design §2.2).
+pub(crate) struct Win {
+    pub(crate) renderer: Renderer,
+    pub(crate) link: Retained<CADisplayLink>,
+    pub(crate) config: Rc<Config>,
     /// The shortcuts in effect (`[keybind]`).
-    binds: Keybinds,
-    theme: Theme,
+    pub(crate) binds: Keybinds,
+    pub(crate) theme: Theme,
     /// The window's light or dark appearance, which picks the theme of a
     /// light/dark pair.
     appearance: Appearance,
-    scale: f64,
+    pub(crate) scale: f64,
+    /// Per window (Cmd+= and Cmd+-), not per pane (splits design §11).
     font_size: f64,
-    focused: bool,
-    cursor_on: bool,
-    blink_scheduled: bool,
-    idle_ticks: u8,
+    /// The window is key.
+    pub(crate) focused: bool,
+    pub(crate) idle_ticks: u8,
     /// Frames presented; lets a delayed buffer trim see if anything was drawn since.
     frames: u64,
     /// Display refresh rate currently asked for (Hz).
     rate: u16,
-    /// Last key, paste, scroll or click: typing gets the full refresh rate.
-    last_input: Instant,
-    sync_since: Option<Instant>,
-    marked: String,
-    scroll_accum: f64,
-    /// Mouse button held while reporting to the program.
-    mouse_button: Option<u8>,
-    /// The gesture that started the selection while the left button is
-    /// held for it.
-    selecting: Option<Gesture>,
-    /// Whether the selection being made changed since the button went down.
-    dragged: bool,
-    /// A rectangular selection (Option-drag); see [`crate::select`].
-    block: Option<Block>,
-    /// Scrolling while a selection is dragged past the top or bottom edge.
-    autoscroll: Option<AutoScroll>,
-    /// An auto-scroll step is waiting to run.
-    autoscroll_scheduled: bool,
-    /// The session has ended, but the window stays open to show why; a key
-    /// closes it.
-    held: bool,
-    /// The key event being handed to the input method, and the modes it
-    /// was translated with, so text it types can be encoded as that key
-    /// (`keys::committed_text`).
-    text_key: Option<(KeyInput, KeyModes)>,
-    /// Keys whose press went to the program, for release events.
-    keys_down: KeysDown,
+    /// Last key, paste, scroll or click in any pane: typing gets the full
+    /// refresh rate.
+    pub(crate) last_input: Instant,
     /// Only with `DECLINE_TEST_DUMP` set: see [`crate::control`].
     test: Option<TestControl>,
-    /// Only with `DECLINE_LATENCY_LOG` set: the key event being handled,
-    /// its timestamp and when `keyDown` got it (see [`crate::latency`]).
-    key_t0: Option<(f64, f64)>,
-    /// When input was last sent and its echo not yet drawn: the first
-    /// output after it is drawn at once, not on the next tick.
-    awaiting_echo: Option<Instant>,
     /// The title bar's height, plus the tab bar's while one shows (points),
     /// as of the last resize.
     top_inset: f64,
@@ -113,34 +85,100 @@ struct State {
     /// This is the Settings tab, which the app started itself: a fixed
     /// title, always opaque, not a running program for `confirm_close`,
     /// and the only session whose chord recording is honoured.
-    settings: bool,
-    /// It runs the login shell, not a program of its own (`-e PROGRAM`, a
-    /// pin's, `command` in the config) or the Settings: only then is the
-    /// program in the shell's foreground saved for a restart and typed at
-    /// the prompt after it (see [`crate::reload::SavedWindow::command`]).
-    runs_shell: bool,
+    pub(crate) settings: bool,
     /// A chord being recorded for the preferences (OSC 7771).
     recording: Option<Recording>,
     /// Bumped by each recording, so a timeout cancels only its own.
     recordings: u64,
 }
 
+/// What each pane keeps: its view, its session and what the renderer
+/// built for it last, and the input and selection state of its terminal.
+pub(crate) struct Pane {
+    pub(crate) view: Retained<PaneView>,
+    pub(crate) session: Session,
+    pub(crate) render: PaneRender,
+    /// Where it is in the window, in pixels.
+    pub(crate) rect: PxRect,
+    pub(crate) cursor_on: bool,
+    pub(crate) blink_scheduled: bool,
+    sync_since: Option<Instant>,
+    pub(crate) marked: String,
+    pub(crate) scroll_accum: f64,
+    /// Mouse button held while reporting to the program.
+    pub(crate) mouse_button: Option<u8>,
+    /// The gesture that started the selection while the left button is
+    /// held for it.
+    pub(crate) selecting: Option<Gesture>,
+    /// Whether the selection being made changed since the button went down.
+    pub(crate) dragged: bool,
+    /// A rectangular selection (Option-drag); see [`crate::select`].
+    pub(crate) block: Option<Block>,
+    /// Scrolling while a selection is dragged past the top or bottom edge.
+    pub(crate) autoscroll: Option<AutoScroll>,
+    /// An auto-scroll step is waiting to run.
+    pub(crate) autoscroll_scheduled: bool,
+    /// The session has ended, but the pane stays open to show why; a key
+    /// closes it.
+    pub(crate) held: bool,
+    /// The key event being handed to the input method, and the modes it
+    /// was translated with, so text it types can be encoded as that key
+    /// (`keys::committed_text`).
+    pub(crate) text_key: Option<(KeyInput, KeyModes)>,
+    /// Keys whose press went to the program, for release events.
+    pub(crate) keys_down: KeysDown,
+    /// Only with `DECLINE_LATENCY_LOG` set: the key event being handled,
+    /// its timestamp and when `keyDown` got it (see [`crate::latency`]).
+    pub(crate) key_t0: Option<(f64, f64)>,
+    /// When input was last sent and its echo not yet drawn: the first
+    /// output after it is drawn at once, not on the next tick.
+    pub(crate) awaiting_echo: Option<Instant>,
+    /// It runs the login shell, not a program of its own (`-e PROGRAM`, a
+    /// pin's, `command` in the config) or the Settings: only then is the
+    /// program in the shell's foreground saved for a restart and typed at
+    /// the prompt after it (see [`crate::reload::SavedWindow::command`]).
+    runs_shell: bool,
+}
+
+pub(crate) struct State {
+    pub(crate) win: Win,
+    tree: Panes,
+    pub(crate) panes: HashMap<PaneId, Pane>,
+}
+
+impl State {
+    /// The pane with focus.
+    fn focused(&mut self) -> Option<&mut Pane> {
+        self.panes.get_mut(&self.tree.focused())
+    }
+
+    /// The panes shown: all of them, or the zoomed one.
+    fn shown(&self) -> Vec<PaneId> {
+        match self.tree.zoomed() {
+            Some(z) => vec![z],
+            None => self.tree.ids(),
+        }
+    }
+}
+
 /// A local key-down monitor waiting for the chord to record.
 struct Recording {
     monitor: Retained<AnyObject>,
+    /// The pane that asked, which gets the reply.
+    pane: PaneId,
 }
 
 /// How long a chord recording waits for a key.
 const RECORD_TIMEOUT: Duration = Duration::from_secs(10);
 
-struct AutoScroll {
+pub(crate) struct AutoScroll {
     /// Lines a second; positive scrolls back into history.
-    speed: f64,
+    pub(crate) speed: f64,
     /// The column under the mouse, for extending the selection.
-    col: usize,
-    last: Instant,
+    pub(crate) col: usize,
+    pub(crate) last: Instant,
     /// Part of a line not yet scrolled.
-    carry: f64,
+    pub(crate) carry: f64,
 }
 
 /// Test-only control commands waiting to run, and the dump in progress.
@@ -164,6 +202,9 @@ pub struct Ivars {
     id: usize,
     layer: Retained<CAMetalLayer>,
     state: RefCell<Option<State>>,
+    /// The pane tree and the first pane's view, made with the view so the
+    /// app can make it first responder before [`WindowView::start`].
+    first: RefCell<Option<(Panes, Retained<PaneView>)>>,
     /// The window whose `contentLayoutRect` this view observes (it changes
     /// when the tab bar shows or hides), until the window closes.
     observed: RefCell<Option<Retained<NSWindow>>>,
@@ -173,11 +214,11 @@ pub struct Ivars {
 const LAYOUT_RECT: &str = "contentLayoutRect";
 
 thread_local! {
-    static VIEWS: RefCell<HashMap<usize, Weak<TerminalView>>> = RefCell::new(HashMap::new());
+    static VIEWS: RefCell<HashMap<usize, Weak<WindowView>>> = RefCell::new(HashMap::new());
     static NEXT_ID: StdCell<usize> = const { StdCell::new(1) };
 }
 
-fn with_view(id: usize, f: impl FnOnce(&TerminalView)) {
+pub(crate) fn with_view(id: usize, f: impl FnOnce(&WindowView)) {
     let view = VIEWS.with(|v| v.borrow().get(&id).and_then(|w| w.load()));
     if let Some(view) = view {
         f(&view);
@@ -209,24 +250,20 @@ pub(crate) fn bring_to_front(id: usize) {
     });
 }
 
-/// Wake the main thread to draw (called from any thread).
-fn wake(id: usize) {
-    DispatchQueue::main().exec_async(move || with_view(id, |v| v.output_arrived()));
+/// Wake the main thread to draw pane `pane` of window `id` (called from
+/// any thread).
+fn wake(id: usize, pane: PaneId) {
+    DispatchQueue::main().exec_async(move || with_view(id, |v| v.output_arrived(pane)));
 }
 
 define_class!(
     #[unsafe(super(NSView, NSResponder, objc2_foundation::NSObject))]
     #[thread_kind = MainThreadOnly]
-    #[name = "DeclineTerminalView"]
+    #[name = "DeclineWindowView"]
     #[ivars = Ivars]
-    pub struct TerminalView;
+    pub struct WindowView;
 
-    impl TerminalView {
-        #[unsafe(method(acceptsFirstResponder))]
-        fn accepts_first_responder(&self) -> bool {
-            true
-        }
-
+    impl WindowView {
         #[unsafe(method(isFlipped))]
         fn is_flipped(&self) -> bool {
             true
@@ -239,7 +276,7 @@ define_class!(
 
         #[unsafe(method(updateLayer))]
         fn update_layer(&self) {
-            self.request_redraw();
+            self.redraw_all();
         }
 
         #[unsafe(method_id(makeBackingLayer))]
@@ -270,7 +307,7 @@ define_class!(
             _context: *mut std::ffi::c_void,
         ) {
             let inset = self.titlebar_height();
-            if self.with_state(|st| st.top_inset != inset) == Some(true) {
+            if self.with_state(|st| st.win.top_inset != inset) == Some(true) {
                 self.resize();
             }
         }
@@ -280,108 +317,6 @@ define_class!(
             self.draw();
         }
 
-        #[unsafe(method(keyDown:))]
-        fn key_down(&self, event: &NSEvent) {
-            self.handle_key(event);
-        }
-
-        #[unsafe(method(keyUp:))]
-        fn key_up(&self, event: &NSEvent) {
-            self.handle_key_up(event);
-        }
-
-        #[unsafe(method(flagsChanged:))]
-        fn flags_changed(&self, event: &NSEvent) {
-            self.handle_flags_changed(event);
-        }
-
-        #[unsafe(method(mouseDown:))]
-        fn mouse_down(&self, event: &NSEvent) {
-            self.mouse_button_event(event, 0, true);
-        }
-
-        #[unsafe(method(mouseUp:))]
-        fn mouse_up(&self, event: &NSEvent) {
-            self.mouse_button_event(event, 0, false);
-        }
-
-        #[unsafe(method(mouseDragged:))]
-        fn mouse_dragged(&self, event: &NSEvent) {
-            self.mouse_motion(event, Some(0));
-        }
-
-        #[unsafe(method(rightMouseDown:))]
-        fn right_mouse_down(&self, event: &NSEvent) {
-            self.mouse_button_event(event, 2, true);
-        }
-
-        #[unsafe(method(rightMouseUp:))]
-        fn right_mouse_up(&self, event: &NSEvent) {
-            self.mouse_button_event(event, 2, false);
-        }
-
-        #[unsafe(method(otherMouseDown:))]
-        fn other_mouse_down(&self, event: &NSEvent) {
-            self.mouse_button_event(event, 1, true);
-        }
-
-        #[unsafe(method(otherMouseUp:))]
-        fn other_mouse_up(&self, event: &NSEvent) {
-            self.mouse_button_event(event, 1, false);
-        }
-
-        #[unsafe(method(mouseMoved:))]
-        fn mouse_moved(&self, event: &NSEvent) {
-            self.mouse_motion(event, None);
-        }
-
-        #[unsafe(method(scrollWheel:))]
-        fn scroll_wheel(&self, event: &NSEvent) {
-            self.handle_scroll(event);
-        }
-
-        #[unsafe(method(copy:))]
-        fn copy(&self, _sender: Option<&AnyObject>) {
-            self.copy_selection();
-        }
-
-        #[unsafe(method(paste:))]
-        fn paste(&self, _sender: Option<&AnyObject>) {
-            let pb = NSPasteboard::generalPasteboard();
-            let Some(text) = pb.stringForType(unsafe { NSPasteboardTypeString }) else { return };
-            self.paste_text(&text.to_string());
-        }
-
-        /// Files, URLs or text dragged onto the window are typed in: see
-        /// `performDragOperation:`.
-        #[unsafe(method(draggingEntered:))]
-        fn dragging_entered(&self, _info: &ProtocolObject<dyn NSDraggingInfo>) -> NSDragOperation {
-            NSDragOperation::Copy
-        }
-
-        #[unsafe(method(draggingUpdated:))]
-        fn dragging_updated(&self, _info: &ProtocolObject<dyn NSDraggingInfo>) -> NSDragOperation {
-            NSDragOperation::Copy
-        }
-
-        #[unsafe(method(performDragOperation:))]
-        fn perform_drag_operation(&self, info: &ProtocolObject<dyn NSDraggingInfo>) -> bool {
-            self.drop_from(&info.draggingPasteboard())
-        }
-
-        #[unsafe(method(selectAll:))]
-        fn select_all(&self, _sender: Option<&AnyObject>) {
-            self.with_state(|st| st.session.lock_term().state.select_all());
-            self.request_redraw();
-        }
-
-        #[unsafe(method(clearBuffer:))]
-        fn clear_buffer(&self, _sender: Option<&AnyObject>) {
-            self.with_state(|st| st.session.lock_term().advance(b"\x1b[H\x1b[2J\x1b[3J"));
-            // Ask the shell to redraw its prompt.
-            self.send_input(b"\x0c".to_vec());
-        }
-
         #[unsafe(method(viewDidChangeEffectiveAppearance))]
         fn view_did_change_effective_appearance(&self) {
             self.appearance_changed();
@@ -389,26 +324,26 @@ define_class!(
 
         #[unsafe(method(increaseFontSize:))]
         fn increase_font_size(&self, _sender: Option<&AnyObject>) {
-            let size = self.with_state(|st| st.font_size + 1.0);
+            let size = self.with_state(|st| st.win.font_size + 1.0);
             self.reload_fonts(size);
         }
 
         #[unsafe(method(decreaseFontSize:))]
         fn decrease_font_size(&self, _sender: Option<&AnyObject>) {
-            let size = self.with_state(|st| (st.font_size - 1.0).max(6.0));
+            let size = self.with_state(|st| (st.win.font_size - 1.0).max(6.0));
             self.reload_fonts(size);
         }
 
         #[unsafe(method(resetFontSize:))]
         fn reset_font_size(&self, _sender: Option<&AnyObject>) {
-            let size = self.with_state(|st| st.config.font_size);
+            let size = self.with_state(|st| st.win.config.font_size);
             self.reload_fonts(size);
         }
     }
 
-    unsafe impl NSObjectProtocol for TerminalView {}
+    unsafe impl NSObjectProtocol for WindowView {}
 
-    unsafe impl NSWindowDelegate for TerminalView {
+    unsafe impl NSWindowDelegate for WindowView {
         #[unsafe(method(windowDidBecomeKey:))]
         fn window_did_become_key(&self, _n: &NSNotification) {
             // A tab brought to the front becomes key: show it now, so its
@@ -432,14 +367,14 @@ define_class!(
         #[unsafe(method(windowDidChangeOcclusionState:))]
         fn window_did_change_occlusion(&self, _n: &NSNotification) {
             if self.sync_visibility() {
-                self.request_redraw();
+                self.redraw_all();
             }
         }
 
         /// With `confirm_close`, ask first while a program runs.
         #[unsafe(method(windowShouldClose:))]
         fn window_should_close(&self, window: &NSWindow) -> bool {
-            let ask = self.with_state(|st| st.config.confirm_close).unwrap_or(false);
+            let ask = self.with_state(|st| st.win.config.confirm_close).unwrap_or(false);
             match self.running_program().filter(|_| ask) {
                 Some(program) => {
                     self.ask_to_close(window, &program);
@@ -454,126 +389,18 @@ define_class!(
             self.shut_down();
         }
     }
-
-    unsafe impl NSTextInputClient for TerminalView {
-        #[unsafe(method(insertText:replacementRange:))]
-        fn insert_text(&self, string: &AnyObject, _range: NSRange) {
-            let text = string_of(string);
-            // The key being handled, unless the text ends a composition.
-            let key = self.with_state(|st| {
-                let composed = !st.marked.is_empty();
-                st.marked.clear();
-                st.text_key.take().filter(|_| !composed)
-            });
-            if text.is_empty() {
-                self.request_redraw();
-            } else {
-                let modes = match &key {
-                    Some(Some((_, modes))) => *modes,
-                    _ => self.key_modes().unwrap_or_default(),
-                };
-                let input = key.flatten().map(|(input, _)| input);
-                // Drawn with the echo (see `send_input`).
-                self.send_input(crate::keys::committed_text(input.as_ref(), modes, &text));
-            }
-        }
-
-        #[unsafe(method(doCommandBySelector:))]
-        fn do_command_by_selector(&self, _selector: Sel) {
-            // Keys with commands (arrows, return, …) are encoded in keyDown.
-        }
-
-        #[unsafe(method(setMarkedText:selectedRange:replacementRange:))]
-        fn set_marked_text(&self, string: &AnyObject, _selected: NSRange, _replacement: NSRange) {
-            let text = string_of(string);
-            self.with_state(|st| st.marked = text);
-            self.request_redraw();
-        }
-
-        #[unsafe(method(unmarkText))]
-        fn unmark_text(&self) {
-            self.with_state(|st| st.marked.clear());
-            self.request_redraw();
-        }
-
-        #[unsafe(method(selectedRange))]
-        fn selected_range(&self) -> NSRange {
-            NSRange::new(NSNotFound as usize, 0)
-        }
-
-        #[unsafe(method(markedRange))]
-        fn marked_range(&self) -> NSRange {
-            let len = self.with_state(|st| st.marked.encode_utf16().count()).unwrap_or(0);
-            if len == 0 { NSRange::new(NSNotFound as usize, 0) } else { NSRange::new(0, len) }
-        }
-
-        #[unsafe(method(hasMarkedText))]
-        fn has_marked_text(&self) -> bool {
-            self.with_state(|st| !st.marked.is_empty()).unwrap_or(false)
-        }
-
-        #[unsafe(method_id(attributedSubstringForProposedRange:actualRange:))]
-        fn attributed_substring(&self, _range: NSRange, _actual: *mut NSRange) -> Option<Retained<NSAttributedString>> {
-            None
-        }
-
-        #[unsafe(method_id(validAttributesForMarkedText))]
-        fn valid_attributes(&self) -> Retained<NSArray<NSAttributedStringKey>> {
-            NSArray::new()
-        }
-
-        #[unsafe(method(firstRectForCharacterRange:actualRange:))]
-        fn first_rect(&self, _range: NSRange, _actual: *mut NSRange) -> NSRect {
-            // Where the input method should put its candidate window: the cursor.
-            let Some(window) = self.window() else { return NSRect::ZERO };
-            let rect = self.with_state(|st| {
-                let m = st.renderer.metrics();
-                let pad = self.padding(st);
-                let t = st.session.lock_term();
-                let (x, y) = layout::cell_origin(t.state.cursor().row(), t.state.cursor().col(), m.into(), pad);
-                let (x, y) = (x as f64 / st.scale, y as f64 / st.scale);
-                NSRect::new(NSPoint::new(x, y), NSSize::new(m.cell_width as f64 / st.scale, m.cell_height as f64 / st.scale))
-            });
-            let Some(rect) = rect else { return NSRect::ZERO };
-            let in_window = self.convertRect_toView(rect, None);
-            window.convertRectToScreen(in_window)
-        }
-
-        #[unsafe(method(characterIndexForPoint:))]
-        fn character_index(&self, _point: NSPoint) -> usize {
-            NSNotFound as usize
-        }
-    }
 );
-
-fn string_of(obj: &AnyObject) -> String {
-    if let Some(s) = obj.downcast_ref::<NSAttributedString>() {
-        return s.string().to_string();
-    }
-    obj.downcast_ref::<NSString>().map(|s| s.to_string()).unwrap_or_default()
-}
-
-/// The files and folders on `pb`, as paths (Finder's file reference URLs
-/// resolved).
-pub(crate) fn file_paths(pb: &NSPasteboard) -> Vec<String> {
-    let Some(items) = pb.pasteboardItems() else { return Vec::new() };
-    items
-        .iter()
-        .filter_map(|item| item.stringForType(unsafe { NSPasteboardTypeFileURL }))
-        .filter_map(|url| NSURL::URLWithString(&url))
-        .filter(|url| url.isFileURL())
-        .filter_map(|url| url.filePathURL().and_then(|u| u.path()))
-        .map(|p| p.to_string())
-        .collect()
-}
 
 pub struct Launch {
     pub command: Command,
-    pub fonts: Fonts,
+    /// Made by the app with the fonts the config sets
+    /// ([`Renderer::with_font_config`], shared with other windows), so it
+    /// could size the window from their cells.
+    pub renderer: Renderer,
     pub scale: f64,
     /// Shown at the top of the window, before the program's output.
     pub notices: Rc<[String]>,
-    /// The Settings tab (see `State::settings`).
+    /// The Settings tab (see `Win::settings`).
     pub settings: bool,
 }
 
@@ -587,8 +414,8 @@ fn window_theme(config: &Config, appearance: Appearance, settings: bool) -> Them
     theme
 }
 
-impl TerminalView {
-    pub fn new(mtm: MainThreadMarker, frame: NSRect) -> Retained<TerminalView> {
+impl WindowView {
+    pub fn new(mtm: MainThreadMarker, frame: NSRect) -> Retained<WindowView> {
         let id = NEXT_ID.with(|n| {
             let id = n.get();
             n.set(id + 1);
@@ -598,21 +425,41 @@ impl TerminalView {
             id,
             layer: CAMetalLayer::new(),
             state: RefCell::new(None),
+            first: RefCell::new(None),
             observed: RefCell::new(None),
         });
-        let view: Retained<TerminalView> = unsafe { msg_send![super(this), initWithFrame: frame] };
+        let view: Retained<WindowView> = unsafe { msg_send![super(this), initWithFrame: frame] };
         view.setWantsLayer(true);
-        let types = unsafe { [NSPasteboardTypeFileURL, NSPasteboardTypeURL, NSPasteboardTypeString] };
-        view.registerForDraggedTypes(&NSArray::from_slice(&types));
+        let tree = Panes::new();
+        let size = view.frame().size;
+        let pane = PaneView::new(mtm, &view, tree.focused(), NSRect::new(NSPoint::new(0.0, 0.0), size));
+        view.addSubview(&pane);
+        *view.ivars().first.borrow_mut() = Some((tree, pane));
         VIEWS.with(|v| v.borrow_mut().insert(id, Weak::from_retained(&view)));
         view
+    }
+
+    /// The view that should have the keys: the focused pane's.
+    pub fn first_responder(&self) -> Option<Retained<PaneView>> {
+        if let Some((_, pane)) = self.ivars().first.borrow().as_ref() {
+            return Some(pane.clone());
+        }
+        self.with_state(|st| st.focused().map(|p| p.view.clone())).flatten()
+    }
+
+    pub(crate) fn id(&self) -> usize {
+        self.ivars().id
     }
 
     /// Start the program and drawing. The view must be in its window.
     pub fn start(&self, config: Rc<Config>, launch: Launch) -> std::io::Result<()> {
         let id = self.ivars().id;
+        let Some((tree, view)) = self.ivars().first.borrow_mut().take() else {
+            return Err(std::io::Error::other("started twice"));
+        };
+        let pane_id = tree.focused();
         let layer = &self.ivars().layer;
-        let renderer = Renderer::new(launch.fonts);
+        let renderer = launch.renderer;
         let settings = launch.settings;
         let runs_shell = !settings && launch.command.argv.is_empty();
         let opaque = config.opacity >= 1.0 || settings;
@@ -627,59 +474,31 @@ impl TerminalView {
         let (cols, lines) = layout::grid_size((size.width, size.height), launch.scale, m.into(), pad);
 
         let mut t = Term::new(cols, lines, config.scrollback);
+        t.state.set_ambiguous_width(config.ambiguous_width);
         t.state.set_default_colors(crate::config::query_colors(&theme));
         for n in launch.notices.iter() {
             crate::session::write_notice(&mut t, n);
         }
-        let mut hooks = Hooks::new(
-            Arc::new(move || wake(id)),
-            Box::new(move |outcome| DispatchQueue::main().exec_async(move || with_view(id, |v| v.program_exited(outcome)))),
-        );
         let test = std::env::var_os(control::ENV).filter(|p| !p.is_empty()).map(|p| TestControl {
             path: PathBuf::from(p),
             queue: VecDeque::new(),
             dump: DumpState::Idle,
             seq: 0,
         });
-        if test.is_some() {
-            hooks.on_control = Some(Box::new(move |cmd| {
-                DispatchQueue::main().exec_async(move || with_view(id, |v| v.control(&cmd)));
-            }));
-        }
-        if let Some(lat) = latency::get() {
-            hooks.on_parsed = Some(Box::new(move || lat.parsed(id)));
-        }
-        hooks.on_events = Some(Box::new(move |events| {
-            DispatchQueue::main().exec_async(move || with_view(id, |v| v.events(events)));
-        }));
-        if settings {
-            hooks.on_record_chord = Some(Box::new(move || {
-                DispatchQueue::main().exec_async(move || with_view(id, |v| v.start_recording()));
-            }));
-        }
+        let hooks = pane_hooks(id, pane_id, test.is_some(), settings);
         let session = Session::spawn(&launch.command, pty_size(cols, lines, m), t, hooks)?;
 
         let link = unsafe { self.displayLinkWithTarget_selector(self, sel!(tick:)) };
         unsafe { link.addToRunLoop_forMode(&NSRunLoop::mainRunLoop(), NSRunLoopCommonModes) };
         link.setPaused(false);
 
-        *self.ivars().state.borrow_mut() = Some(State {
+        let pane = Pane {
+            view,
             session,
-            renderer,
-            link,
-            font_size: config.font_size,
-            binds: config.keybinds(),
-            config,
-            theme,
-            appearance,
-            scale: launch.scale,
-            focused: true,
+            render: PaneRender::new(),
+            rect: PxRect::default(),
             cursor_on: true,
             blink_scheduled: false,
-            idle_ticks: 0,
-            frames: 0,
-            rate: 0,
-            last_input: Instant::now(),
             sync_since: None,
             marked: String::new(),
             scroll_accum: 0.0,
@@ -692,16 +511,35 @@ impl TerminalView {
             held: false,
             text_key: None,
             keys_down: KeysDown::default(),
-            test,
             key_t0: None,
             awaiting_echo: None,
-            top_inset: self.titlebar_height(),
-            hidden: 0,
-            shown: true,
-            settings,
             runs_shell,
-            recording: None,
-            recordings: 0,
+        };
+        *self.ivars().state.borrow_mut() = Some(State {
+            win: Win {
+                renderer,
+                link,
+                font_size: config.font_size,
+                binds: config.keybinds(),
+                config,
+                theme,
+                appearance,
+                scale: launch.scale,
+                focused: true,
+                idle_ticks: 0,
+                frames: 0,
+                rate: 0,
+                last_input: Instant::now(),
+                test,
+                top_inset: self.titlebar_height(),
+                hidden: 0,
+                shown: true,
+                settings,
+                recording: None,
+                recordings: 0,
+            },
+            tree,
+            panes: HashMap::from([(pane_id, pane)]),
         });
         if let Some(window) = self.window() {
             unsafe {
@@ -718,18 +556,28 @@ impl TerminalView {
         Ok(())
     }
 
-    /// What the program asked for, taken as it was parsed (see
+    /// What pane `pane`'s program asked for, taken as it was parsed (see
     /// [`crate::session::Events`]): drawn or not, a tab's title is shown
     /// in the tab bar, a bell bounces the Dock icon, a notification is
     /// shown if this window or tab isn't the one in front, and progress
     /// goes on the Dock icon.
-    fn events(&self, events: Events) {
+    fn events(&self, pane: PaneId, events: Events) {
         let mtm = MainThreadMarker::from(self);
         let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
-        let fixed_title = self.with_state(|st| st.settings || st.config.title.is_some()).unwrap_or(true);
+        // Only the focused pane's title is the window's.
+        let Some((fixed_title, focused)) = self.with_state(|st| {
+            (
+                st.win.settings || st.win.config.title.is_some(),
+                st.panes.contains_key(&pane).then_some(st.tree.focused() == pane),
+            )
+        }) else {
+            return;
+        };
+        let Some(focused) = focused else { return };
         let window = self.window();
         if let Some(window) = &window
             && !fixed_title
+            && focused
             && let Some(title) = &events.title
         {
             window.setTitle(&NSString::from_str(title));
@@ -757,40 +605,50 @@ impl TerminalView {
         }
     }
 
-    fn with_state<R>(&self, f: impl FnOnce(&mut State) -> R) -> Option<R> {
+    pub(crate) fn with_state<R>(&self, f: impl FnOnce(&mut State) -> R) -> Option<R> {
         let mut st = self.ivars().state.borrow_mut();
         st.as_mut().map(f)
     }
 
+    /// `f` on the window and pane `pane`; `None` once it is gone.
+    pub(crate) fn with_pane<R>(&self, pane: PaneId, f: impl FnOnce(&mut Win, &mut Pane) -> R) -> Option<R> {
+        let mut st = self.ivars().state.borrow_mut();
+        let st = st.as_mut()?;
+        let p = st.panes.get_mut(&pane)?;
+        Some(f(&mut st.win, p))
+    }
+
+    /// The focused pane's view.
+    fn focused_view(&self) -> Option<Retained<PaneView>> {
+        self.with_state(|st| st.focused().map(|p| p.view.clone())).flatten()
+    }
+
     pub fn foreground_cwd(&self) -> Option<String> {
         self.with_state(|st| {
-            st.session
+            let p = st.focused()?;
+            p.session
                 .lock_term()
                 .state
                 .cwd()
                 .map(str::to_owned)
-                .or_else(|| st.session.foreground_cwd())
+                .or_else(|| p.session.foreground_cwd())
         })
         .flatten()
     }
 
     /// The title bar's height, plus the tab bar's while one shows.
-    fn titlebar_height(&self) -> f64 {
+    pub(crate) fn titlebar_height(&self) -> f64 {
         match self.window() {
             Some(w) => layout::top_inset(w.frame().size.height, w.contentLayoutRect().size.height),
             None => 0.0,
         }
     }
 
-    fn padding(&self, st: &State) -> Padding {
-        padding_for(&st.config, self.titlebar_height(), st.scale)
-    }
-
-    fn unpause(&self) {
+    pub(crate) fn unpause(&self) {
         let was_paused = self.with_state(|st| {
-            st.idle_ticks = 0;
-            let paused = st.link.isPaused();
-            st.link.setPaused(false);
+            st.win.idle_ticks = 0;
+            let paused = st.win.link.isPaused();
+            st.win.link.setPaused(false);
             paused
         });
         if was_paused == Some(true) {
@@ -799,23 +657,38 @@ impl TerminalView {
         }
     }
 
-    /// The program wrote something (the dirty flag was clear). If it may be
-    /// the echo of input, draw now rather than on the next tick.
-    fn output_arrived(&self) {
-        let echo = self.with_state(|st| st.awaiting_echo.take().is_some());
-        if echo == Some(true) {
-            self.with_state(|st| {
-                st.idle_ticks = 0;
-                st.link.setPaused(false);
-            });
-            self.draw();
-        } else {
-            self.unpause();
+    /// Pane `pane`'s program wrote something (its dirty flag was clear).
+    /// If it may be the echo of input, draw now rather than on the next
+    /// tick. A pane that has closed is ignored.
+    fn output_arrived(&self, pane: PaneId) {
+        let echo = self.with_pane(pane, |win, p| {
+            let echo = p.awaiting_echo.take().is_some();
+            if echo {
+                win.idle_ticks = 0;
+                win.link.setPaused(false);
+            }
+            echo
+        });
+        match echo {
+            Some(true) => self.draw(),
+            Some(false) => self.unpause(),
+            None => {}
         }
     }
 
-    fn request_redraw(&self) {
-        self.with_state(|st| st.session.mark_dirty());
+    /// Draw pane `pane` again soon.
+    pub(crate) fn request_redraw(&self, pane: PaneId) {
+        self.with_pane(pane, |_, p| p.session.mark_dirty());
+        self.unpause();
+    }
+
+    /// Draw every pane again soon.
+    fn redraw_all(&self) {
+        self.with_state(|st| {
+            for p in st.panes.values() {
+                p.session.mark_dirty();
+            }
+        });
         self.unpause();
     }
 
@@ -823,7 +696,7 @@ impl TerminalView {
     /// group can't, whatever its occlusion state says: macOS doesn't
     /// reliably report a background tab as covered. The key window can,
     /// even before its occlusion state catches up with a tab switch.
-    fn visible(&self) -> bool {
+    pub(crate) fn visible(&self) -> bool {
         self.window().is_some_and(|w| {
             let behind = w
                 .tabGroup()
@@ -841,17 +714,17 @@ impl TerminalView {
         let visible = self.visible();
         let minimised = self.window().is_some_and(|w| w.isMiniaturized());
         let changed = self.with_state(|st| {
-            let changed = st.shown != visible;
-            st.shown = visible;
+            let changed = st.win.shown != visible;
+            st.win.shown = visible;
             if changed && !visible {
-                st.hidden += 1;
-                st.renderer.hide(minimised);
+                st.win.hidden += 1;
+                st.win.renderer.hide(minimised);
             }
             changed
         });
         if changed == Some(true) {
             if visible {
-                self.request_redraw();
+                self.redraw_all();
             } else {
                 self.trim_drawables();
             }
@@ -859,131 +732,193 @@ impl TerminalView {
         visible
     }
 
+    /// One display-link tick (or a draw asked for at once): each shown
+    /// pane says whether it builds a new frame, reuses its last one, is
+    /// held in a synchronized update or waits for an echo
+    /// ([`frame_policy::pane`]); the window decides from those
+    /// ([`frame_policy::combine`]), builds the panes that need it and
+    /// draws them all in one frame.
     fn draw(&self) {
         let titlebar = self.titlebar_height();
         let visible = self.visible();
         let minimised = self.window().is_some_and(|w| w.isMiniaturized());
         let mut guard = self.ivars().state.borrow_mut();
         let Some(st) = guard.as_mut() else { return };
+        let shown = st.shown();
+        let State { win, panes, .. } = st;
         // Under test control, draw even when covered by other windows, so a
         // dump never waits forever for a frame.
-        let visible = visible || st.test.is_some();
-        let term = st.session.term().clone();
-        let mut dirty = st.session.take_dirty();
-        if let Some(sent) = st.awaiting_echo {
-            if sent.elapsed() >= ECHO_WAIT {
+        let visible = visible || win.test.is_some();
+        let terms: Vec<(PaneId, Arc<Mutex<Term>>)> = shown
+            .iter()
+            .filter_map(|id| panes.get(id).map(|p| (*id, p.session.term().clone())))
+            .collect();
+        let mut ticks = Vec::with_capacity(terms.len());
+        for (id, term) in &terms {
+            let p = panes.get_mut(id).expect("shown pane");
+            let dirty = p.session.take_dirty();
+            let echo = p.awaiting_echo.map(|sent| sent.elapsed());
+            let waited_out = echo.is_some_and(|e| e >= ECHO_WAIT);
+            if waited_out {
                 // No echo: draw what the input changed (cursor, scroll).
-                st.awaiting_echo = None;
-                dirty = true;
-            } else if !dirty {
-                // Keep ticking until the echo comes or the wait is over.
-                st.idle_ticks = 0;
-                return;
+                p.awaiting_echo = None;
             }
+            // Only a frame that may be drawn needs the terminal's lock.
+            let t = ((dirty || waited_out) && visible).then(|| crate::session::lock(term));
+            let synchronized = t.as_ref().is_some_and(|t| t.state.modes().synchronized);
+            let sync_elapsed = if synchronized {
+                p.sync_since.get_or_insert_with(Instant::now).elapsed()
+            } else {
+                if t.is_some() {
+                    p.sync_since = None;
+                }
+                Duration::ZERO
+            };
+            // Waited out, it builds like a changed pane (unless held).
+            let frame = frame_policy::pane(dirty || waited_out, synchronized, sync_elapsed, echo.filter(|_| !waited_out));
+            ticks.push((*id, frame, t));
         }
-        // Only a frame that may be drawn needs the terminal's lock.
-        let mut t = (dirty && visible).then(|| crate::session::lock(&term));
-        let synchronized = t.as_ref().is_some_and(|t| t.state.modes().synchronized);
-        let sync_elapsed = if synchronized {
-            st.sync_since.get_or_insert_with(Instant::now).elapsed()
-        } else {
-            if t.is_some() {
-                st.sync_since = None;
-            }
-            Duration::ZERO
-        };
-        let decision = frame_policy::decide(
-            dirty,
-            visible,
-            synchronized,
-            sync_elapsed,
-            st.idle_ticks,
-            minimised,
-            st.last_input.elapsed(),
-            st.focused,
+        let frames: Vec<PaneFrame> = ticks.iter().map(|(_, f, _)| *f).collect();
+        let decision = frame_policy::combine(
+            &frames,
+            &WindowTick {
+                visible,
+                minimised,
+                focused: win.focused,
+                idle_ticks: win.idle_ticks,
+                last_input_elapsed: win.last_input.elapsed(),
+            },
         );
+        // A pane held in a synchronized update keeps its change for later.
+        let keep_held = |panes: &HashMap<PaneId, Pane>, ticks: &[(PaneId, PaneFrame, _)]| {
+            for (id, f, _) in ticks {
+                if *f == PaneFrame::Held {
+                    panes[id].session.mark_dirty();
+                }
+            }
+        };
         let rate = match decision {
             Decision::Skip => {
-                st.idle_ticks = st.idle_ticks.saturating_add(1);
+                win.idle_ticks = win.idle_ticks.saturating_add(1);
                 return;
             }
             Decision::Pause { trim_after } => {
-                st.idle_ticks = st.idle_ticks.saturating_add(1);
-                st.link.setPaused(true);
-                let token = st.frames;
-                drop(t);
+                win.idle_ticks = win.idle_ticks.saturating_add(1);
+                win.link.setPaused(true);
+                let token = win.frames;
+                drop(ticks);
                 drop(guard);
                 self.schedule_trim(token, trim_after);
                 return;
             }
             Decision::Hide { keep_surface } => {
-                // Hidden or fully covered: keep the change and draw when shown.
-                st.idle_ticks = 0;
-                st.session.mark_dirty();
-                st.link.setPaused(true);
-                st.renderer.hide(keep_surface);
+                // Hidden or fully covered: keep the changes and draw when shown.
+                win.idle_ticks = 0;
+                for (id, _, _) in &ticks {
+                    panes[id].session.mark_dirty();
+                }
+                win.link.setPaused(true);
+                win.renderer.hide(keep_surface);
                 return;
             }
             Decision::Hold => {
-                // Keep ticking so the timeout is noticed.
-                st.idle_ticks = 0;
-                st.session.mark_dirty();
-                st.link.setPaused(false);
+                // Keep ticking so the timeout (or the echo) is noticed.
+                win.idle_ticks = 0;
+                keep_held(panes, &ticks);
+                win.link.setPaused(false);
                 return;
             }
             Decision::Draw { rate } => latency::get().and_then(|l| l.hz()).unwrap_or(rate),
         };
-        st.idle_ticks = 0;
-        st.renderer.show();
-        if rate != st.rate {
-            st.rate = rate;
+        keep_held(panes, &ticks);
+        win.idle_ticks = 0;
+        win.renderer.show();
+        if rate != win.rate {
+            win.rate = rate;
             let r = rate as f32;
-            st.link.setPreferredFrameRateRange(objc2_quartz_core::CAFrameRateRange {
+            win.link.setPreferredFrameRateRange(objc2_quartz_core::CAFrameRateRange {
                 minimum: r / 2.0,
                 maximum: r,
                 preferred: r,
             });
         }
-        let pad = padding_for(&st.config, titlebar, st.scale);
-        let blink;
-        let clipboard;
-        {
-            let Some(t) = t.as_mut() else { return };
-            clipboard = t.state.take_clipboard();
-            blink = t.state.cursor_blink();
+        let mut clipboard = None;
+        let mut blinking = Vec::new();
+        for ((id, frame, t), (_, term)) in ticks.iter_mut().zip(&terms) {
+            let (id, frame) = (*id, *frame);
+            let p = panes.get_mut(&id).expect("shown pane");
+            // A pane built against emptied glyph textures or old fonts is
+            // built again before it is drawn, held or not.
+            let build = frame == PaneFrame::Build || !win.renderer.is_current(&p.render);
+            if !build {
+                continue;
+            }
+            let t = t.get_or_insert_with(|| crate::session::lock(term));
+            if let Some(text) = t.state.take_clipboard() {
+                clipboard = Some(text);
+            }
+            if t.state.cursor_blink() && win.focused && !p.blink_scheduled {
+                p.blink_scheduled = true;
+                blinking.push(id);
+            }
+            let pad = pane_padding(&win.config, titlebar, win.scale, p.rect);
             let input = FrameInput {
-                theme: &st.theme,
-                metrics: st.renderer.metrics(),
+                theme: &win.theme,
+                metrics: win.renderer.metrics(),
                 padding: (pad.x, pad.top),
-                cursor_on: st.cursor_on,
-                focused: st.focused,
-                preedit: Some(st.marked.as_str()),
+                cursor_on: p.cursor_on,
+                focused: win.focused,
+                preedit: Some(p.marked.as_str()),
             };
-            st.renderer.prepare(&mut t.state, &input);
+            win.renderer.build_pane(&mut p.render, &mut t.state, &input);
         }
-        // With the terminal still locked: the keys whose output this frame shows.
+        // With the terminals still locked: the keys whose output this frame shows.
         let timed = latency::get().map(|l| (l, l.take_for_frame(self.ivars().id, rate)));
-        drop(t);
+        drop(ticks);
+        let (w, h) = {
+            let s = self.ivars().layer.drawableSize();
+            (s.width as u32, s.height as u32)
+        };
+        let draws: Vec<PaneDraw> = shown
+            .iter()
+            .filter_map(|id| panes.get(id))
+            .filter_map(|p| {
+                let r = term_render::PxRect {
+                    x: p.rect.x,
+                    y: p.rect.y,
+                    w: p.rect.w,
+                    h: p.rect.h,
+                };
+                Some(PaneDraw {
+                    pane: &p.render,
+                    origin: (r.x, r.y),
+                    scissor: r.clamped(w, h)?,
+                })
+            })
+            .collect();
+        // One pane clears to its own background; several clear to nothing
+        // and each fills its own rectangle, so a see-through background's
+        // alpha is applied once.
+        let clear = match draws.as_slice() {
+            [one] => one.pane.frame.clear,
+            _ => 0,
+        };
         match timed {
-            Some((lat, keys)) if !keys.is_empty() => present_timed(&mut st.renderer, &self.ivars().layer, lat, keys),
-            _ => st.renderer.present(&self.ivars().layer),
+            Some((lat, keys)) if !keys.is_empty() => present_timed(&mut win.renderer, &self.ivars().layer, clear, &draws, lat, keys),
+            _ => win.renderer.present_panes(&self.ivars().layer, clear, &draws, &[]),
         }
-        st.frames += 1;
+        drop(draws);
+        win.frames += 1;
         let mut poll_dump = false;
-        if let Some(test) = &mut st.test
+        if let Some(test) = &mut win.test
             && test.dump == DumpState::Requested
         {
-            test.dump = DumpState::Drawn(st.renderer.frames_submitted());
+            test.dump = DumpState::Drawn(win.renderer.frames_submitted());
             poll_dump = true;
         }
-
-        let need_blink = blink && st.focused && !st.blink_scheduled;
-        if need_blink {
-            st.blink_scheduled = true;
-        }
         drop(guard);
-        if need_blink {
-            self.schedule_blink();
+        for pane in blinking {
+            self.schedule_blink(pane);
         }
         if let Some(text) = clipboard {
             let pb = NSPasteboard::generalPasteboard();
@@ -1002,7 +937,8 @@ impl TerminalView {
         let id = self.ivars().id;
         let _ = DispatchQueue::main().after(DispatchTime::NOW.time(after.as_nanos() as i64), move || {
             with_view(id, |v| {
-                let idle = v.with_state(|st| st.frames == token && st.link.isPaused() && !st.blink_scheduled);
+                let idle =
+                    v.with_state(|st| st.win.frames == token && st.win.link.isPaused() && !st.panes.values().any(|p| p.blink_scheduled));
                 if idle == Some(true) {
                     v.trim_drawables();
                 }
@@ -1017,37 +953,75 @@ impl TerminalView {
         layer.setDrawableSize(size);
     }
 
-    fn schedule_blink(&self) {
+    pub(crate) fn schedule_blink(&self, pane: PaneId) {
         let id = self.ivars().id;
         let _ = DispatchQueue::main().after(DispatchTime::NOW.time(BLINK_INTERVAL.as_nanos() as i64), move || {
             with_view(id, |v| {
-                let again = v.with_state(|st| {
-                    st.blink_scheduled = false;
-                    let blinking = st.focused && st.session.lock_term().state.cursor_blink();
-                    st.cursor_on = !st.cursor_on || !blinking;
+                let again = v.with_pane(pane, |win, p| {
+                    p.blink_scheduled = false;
+                    let blinking = win.focused && p.session.lock_term().state.cursor_blink();
+                    p.cursor_on = !p.cursor_on || !blinking;
                     blinking
                 });
                 if again == Some(true) {
-                    v.request_redraw();
+                    v.request_redraw(pane);
                 }
             })
         });
     }
 
+    /// The window's content in pixels, for laying out its panes.
+    fn geometry(&self, st: &State, titlebar: f64) -> Geometry {
+        let size = self.frame().size;
+        let scale = st.win.scale;
+        let m = st.win.renderer.metrics();
+        let pad = padding_for(&st.win.config, 0.0, scale);
+        Geometry {
+            bounds: PxRect {
+                x: 0,
+                y: 0,
+                w: (size.width * scale).round() as i32,
+                h: (size.height * scale).round() as i32,
+            },
+            top_inset: (titlebar * scale).round() as i32,
+            min: (
+                (10 * m.cell_width + 2 * pad.x) as i32,
+                (3 * m.cell_height + pad.top + pad.bottom) as i32,
+            ),
+            divider: scale.round().max(1.0) as i32,
+        }
+    }
+
+    /// Lay out the panes for the view's size, title bar and fonts: each
+    /// pane view gets its rectangle and each session its grid.
     fn resize(&self) {
         let Some(window) = self.window() else { return };
         let titlebar = self.titlebar_height();
         self.with_state(|st| {
-            st.scale = window.backingScaleFactor();
-            st.top_inset = titlebar;
+            st.win.scale = window.backingScaleFactor();
+            st.win.top_inset = titlebar;
             let size = self.frame().size;
+            let scale = st.win.scale;
             let layer = &self.ivars().layer;
-            layer.setContentsScale(st.scale);
-            layer.setDrawableSize(NSSize::new((size.width * st.scale).round(), (size.height * st.scale).round()));
-            let m = st.renderer.metrics();
-            let pad = padding_for(&st.config, titlebar, st.scale);
-            let (cols, lines) = layout::grid_size((size.width, size.height), st.scale, m.into(), pad);
-            let _ = st.session.resize(pty_size(cols, lines, m));
+            layer.setContentsScale(scale);
+            layer.setDrawableSize(NSSize::new((size.width * scale).round(), (size.height * scale).round()));
+            let layout = st.tree.layout(&self.geometry(st, titlebar));
+            let m = st.win.renderer.metrics();
+            for (id, rect) in layout.panes {
+                let Some(p) = st.panes.get_mut(&id) else { continue };
+                p.rect = rect;
+                // One pane fills the view, in points as the view has them.
+                let frame = if st.tree.len() == 1 {
+                    NSRect::new(NSPoint::new(0.0, 0.0), size)
+                } else {
+                    let pt = |v: i32| v as f64 / scale;
+                    NSRect::new(NSPoint::new(pt(rect.x), pt(rect.y)), NSSize::new(pt(rect.w), pt(rect.h)))
+                };
+                p.view.setFrame(frame);
+                let pad = pane_padding(&st.win.config, titlebar, scale, rect);
+                let (cols, lines) = layout::grid_size((frame.size.width, frame.size.height), scale, m.into(), pad);
+                let _ = p.session.resize(pty_size(cols, lines, m));
+            }
         });
         // Draw now so live resizing doesn't show a stretched old frame.
         self.draw();
@@ -1057,15 +1031,16 @@ impl TerminalView {
         let Some(window) = self.window() else { return };
         let scale = window.backingScaleFactor();
         let changed = self.with_state(|st| {
-            let size = size.unwrap_or(st.font_size);
-            if size == st.font_size && scale == st.scale {
+            let win = &mut st.win;
+            let size = size.unwrap_or(win.font_size);
+            if size == win.font_size && scale == win.scale {
                 return false;
             }
-            st.font_size = size;
-            st.scale = scale;
-            // Only the size changes: fallbacks, faces, line height and
-            // cell width stay as configured.
-            st.renderer.set_fonts(Fonts::with_config(&st.config.font_config(size), scale));
+            win.font_size = size;
+            win.scale = scale;
+            // Only the size changes: fallbacks, faces, line height, cell
+            // width and features stay as configured.
+            win.renderer.set_font_config(&win.config.font_config(size), scale);
             true
         });
         if changed == Some(true) {
@@ -1075,42 +1050,47 @@ impl TerminalView {
 
     /// A reloaded config: colours, fonts, padding, opacity and shortcuts
     /// change at once, option-as-meta and copy-on-select from the next key
-    /// or selection; `notices` are written into the terminal. A new
+    /// or selection; `notices` are written into the terminals. A new
     /// `font_size` replaces a size set with Cmd+= / Cmd+-; otherwise the
     /// window keeps its size.
     pub fn apply_config(&self, config: Rc<Config>, notices: &[String]) {
         let Some(window) = self.window() else { return };
         let scale = window.backingScaleFactor();
         let changed = self.with_state(|st| {
-            let old = std::mem::replace(&mut st.config, config.clone());
-            let old_fonts = old.font_config(st.font_size);
+            let win = &mut st.win;
+            let old = std::mem::replace(&mut win.config, config.clone());
+            let old_fonts = old.font_config(win.font_size);
             if config.font_size != old.font_size {
-                st.font_size = config.font_size;
+                win.font_size = config.font_size;
             }
-            let fonts = config.font_config(st.font_size);
-            if fonts != old_fonts || scale != st.scale {
-                st.scale = scale;
-                st.renderer.set_fonts(Fonts::with_config(&fonts, scale));
+            let fonts = config.font_config(win.font_size);
+            if fonts != old_fonts || scale != win.scale {
+                win.scale = scale;
+                win.renderer.set_font_config(&fonts, scale);
             }
-            st.binds = config.keybinds();
-            st.theme = window_theme(&config, st.appearance, st.settings);
-            {
-                let mut t = st.session.lock_term();
-                t.state.set_default_colors(crate::config::query_colors(&st.theme));
+            win.binds = config.keybinds();
+            win.theme = window_theme(&config, win.appearance, win.settings);
+            for p in st.panes.values() {
+                let mut t = p.session.lock_term();
+                t.state.set_default_colors(crate::config::query_colors(&win.theme));
+                if t.state.ambiguous_width() != config.ambiguous_width {
+                    // For output from now on; what is on screen stays.
+                    t.state.set_ambiguous_width(config.ambiguous_width);
+                }
                 // Not into a full-screen program (vim, the preferences):
                 // the lines would land under its cursor in its colours.
-                if !st.settings && !t.state.alt_screen_active() {
+                if !win.settings && !t.state.alt_screen_active() {
                     for n in notices {
                         crate::session::write_late_notice(&mut t, n);
                     }
                 }
             }
-            self.ivars().layer.setOpaque(config.opacity >= 1.0 || st.settings);
+            self.ivars().layer.setOpaque(config.opacity >= 1.0 || win.settings);
         });
         if changed.is_some() {
             // Padding or cell size may have changed the grid.
             self.resize();
-            self.request_redraw();
+            self.redraw_all();
         }
     }
 
@@ -1133,38 +1113,48 @@ impl TerminalView {
     fn appearance_changed(&self) {
         let appearance = self.appearance();
         let changed = self.with_state(|st| {
-            if st.appearance == appearance {
+            let win = &mut st.win;
+            if win.appearance == appearance {
                 return false;
             }
-            st.appearance = appearance;
-            let theme = window_theme(&st.config, appearance, st.settings);
-            let recolour = theme.foreground != st.theme.foreground
-                || theme.background != st.theme.background
-                || theme.palette != st.theme.palette
-                || theme.cursor != st.theme.cursor
-                || theme.selection != st.theme.selection;
-            st.theme = theme;
-            st.session
-                .lock_term()
-                .state
-                .set_default_colors(crate::config::query_colors(&st.theme));
+            win.appearance = appearance;
+            let theme = window_theme(&win.config, appearance, win.settings);
+            let recolour = theme.foreground != win.theme.foreground
+                || theme.background != win.theme.background
+                || theme.palette != win.theme.palette
+                || theme.cursor != win.theme.cursor
+                || theme.selection != win.theme.selection;
+            win.theme = theme;
+            for p in st.panes.values() {
+                p.session
+                    .lock_term()
+                    .state
+                    .set_default_colors(crate::config::query_colors(&win.theme));
+            }
             recolour
         });
         if changed == Some(true) {
-            self.request_redraw();
+            self.redraw_all();
         }
     }
 
+    /// The window became key or stopped being key: the focused pane's
+    /// program is told if it asked (focus events).
     fn set_focus(&self, focused: bool) {
         let report = self.with_state(|st| {
-            st.focused = focused;
-            st.cursor_on = true;
-            st.session.lock_term().state.modes().focus_events
+            st.win.focused = focused;
+            let id = st.tree.focused();
+            let p = st.focused()?;
+            p.cursor_on = true;
+            let report = p.session.lock_term().state.modes().focus_events;
+            Some((id, report, p.view.clone()))
         });
-        if report == Some(true) {
-            self.send_raw(if focused { b"\x1b[I".to_vec() } else { b"\x1b[O".to_vec() });
+        if let Some(Some((id, report, view))) = report {
+            if report {
+                view.send_raw(if focused { b"\x1b[I".to_vec() } else { b"\x1b[O".to_vec() });
+            }
+            self.request_redraw(id);
         }
-        self.request_redraw();
     }
 
     fn shut_down(&self) {
@@ -1175,24 +1165,32 @@ impl TerminalView {
         self.finish_recording(None);
         let st = self.ivars().state.borrow_mut().take();
         if let Some(st) = st {
-            st.link.invalidate();
-            drop(st); // hangs up on the program
+            st.win.link.invalidate();
+            drop(st); // hangs up on the programs
             crate::notify::set_progress(MainThreadMarker::from(self), self.ivars().id, term_core::Progress::Clear);
         }
         VIEWS.with(|v| v.borrow_mut().remove(&self.ivars().id));
     }
 
-    fn program_exited(&self, outcome: Outcome) {
+    /// Pane `pane`'s program ended. A pane that has closed already is
+    /// ignored.
+    fn program_exited(&self, pane: PaneId, outcome: Outcome) {
         match outcome {
-            Outcome::Closed => self.close_window(),
+            Outcome::Closed => {
+                // The last pane closes the window (closing one of several
+                // comes with splitting).
+                if self.with_state(|st| st.panes.contains_key(&pane)) == Some(true) {
+                    self.close_window();
+                }
+            }
             Outcome::Hold => {
                 // The session wrote why into the terminal.
-                let testing = self.with_state(|st| {
-                    st.held = true;
-                    st.session.mark_dirty();
-                    st.test.is_some()
+                let testing = self.with_pane(pane, |win, p| {
+                    p.held = true;
+                    p.session.mark_dirty();
+                    win.test.is_some()
                 });
-                self.request_redraw();
+                self.request_redraw(pane);
                 if testing == Some(true) {
                     // Smoke tests can't send a dump command once the
                     // program is gone: dump what the held window shows.
@@ -1202,137 +1200,100 @@ impl TerminalView {
         }
     }
 
-    fn close_window(&self) {
+    pub(crate) fn close_window(&self) {
         if let Some(window) = self.window() {
             window.close();
         }
     }
 
-    /// Input typed by the user: snaps the view back to the live screen.
-    fn send_input(&self, bytes: Vec<u8>) {
-        let len = bytes.len();
-        let key_t0 = self.with_state(|st| {
-            st.cursor_on = true;
-            st.last_input = Instant::now();
-            let mut t = st.session.lock_term();
-            t.state.scroll_view_to_bottom();
-            t.state.set_selection(None);
-            drop(t);
-            st.key_t0.take()
-        });
-        // Logged before the writer has the bytes, so the echo can't be
-        // parsed before the key is waited for.
-        if let (Some(lat), Some(Some((t0, key_down)))) = (latency::get(), key_t0) {
-            lat.key_sent(self.ivars().id, t0, key_down, len);
-        }
-        self.send_raw(bytes);
-        // Don't draw yet: the echo is usually well under a millisecond away.
-        // A frame now would take the free drawable and clear the dirty flag,
-        // so the echo would wait for the next tick. Instead the first output
-        // after this is drawn as soon as it's parsed (`output_arrived`);
-        // with none, a tick draws after `ECHO_WAIT`.
-        self.with_state(|st| {
-            st.awaiting_echo = Some(Instant::now());
-            st.idle_ticks = 0;
-            st.link.setPaused(false);
-        });
-    }
-
-    /// Bytes typed for the latency harness (its `type` command).
+    /// Bytes typed for the latency harness (its `type` command), into the
+    /// focused pane.
     pub fn latency_type(&self, bytes: Vec<u8>) {
         let t = latency::now();
-        self.with_state(|st| st.key_t0 = Some((t, t)));
-        self.send_input(bytes);
-        self.with_state(|st| st.key_t0 = None);
+        let Some(view) = self.focused_view() else { return };
+        view.with(|_, p| p.key_t0 = Some((t, t)));
+        view.send_input(bytes);
+        view.with(|_, p| p.key_t0 = None);
     }
 
-    fn send_raw(&self, bytes: Vec<u8>) {
-        self.with_state(|st| st.session.send(bytes));
-    }
-
-    /// Type `text` as a paste: bracketed when the program asked for it.
-    fn paste_text(&self, text: &str) {
-        let bracketed = self
-            .with_state(|st| st.session.lock_term().state.modes().bracketed_paste)
-            .unwrap_or(false);
-        self.send_input(paste_bytes(text, bracketed));
-    }
-
-    /// Something dropped on the window: files and folders as their paths,
-    /// quoted for the shell and separated by spaces; else a URL or text as
-    /// it is.
-    fn drop_from(&self, pb: &NSPasteboard) -> bool {
-        let paths = file_paths(pb);
-        let text = if !paths.is_empty() {
-            crate::desktop::dropped_text(&paths)
-        } else {
-            let text = unsafe { pb.stringForType(NSPasteboardTypeURL) }.or_else(|| unsafe { pb.stringForType(NSPasteboardTypeString) });
-            match text {
-                Some(t) => t.to_string(),
-                None => return false,
-            }
-        };
-        self.paste_text(&text);
-        true
-    }
-
-    /// The program running in the foreground, if it isn't the shell (see
-    /// [`crate::running`]). Never the Settings tab: closing it loses
-    /// nothing, each edit being written at once.
+    /// The program running in the focused pane's foreground, if it isn't
+    /// the shell (see [`crate::running`]). Never the Settings tab: closing
+    /// it loses nothing, each edit being written at once.
     pub fn running_program(&self) -> Option<String> {
-        let pid = self.with_state(|st| (!st.settings).then(|| st.session.pid()).flatten()).flatten()?;
+        let pid = self
+            .with_state(|st| {
+                let settings = st.win.settings;
+                (!settings).then(|| st.focused().and_then(|p| p.session.pid())).flatten()
+            })
+            .flatten()?;
         crate::running::foreground_program(pid)
     }
 
-    /// The command line of the program in the shell's foreground, to save
-    /// for a restart (see [`crate::running::foreground_command`]). Only
-    /// for a window running the login shell.
+    /// The command line of the program in the focused pane's shell's
+    /// foreground, to save for a restart (see
+    /// [`crate::running::foreground_command`]). Only for a pane running
+    /// the login shell.
     pub fn command_to_restore(&self) -> Option<String> {
-        let pid = self.with_state(|st| st.runs_shell.then(|| st.session.pid()).flatten()).flatten()?;
+        let pid = self
+            .with_state(|st| st.focused().and_then(|p| p.runs_shell.then(|| p.session.pid()).flatten()))
+            .flatten()?;
         crate::running::foreground_command(pid)
     }
 
     /// Type a restored tab's `command` at its shell's prompt once the
     /// shell is reading, without running it (see
-    /// [`Session::type_at_prompt`]). Only for a window running the login
+    /// [`Session::type_at_prompt`]). Only for a pane running the login
     /// shell.
     pub fn type_at_prompt(&self, command: String) {
         self.with_state(|st| {
-            if st.runs_shell {
-                st.session.type_at_prompt(command);
+            if let Some(p) = st.focused()
+                && p.runs_shell
+            {
+                p.session.type_at_prompt(command);
             }
         });
     }
 
+    /// Whether the program in the focused pane is on the alternate screen,
+    /// and whether a chord is being recorded (see [`crate::app::settings_status`]).
+    pub(crate) fn settings_status(&self) -> (bool, bool) {
+        self.with_state(|st| {
+            let recording = st.win.recording.is_some();
+            let alt = st.focused().is_some_and(|p| p.session.lock_term().state.alt_screen_active());
+            (alt, recording)
+        })
+        .unwrap_or((false, false))
+    }
+
     /// Whether this is the Settings tab.
     pub fn is_settings(&self) -> bool {
-        self.with_state(|st| st.settings).unwrap_or(false)
+        self.with_state(|st| st.win.settings).unwrap_or(false)
     }
 
-    /// Type `bytes` as if typed (the test-only `type-settings`).
+    /// Type `bytes` into the focused pane as if typed (the test-only
+    /// `type-settings`).
     pub fn type_bytes(&self, bytes: Vec<u8>) {
-        self.send_input(bytes);
+        if let Some(view) = self.focused_view() {
+            view.send_input(bytes);
+        }
     }
 
-    /// The preferences asked for a chord (`OSC 7771 ; record-chord`, only
-    /// heard in the Settings tab): the next key down in this window is
-    /// taken before the menus, the input method and `[keybind]` see it,
-    /// and sent back as `OSC 7771 ; chord ; <chord>`. Plain Esc, the
-    /// window losing focus (a tab switch too) or [`RECORD_TIMEOUT`]
-    /// cancel.
-    fn start_recording(&self) {
-        let Some(settings) = self.with_state(|st| st.settings) else {
+    /// Pane `pane`'s preferences asked for a chord (`OSC 7771 ;
+    /// record-chord`, only heard in the Settings tab): the next key down
+    /// in this window is taken before the menus, the input method and
+    /// `[keybind]` see it, and sent back as `OSC 7771 ; chord ; <chord>`.
+    /// Plain Esc, the window losing focus (a tab switch too) or
+    /// [`RECORD_TIMEOUT`] cancel.
+    fn start_recording(&self, pane: PaneId) {
+        let Some(Some(view)) = self.with_state(|st| st.win.settings.then(|| st.panes.get(&pane).map(|p| p.view.clone())).flatten()) else {
             return;
         };
-        if !settings {
-            return;
-        }
         // Asked again while waiting: the old monitor goes, silently.
-        if let Some(old) = self.with_state(|st| st.recording.take()).flatten() {
+        if let Some(old) = self.with_state(|st| st.win.recording.take()).flatten() {
             unsafe { NSEvent::removeMonitor(&old.monitor) };
         }
         if !self.window().is_some_and(|w| w.isKeyWindow()) {
-            self.send_raw(keybind::chord_reply(None).into_bytes());
+            view.send_raw(keybind::chord_reply(None).into_bytes());
             return;
         }
         let id = self.ivars().id;
@@ -1343,19 +1304,19 @@ impl TerminalView {
         });
         let monitor = unsafe { NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::KeyDown, &handler) };
         let Some(monitor) = monitor else {
-            self.send_raw(keybind::chord_reply(None).into_bytes());
+            view.send_raw(keybind::chord_reply(None).into_bytes());
             return;
         };
         let Some(token) = self.with_state(|st| {
-            st.recordings += 1;
-            st.recording = Some(Recording { monitor });
-            st.recordings
+            st.win.recordings += 1;
+            st.win.recording = Some(Recording { monitor, pane });
+            st.win.recordings
         }) else {
             return;
         };
         let _ = DispatchQueue::main().after(DispatchTime::NOW.time(RECORD_TIMEOUT.as_nanos() as i64), move || {
             with_view(id, |v| {
-                if v.with_state(|st| st.recordings == token && st.recording.is_some()) == Some(true) {
+                if v.with_state(|st| st.win.recordings == token && st.win.recording.is_some()) == Some(true) {
                     v.finish_recording(None);
                 }
             })
@@ -1364,7 +1325,7 @@ impl TerminalView {
 
     /// A key down while a chord is recorded: whether it was taken.
     fn recorded_key(&self, event: &NSEvent) -> bool {
-        if self.with_state(|st| st.recording.is_some()) != Some(true) {
+        if self.with_state(|st| st.win.recording.is_some()) != Some(true) {
             return false;
         }
         let ours = self
@@ -1374,13 +1335,13 @@ impl TerminalView {
         if !ours {
             return false;
         }
-        let input = key_input(event);
+        let input = crate::pane_view::key_input(event);
         let mods = crate::keys::flags::COMMAND | crate::keys::flags::CONTROL | crate::keys::flags::OPTION | crate::keys::flags::SHIFT;
         if input.keycode == 0x35 && input.flags & mods == 0 {
             self.finish_recording(None);
             return true;
         }
-        let chord = self.with_state(|st| keybind::recorded_chord(&input, &st.binds)).flatten();
+        let chord = self.with_state(|st| keybind::recorded_chord(&input, &st.win.binds)).flatten();
         // A key with no character or name: keep waiting.
         if chord.is_some() {
             self.finish_recording(chord);
@@ -1391,11 +1352,17 @@ impl TerminalView {
     /// Ends a chord recording, if one is waiting, replying with `chord`
     /// or, for `None`, that it was cancelled.
     fn finish_recording(&self, chord: Option<keybind::Chord>) {
-        let Some(rec) = self.with_state(|st| st.recording.take()).flatten() else {
+        let Some(Some((rec, view))) = self.with_state(|st| {
+            let rec = st.win.recording.take()?;
+            let view = st.panes.get(&rec.pane).map(|p| p.view.clone());
+            Some((rec, view))
+        }) else {
             return;
         };
         unsafe { NSEvent::removeMonitor(&rec.monitor) };
-        self.send_raw(keybind::chord_reply(chord.as_ref()).into_bytes());
+        if let Some(view) = view {
+            view.send_raw(keybind::chord_reply(chord.as_ref()).into_bytes());
+        }
     }
 
     /// Ask, in a sheet on `window`, whether to close it while `program`
@@ -1419,445 +1386,58 @@ impl TerminalView {
         });
         alert.beginSheetModalForWindow_completionHandler(window, Some(&done));
     }
-
-    /// The right-click (or Control-click) menu: Copy, Paste, Select All and
-    /// Clear Scrollback, for when the program isn't taking the mouse.
-    fn show_context_menu(&self, event: &NSEvent) {
-        let mtm = MainThreadMarker::from(self);
-        let has_selection = self
-            .with_state(|st| st.session.lock_term().state.selection_text().is_some_and(|t| !t.is_empty()))
-            .unwrap_or(false);
-        let can_paste = unsafe { NSPasteboard::generalPasteboard().stringForType(NSPasteboardTypeString) }.is_some();
-        let menu = NSMenu::new(mtm);
-        menu.setAutoenablesItems(false);
-        let add = |title: &str, action: Sel, enabled: bool| {
-            let item = unsafe {
-                NSMenuItem::initWithTitle_action_keyEquivalent(
-                    NSMenuItem::alloc(mtm),
-                    &NSString::from_str(title),
-                    Some(action),
-                    &NSString::new(),
-                )
-            };
-            unsafe { item.setTarget(Some(self)) };
-            item.setEnabled(enabled);
-            menu.addItem(&item);
-        };
-        add("Copy", sel!(copy:), has_selection);
-        add("Paste", sel!(paste:), can_paste);
-        add("Select All", sel!(selectAll:), true);
-        menu.addItem(&NSMenuItem::separatorItem(mtm));
-        add("Clear Scrollback", sel!(clearBuffer:), true);
-        NSMenu::popUpContextMenu_withEvent_forView(&menu, event, self);
-    }
-
-    fn handle_key(&self, event: &NSEvent) {
-        if latency::get().is_some() {
-            let times = (event.timestamp(), latency::now());
-            self.with_state(|st| st.key_t0 = Some(times));
-        }
-        self.handle_key_event(event);
-        self.with_state(|st| st.key_t0 = None);
-    }
-
-    fn handle_key_event(&self, event: &NSEvent) {
-        let input = key_input(event);
-        // A held window closes on any key; Cmd shortcuts (copy the error,
-        // close, quit) still go to the menus.
-        if input.flags & crate::keys::flags::COMMAND == 0 && self.with_state(|st| st.held) == Some(true) {
-            self.close_window();
-            return;
-        }
-        let Some(modes) = self.key_modes() else { return };
-        // `[keybind]` first; an input method composing gets every key but
-        // Cmd ones.
-        let decision = self.with_state(|st| {
-            if modes.composing && input.flags & crate::keys::flags::COMMAND == 0 {
-                return None;
-            }
-            st.binds.decide(&input).map(|d| match d {
-                keybind::Decision::Send(text) => Err(text.as_bytes().to_vec()),
-                keybind::Decision::Perform(action) => Ok(action),
-            })
-        });
-        match decision.flatten() {
-            Some(Err(bytes)) => return self.send_input(bytes),
-            Some(Ok(action)) => {
-                let app = NSApplication::sharedApplication(MainThreadMarker::from(self));
-                unsafe { app.sendAction_to_from(Sel::register(action.selector()), None, Some(self)) };
-                return;
-            }
-            None => {}
-        }
-        let action = crate::keys::translate(&input, modes);
-        if input.flags & crate::keys::flags::COMMAND == 0 {
-            NSCursor::setHiddenUntilMouseMoves(true);
-        }
-        let went_to_program = matches!(action, KeyAction::Send(_)) || (action == KeyAction::ToTextInput && !modes.composing);
-        if went_to_program {
-            self.with_state(|st| st.keys_down.press(input.keycode));
-        }
-        match action {
-            KeyAction::Send(bytes) => self.send_input(bytes),
-            KeyAction::ToMenu | KeyAction::Ignore => {}
-            KeyAction::ToTextInput => {
-                // Text, dead keys and input methods.
-                let key = (!modes.composing).then_some((input, modes));
-                self.with_state(|st| st.text_key = key);
-                let events = NSArray::from_slice(&[event]);
-                self.interpretKeyEvents(&events);
-                self.with_state(|st| st.text_key = None);
-            }
-        }
-    }
-
-    /// How keys are encoded right now.
-    fn key_modes(&self) -> Option<KeyModes> {
-        self.with_state(|st| {
-            let t = st.session.lock_term();
-            KeyModes {
-                app_cursor: t.state.modes().app_cursor,
-                app_keypad: t.state.modes().app_keypad,
-                newline: t.state.modes().linefeed_newline,
-                kitty_flags: t.state.kitty_keyboard_flags(),
-                option_as_meta: st.config.option_as_meta,
-                composing: !st.marked.is_empty(),
-            }
-        })
-    }
-
-    /// A key came up: a release event if the program asked for them
-    /// (kitty flag 2) and the press went to it.
-    fn handle_key_up(&self, event: &NSEvent) {
-        let Some(modes) = self.key_modes() else { return };
-        let input = KeyInput {
-            event: KeyEventType::Release,
-            ..key_input(event)
-        };
-        let was_down = self.with_state(|st| st.keys_down.release(input.keycode)).unwrap_or(false);
-        if modes.kitty_flags & crate::keys::kitty::EVENT_TYPES == 0 || !was_down {
-            return;
-        }
-        if let KeyAction::Send(bytes) = crate::keys::translate(&input, modes) {
-            // Not typing: the view stays where it is.
-            self.send_raw(bytes);
-        }
-    }
-
-    /// A modifier key went down or up: reported only when the program
-    /// asked for every key (kitty flag 8).
-    fn handle_flags_changed(&self, event: &NSEvent) {
-        let Some(modes) = self.key_modes() else { return };
-        if modes.kitty_flags & crate::keys::kitty::ALL_KEYS == 0 {
-            return;
-        }
-        // `flagsChanged` events have no characters.
-        let input = KeyInput {
-            keycode: event.keyCode(),
-            flags: event.modifierFlags().0,
-            ..KeyInput::default()
-        };
-        if let KeyAction::Send(bytes) = crate::keys::translate(&input, modes) {
-            self.send_raw(bytes);
-        }
-    }
-
-    /// Visible line and column under the mouse, clamped to the grid.
-    fn cell_at(&self, event: &NSEvent) -> Option<(usize, usize)> {
-        let p = self.convertPoint_fromView(event.locationInWindow(), None);
-        let titlebar = self.titlebar_height();
-        self.with_state(|st| {
-            let m = st.renderer.metrics();
-            let pad = padding_for(&st.config, titlebar, st.scale);
-            let t = st.session.lock_term();
-            layout::cell_at((p.x, p.y), st.scale, m.into(), pad, t.state.cols(), t.state.lines())
-        })
-    }
-
-    fn mods_of(event: &NSEvent) -> u8 {
-        let f = event.modifierFlags();
-        mouse::modifier_bits(
-            f.contains(NSEventModifierFlags::Shift),
-            f.contains(NSEventModifierFlags::Option),
-            f.contains(NSEventModifierFlags::Control),
-        )
-    }
-
-    /// Whether the program wants this mouse event (Shift forces selection).
-    fn reporting(&self, event: &NSEvent) -> Option<(term_core::MouseMode, bool)> {
-        let shift = event.modifierFlags().contains(NSEventModifierFlags::Shift);
-        let (mode, sgr) = self.with_state(|st| {
-            let t = st.session.lock_term();
-            (t.state.modes().mouse, t.state.modes().mouse_sgr)
-        })?;
-        mouse::reports(mode, shift).then_some((mode, sgr))
-    }
-
-    fn send_mouse(&self, code: u8, line: usize, col: usize, press: bool, sgr: bool) {
-        if let Some(bytes) = mouse::encode(code, line, col, press, sgr) {
-            self.send_raw(bytes);
-        }
-    }
-
-    fn mouse_button_event(&self, event: &NSEvent, button: u8, press: bool) {
-        self.with_state(|st| st.last_input = Instant::now());
-        let Some((line, col)) = self.cell_at(event) else { return };
-        // A selection being made ends on its own button's release, even
-        // if Shift (which kept the program from the mouse) is let go first.
-        if button == mouse::LEFT && !press && self.with_state(|st| st.selecting.is_some()) == Some(true) {
-            self.end_selection();
-            return;
-        }
-        if let Some((_, sgr)) = self.reporting(event) {
-            self.with_state(|st| st.mouse_button = press.then_some(button));
-            self.send_mouse(button + Self::mods_of(event), line, col, press, sgr);
-            return;
-        }
-        if press && mouse::opens_menu(false, button, event.modifierFlags().contains(NSEventModifierFlags::Control)) {
-            self.show_context_menu(event);
-            return;
-        }
-        if button != mouse::LEFT || !press {
-            return;
-        }
-        let flags = event.modifierFlags();
-        let gesture = select::gesture(
-            event.clickCount(),
-            flags.contains(NSEventModifierFlags::Shift),
-            flags.contains(NSEventModifierFlags::Option),
-        );
-        self.with_state(|st| {
-            st.selecting = Some(gesture);
-            st.dragged = false;
-            st.autoscroll = None;
-            let block = st.block.take();
-            let mut t = st.session.lock_term();
-            let s = &mut t.state;
-            let point = s.point_at(line, col);
-            match gesture {
-                Gesture::Start => {
-                    // Remember the anchor in an empty selection; dragging extends it.
-                    s.set_selection(Some(Selection::new(point, point)));
-                    st.scroll_accum = 0.0;
-                }
-                Gesture::Block => {
-                    let b = Block::at(point);
-                    s.set_selection(Some(b.stream()));
-                    st.block = Some(b);
-                }
-                Gesture::Word => s.select_word(point),
-                Gesture::Line => s.select_line(point),
-                Gesture::Extend => {
-                    // A rectangle still shown grows as a rectangle.
-                    match block.filter(|b| s.selection() == Some(b.stream())) {
-                        Some(mut b) => {
-                            b.head = point;
-                            s.set_selection(Some(b.stream()));
-                            st.block = Some(b);
-                        }
-                        None => s.extend_selection(point),
-                    }
-                }
-            }
-        });
-        self.request_redraw();
-    }
-
-    /// The left button was let go after making a selection: stop
-    /// auto-scrolling, and copy it if `copy_on_select` is on.
-    fn end_selection(&self) {
-        let copy = self.with_state(|st| {
-            let gesture = st.selecting.take();
-            st.autoscroll = None;
-            st.config.copy_on_select && gesture.is_some_and(|g| select::copies_on_release(g, st.dragged))
-        });
-        if copy == Some(true) {
-            self.copy_selection();
-        }
-    }
-
-    /// Put the selection (or the rectangle being shown) on the clipboard.
-    fn copy_selection(&self) {
-        let text = self
-            .with_state(|st| {
-                let mut t = st.session.lock_term();
-                match st.block.filter(|b| t.state.selection() == Some(b.stream())) {
-                    Some(b) => Some(b.text(&mut t.state)),
-                    None => t.state.selection_text(),
-                }
-            })
-            .flatten();
-        if let Some(text) = text.filter(|t| !t.is_empty()) {
-            let pb = NSPasteboard::generalPasteboard();
-            pb.clearContents();
-            pb.setString_forType(&NSString::from_str(&text), unsafe { NSPasteboardTypeString });
-        }
-    }
-
-    /// Move the selection being made to the cell at view `line`, `col`.
-    /// Whether it changed.
-    fn extend_selection_to(st: &mut State, line: usize, col: usize) -> bool {
-        let mut t = st.session.lock_term();
-        let before = t.state.selection();
-        let Some(sel) = before else { return false };
-        let to = t.state.point_at(line, col);
-        match st.block.as_mut().filter(|b| sel == b.stream()) {
-            Some(b) => {
-                b.head = to;
-                t.state.set_selection(Some(b.stream()));
-            }
-            None => t.state.extend_selection(to),
-        }
-        let changed = t.state.selection() != before;
-        st.dragged |= changed;
-        changed
-    }
-
-    /// Auto-scroll speed for a drag at `event`'s height (lines a second;
-    /// positive scrolls back), 0 while it is over the rows.
-    fn autoscroll_speed(&self, event: &NSEvent) -> f64 {
-        let p = self.convertPoint_fromView(event.locationInWindow(), None);
-        let titlebar = self.titlebar_height();
-        self.with_state(|st| {
-            let m = st.renderer.metrics();
-            let pad = padding_for(&st.config, titlebar, st.scale);
-            let lines = st.session.lock_term().state.lines();
-            let top = pad.top as f64;
-            let bottom = top + (lines as u32 * m.cell_height) as f64;
-            select::autoscroll_speed(p.y * st.scale, top, bottom, m.cell_height as f64)
-        })
-        .unwrap_or(0.0)
-    }
-
-    /// One auto-scroll step, then the next one while the mouse is still
-    /// held past the edge. Nothing is scheduled once it is back over the
-    /// rows or the button is let go.
-    fn autoscroll_tick(&self) {
-        let step = self.with_state(|st| {
-            st.autoscroll_scheduled = false;
-            if st.selecting.is_none() {
-                st.autoscroll = None;
-            }
-            let a = st.autoscroll.as_mut()?;
-            let now = Instant::now();
-            let lines = select::autoscroll_step(a.speed, (now - a.last).as_secs_f64(), &mut a.carry);
-            a.last = now;
-            let (up, col) = (a.speed > 0.0, a.col);
-            let mut changed = false;
-            if lines != 0 {
-                let mut t = st.session.lock_term();
-                let before = t.state.view_top();
-                t.state.scroll_view(lines);
-                changed = t.state.view_top() != before;
-                let row = if up { 0 } else { t.state.lines() - 1 };
-                drop(t);
-                changed |= Self::extend_selection_to(st, row, col);
-            }
-            st.autoscroll_scheduled = true;
-            Some(changed)
-        });
-        let Some(Some(changed)) = step else { return };
-        if changed {
-            self.request_redraw();
-        }
-        self.schedule_autoscroll();
-    }
-
-    fn schedule_autoscroll(&self) {
-        let id = self.ivars().id;
-        let at = DispatchTime::NOW.time(select::INTERVAL.as_nanos() as i64);
-        let _ = DispatchQueue::main().after(at, move || with_view(id, |v| v.autoscroll_tick()));
-    }
-
-    fn mouse_motion(&self, event: &NSEvent, button: Option<u8>) {
-        let Some((line, col)) = self.cell_at(event) else { return };
-        let selecting = self.with_state(|st| st.selecting.is_some()) == Some(true);
-        if !selecting && let Some((mode, sgr)) = self.reporting(event) {
-            let held = self.with_state(|st| st.mouse_button).flatten();
-            if mouse::reports_motion(mode, held) {
-                self.send_mouse(mouse::motion_code(held, button, Self::mods_of(event)), line, col, true, sgr);
-            }
-            return;
-        }
-        if button != Some(mouse::LEFT) || !selecting {
-            return;
-        }
-        let speed = self.autoscroll_speed(event);
-        let (changed, start_timer) = self
-            .with_state(|st| {
-                // Past the top or bottom edge, a timer keeps scrolling
-                // while the mouse is held still; it stops once back over
-                // the rows or the button is let go.
-                st.autoscroll = (speed != 0.0).then(|| {
-                    let (last, carry) = st.autoscroll.as_ref().map_or((Instant::now(), 0.0), |a| (a.last, a.carry));
-                    AutoScroll { speed, col, last, carry }
-                });
-                let start = st.autoscroll.is_some() && !st.autoscroll_scheduled;
-                st.autoscroll_scheduled |= start;
-                (Self::extend_selection_to(st, line, col), start)
-            })
-            .unwrap_or((false, false));
-        if changed {
-            self.request_redraw();
-        }
-        if start_timer {
-            self.schedule_autoscroll();
-        }
-    }
-
-    fn handle_scroll(&self, event: &NSEvent) {
-        self.with_state(|st| st.last_input = Instant::now());
-        let precise = event.hasPreciseScrollingDeltas();
-        let reporting = self.reporting(event);
-        let Some((line, col)) = self.cell_at(event) else { return };
-        let lines = self.with_state(|st| {
-            let dy = event.scrollingDeltaY();
-            let delta = if precise {
-                dy * st.scale / st.renderer.metrics().cell_height as f64
-            } else {
-                dy
-            };
-            st.scroll_accum += delta;
-            let whole = st.scroll_accum.trunc();
-            st.scroll_accum -= whole;
-            whole as isize
-        });
-        let Some(lines) = lines.filter(|&l| l != 0) else { return };
-        if let Some((_, sgr)) = reporting {
-            let code = mouse::wheel_code(lines, Self::mods_of(event));
-            for _ in 0..lines.unsigned_abs().min(mouse::MAX_WHEEL_REPORTS) {
-                self.send_mouse(code, line, col, true, sgr);
-            }
-            return;
-        }
-        let alt = self.with_state(|st| {
-            let t = st.session.lock_term();
-            t.state.alt_screen_active().then_some(t.state.modes().app_cursor)
-        });
-        if let Some(Some(app_cursor)) = alt {
-            // Full-screen programs without mouse support get arrow keys.
-            let key = if lines > 0 { crate::keys::Key::Up } else { crate::keys::Key::Down };
-            let bytes = encode_key(key, Mods::default(), app_cursor);
-            for _ in 0..lines.unsigned_abs() {
-                self.send_raw(bytes.clone());
-            }
-            return;
-        }
-        self.with_state(|st| st.session.lock_term().state.scroll_view(lines));
-        self.request_redraw();
-    }
 }
 
-/// Present like [`Renderer::present`], with handlers that time the frame
-/// for the keys it shows (latency harness only). The renderer doesn't see
-/// this drawable, so a window hidden right after such a frame keeps its
-/// previous surface instead of offering it for purging.
-fn present_timed(renderer: &mut Renderer, layer: &CAMetalLayer, lat: &'static Latency, keys: Vec<latency::Key>) {
+/// The session hooks of pane `pane` in window `id`: each finds its window
+/// and pane again on the main thread, and does nothing once either is gone.
+fn pane_hooks(id: usize, pane: PaneId, test: bool, settings: bool) -> Hooks {
+    let mut hooks = Hooks::new(
+        Arc::new(move || wake(id, pane)),
+        Box::new(move |outcome| DispatchQueue::main().exec_async(move || with_view(id, |v| v.program_exited(pane, outcome)))),
+    );
+    if test {
+        hooks.on_control = Some(Box::new(move |cmd| {
+            DispatchQueue::main().exec_async(move || {
+                with_view(id, |v| {
+                    if v.with_state(|st| st.panes.contains_key(&pane)) == Some(true) {
+                        v.control(&cmd)
+                    }
+                })
+            });
+        }));
+    }
+    if let Some(lat) = latency::get() {
+        // The latency log counts by window (one pane each until B2.5).
+        hooks.on_parsed = Some(Box::new(move || lat.parsed(id)));
+    }
+    hooks.on_events = Some(Box::new(move |events| {
+        DispatchQueue::main().exec_async(move || with_view(id, |v| v.events(pane, events)));
+    }));
+    if settings {
+        hooks.on_record_chord = Some(Box::new(move || {
+            DispatchQueue::main().exec_async(move || with_view(id, |v| v.start_recording(pane)));
+        }));
+    }
+    hooks
+}
+
+/// Present `panes` like [`Renderer::present_panes`], with handlers that
+/// time the frame for the keys it shows (latency harness only). The
+/// renderer doesn't see this drawable, so a window hidden right after such
+/// a frame keeps its previous surface instead of offering it for purging.
+fn present_timed(
+    renderer: &mut Renderer,
+    layer: &CAMetalLayer,
+    clear: term_render::Rgba,
+    panes: &[PaneDraw],
+    lat: &'static Latency,
+    keys: Vec<latency::Key>,
+) {
     let Some(drawable) = layer.nextDrawable() else {
         lat.write(&keys);
         return;
     };
-    let cmd = renderer.encode(&drawable.texture());
+    let cmd = renderer.encode_panes(&drawable.texture(), clear, panes, &[]);
     let frame = Arc::new(FrameKeys::new(keys));
     let on_gpu = frame.clone();
     let done = RcBlock::new(move |cb: NonNull<ProtocolObject<dyn MTLCommandBuffer>>| {
@@ -1874,8 +1454,14 @@ fn present_timed(renderer: &mut Renderer, layer: &CAMetalLayer, lat: &'static La
     cmd.commit();
 }
 
-fn padding_for(config: &Config, titlebar: f64, scale: f64) -> Padding {
+pub(crate) fn padding_for(config: &Config, titlebar: f64, scale: f64) -> Padding {
     layout::padding(config.padding, titlebar, scale)
+}
+
+/// The padding inside a pane at `rect`: the title bar's inset on top of it
+/// only when it touches the window's top.
+pub(crate) fn pane_padding(config: &Config, titlebar: f64, scale: f64, rect: PxRect) -> Padding {
+    padding_for(config, if rect.y == 0 { titlebar } else { 0.0 }, scale)
 }
 
 fn pty_size(cols: usize, lines: usize, m: term_font::Metrics) -> Size {
@@ -1900,53 +1486,19 @@ pub fn content_size(config: &Config, m: term_font::Metrics, scale: f64, titlebar
     NSSize::new(w, h)
 }
 
-/// What `keys::translate` needs from a key event.
-fn key_input(event: &NSEvent) -> KeyInput {
-    let flags = event.modifierFlags();
-    let (ascii, ascii_shifted) = crate::ascii_layout::chars(event.keyCode());
-    let plain = event.charactersIgnoringModifiers().map(|s| s.to_string()).unwrap_or_default();
-    let shifted = if flags.contains(NSEventModifierFlags::Shift) {
-        NSEventModifierFlags::Shift
-    } else {
-        NSEventModifierFlags::empty()
-    };
-    KeyInput {
-        keycode: event.keyCode(),
-        chars: event.characters().map(|s| s.to_string()).unwrap_or_default(),
-        chars_unshifted: event
-            .charactersByApplyingModifiers(NSEventModifierFlags::empty())
-            .map(|s| s.to_string())
-            .unwrap_or_default(),
-        event: if event.isARepeat() {
-            KeyEventType::Repeat
-        } else {
-            KeyEventType::Press
-        },
-        chars_shift_only: event
-            .charactersByApplyingModifiers(shifted)
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| plain.clone()),
-        chars_ignoring_mods: plain,
-        ascii,
-        ascii_shifted,
-        flags: flags.0,
-        numpad: flags.contains(NSEventModifierFlags::NumericPad),
-    }
-}
-
-pub fn delegate_of(view: &TerminalView) -> &ProtocolObject<dyn NSWindowDelegate> {
+pub fn delegate_of(view: &WindowView) -> &ProtocolObject<dyn NSWindowDelegate> {
     ProtocolObject::from_ref(view)
 }
 
 /// Test-only control (`DECLINE_TEST_DUMP`); see [`crate::control`].
-impl TerminalView {
+impl WindowView {
     fn control(&self, cmd: &str) {
         let Some(c) = Control::parse(cmd) else {
             eprintln!("terminal-decline: unknown test control command {cmd:?}");
             return;
         };
         self.with_state(|st| {
-            if let Some(test) = &mut st.test {
+            if let Some(test) = &mut st.win.test {
                 test.queue.push_back(c);
             }
         });
@@ -1957,7 +1509,7 @@ impl TerminalView {
     fn run_controls(&self) {
         loop {
             let next = self.with_state(|st| {
-                let test = st.test.as_mut()?;
+                let test = st.win.test.as_mut()?;
                 if test.dump != DumpState::Idle {
                     return None;
                 }
@@ -1967,15 +1519,15 @@ impl TerminalView {
                 None => return,
                 Some(Control::Dump) => {
                     self.with_state(|st| {
-                        if let Some(test) = &mut st.test {
+                        if let Some(test) = &mut st.win.test {
                             test.dump = DumpState::Requested;
                         }
                     });
-                    self.request_redraw();
+                    self.redraw_all();
                 }
                 Some(Control::Resize { cols, lines }) => self.set_grid(cols as usize, lines as usize),
                 Some(Control::Font(delta)) => {
-                    let size = self.with_state(|st| (st.font_size + delta as f64).max(6.0));
+                    let size = self.with_state(|st| (st.win.font_size + delta as f64).max(6.0));
                     self.reload_fonts(size);
                 }
                 Some(Control::Tab) => {
@@ -1984,7 +1536,11 @@ impl TerminalView {
                     }
                 }
                 Some(Control::Front) => bring_to_front(self.ivars().id),
-                Some(Control::Drop(paths)) => self.paste_text(&crate::desktop::dropped_text(&paths)),
+                Some(Control::Drop(paths)) => {
+                    if let Some(view) = self.focused_view() {
+                        view.paste_text(&crate::desktop::dropped_text(&paths));
+                    }
+                }
                 Some(Control::Settings) => crate::app::show_settings_now(),
                 Some(Control::TypeSettings(bytes)) => crate::app::type_into_settings(bytes),
                 Some(Control::Key { keycode, flags }) => post_key(MainThreadMarker::from(self), keycode, flags),
@@ -2001,13 +1557,13 @@ impl TerminalView {
         }
     }
 
-    /// Resize the window to show `cols` × `lines`.
+    /// Resize the window to show `cols` × `lines` (in its one pane).
     fn set_grid(&self, cols: usize, lines: usize) {
         let Some(window) = self.window() else { return };
         let titlebar = self.titlebar_height();
         let size = self.with_state(|st| {
-            let pad = padding_for(&st.config, titlebar, st.scale);
-            layout::content_size(cols, lines, st.scale, st.renderer.metrics().into(), pad)
+            let pad = padding_for(&st.win.config, titlebar, st.win.scale);
+            layout::content_size(cols, lines, st.win.scale, st.win.renderer.metrics().into(), pad)
         });
         if let Some((w, h)) = size {
             window.setContentSize(NSSize::new(w, h));
@@ -2017,9 +1573,9 @@ impl TerminalView {
     /// Write the dump once the GPU has finished the frame drawn for it.
     fn poll_dump(&self) {
         let ready = self.with_state(|st| {
-            let test = st.test.as_ref()?;
+            let test = st.win.test.as_ref()?;
             let DumpState::Drawn(frame) = test.dump else { return None };
-            Some(st.renderer.frames_completed() >= frame)
+            Some(st.win.renderer.frames_completed() >= frame)
         });
         match ready.flatten() {
             None => {}
@@ -2046,6 +1602,9 @@ impl TerminalView {
                         .map(|b| b.to_string()),
                     active: objc2_app_kit::NSApplication::sharedApplication(MainThreadMarker::from(self)).isActive(),
                     secure_input: crate::app::secure_input_held(),
+                    // Read before this window's state is borrowed: it may
+                    // be the Settings tab.
+                    settings: crate::app::settings_status(),
                 };
                 self.with_state(|st| write_dump(st, window));
                 self.run_controls();
@@ -2099,20 +1658,25 @@ struct Window {
     badge: Option<String>,
     active: bool,
     secure_input: bool,
+    settings: (bool, bool),
 }
 
+/// One line of JSON about the window and its focused pane.
 fn write_dump(st: &mut State, window: Window) {
     use std::io::Write;
-    let pad_top = padding_for(&st.config, window.top_inset, st.scale).top;
-    let Some(test) = &mut st.test else { return };
+    let focused = st.tree.focused();
+    let State { win, panes, .. } = st;
+    let Some(p) = panes.get(&focused) else { return };
+    let pad_top = pane_padding(&win.config, window.top_inset, win.scale, p.rect).top;
+    let Some(test) = &mut win.test else { return };
     test.seq += 1;
     test.dump = DumpState::Idle;
     let (screen, cols, lines) = {
-        let t = st.session.lock_term();
+        let t = p.session.lock_term();
         (t.state.dump(), t.state.cols(), t.state.lines())
     };
-    let m = st.renderer.metrics();
-    let (mask_texture, color_texture) = st.renderer.glyph_texture_sizes();
+    let m = win.renderer.metrics();
+    let (mask_texture, color_texture) = win.renderer.glyph_texture_sizes();
     let dump = Dump {
         seq: test.seq,
         window: window.id,
@@ -2120,26 +1684,28 @@ fn write_dump(st: &mut State, window: Window) {
         tab: window.tab,
         visible: window.visible,
         sheet: window.sheet,
-        hidden: st.hidden,
+        hidden: win.hidden,
         pad_top,
         notifications: crate::notify::stats(),
         badge: window.badge,
         active: window.active,
         secure_input: window.secure_input,
+        settings_ready: window.settings.0,
+        settings_recording: window.settings.1,
         screen,
         cols,
         lines,
-        frames: st.renderer.frames_completed(),
-        glyphs: st.renderer.pane.frame.glyphs.len(),
-        rects: st.renderer.pane.frame.rects.len(),
+        frames: win.renderer.frames_completed(),
+        glyphs: p.render.frame.glyphs.len(),
+        rects: p.render.frame.rects.len(),
         mask_texture,
         color_texture,
         cell_width: m.cell_width,
         cell_height: m.cell_height,
-        font_size: st.font_size,
-        scale: st.scale,
-        foreground: format!("#{:06x}", crate::config::rgb_of(st.theme.foreground)),
-        background: format!("#{:06x}", crate::config::rgb_of(st.theme.background)),
+        font_size: win.font_size,
+        scale: win.scale,
+        foreground: format!("#{:06x}", crate::config::rgb_of(win.theme.foreground)),
+        background: format!("#{:06x}", crate::config::rgb_of(win.theme.background)),
         phys_footprint: control::phys_footprint(),
     };
     let line = serde_json::to_string(&dump).expect("dump serialises");

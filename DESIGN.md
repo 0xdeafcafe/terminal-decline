@@ -573,7 +573,9 @@ theme (a built-in Terminal Decline theme by loose name, else the Ghostty theme f
 becomes `themes/<name>.toml`; `light:x,dark:y` becomes a pair), palette,
 foreground/background/cursor/selection colours, font-family (the first is
 `font_family`, the rest `font_fallback`), the bold/italic faces,
-font-size, adjust-cell-height/width percentages, background-opacity,
+font-feature (`font_features`; CSS-style `"cv05" 2` and `liga off`
+converted, one line's comma-separated entries split, the last setting of
+a tag kept), font-size, adjust-cell-height/width percentages, background-opacity,
 background-blur, macos-option-as-alt, copy-on-select, window-padding-x,
 window-width/height, split-divider-color (`[colors] split_divider`),
 unfocused-split-opacity (`unfocused_pane_opacity`) and keybinds (actions
@@ -600,7 +602,7 @@ contents, so only a real change reloads. A reload reads every layer again
 
 - to every window at once: `theme` and `[colors]`, the font settings
   (`font_family`, `font_size`, `font_fallback`, `font_bold`/`_italic`/`_bold_italic`,
-  `line_height`, `cell_width`; Fonts rebuilt as Cmd+= does; a new
+  `line_height`, `cell_width`, `font_features`; Fonts rebuilt as Cmd+= does; a new
   `font_size` replaces a size set with Cmd+= / Cmd+-), `padding`,
   `opacity`, `option_as_meta`, `copy_on_select` and `[keybind]` (the menus
   are rebuilt);
@@ -676,8 +678,17 @@ Fonts (`config::Config::font_config` → `term_font::Fonts::with_config`):
 the system's fallback), `font_bold` / `font_italic` / `font_bold_italic`
 (faces by name; unset, the family's own), `line_height = 1.0` (multiplies
 the cell height; must be above 0) and `cell_width = "0"` (points, e.g.
-`"1.5"` or `-1`, or a percentage of the advance, `"10%"`). A bad
-`line_height` or `cell_width` is reported like any other bad setting. The
+`"1.5"` or `-1`, or a percentage of the advance, `"10%"`), and
+`font_features = ["-calt", "-liga", "zero", "ss01=1"]` (OpenType features
+on all four faces, Ghostty's and kitty's syntax: `tag` or `+tag` on,
+`-tag` off, `tag=n` an alternate; parsed by `term_font::Tag::parse_feature`).
+Ligatures are on where the font has them (ligatures design §8) and
+`["-calt", "-liga"]` turns them off; until the renderer draws them (B1.2
+sets `Fonts::allow_runs`) every cell is still shaped alone, so only
+single-glyph features such as `zero` and `ss01` show. A bad
+`line_height` or `cell_width` is reported like any other bad setting; a
+bad `font_features` entry is a notice naming it and only that entry is
+left out. The
 first window checks the named fonts are installed (`Fonts::missing`); any
 that aren't become config notices in that window and later ones
 (`terminal-decline: config: font_fallback: no font named "X" is installed;

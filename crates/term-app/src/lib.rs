@@ -19,6 +19,7 @@ pub mod latency;
 pub mod layout;
 pub mod mouse;
 pub mod notify;
+mod pane_view;
 pub mod panes;
 pub mod paths;
 pub mod pin;

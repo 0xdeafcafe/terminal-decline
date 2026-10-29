@@ -145,6 +145,8 @@ pub enum Fit {
     /// kitty: scaled to fit, keeping its aspect, centred.
     #[default]
     Contain,
+    /// Scaled to fit, keeping its aspect, from the top left (iTerm2).
+    ContainTopLeft,
     /// Stretched to the box (iTerm2 `preserveAspectRatio=0`).
     Stretch,
     /// One image pixel per device pixel from the top left (Sixel).
@@ -689,6 +691,26 @@ impl Graphics {
                 }
             }
         }
+    }
+
+    /// Whether any of decline's own images (Sixel, iTerm2) is here.
+    pub fn has_own(&self) -> bool {
+        self.next_own != 1 && self.images.keys().any(|k| matches!(k, ImageKey::Own(_)))
+    }
+
+    /// Free decline's own images `live` doesn't keep (§4.3: no placeholder
+    /// style or history block names them any more). Returns how many went.
+    pub fn retain_own(&mut self, live: impl Fn(ImageKey) -> bool) -> usize {
+        let gone: Vec<ImageKey> = self
+            .images
+            .keys()
+            .copied()
+            .filter(|k| matches!(k, ImageKey::Own(_)) && !live(*k))
+            .collect();
+        for k in &gone {
+            self.remove(*k);
+        }
+        gone.len()
     }
 
     /// Check the maps agree with each other.

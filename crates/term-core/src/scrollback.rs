@@ -1919,6 +1919,14 @@ impl Scrollback {
         out.append(&mut self.freed_images);
     }
 
+    /// Add the own images every block still listed names to `out`.
+    pub fn listed_images(&self, out: &mut std::collections::HashSet<ImageKey>) {
+        for b in &self.blocks {
+            out.extend(b.data.images.iter().copied());
+        }
+        out.extend(self.open.images.iter().copied());
+    }
+
     fn free_oldest(&mut self) {
         if let Some(b) = self.blocks.pop_front() {
             self.freed_images.extend_from_slice(&b.data.images);

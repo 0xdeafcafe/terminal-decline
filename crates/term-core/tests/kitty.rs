@@ -109,7 +109,7 @@ fn a_query_is_answered_before_a_da1_sent_after_it() {
     let mut bytes = apc("a=q,i=31,s=1,v=1,f=24", b"\0\0\0");
     bytes.extend_from_slice(b"\x1b[c");
     t.advance(&bytes);
-    assert_eq!(replies(&mut t), "\x1b_Gi=31;OK\x1b\\\x1b[?62;22c");
+    assert_eq!(replies(&mut t), "\x1b_Gi=31;OK\x1b\\\x1b[?62;4;22c");
     assert!(t.state.graphics().image(ImageKey::Kitty(31)).is_none(), "a query stores nothing");
     assert_eq!(t.state.image_pool().used(), 0);
 }

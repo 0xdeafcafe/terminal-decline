@@ -19,6 +19,7 @@ use crate::unicode::{self, Segmenter};
 
 mod graphics;
 mod history;
+mod own_images;
 mod reflow;
 mod replies;
 mod search;
@@ -184,6 +185,14 @@ pub struct Modes {
     /// (legacy): only zero-width scalars join the cell before them, and a
     /// cell keeps its first scalar's width.
     pub grapheme_clusters: bool,
+    /// 80 (DECSDM): Sixel display mode: images at the top left, no
+    /// scrolling. Off (scrolling) by default.
+    pub sixel_display: bool,
+    /// 1070, on by default: each Sixel image starts from the initial
+    /// colour registers; off, they carry over between images.
+    pub sixel_private_colors: bool,
+    /// 8452: the cursor ends right of a Sixel image rather than below it.
+    pub sixel_cursor_right: bool,
 }
 
 impl Default for Modes {
@@ -202,6 +211,9 @@ impl Default for Modes {
             mouse_sgr: false,
             synchronized: false,
             grapheme_clusters: true,
+            sixel_display: false,
+            sixel_private_colors: true,
+            sixel_cursor_right: false,
         }
     }
 }
@@ -440,6 +452,20 @@ pub struct Terminal {
     image_host: Arc<dyn ImageHost>,
     /// Stop the parser for header reads, so they happen unlocked.
     reads_off_lock: bool,
+    /// What a streamed OSC string feeds (iTerm2 files, §7.1).
+    osc_stream: own_images::OscStream,
+    /// The iTerm2 `File=` streaming in, and the multipart file in progress.
+    iterm_file: Option<Box<own_images::ItermReader>>,
+    iterm_multi: Option<Box<own_images::ItermReader>>,
+    /// The Sixel string being decoded (§8).
+    sixel: Option<Box<own_images::SixelString>>,
+    /// Colour registers carried over between Sixel images (mode 1070
+    /// reset), per screen.
+    sixel_palettes: [Option<Box<term_image::sixel::Palette>>; 2],
+    /// Device pixels per point: iTerm2 sizes count image pixels as points.
+    image_scale: f32,
+    /// Look for own images nothing names (a style sweep ran).
+    own_gc_due: bool,
 }
 
 /// The placeholder cell diacritics go to, and what was inferred so far.
@@ -539,6 +565,13 @@ impl Terminal {
             deferred_replies: Vec::new(),
             image_host: Arc::new(RustHost::new()),
             reads_off_lock: false,
+            osc_stream: own_images::OscStream::None,
+            iterm_file: None,
+            iterm_multi: None,
+            sixel: None,
+            sixel_palettes: [None, None],
+            image_scale: 1.0,
+            own_gc_due: false,
         }
         .with_rows_touched()
     }
@@ -758,6 +791,16 @@ impl Terminal {
     /// Cell size in pixels, for answering size queries.
     pub fn cell_pixels(&self) -> (u16, u16) {
         self.cell_pixels
+    }
+
+    /// Device pixels per point (2 on a Retina display): iTerm2 images
+    /// count their pixels as points, as iTerm2 does (images.md §12, 7).
+    pub fn set_image_scale(&mut self, scale: f32) {
+        self.image_scale = if scale.is_finite() { scale.clamp(0.25, 8.0) } else { 1.0 };
+    }
+
+    pub fn image_scale(&self) -> f32 {
+        self.image_scale
     }
 
     pub fn set_cell_pixels(&mut self, size: (u16, u16)) {
@@ -1397,6 +1440,7 @@ impl Terminal {
             give_back,
             &[self.pen_link_id],
         );
+        self.own_gc_due = true;
         if renumbered {
             // Every row's cells changed bits.
             self.touch_screen_rows();
@@ -1794,6 +1838,7 @@ impl Terminal {
     /// Move the image jobs queued since the last call to `out`, to run with
     /// the lock released (after each parse slice and each snapshot).
     pub fn take_image_jobs(&mut self, out: &mut Vec<ImageJob>) {
+        self.collect_own_images();
         out.append(&mut self.image_jobs);
     }
 
@@ -1857,6 +1902,7 @@ impl Terminal {
         fresh.colors = Box::new(self.colors.reset_all());
         fresh.colors_changed = true;
         fresh.cell_pixels = self.cell_pixels;
+        fresh.image_scale = self.image_scale;
         fresh.bulk_ascii = self.bulk_ascii;
         fresh.ambiguous = self.ambiguous;
         fresh.grapheme_log = self.grapheme_log.take();
@@ -2422,6 +2468,9 @@ impl Terminal {
             2004 => set(self.modes.bracketed_paste),
             2026 => set(self.modes.synchronized),
             2027 => set(self.modes.grapheme_clusters),
+            80 => set(self.modes.sixel_display),
+            1070 => set(self.modes.sixel_private_colors),
+            8452 => set(self.modes.sixel_cursor_right),
             _ => 0,
         }
     }
@@ -2496,8 +2545,21 @@ impl Terminal {
             2004 => self.modes.bracketed_paste = on,
             2026 => self.modes.synchronized = on,
             2027 => self.modes.grapheme_clusters = on,
+            80 => self.modes.sixel_display = on,
+            1070 => self.modes.sixel_private_colors = on,
+            8452 => self.modes.sixel_cursor_right = on,
             _ => {}
         }
+    }
+
+    /// DA1: VT220-level with ANSI colour, and Sixel (4) while images are on.
+    fn primary_da(&mut self) {
+        let reply: &[u8] = if self.images_enabled() {
+            b"\x1b[?62;4;22c"
+        } else {
+            b"\x1b[?62;22c"
+        };
+        self.replies.extend_from_slice(reply);
     }
 
     fn sgr(&mut self, params: &Params) {
@@ -2726,8 +2788,8 @@ fn dec_line_drawing(c: char) -> char {
 /// - Clipboard copies (OSC 52) up to 4 MB, so a big yank (Neovim over SSH,
 ///   say) still arrives.
 /// - iTerm2 file parts (`1337;FilePart=`) up to 1 MB each.
-/// - Whole iTerm2 files (`1337;File=`) are dropped: they will stream into
-///   the iTerm2 image reader when there is one, and nothing reads them now.
+/// - Whole iTerm2 files (`1337;File=`) are dropped here: with images on
+///   they stream into the iTerm2 reader first (images.md §7.1).
 /// - Everything else up to 64 KB (vte's default).
 fn osc_size_policy(prefix: &[u8]) -> OscLarge {
     const KB: usize = 1024;
@@ -2779,21 +2841,33 @@ impl Perform for Terminal {
         }
     }
 
-    fn hook(&mut self, _params: &Params, intermediates: &[u8], ignore: bool, action: char) {
+    fn hook(&mut self, params: &Params, intermediates: &[u8], ignore: bool, action: char) {
         self.clear_grapheme();
+        self.sixel = None;
+        if action == 'q' && intermediates.is_empty() && !ignore && self.images_enabled() {
+            return self.sixel_start(params);
+        }
         self.dcs_hook(intermediates, ignore, action);
     }
 
     fn put(&mut self, byte: u8) {
-        self.dcs_put(&[byte]);
+        self.put_slice(&[byte]);
     }
 
     fn put_slice(&mut self, data: &[u8]) {
-        self.dcs_put(data);
+        if self.sixel.is_some() {
+            self.sixel_put(data);
+        } else {
+            self.dcs_put(data);
+        }
     }
 
     fn dcs_end(&mut self, complete: bool) {
-        self.dcs_finish(complete);
+        if self.sixel.is_some() {
+            self.sixel_end(complete);
+        } else {
+            self.dcs_finish(complete);
+        }
     }
 
     fn apc_start(&mut self) {
@@ -2997,7 +3071,8 @@ impl Perform for Terminal {
                 // straight after repeats nothing.
                 self.forget_last_char();
             }
-            ('c', []) => self.replies.extend_from_slice(b"\x1b[?62;22c"),
+            ('c', []) => self.primary_da(),
+            ('S', [b'?']) if self.images_enabled() => self.xtsmgraphics(args),
             ('c', [b'>']) => self.replies.extend_from_slice(b"\x1b[>1;10;0c"),
             // DECREQTPARM: no parity, 8 bits, 38400 baud both ways, clock
             // multiplier 1, no STP flags; solicited (3) for `1 x`.
@@ -3183,19 +3258,35 @@ impl Perform for Terminal {
                 self.cursor.pending_wrap = false;
             }
             // DECID: answered as primary DA.
-            ([], b'Z') => self.replies.extend_from_slice(b"\x1b[?62;22c"),
+            ([], b'Z') => self.primary_da(),
             _ => return,
         }
         self.touch();
     }
 
     fn osc_large(&mut self, prefix: &[u8]) -> OscLarge {
+        if prefix.starts_with(b"1337;File")
+            && let Some(answer) = self.iterm_osc_large(prefix)
+        {
+            return answer;
+        }
         osc_size_policy(prefix)
+    }
+
+    fn osc_put(&mut self, data: &[u8]) {
+        self.iterm_osc_put(data);
+    }
+
+    fn osc_end(&mut self, complete: bool) {
+        self.iterm_osc_end(complete);
     }
 
     fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
         self.clear_grapheme();
         if self.osc_color(params) {
+            return;
+        }
+        if params.first() == Some(&&b"1337"[..]) && self.iterm_osc_dispatch(params) {
             return;
         }
         match params {

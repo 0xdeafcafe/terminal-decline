@@ -349,3 +349,45 @@ fn shaping_a_run_reuses_its_buffers() {
         assert_eq!(shape(&f, &a, Style::Regular, LINE), first);
     }
 }
+
+#[test]
+fn which_characters_can_ligate() {
+    let f = jb(&[]);
+    for style in Style::ALL {
+        for ch in "-=>!<|&:*/.+?#~;_[]({}".chars() {
+            assert!(f.ligates(ch, style), "{ch:?} in {style:?}");
+        }
+        // Nothing of JetBrains Mono's starts or ends at these.
+        for ch in ")%,'\"`".chars() {
+            assert!(!f.ligates(ch, style), "{ch:?} in {style:?}");
+        }
+        // JetBrains Mono's calt looks at digits, capitals and spaces too
+        // (`12:34`, `A:B`, `0xFF`), but not small letters.
+        for ch in "09AZ ".chars() {
+            assert!(f.ligates(ch, style), "{ch:?} in {style:?}");
+        }
+        for ch in "abcdefghijklmnopqrstuvwyz漢😀".chars() {
+            assert!(!f.ligates(ch, style), "{ch:?} in {style:?}");
+        }
+        assert_eq!(f.plain_char(style), Some('a'));
+    }
+    // A plain letter stands in for any other: shaped the same either side
+    // of a ligature.
+    let with = |c: char| shape(&f, &text(&format!("{c}->{c}")), Style::Regular, LINE);
+    let a = with('a');
+    for c in "bkqxyz".chars() {
+        let g = with(c);
+        assert_eq!(g[1..g.len() - 1], a[1..a.len() - 1], "{c}");
+    }
+    // Ligatures off: nothing can.
+    let off = jb(&["-calt", "-liga"]);
+    assert!(!off.ligates('-', Style::Regular) && off.plain_char(Style::Regular).is_none());
+    // Menlo, on the fast path, neither.
+    let mut menlo = Fonts::new("Menlo", 26.0);
+    menlo.allow_runs(true);
+    assert!(!menlo.ligates('-', Style::Regular));
+    // `+liga` on Menlo (a `morx` face): its table isn't read, so every
+    // character can.
+    let menlo = fonts_with("Menlo", &["+liga"], |_| {});
+    assert!(menlo.ligates('f', Style::Regular) && menlo.ligates('-', Style::Regular));
+}

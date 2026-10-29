@@ -22,7 +22,8 @@ use std::collections::HashMap;
 use std::ffi::c_void;
 use std::ptr::NonNull;
 
-use objc2_core_foundation::{CFArray, CFDictionary, CFRange, CFRetained, CFString, CGFloat, CGPoint, CGRect, CGSize, Type};
+use detect::Ligating;
+use objc2_core_foundation::{CFArray, CFDictionary, CFIndex, CFRange, CFRetained, CFString, CGFloat, CGPoint, CGRect, CGSize, Type};
 use objc2_core_graphics::{CGBitmapContextCreate, CGColorSpace, CGContext, CGGlyph, CGImageAlphaInfo, CGImageByteOrderInfo};
 use objc2_core_text::{
     CTFont, CTFontDescriptor, CTFontOrientation, CTFontSymbolicTraits, CTFontTableOptions, kCTFontCascadeListAttribute, kCTFontTableGSUB,
@@ -99,6 +100,9 @@ pub struct Fonts {
     /// Per face, whether it has ligatures or contextual alternates on
     /// (ligatures design §1), worked out at construction.
     runs: [bool; 4],
+    /// Per face that shapes runs, the characters that can take part in its
+    /// substitutions ([`Fonts::ligates`]).
+    ligating: [Ligating; 4],
     /// Whether [`Fonts::features`] reports `runs`: off until the renderer
     /// draws ligatures (B1.2).
     allow_runs: bool,
@@ -199,6 +203,7 @@ impl Fonts {
             rgb: CGColorSpace::new_device_rgb().expect("rgb colour space"),
             face_ids,
             runs: [false; 4],
+            ligating: Default::default(),
             allow_runs: false,
             advance,
             line_attrs,
@@ -206,7 +211,98 @@ impl Fonts {
             scaled: RefCell::new(HashMap::new()),
         };
         fonts.runs = fonts.detect_runs(&face_fonts, &config.features);
+        fonts.ligating = fonts.detect_ligating(&face_fonts, &config.features);
         fonts
+    }
+
+    /// Per face that shapes runs, which characters can take part in its
+    /// substitutions: those whose glyph is in the `GSUB` lookups of its
+    /// cross-character features ([`detect::lookup_glyphs`]). Every
+    /// character for `morx` faces, tables this can't read, and rules that
+    /// take any glyph.
+    fn detect_ligating(&self, faces: &[CFRetained<CTFont>; 4], user: &[(Tag, u32)]) -> [Ligating; 4] {
+        let mut out: [Ligating; 4] = Default::default();
+        for style in Style::ALL {
+            let i = style as usize;
+            if !self.runs[i] {
+                continue;
+            }
+            if let Some(j) = (0..i).find(|&j| self.face_ids[j] == self.face_ids[i]) {
+                out[i] = out[j].clone();
+                continue;
+            }
+            let font = &faces[i];
+            let morx = unsafe { font.table(kCTFontTableMorx, CTFontTableOptions(0)) }.is_some();
+            let gsub = unsafe { font.table(kCTFontTableGSUB, CTFontTableOptions(0)) };
+            let set = match gsub {
+                Some(gsub) if !morx => detect::lookup_glyphs(unsafe { gsub.as_bytes_unchecked() }, user),
+                _ => None,
+            };
+            out[i] = match set {
+                Some(set) if !set.any => self.ligating_chars(font, style, &set.glyphs),
+                _ => Ligating::all(),
+            };
+        }
+        out
+    }
+
+    /// The characters of the Basic Multilingual Plane whose glyph in
+    /// `font` is in `glyphs` (sorted): by the font's character map, and for
+    /// ASCII also by the glyph the per-character lookup picks (which
+    /// single-glyph features like `zero` change).
+    fn ligating_chars(&self, font: &CTFont, style: Style, glyphs: &[u16]) -> Ligating {
+        let chars: Vec<u16> = (0x20..=0xFFFFu32)
+            .filter(|c| !(0xD800..0xE000).contains(c))
+            .map(|c| c as u16)
+            .collect();
+        let mut mapped = vec![0 as CGGlyph; chars.len()];
+        // About 2 ms for the whole plane, at construction.
+        unsafe {
+            font.glyphs_for_characters(
+                NonNull::new_unchecked(chars.as_ptr() as *mut u16),
+                NonNull::new_unchecked(mapped.as_mut_ptr()),
+                chars.len() as CFIndex,
+            )
+        };
+        let in_set = |g: CGGlyph| g != 0 && glyphs.binary_search(&g).is_ok();
+        // With the user's features, ASCII may resolve to other glyphs.
+        let featured = self.registry.borrow().line_lookup[style as usize];
+        let face_id = self.face_ids[style as usize];
+        let resolved =
+            |ch: char| featured && ch.is_ascii_graphic() && self.glyph_key(ch, style).is_some_and(|k| k.font == face_id && in_set(k.glyph));
+        let mut l = Ligating::default();
+        for (&c, &g) in chars.iter().zip(&mapped) {
+            if in_set(g) || resolved(char::from_u32(c as u32).unwrap_or(' ')) {
+                if c < 128 {
+                    l.ascii |= 1 << c;
+                } else {
+                    l.other.push(c as u32);
+                }
+            }
+        }
+        let has = |ch: char| mapped[ch as usize - 0x20] != 0;
+        l.plain = ('a'..='z').chain('A'..='Z').find(|&ch| has(ch) && !l.contains(ch));
+        l
+    }
+
+    /// Whether `ch` can take part in `face`'s ligatures and contextual
+    /// alternates: its glyph is in a lookup of a cross-character feature
+    /// that is on (ligatures design §5). A character that can't is never
+    /// substituted, and no rule tells it from any other such character, so
+    /// a renderer shapes only the stretches of characters that can, each
+    /// with a [`plain_char`](Fonts::plain_char) for a neighbour that can't.
+    /// True for every character of a face whose table can't be read this
+    /// way (`morx` faces, rules taking any glyph); false in faces that
+    /// don't shape runs.
+    pub fn ligates(&self, ch: char, face: Style) -> bool {
+        self.ligating[face as usize].contains(ch)
+    }
+
+    /// A letter `face` draws that can't take part in its substitutions
+    /// ([`Fonts::ligates`]), to stand for any such neighbour of a stretch
+    /// that can. `None` when there is none.
+    pub fn plain_char(&self, face: Style) -> Option<char> {
+        self.ligating[face as usize].plain
     }
 
     /// Whether each face shapes whole runs (ligatures design §1). OpenType

@@ -70,6 +70,18 @@ fn bench(c: &mut Criterion) {
             black_box(conv.finish().unwrap())
         })
     });
+    g.bench_function("kitty_rgba_8mb_display_p3", |b| {
+        let mut target = VecPixels::new(w, h);
+        b.iter(|| {
+            let mut conv = Converter::new(Layout::Rgba, w, h).display_p3();
+            for chunk in &chunks {
+                let mut d = Base64::new();
+                d.feed_to(chunk, &mut |bytes| conv.feed(bytes, &mut target)).unwrap();
+                d.finish_to(&mut |bytes| conv.feed(bytes, &mut target)).unwrap();
+            }
+            black_box(conv.finish().unwrap())
+        })
+    });
 
     // A screenshot-like image compressed: base64, inflate, convert.
     let z = miniz_oxide::deflate::compress_to_vec_zlib(&raw, 6);

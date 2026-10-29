@@ -83,14 +83,17 @@ fn probe_and_inflate_mutations() {
 
 #[test]
 fn decoders_on_mutated_images() {
-    use term_image::decode::{Limits, decode};
+    use term_image::decode::{Options, decode};
     let fixtures: [&[u8]; 4] = [
         include_bytes!("fixtures/quadrants-64x48.jpg"),
         include_bytes!("fixtures/quadrants-64x48.gif"),
         include_bytes!("fixtures/rgba-4x2-adam7.png"),
         include_bytes!("fixtures/gradient-300x300-adam7.png"),
     ];
-    let limits = Limits { transient: 4 << 20 };
+    let limits = Options {
+        transient: 4 << 20,
+        ..Options::default()
+    };
     let mut r = Rng(17);
     for _ in 0..1500 {
         for base in fixtures {

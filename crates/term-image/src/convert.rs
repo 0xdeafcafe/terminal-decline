@@ -2,6 +2,7 @@
 //! a [`PixelTarget`] as they stream in, so a raw image is ready the moment
 //! its last byte arrives (images.md §3.3).
 
+use crate::color::ToP3;
 use crate::{PixelTarget, premultiply};
 
 /// The layout of the incoming pixels.
@@ -39,6 +40,7 @@ pub struct Converter {
     opaque: bool,
     /// Bytes past the end of the image, ignored.
     extra: usize,
+    colour: Option<&'static ToP3>,
 }
 
 /// How a conversion ended.
@@ -80,7 +82,14 @@ impl Converter {
             partial_len: 0,
             opaque: true,
             extra: 0,
+            colour: None,
         }
+    }
+
+    /// Convert the pixels, taken as sRGB, to Display P3 as they are written.
+    pub fn display_p3(mut self) -> Converter {
+        self.colour = Some(ToP3::srgb());
+        self
     }
 
     /// The number of bytes the whole image takes.
@@ -113,6 +122,9 @@ impl Converter {
                 let px = self.partial;
                 let at = self.y as usize * pitch + self.x as usize * 4;
                 self.opaque &= put(self.layout, &px[..bpp], &mut bytes[at..at + 4]);
+                if let Some(c) = self.colour {
+                    c.bgra_premultiplied(&mut bytes[at..at + 4]);
+                }
                 self.partial_len = 0;
                 self.advance(1);
             }
@@ -136,6 +148,9 @@ impl Converter {
                 }
                 Layout::Rgba => rgba_row(src, dst),
             };
+            if let Some(c) = self.colour {
+                c.bgra_premultiplied(dst);
+            }
             data = &data[whole * bpp..];
             self.advance(whole as u32);
         }
@@ -249,6 +264,18 @@ mod tests {
                 assert_eq!(t, whole, "{layout:?} in pieces of {piece}");
             }
         }
+    }
+
+    #[test]
+    fn display_p3() {
+        let mut t = VecPixels::new(2, 1);
+        let mut c = Converter::new(Layout::Rgb, 2, 1).display_p3();
+        c.feed(&[255, 0, 0, 9], &mut t);
+        c.feed(&[9, 9], &mut t);
+        c.finish().unwrap();
+        let [r, g, b] = ToP3::srgb().rgb([255, 0, 0]);
+        assert_eq!(t.pixel(0, 0), [b, g, r, 255]);
+        assert_eq!(t.pixel(1, 0), [9, 9, 9, 255]);
     }
 
     #[test]

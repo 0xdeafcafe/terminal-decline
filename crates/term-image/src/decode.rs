@@ -16,23 +16,44 @@
 //!     (a 4032 × 3024 photo drawn at 1000 px wide is decoded at 1008 ×
 //!     756);
 //!   - GIF (`gif`): the first frame as palette indices, a byte a pixel.
-//! - Each decoder's own allocations are capped by [`Limits::transient`].
+//! - Each decoder's own allocations are capped by [`Options::transient`].
 //! - Colour profiles and gamma are ignored: pixels are taken as sRGB.
 
+use crate::color::ToP3;
 use crate::probe::{self, Format, Probe};
 use crate::{PixelTarget, premultiply};
 use std::io::Cursor;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Limits {
+pub struct Options {
     /// Most bytes a decoder may allocate for itself, beyond the target.
     pub transient: usize,
+    /// Convert the pixels from the image's colour space (its ICC profile,
+    /// or sRGB if it has none) to Display P3 ([`crate::color`]). On by
+    /// default.
+    pub display_p3: bool,
 }
 
-impl Default for Limits {
-    fn default() -> Limits {
-        Limits { transient: 64 << 20 }
+impl Default for Options {
+    fn default() -> Options {
+        Options {
+            transient: 64 << 20,
+            display_p3: true,
+        }
     }
+}
+
+/// The conversion for an image with ICC profile `icc`, if any is needed.
+fn colour_for(icc: Option<&[u8]>, options: &Options, own: &mut Option<ToP3>) -> bool {
+    if !options.display_p3 {
+        return false;
+    }
+    if let Some(t) = icc.and_then(ToP3::from_icc) {
+        let identity = t.is_identity();
+        *own = Some(t);
+        return !identity;
+    }
+    true
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -41,7 +62,7 @@ pub enum DecodeError {
     Unsupported,
     /// The decoder refused the data.
     Corrupt(String),
-    /// The decoder would pass [`Limits::transient`].
+    /// The decoder would pass [`Options::transient`].
     TooLarge,
     /// The data ended early.
     Truncated,
@@ -90,7 +111,7 @@ pub fn fit_size((w, h): (u32, u32), (mw, mh): (u32, u32)) -> (u32, u32) {
 }
 
 /// Decode `bytes` into `into`, scaled to `into`'s width and height.
-pub fn decode(bytes: &[u8], into: &mut dyn PixelTarget, limits: &Limits) -> Result<Decoded, DecodeError> {
+pub fn decode(bytes: &[u8], into: &mut dyn PixelTarget, limits: &Options) -> Result<Decoded, DecodeError> {
     let p = match probe::probe(bytes) {
         Ok(p) => p,
         Err(probe::ProbeError::NeedMore) => return Err(DecodeError::Truncated),
@@ -114,7 +135,7 @@ pub fn decode(bytes: &[u8], into: &mut dyn PixelTarget, limits: &Limits) -> Resu
     })
 }
 
-fn png(bytes: &[u8], into: &mut dyn PixelTarget, limits: &Limits) -> Result<bool, DecodeError> {
+fn png(bytes: &[u8], into: &mut dyn PixelTarget, limits: &Options) -> Result<bool, DecodeError> {
     let mut d = png::Decoder::new_with_limits(Cursor::new(bytes), png::Limits { bytes: limits.transient });
     d.set_transformations(png::Transformations::normalize_to_color8());
     let mut reader = d.read_info().map_err(png_error)?;
@@ -128,7 +149,10 @@ fn png(bytes: &[u8], into: &mut dyn PixelTarget, limits: &Limits) -> Result<bool
         png::ColorType::Rgba => Src::Rgba,
         png::ColorType::Indexed => return Err(DecodeError::Corrupt("palette not expanded".into())),
     };
-    let mut sink = Sink::new((sw, sh), 1, into);
+    let mut own = None;
+    let convert = colour_for(reader.info().icc_profile.as_deref(), limits, &mut own);
+    let colour = convert.then(|| own.as_ref().unwrap_or(ToP3::srgb()));
+    let mut sink = Sink::new((sw, sh), 1, colour, into);
     if interlaced {
         let size = reader.output_buffer_size().ok_or(DecodeError::TooLarge)?;
         if size > limits.transient {
@@ -155,7 +179,7 @@ fn png_error(e: png::DecodingError) -> DecodeError {
     }
 }
 
-fn jpeg(bytes: &[u8], p: &Probe, into: &mut dyn PixelTarget, limits: &Limits) -> Result<bool, DecodeError> {
+fn jpeg(bytes: &[u8], p: &Probe, into: &mut dyn PixelTarget, limits: &Options) -> Result<bool, DecodeError> {
     let mut d = jpeg_decoder::Decoder::new(Cursor::new(bytes));
     d.set_max_decoding_buffer_size(limits.transient);
     // Ask for the stored-orientation size of the target; the decoder picks
@@ -185,7 +209,11 @@ fn jpeg(bytes: &[u8], p: &Probe, into: &mut dyn PixelTarget, limits: &Limits) ->
     if line == 0 || data.len() < line * sh as usize {
         return Err(DecodeError::Truncated);
     }
-    let mut sink = Sink::new((sw, sh), p.orientation, into);
+    let icc = d.icc_profile();
+    let mut own = None;
+    let convert = colour_for(icc.as_deref(), limits, &mut own);
+    let colour = convert.then(|| own.as_ref().unwrap_or(ToP3::srgb()));
+    let mut sink = Sink::new((sw, sh), p.orientation, colour, into);
     for row in data.chunks_exact(line).take(sh as usize) {
         sink.row(layout, row);
     }
@@ -207,7 +235,7 @@ fn jpeg_error(e: jpeg_decoder::Error) -> DecodeError {
     }
 }
 
-fn gif(bytes: &[u8], into: &mut dyn PixelTarget, limits: &Limits) -> Result<bool, DecodeError> {
+fn gif(bytes: &[u8], into: &mut dyn PixelTarget, limits: &Options) -> Result<bool, DecodeError> {
     let mut opts = gif::DecodeOptions::new();
     opts.set_color_output(gif::ColorOutput::Indexed);
     let limit = std::num::NonZeroU64::new(limits.transient as u64).ok_or(DecodeError::TooLarge)?;
@@ -224,7 +252,8 @@ fn gif(bytes: &[u8], into: &mut dyn PixelTarget, limits: &Limits) -> Result<bool
         return Err(DecodeError::Truncated);
     }
     // The logical screen, transparent where the first frame doesn't cover it.
-    let mut sink = Sink::new((sw, sh), 1, into);
+    let colour = limits.display_p3.then(ToP3::srgb);
+    let mut sink = Sink::new((sw, sh), 1, colour, into);
     let mut row = vec![0u8; sw as usize * 4];
     for y in 0..sh {
         row.fill(0);
@@ -270,11 +299,20 @@ enum Src {
     Cmyk,
 }
 
+impl Src {
+    /// Grey stays grey in any RGB space with the same white: no conversion.
+    fn is_colour(self) -> bool {
+        matches!(self, Src::Rgb | Src::Rgba | Src::Cmyk)
+    }
+}
+
 /// Takes source rows in order, scales them to the target by averaging
 /// (or repeating, if the target is larger), turns them by the EXIF
 /// orientation and writes them.
 struct Sink<'a> {
     target: &'a mut dyn PixelTarget,
+    /// The colour conversion, applied to each source row.
+    colour: Option<&'a ToP3>,
     orientation: u8,
     /// Source rows.
     sh: u32,
@@ -295,7 +333,7 @@ struct Sink<'a> {
 }
 
 impl<'a> Sink<'a> {
-    fn new((sw, sh): (u32, u32), orientation: u8, target: &'a mut dyn PixelTarget) -> Sink<'a> {
+    fn new((sw, sh): (u32, u32), orientation: u8, colour: Option<&'a ToP3>, target: &'a mut dyn PixelTarget) -> Sink<'a> {
         let (tw, th) = if orientation >= 5 {
             (target.height(), target.width())
         } else {
@@ -304,6 +342,7 @@ impl<'a> Sink<'a> {
         let cols = (0..tw).map(|x| span(x, sw, tw)).collect();
         Sink {
             target,
+            colour,
             orientation,
             sh,
             tw,
@@ -328,11 +367,17 @@ impl<'a> Sink<'a> {
             let at = self.sy as usize * pitch;
             let dst = &mut self.target.bytes_mut()[at..at + self.line.len()];
             self.opaque &= to_bgra(layout, src, dst);
+            if let Some(c) = self.colour.filter(|_| layout.is_colour()) {
+                c.bgra_premultiplied(dst);
+            }
             self.sy += 1;
             self.ty += 1;
             return;
         }
         self.opaque &= to_bgra(layout, src, &mut self.line);
+        if let Some(c) = self.colour.filter(|_| layout.is_colour()) {
+            c.bgra_premultiplied(&mut self.line);
+        }
         let r = self.sy;
         self.sy += 1;
         // Every scaled row whose span holds this source row.
@@ -459,6 +504,14 @@ mod tests {
     use super::*;
     use crate::VecPixels;
 
+    /// No colour conversion, so pixels can be checked exactly.
+    fn raw() -> Options {
+        Options {
+            display_p3: false,
+            ..Options::default()
+        }
+    }
+
     /// The png crate writes no interlaced PNGs: those are fixtures.
     fn png_bytes(w: u32, h: u32, color: png::ColorType, interlaced: bool, data: &[u8]) -> Vec<u8> {
         if interlaced {
@@ -489,7 +542,7 @@ mod tests {
         for interlaced in [false, true] {
             let bytes = png_bytes(4, 2, png::ColorType::Rgba, interlaced, &rgba_4x2());
             let mut t = VecPixels::new(4, 2);
-            let d = decode(&bytes, &mut t, &Limits::default()).unwrap();
+            let d = decode(&bytes, &mut t, &raw()).unwrap();
             assert_eq!(
                 d,
                 Decoded {
@@ -507,16 +560,53 @@ mod tests {
     }
 
     #[test]
+    fn converted_to_display_p3() {
+        let red = png_bytes(1, 1, png::ColorType::Rgb, false, &[255, 0, 0]);
+        let mut t = VecPixels::new(1, 1);
+        decode(&red, &mut t, &Options::default()).unwrap();
+        let [r, g, b] = ToP3::srgb().rgb([255, 0, 0]);
+        assert_eq!(t.pixel(0, 0), [b, g, r, 255]);
+        assert_ne!((r, g, b), (255, 0, 0));
+        // Grey is left alone.
+        let grey = png_bytes(1, 1, png::ColorType::Grayscale, false, &[77]);
+        decode(&grey, &mut t, &Options::default()).unwrap();
+        assert_eq!(t.pixel(0, 0), [77, 77, 77, 255]);
+        // A PNG tagged Display P3 is already right; one tagged sRGB is
+        // converted as one with no profile.
+        let tagged = |profile: Vec<u8>| {
+            let mut info = png::Info::with_size(1, 1);
+            info.color_type = png::ColorType::Rgb;
+            info.bit_depth = png::BitDepth::Eight;
+            info.icc_profile = Some(std::borrow::Cow::Owned(profile));
+            let mut out = Vec::new();
+            png::Encoder::with_info(&mut out, info)
+                .unwrap()
+                .write_header()
+                .unwrap()
+                .write_image_data(&[255, 0, 0])
+                .unwrap();
+            out
+        };
+        let p3 = [(0.680, 0.320), (0.265, 0.690), (0.150, 0.060)];
+        let srgb = [(0.64, 0.33), (0.30, 0.60), (0.15, 0.06)];
+        decode(&tagged(crate::color::tests::icc(p3)), &mut t, &Options::default()).unwrap();
+        assert_eq!(t.pixel(0, 0), [0, 0, 255, 255]);
+        decode(&tagged(crate::color::tests::icc(srgb)), &mut t, &Options::default()).unwrap();
+        let px = t.pixel(0, 0);
+        assert!(px[2].abs_diff(r) <= 1 && px[1].abs_diff(g) <= 1 && px[0].abs_diff(b) <= 1, "{px:?}");
+    }
+
+    #[test]
     fn png_colour_types() {
         let mut t = VecPixels::new(2, 1);
         let rgb = png_bytes(2, 1, png::ColorType::Rgb, false, &[10, 20, 30, 40, 50, 60]);
-        assert!(decode(&rgb, &mut t, &Limits::default()).unwrap().opaque);
+        assert!(decode(&rgb, &mut t, &raw()).unwrap().opaque);
         assert_eq!(t.pixel(1, 0), [60, 50, 40, 255]);
         let grey = png_bytes(2, 1, png::ColorType::Grayscale, false, &[7, 200]);
-        decode(&grey, &mut t, &Limits::default()).unwrap();
+        decode(&grey, &mut t, &raw()).unwrap();
         assert_eq!(t.pixel(1, 0), [200, 200, 200, 255]);
         let ga = png_bytes(2, 1, png::ColorType::GrayscaleAlpha, false, &[200, 255, 200, 0]);
-        assert!(!decode(&ga, &mut t, &Limits::default()).unwrap().opaque);
+        assert!(!decode(&ga, &mut t, &raw()).unwrap().opaque);
         assert_eq!(t.pixel(0, 0), [200, 200, 200, 255]);
         assert_eq!(t.pixel(1, 0), [0, 0, 0, 0]);
     }
@@ -526,7 +616,7 @@ mod tests {
         // 4 × 2 → 2 × 1: each output pixel averages a 2 × 2 block.
         let bytes = png_bytes(4, 2, png::ColorType::Rgba, false, &rgba_4x2());
         let mut t = VecPixels::new(2, 1);
-        decode(&bytes, &mut t, &Limits::default()).unwrap();
+        decode(&bytes, &mut t, &raw()).unwrap();
         // red, green, black, white: (255+0+0+255)/4 etc.
         assert_eq!(t.pixel(0, 0), [64, 128, 128, 255]);
         // blue, half white (128 premultiplied), grey, transparent.
@@ -544,7 +634,7 @@ mod tests {
         let bytes = png_bytes(w, h, png::ColorType::Rgb, false, &data);
         for (tw, th) in [(1, 1), (7, 3), (150, 100), (299, 199), (300, 200), (450, 300)] {
             let mut t = VecPixels::new(tw, th);
-            decode(&bytes, &mut t, &Limits::default()).unwrap();
+            decode(&bytes, &mut t, &raw()).unwrap();
             assert_eq!(t.pixel(0, 0)[0], 77);
             assert_eq!(t.pixel(tw - 1, th - 1)[3], 255);
         }
@@ -585,7 +675,7 @@ mod tests {
     #[test]
     fn errors() {
         let mut t = VecPixels::new(4, 2);
-        let l = Limits::default();
+        let l = raw();
         assert_eq!(decode(b"%PDF-1.7", &mut t, &l), Err(DecodeError::Unsupported));
         let bytes = png_bytes(4, 2, png::ColorType::Rgba, false, &rgba_4x2());
         assert!(decode(&bytes[..bytes.len() - 20], &mut t, &l).is_err());
@@ -597,12 +687,32 @@ mod tests {
         // A tiny transient limit: an interlaced PNG needs the whole image.
         let big = include_bytes!("../tests/fixtures/gradient-300x300-adam7.png");
         let mut t = VecPixels::new(300, 300);
-        assert_eq!(decode(big, &mut t, &Limits { transient: 100_000 }), Err(DecodeError::TooLarge));
+        assert_eq!(
+            decode(
+                big,
+                &mut t,
+                &Options {
+                    transient: 100_000,
+                    ..raw()
+                }
+            ),
+            Err(DecodeError::TooLarge)
+        );
         assert!(decode(big, &mut t, &l).unwrap().opaque);
         assert_eq!(t.pixel(299, 299), [7, 180, 180, 255]);
         let jpeg = include_bytes!("../tests/fixtures/photo-1600x1200.jpg");
         let mut t = VecPixels::new(1600, 1200);
-        assert_eq!(decode(jpeg, &mut t, &Limits { transient: 1 << 20 }), Err(DecodeError::TooLarge));
+        assert_eq!(
+            decode(
+                jpeg,
+                &mut t,
+                &Options {
+                    transient: 1 << 20,
+                    ..raw()
+                }
+            ),
+            Err(DecodeError::TooLarge)
+        );
     }
 
     /// Red top-left, green top-right, blue bottom-left, white bottom-right.
@@ -623,11 +733,11 @@ mod tests {
     fn gif_first_frame() {
         let gif = include_bytes!("../tests/fixtures/quadrants-64x48.gif");
         let mut t = VecPixels::new(64, 48);
-        let d = decode(gif, &mut t, &Limits::default()).unwrap();
+        let d = decode(gif, &mut t, &raw()).unwrap();
         assert_eq!(d.source, (64, 48));
         check_quadrants(&t, 0);
         let mut t = VecPixels::new(16, 12);
-        decode(gif, &mut t, &Limits::default()).unwrap();
+        decode(gif, &mut t, &raw()).unwrap();
         check_quadrants(&t, 0);
     }
 
@@ -636,7 +746,7 @@ mod tests {
         let jpeg = include_bytes!("../tests/fixtures/quadrants-64x48.jpg");
         for (w, h) in [(64, 48), (32, 24), (16, 12), (8, 6), (100, 75)] {
             let mut t = VecPixels::new(w, h);
-            let d = decode(jpeg, &mut t, &Limits::default()).unwrap();
+            let d = decode(jpeg, &mut t, &raw()).unwrap();
             assert!(d.opaque);
             assert_eq!(d.source, (64, 48));
             check_quadrants(&t, 40);
@@ -683,7 +793,7 @@ mod tests {
             let (w, h) = (p.width, p.height);
             assert_eq!((w, h), if o >= 5 { (48, 64) } else { (64, 48) });
             let mut t = VecPixels::new(w, h);
-            decode(&bytes, &mut t, &Limits::default()).unwrap();
+            decode(&bytes, &mut t, &raw()).unwrap();
             let near = |a: [u8; 4], b: [u8; 4]| a.iter().zip(b).all(|(&x, y)| x.abs_diff(y) <= 40);
             let at = [(w / 4, h / 4), (3 * w / 4, h / 4), (w / 4, 3 * h / 4), (3 * w / 4, 3 * h / 4)];
             for ((x, y), want) in at.into_iter().zip(want) {
@@ -703,7 +813,7 @@ mod tests {
         let (w, h) = fit(&p, (400, 400));
         assert_eq!((w, h), (400, 300));
         let mut t = VecPixels::new(w, h);
-        decode(jpeg, &mut t, &Limits::default()).unwrap();
+        decode(jpeg, &mut t, &raw()).unwrap();
         // The sky at the top, bluish; the ground at the bottom, greenish.
         let [b, g, r, _] = t.pixel(10, 5);
         assert!(b > r && b > 150, "{b} {g} {r}");

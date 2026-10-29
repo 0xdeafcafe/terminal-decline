@@ -6,7 +6,7 @@
 use criterion::{Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
 use term_image::VecPixels;
-use term_image::decode::{Limits, decode};
+use term_image::decode::{Options, decode};
 
 /// A screenshot-like 1624 × 1018 RGBA PNG: flat areas with text-like
 /// stripes.
@@ -40,7 +40,7 @@ fn bench(c: &mut Criterion) {
     let png = screenshot();
     let jpeg = include_bytes!("../tests/fixtures/photo-1600x1200.jpg");
     let gif = include_bytes!("../tests/fixtures/quadrants-64x48.gif");
-    let l = Limits::default();
+    let l = Options::default();
     let mut g = c.benchmark_group("decode");
     g.sample_size(20);
     for (name, bytes, (w, h)) in [

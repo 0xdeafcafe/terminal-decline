@@ -18,6 +18,7 @@
 //! says so.
 
 pub mod base64;
+pub mod color;
 pub mod convert;
 pub mod decode;
 pub mod inflate;

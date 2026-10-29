@@ -16,6 +16,7 @@
 //! Pixels past the limits are clipped, and repeats are clamped to the
 //! width limit, so no input makes the decoder loop or allocate past them.
 
+use crate::color::ToP3;
 use crate::{AllocWith, MAX_SIDE, PixelTarget};
 
 /// Colour registers (cells §14). Higher numbers wrap, as in xterm.
@@ -178,6 +179,8 @@ pub struct Decoder<T: PixelTarget = Box<dyn PixelTarget + Send>> {
     nparams: usize,
     failed: bool,
     limits: Limits,
+    /// Registers hold sRGB; colours are converted as they are selected.
+    colour: Option<&'static ToP3>,
 }
 
 impl<T: PixelTarget> std::fmt::Debug for Decoder<T> {
@@ -214,6 +217,23 @@ impl<T: PixelTarget> Decoder<T> {
             nparams: 0,
             failed: false,
             limits,
+            colour: None,
+        }
+    }
+
+    /// Convert colours from sRGB to Display P3 as they are used (the
+    /// registers keep sRGB, so a palette carried over is never converted
+    /// twice).
+    pub fn display_p3(mut self) -> Decoder<T> {
+        self.colour = Some(ToP3::srgb());
+        self.color = self.shown(self.palette.0[0]);
+        self
+    }
+
+    fn shown(&self, c: [u8; 4]) -> [u8; 4] {
+        match self.colour {
+            Some(t) => t.bgra(c),
+            None => c,
         }
     }
 
@@ -307,7 +327,7 @@ impl<T: PixelTarget> Decoder<T> {
                 self.palette.0[reg] = bgra(r, g, b);
             }
         }
-        self.color = self.palette.0[reg];
+        self.color = self.shown(self.palette.0[reg]);
     }
 
     fn raster_command(&mut self, alloc: AllocWith<'_, T>) {
@@ -535,7 +555,7 @@ impl<T: PixelTarget> Decoder<T> {
             target = exact;
         }
         if self.fill_background {
-            let bg = palette.0[0];
+            let bg = self.shown(palette.0[0]);
             let pitch = target.row_pitch();
             let bytes = target.bytes_mut();
             for y in 0..h as usize {
@@ -760,6 +780,21 @@ mod tests {
         // Selecting a register without defining it uses the palette.
         let (p, _, _) = decode(7, 1, b"#2~");
         assert_eq!(p.pixel(0, 0), pal.0[2]);
+    }
+
+    #[test]
+    fn display_p3() {
+        let mut d = Decoder::<VecPixels>::new(7, 0, Palette::vt340(), Limits::default()).display_p3();
+        let mut alloc = |w, h| Some(VecPixels::new(w, h));
+        d.put_slice(b"#0;2;0;0;100#1;2;100;0;0#1D", &mut alloc);
+        let f = d.finish(&mut alloc);
+        let p = f.image.unwrap().pixels;
+        let t = ToP3::srgb();
+        assert_eq!(p.pixel(0, 0), t.bgra(RED));
+        // The background, register 0 at the end, converted too.
+        assert_eq!(p.pixel(0, 1), t.bgra(BLUE));
+        // Registers keep sRGB.
+        assert_eq!(f.palette.0[1], RED);
     }
 
     #[test]

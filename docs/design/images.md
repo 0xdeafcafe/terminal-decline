@@ -733,10 +733,20 @@ is measured in PR I.5.
   decoders, or a separate decoding process).
 - Raw kitty data and Sixel never reach ImageIO: term-image converts RGB /
   RGBA / palette pixels into BGRA premultiplied as they arrive.
-- **Colour**: images are converted to sRGB. The window's layer has no
-  colour space set today (`configure_layer`), so on a P3 display sRGB
-  values are shown as P3 and photos look more saturated than in Preview,
-  as text colours already do. Open question 9.
+- **Colour** (decided, question 9): the window's layer stays untagged,
+  and each image is converted once, when decoded, from its own colour
+  space (its ICC profile; sRGB if it has none) to Display P3, in
+  `term_image::color::ToP3`: the source curve through a table to 16-bit
+  linear, a 3 × 3 matrix in fixed point, the sRGB curve (P3's) through a
+  table. Matrix/TRC ICC profiles are read (`rXYZ`/`gXYZ`/`bXYZ`, `rTRC`
+  as `curv` or `para`); others are taken as sRGB; a Display P3 profile
+  (iPhone photos) is left as is; grey images are not touched. On by
+  default in `decode::Options`; kitty's raw pixels
+  (`Converter::display_p3`) and Sixel colours (`Decoder::display_p3`,
+  registers keep sRGB) take it as sRGB when term-core asks. Cost about
+  3 ns a pixel (M-series Mac, machine not idle): kitty's 8 MB full-HD
+  RGBA 10.2 → 17.3 ms; the 1624 × 1018 PNG 4.3 → 9.5 ms (§9 still
+  expects 5–15 ms).
 
 ### 6.2 Pixel buffers and textures (term-render)
 
@@ -1116,7 +1126,7 @@ the size of the largest window; 2 animation after 1.0; 3 pure-Rust
 decoders, fuzzed; 4 no HEIC in 1.0; 5–8, 10, 11 as proposed; 7 iTerm2
 images sized per point, as iTerm2; 9 the window stays untagged (text keeps today's colours) and each image is
 converted from its own colour space (sRGB if none) to Display P3 once, when
-it is decoded.
+it is decoded (built in I.1, §6.1).
 
 1. **Budget on large screens.** One full-screen image is about 59 MB on a
    5K display and 31 MB on a 16" MacBook Pro, and the kitty protocol asks

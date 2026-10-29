@@ -221,12 +221,14 @@ fn smoke_second_tab_shrinks_the_grid() {
     let dir = TempDir::new("tab");
     let d = dir.path().display();
     // The same program runs in both tabs; the first to make the directory
-    // is the first tab.
+    // is the first tab. macOS reports the first tab as covered (which is
+    // what frees its memory) asynchronously, after the tab switch; the
+    // script can't see that, so it gives it a second before the last dump.
     let wait = |cond: &str| format!("i=0; while ! {{ {cond}; }} && [ $i -lt 200 ]; do sleep 0.05; i=$((i+1)); done; ");
     let script = format!(
         "if mkdir '{d}/first' 2>/dev/null; then \
            s0=$(stty size); echo one; {dump}{tab}\
-           {wait_two}{wait_size}stty size; {dump}{quit}\
+           {wait_two}{wait_size}stty size; sleep 1; {dump}{quit}\
          else \
            echo two; {dump}{wait_dump}touch '{d}/two-done'; \
          fi; sleep 20",

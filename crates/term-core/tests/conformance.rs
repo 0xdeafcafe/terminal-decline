@@ -5,7 +5,7 @@
 use term_core::{Attrs, Color, CursorShape, Selection, Style, Term, Underline, Width};
 
 fn new(cols: usize, lines: usize) -> Term {
-    Term::new(cols, lines, 1000)
+    Term::new(cols, lines, 1000, term_core::ImagePool::process())
 }
 
 /// Visible row text with trailing blanks trimmed (wide spacers dropped).
@@ -498,7 +498,7 @@ fn scrolled_rows_keep_wrapped_flag() {
 
 #[test]
 fn scrollback_limit_evicts_oldest() {
-    let mut t = Term::new(4, 1, 3);
+    let mut t = Term::new(4, 1, 3, term_core::ImagePool::process());
     for i in 0..10 {
         t.advance(format!("{i}\r\n").as_bytes());
     }

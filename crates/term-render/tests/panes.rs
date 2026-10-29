@@ -157,7 +157,7 @@ fn theme() -> Theme {
 }
 
 fn built(renderer: &mut Renderer, theme: &Theme, cols: usize, lines: usize, text: &str) -> (PaneRender, Term) {
-    let mut t = Term::new(cols, lines, 0);
+    let mut t = Term::new(cols, lines, 0, term_core::ImagePool::process());
     t.advance(format!("\x1b[?25l{text}").as_bytes());
     let mut pane = PaneRender::new();
     let input = input(renderer, theme);
@@ -488,7 +488,7 @@ fn panes_build_from_a_snapshot_unless_the_textures_were_emptied() {
     assert!(!r1.build_from_snapshot(&mut a, &input), "emptied since the snapshot");
     r1.build_pane(&mut a, &mut ta.state, &input);
     assert!(r1.is_current(&a));
-    let mut tb = Term::new(6, 1, 0);
+    let mut tb = Term::new(6, 1, 0, term_core::ImagePool::process());
     tb.advance(b"\x1b[?25lABCxyz");
     r1.build_pane(&mut b, &mut tb.state, &input);
     assert!(

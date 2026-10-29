@@ -169,7 +169,7 @@ mod tests {
 
     #[test]
     fn jumps_put_prompts_at_the_top() {
-        let mut t = Term::new(20, 4, 100);
+        let mut t = Term::new(20, 4, 100, term_core::ImagePool::process());
         session(&mut t, "one", "1\r\n1\r\n1\r\n");
         session(&mut t, "two", "2\r\n2\r\n2\r\n");
         session(&mut t, "three", "3\r\n");
@@ -188,14 +188,14 @@ mod tests {
         assert_eq!(t.state.display_offset(), 0);
         assert!(!jump(&mut t.state, false), "nothing below the bottom");
         // No marks: nowhere to go.
-        let mut plain = Term::new(20, 4, 100);
+        let mut plain = Term::new(20, 4, 100, term_core::ImagePool::process());
         plain.advance(b"a\r\nb\r\nc\r\nd\r\ne\r\nf");
         assert!(!jump(&mut plain.state, true));
     }
 
     #[test]
     fn selects_the_output_at_the_top_or_the_last() {
-        let mut t = Term::new(20, 4, 100);
+        let mut t = Term::new(20, 4, 100, term_core::ImagePool::process());
         session(&mut t, "one", "1\r\n11\r\n");
         session(&mut t, "two", "2\r\n");
         session(&mut t, "quiet", "");
@@ -210,12 +210,12 @@ mod tests {
         assert!(select_output(&mut t.state));
         assert_eq!(t.state.selection_text().as_deref(), Some("1\n11"));
         // A command still running: its output so far.
-        let mut t = Term::new(20, 4, 100);
+        let mut t = Term::new(20, 4, 100, term_core::ImagePool::process());
         t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07slow\r\n\x1b]133;C\x07so far");
         assert!(select_output(&mut t.state));
         assert_eq!(t.state.selection_text().as_deref(), Some("so far"));
         assert!(has_output(&t.state, t.state.point_at(0, 0)));
-        let mut plain = Term::new(20, 4, 100);
+        let mut plain = Term::new(20, 4, 100, term_core::ImagePool::process());
         plain.advance(b"text");
         assert!(!select_output(&mut plain.state));
         assert!(!has_output(&plain.state, plain.state.point_at(0, 0)));
@@ -228,7 +228,7 @@ mod tests {
 
     #[test]
     fn steps_to_a_cell_of_the_command_line() {
-        let mut t = Term::new(20, 4, 100);
+        let mut t = Term::new(20, 4, 100, term_core::ImagePool::process());
         typing(&mut t, "echo hello");
         // The cursor is at column 12, after `hello`.
         assert_eq!(input_steps(&t.state, 0, 12), Some(0));
@@ -247,7 +247,7 @@ mod tests {
 
     #[test]
     fn steps_count_wide_characters_and_clusters_as_one() {
-        let mut t = Term::new(20, 4, 100);
+        let mut t = Term::new(20, 4, 100, term_core::ImagePool::process());
         // `a`, a wide character, a flag (a cluster, two cells), `b`.
         typing(&mut t, "a\u{4e16}\u{1f1e9}\u{1f1ea}b");
         let (row, col) = t.state.cursor_in_view().unwrap();
@@ -262,7 +262,7 @@ mod tests {
 
     #[test]
     fn steps_follow_a_wrapped_command_line() {
-        let mut t = Term::new(10, 4, 100);
+        let mut t = Term::new(10, 4, 100, term_core::ImagePool::process());
         typing(&mut t, "0123456789abcdefg");
         // Row 0: `$ 01234567`, row 1: `89abcdefg`, the cursor after it.
         assert_eq!(t.state.cursor_in_view(), Some((1, 9)));
@@ -275,26 +275,26 @@ mod tests {
     #[test]
     fn no_steps_without_an_open_command_line() {
         // No marks.
-        let mut plain = Term::new(20, 4, 100);
+        let mut plain = Term::new(20, 4, 100, term_core::ImagePool::process());
         plain.advance(b"$ echo hello");
         assert_eq!(input_steps(&plain.state, 0, 4), None);
         // Prompt marked, but before its B mark.
-        let mut a = Term::new(20, 4, 100);
+        let mut a = Term::new(20, 4, 100, term_core::ImagePool::process());
         a.advance(b"\x1b]133;A\x07$ ");
         assert_eq!(input_steps(&a.state, 0, 1), None);
         // A command running: its output is not a command line.
-        let mut running = Term::new(20, 4, 100);
+        let mut running = Term::new(20, 4, 100, term_core::ImagePool::process());
         typing(&mut running, "sleep 9\r\n\x1b]133;C\x07output");
         assert_eq!(input_steps(&running.state, 0, 4), None);
         assert_eq!(input_steps(&running.state, 1, 2), None);
         // Finished, a new prompt: its input is open again, the old is not.
-        let mut done = Term::new(20, 4, 100);
+        let mut done = Term::new(20, 4, 100, term_core::ImagePool::process());
         typing(&mut done, "ls\r\n\x1b]133;C\x07a\r\n\x1b]133;D;0\x07");
         typing(&mut done, "pwd");
         assert_eq!(input_steps(&done.state, 0, 3), None);
         assert_eq!(input_steps(&done.state, 2, 3), Some(-2));
         // Scrolled back: the cursor is not in view.
-        let mut back = Term::new(20, 2, 100);
+        let mut back = Term::new(20, 2, 100, term_core::ImagePool::process());
         typing(&mut back, "one\r\ntwo\r\nthree");
         back.state.scroll_view(1);
         assert_eq!(input_steps(&back.state, 1, 3), None);

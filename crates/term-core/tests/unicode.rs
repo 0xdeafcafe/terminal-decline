@@ -207,7 +207,7 @@ fn text() -> impl Strategy<Value = String> {
 /// What a terminal segments `s` into when it is printed, fed whole or one
 /// byte per `advance` call, with bulk ASCII on or off.
 fn terminal_graphemes(s: &str, byte_at_a_time: bool, bulk: bool) -> Vec<String> {
-    let mut t = Term::new(7, 3, 10);
+    let mut t = Term::new(7, 3, 10, term_core::ImagePool::process());
     t.state.set_bulk_ascii(bulk);
     t.state.record_graphemes(true);
     if byte_at_a_time {
@@ -241,12 +241,12 @@ proptest! {
 #[test]
 fn non_print_ends_the_cluster() {
     for between in ["\x1b[C", "\x1b[1m", "\r", "\x1b]0;t\x07", "\x1bP$q\x1b\\"] {
-        let mut t = Term::new(20, 3, 10);
+        let mut t = Term::new(20, 3, 10, term_core::ImagePool::process());
         t.state.record_graphemes(true);
         t.advance(format!("e{between}\u{0301}").as_bytes());
         assert_eq!(t.state.take_graphemes(), ["e", "\u{0301}"], "{between:?}");
     }
-    let mut t = Term::new(20, 3, 10);
+    let mut t = Term::new(20, 3, 10, term_core::ImagePool::process());
     t.state.record_graphemes(true);
     t.advance("e\u{0301}".as_bytes());
     assert_eq!(t.state.take_graphemes(), ["e\u{0301}"]);
@@ -256,7 +256,7 @@ fn non_print_ends_the_cluster() {
 /// keycap joins it; and a Prepend scalar takes the first byte of a run.
 #[test]
 fn ascii_runs_leave_the_state_on_their_last_cell() {
-    let mut t = Term::new(20, 3, 10);
+    let mut t = Term::new(20, 3, 10, term_core::ImagePool::process());
     t.state.record_graphemes(true);
     t.advance("abc1\u{FE0F}\u{20E3}xe\u{0301}".as_bytes());
     assert_eq!(t.state.take_graphemes(), ["a", "b", "c", "1\u{FE0F}\u{20E3}", "x", "e\u{0301}"]);
@@ -268,7 +268,7 @@ fn ascii_runs_leave_the_state_on_their_last_cell() {
     assert_eq!(t.state.take_graphemes(), ["\u{0600}1", "2"]);
 
     // At the end of a row, before the wrap.
-    let mut t = Term::new(4, 3, 10);
+    let mut t = Term::new(4, 3, 10, term_core::ImagePool::process());
     t.advance(b"abcd");
     assert_eq!(t.state.grapheme_state().at, Some((0, 3)));
     assert!(t.state.cursor().pending_wrap());
@@ -329,7 +329,7 @@ fn cluster_width_with_ambiguous_wide() {
 #[test]
 fn ambiguous_width_applies_to_new_output_only() {
     use term_core::Width::*;
-    let mut t = Term::new(10, 1, 0);
+    let mut t = Term::new(10, 1, 0, term_core::ImagePool::process());
     t.advance("§".as_bytes());
     assert_eq!(t.state.cursor().col(), 1);
     t.state.set_ambiguous_width(2);
@@ -401,7 +401,7 @@ fn expected_cells(s: &str, ambiguous: u8, legacy: bool) -> Vec<(String, u8)> {
 
 /// The cells of row 0, up to the cursor: text and width.
 fn printed_cells(s: &str, ambiguous: u8, legacy: bool, byte_at_a_time: bool, bulk: bool) -> Vec<(String, u8)> {
-    let mut t = Term::new(400, 2, 10);
+    let mut t = Term::new(400, 2, 10, term_core::ImagePool::process());
     t.state.set_bulk_ascii(bulk);
     t.state.set_ambiguous_width(ambiguous);
     if legacy {

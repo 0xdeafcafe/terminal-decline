@@ -6,7 +6,7 @@
 use term_core::{Content, Point, Selection, Term, Width};
 
 fn term(cols: usize, lines: usize, input: &str) -> Term {
-    let mut t = Term::new(cols, lines, 100);
+    let mut t = Term::new(cols, lines, 100, term_core::ImagePool::process());
     t.advance(input.as_bytes());
     t
 }

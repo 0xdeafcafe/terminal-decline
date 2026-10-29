@@ -18,7 +18,7 @@ fn copied(t: &Term) -> String {
 
 #[test]
 fn selection_spans_scrollback_and_screen() {
-    let mut t = Term::new(10, 2, 100);
+    let mut t = Term::new(10, 2, 100, term_core::ImagePool::process());
     t.advance(b"one\r\ntwo\r\nthree");
     assert_eq!(t.state.scrollback_len(), 1);
     t.state.scroll_view(1);
@@ -31,7 +31,7 @@ fn selection_spans_scrollback_and_screen() {
 
 #[test]
 fn reversed_anchor_and_head_copy_the_same_text() {
-    let mut t = Term::new(10, 3, 100);
+    let mut t = Term::new(10, 3, 100, term_core::ImagePool::process());
     t.advance(b"alpha\r\nbeta\r\ngamma");
     select(&mut t, (0, 2), (2, 1));
     let forward = copied(&t);
@@ -42,7 +42,7 @@ fn reversed_anchor_and_head_copy_the_same_text() {
 
 #[test]
 fn selection_stays_on_its_text_as_it_scrolls_into_history() {
-    let mut t = Term::new(10, 2, 3);
+    let mut t = Term::new(10, 2, 3, term_core::ImagePool::process());
     t.advance(b"one\r\ntwo");
     select(&mut t, (1, 0), (1, 2));
     assert_eq!(copied(&t), "two");
@@ -59,7 +59,7 @@ fn selection_stays_on_its_text_as_it_scrolls_into_history() {
 
 #[test]
 fn selection_stays_put_while_the_view_scrolls() {
-    let mut t = Term::new(10, 2, 100);
+    let mut t = Term::new(10, 2, 100, term_core::ImagePool::process());
     t.advance(b"a\r\nb\r\nc\r\nd");
     select(&mut t, (0, 0), (0, 0));
     assert_eq!(copied(&t), "c");
@@ -69,7 +69,7 @@ fn selection_stays_put_while_the_view_scrolls() {
 
 #[test]
 fn resize_moves_the_selection_with_its_text() {
-    let mut t = Term::new(10, 2, 100);
+    let mut t = Term::new(10, 2, 100, term_core::ImagePool::process());
     t.advance(b"hello");
     select(&mut t, (0, 0), (0, 4));
     t.state.resize(10, 2);
@@ -84,7 +84,7 @@ fn resize_moves_the_selection_with_its_text() {
 
 #[test]
 fn wide_chars_are_copied_once() {
-    let mut t = Term::new(10, 2, 100);
+    let mut t = Term::new(10, 2, 100, term_core::ImagePool::process());
     t.advance("a漢b".as_bytes());
     select(&mut t, (0, 0), (0, 3));
     assert_eq!(copied(&t), "a漢b");
@@ -103,7 +103,7 @@ fn wide_chars_are_copied_once() {
 
 #[test]
 fn trailing_spaces_trimmed_except_on_wrapped_lines() {
-    let mut t = Term::new(4, 4, 100);
+    let mut t = Term::new(4, 4, 100, term_core::ImagePool::process());
     t.advance(b"ab  \r\ncd\r\nef  gh");
     assert_snapshot!(t.state.dump(), @r"
     ab··|
@@ -121,7 +121,7 @@ fn trailing_spaces_trimmed_except_on_wrapped_lines() {
 
 #[test]
 fn view_scroll_clamps_at_both_ends() {
-    let mut t = Term::new(10, 2, 100);
+    let mut t = Term::new(10, 2, 100, term_core::ImagePool::process());
     for i in 0..10 {
         t.advance(format!("{i}\r\n").as_bytes());
     }
@@ -149,7 +149,7 @@ fn view_scroll_clamps_at_both_ends() {
 
 #[test]
 fn view_scroll_does_nothing_on_the_alt_screen() {
-    let mut t = Term::new(10, 2, 100);
+    let mut t = Term::new(10, 2, 100, term_core::ImagePool::process());
     t.advance(b"a\r\nb\r\nc\r\n");
     t.state.scroll_view(1);
     assert_eq!(t.state.display_offset(), 1);
@@ -164,7 +164,7 @@ fn view_scroll_does_nothing_on_the_alt_screen() {
 
 #[test]
 fn view_scroll_with_no_scrollback() {
-    let mut t = Term::new(10, 2, 0);
+    let mut t = Term::new(10, 2, 0, term_core::ImagePool::process());
     t.advance(b"a\r\nb\r\nc\r\n");
     t.state.scroll_view(5);
     assert_eq!(t.state.display_offset(), 0);
@@ -172,7 +172,7 @@ fn view_scroll_with_no_scrollback() {
 
 #[test]
 fn replies_in_one_chunk_keep_their_order() {
-    let mut t = Term::new(10, 2, 0);
+    let mut t = Term::new(10, 2, 0, term_core::ImagePool::process());
     t.advance(b"\x1b[5n\x1b[2;3H\x1b[6n\x1b[c\x1b]11;?\x07\x1b[?2026$p\x1b[>c\x1b[18t");
     let replies = String::from_utf8(t.state.replies().to_vec()).unwrap();
     assert_eq!(
@@ -193,7 +193,7 @@ fn word(t: &mut Term, line: usize, col: usize) -> String {
 
 #[test]
 fn double_click_selects_a_word() {
-    let mut t = Term::new(40, 3, 100);
+    let mut t = Term::new(40, 3, 100, term_core::ImagePool::process());
     t.advance(b"see src/main.rs:12:5 (here)");
     assert_eq!(word(&mut t, 0, 0), "see");
     assert_eq!(word(&mut t, 0, 2), "see");
@@ -208,7 +208,7 @@ fn double_click_selects_a_word() {
 
 #[test]
 fn double_click_selects_a_word_split_by_a_soft_wrap() {
-    let mut t = Term::new(10, 4, 100);
+    let mut t = Term::new(10, 4, 100, term_core::ImagePool::process());
     // "averyverylongword" wraps after 6 of its letters.
     t.advance(b"one  averyverylongword two");
     assert_snapshot!(t.state.dump(), @r"
@@ -232,7 +232,7 @@ fn double_click_selects_a_word_split_by_a_soft_wrap() {
 
 #[test]
 fn a_hard_line_break_ends_a_word() {
-    let mut t = Term::new(10, 3, 100);
+    let mut t = Term::new(10, 3, 100, term_core::ImagePool::process());
     t.advance(b"0123456789\r\nabc");
     assert!(!t.state.visible_row(0).wrapped());
     assert_eq!(word(&mut t, 0, 9), "0123456789");
@@ -241,13 +241,13 @@ fn a_hard_line_break_ends_a_word() {
 
 #[test]
 fn double_click_on_a_wrapped_word_in_history() {
-    let mut t = Term::new(6, 2, 100);
+    let mut t = Term::new(6, 2, 100, term_core::ImagePool::process());
     t.advance(b"xx abcdefgh\r\n\r\n\r\n");
     assert_eq!(t.state.scrollback_len(), 3);
     t.state.scroll_view(3);
     assert_eq!(word(&mut t, 1, 2), "abcdefgh");
     // Across the boundary between history and the screen.
-    let mut t = Term::new(6, 2, 100);
+    let mut t = Term::new(6, 2, 100, term_core::ImagePool::process());
     t.advance(b"\r\nxx abcdefgh");
     assert_eq!(t.state.scrollback_len(), 1);
     assert_eq!(word(&mut t, 1, 0), "abcdefgh", "from the screen");
@@ -257,7 +257,7 @@ fn double_click_on_a_wrapped_word_in_history() {
 
 #[test]
 fn double_click_takes_wide_characters_whole() {
-    let mut t = Term::new(10, 2, 100);
+    let mut t = Term::new(10, 2, 100, term_core::ImagePool::process());
     t.advance("a漢字b c".as_bytes());
     for col in 0..=5 {
         assert_eq!(word(&mut t, 0, col), "a漢字b", "at {col}");
@@ -266,7 +266,7 @@ fn double_click_takes_wide_characters_whole() {
     assert_eq!((sel.anchor.col, sel.head.col), (0, 5));
     // A wide character that didn't fit at the end of a row moved to the
     // next; the empty cell it left doesn't split the word.
-    let mut t = Term::new(5, 2, 100);
+    let mut t = Term::new(5, 2, 100, term_core::ImagePool::process());
     t.advance("abcd漢x".as_bytes());
     assert_snapshot!(t.state.dump(), @r"
     abcd⏎
@@ -279,7 +279,7 @@ fn double_click_takes_wide_characters_whole() {
 
 #[test]
 fn triple_click_selects_the_logical_line() {
-    let mut t = Term::new(5, 5, 100);
+    let mut t = Term::new(5, 5, 100, term_core::ImagePool::process());
     t.advance(b"first\r\nsecond line\r\nlast");
     let p = t.state.point_at(2, 2);
     t.state.select_line(p);
@@ -297,7 +297,7 @@ fn triple_click_selects_the_logical_line() {
 
 #[test]
 fn dragging_grows_word_and_line_selections_by_whole_units() {
-    let mut t = Term::new(30, 3, 100);
+    let mut t = Term::new(30, 3, 100, term_core::ImagePool::process());
     t.advance(b"alpha beta gamma\r\ndelta epsilon");
     // Double-click "beta", drag forward into "gamma": "beta gamma".
     let beta = t.state.point_at(0, 7);
@@ -323,7 +323,7 @@ fn dragging_grows_word_and_line_selections_by_whole_units() {
 
 #[test]
 fn dragging_a_plain_selection_moves_its_head() {
-    let mut t = Term::new(20, 2, 100);
+    let mut t = Term::new(20, 2, 100, term_core::ImagePool::process());
     t.advance(b"hello world");
     t.state.extend_selection(t.state.point_at(0, 2));
     let sel = t.state.selection().unwrap();
@@ -339,7 +339,7 @@ fn dragging_a_plain_selection_moves_its_head() {
 
 #[test]
 fn select_all_takes_history_and_the_whole_screen() {
-    let mut t = Term::new(10, 2, 100);
+    let mut t = Term::new(10, 2, 100, term_core::ImagePool::process());
     t.advance(b"one\r\ntwo\r\nthree\r\nfour");
     assert_eq!(t.state.scrollback_len(), 2);
     t.state.select_all();
@@ -356,7 +356,7 @@ fn select_all_takes_history_and_the_whole_screen() {
 
 #[test]
 fn cursor_in_view_follows_the_view() {
-    let mut t = Term::new(10, 3, 100);
+    let mut t = Term::new(10, 3, 100, term_core::ImagePool::process());
     t.advance(b"a\r\nb\r\nc\r\nd\r\ne");
     assert_eq!(t.state.cursor_in_view(), Some((2, 1)));
     t.state.scroll_view(1);
@@ -369,7 +369,7 @@ fn cursor_in_view_follows_the_view() {
 
 #[test]
 fn view_top_names_the_first_row_shown() {
-    let mut t = Term::new(4, 2, 100);
+    let mut t = Term::new(4, 2, 100, term_core::ImagePool::process());
     t.advance(b"0\r\nabcdefghij\r\nx");
     assert_eq!(t.state.scrollback_len(), 3);
     assert_eq!(t.state.view_top(), ViewTop::Bottom);
@@ -403,7 +403,7 @@ fn view_top_names_the_first_row_shown() {
 
 #[test]
 fn reset_keeps_pending_replies() {
-    let mut t = Term::new(10, 2, 0);
+    let mut t = Term::new(10, 2, 0, term_core::ImagePool::process());
     t.advance(b"\x1b[5n\x1b[2;2H\x1bc\x1b[6n");
     assert_eq!(t.state.replies(), b"\x1b[0n\x1b[1;1R");
 }

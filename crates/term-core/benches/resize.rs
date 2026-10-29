@@ -15,7 +15,7 @@ const HISTORY: usize = 100_000;
 /// History of short lines, then a screen of long lines that wrap, the
 /// first of them starting in history.
 fn terminal(wide: bool) -> Term {
-    let mut t = Term::new(COLS, LINES, HISTORY);
+    let mut t = Term::new(COLS, LINES, HISTORY, term_core::ImagePool::process());
     let mut out = Vec::new();
     for i in 0..HISTORY {
         out.extend_from_slice(format!("line {i}: the quick brown fox jumps over the lazy dog\r\n").as_bytes());

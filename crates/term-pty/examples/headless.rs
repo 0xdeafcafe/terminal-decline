@@ -183,7 +183,7 @@ fn main() {
     };
     let pty = Pty::spawn(&cmd, size).expect("spawn");
     let child = pty.child();
-    let mut term = Term::new(cols as usize, lines as usize, 1000);
+    let mut term = Term::new(cols as usize, lines as usize, 1000, term_core::ImagePool::process());
     term.state.set_cell_pixels((8, 16));
     let shared = Arc::new(Shared {
         term: Mutex::new(term),

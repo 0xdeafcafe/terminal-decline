@@ -153,7 +153,7 @@ fn rainbow(text: &str) -> String {
 }
 
 fn term(cols: usize, lines: usize, bytes: &str) -> Term {
-    let mut t = Term::new(cols, lines, 100);
+    let mut t = Term::new(cols, lines, 100, term_core::ImagePool::process());
     t.advance(bytes.as_bytes());
     t
 }
@@ -418,7 +418,7 @@ fn ligatures_draw_like_whole_glyphs_on_the_grid() {
     let (cols, lines) = (16, 1);
     let (width, height) = (cols * cw, lines * ch);
     let theme = Theme::new([0; 16], 0xffffff, 0x000000, 0xffffff, 0x444444);
-    let mut t = Term::new(cols, lines, 0);
+    let mut t = Term::new(cols, lines, 0, term_core::ImagePool::process());
     t.advance(format!("\x1b[?25l{text}").as_bytes());
     let input = FrameInput {
         theme: &theme,

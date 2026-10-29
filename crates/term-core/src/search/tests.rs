@@ -137,7 +137,7 @@ fn matcher_paths() {
 
 #[test]
 fn hits_on_screen_and_across_a_wrap() {
-    let mut t = Term::new(10, 4, 100);
+    let mut t = Term::new(10, 4, 100, crate::ImagePool::process());
     t.advance(b"hello world, hello");
     let hits = search(&mut t, q("hello", false, WordMatch::Contains));
     assert_eq!(hits.len(), 2);
@@ -150,7 +150,7 @@ fn hits_on_screen_and_across_a_wrap() {
 
 #[test]
 fn clusters_and_wide_characters() {
-    let mut t = Term::new(20, 3, 100);
+    let mut t = Term::new(20, 3, 100, crate::ImagePool::process());
     t.advance("e\u{301}x e 中文e".as_bytes());
     let hits = search(&mut t, q("e", false, WordMatch::Contains));
     // Not the first half of e + U+0301.
@@ -162,7 +162,7 @@ fn clusters_and_wide_characters() {
 
 #[test]
 fn history_blocks_and_boundaries() {
-    let mut t = Term::new(12, 3, 1000);
+    let mut t = Term::new(12, 3, 1000, crate::ImagePool::process());
     for i in 0..60 {
         t.advance(format!("line {i} needle\r\n").as_bytes());
         if i % 7 == 0 {
@@ -181,7 +181,7 @@ fn history_blocks_and_boundaries() {
 
 #[test]
 fn live_output_is_searched_once() {
-    let mut t = Term::new(16, 3, 1000);
+    let mut t = Term::new(16, 3, 1000, crate::ImagePool::process());
     t.advance(b"one foo\r\n");
     let query = q("foo", false, WordMatch::Contains);
     assert_eq!(search(&mut t, query.clone()).len(), 1);
@@ -199,7 +199,7 @@ fn live_output_is_searched_once() {
 
 #[test]
 fn next_and_previous_wrap_and_select() {
-    let mut t = Term::new(10, 3, 100);
+    let mut t = Term::new(10, 3, 100, crate::ImagePool::process());
     t.advance(b"ab\r\nab\r\nab");
     search(&mut t, q("ab", false, WordMatch::Contains));
     assert!(t.state.search_next());
@@ -221,7 +221,7 @@ fn next_and_previous_wrap_and_select() {
 
 #[test]
 fn freed_and_cleared_history_drop_their_hits() {
-    let mut t = Term::new(10, 2, 1000);
+    let mut t = Term::new(10, 2, 1000, crate::ImagePool::process());
     for _ in 0..30 {
         t.advance(b"zz\r\n");
     }
@@ -281,7 +281,7 @@ proptest! {
         later in output(),
         query in query(),
     ) {
-        let mut t = Term::new(cols, 3, limit);
+        let mut t = Term::new(cols, 3, limit, crate::ImagePool::process());
         feed(&mut t, &before);
         let hits = search(&mut t, query.clone());
         prop_assert_eq!(&hits, &naive(&t, &query));

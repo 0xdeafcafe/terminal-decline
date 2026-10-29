@@ -52,6 +52,7 @@ use std::hash::{BuildHasherDefault, Hasher};
 use std::sync::Arc;
 
 use crate::cell::{Cell, Color, ColorKind, Mark, MarkKind, Row, Width};
+use crate::image::ImageKey;
 use crate::links::LinkValue;
 use crate::style::{Attrs, Style, Underline};
 use crate::unicode;
@@ -155,6 +156,9 @@ pub struct BlockData {
     head_continues: bool,
     /// Some line here has prompt marks (OSC 133).
     has_marks: bool,
+    /// Decline's own images its dictionary names, each once (images.md
+    /// §4.3): they are needed until the block is freed.
+    images: Box<[ImageKey]>,
 }
 
 /// Bytes a block counts for one of its links.
@@ -187,6 +191,12 @@ impl BlockData {
             + self.styles.len()
             + self.style_starts.len() * 2
             + self.links.iter().map(|l| link_bytes(l)).sum::<usize>()
+            + self.images.len() * std::mem::size_of::<ImageKey>()
+    }
+
+    /// Decline's own images this block's lines name.
+    pub fn images(&self) -> &[ImageKey] {
+        &self.images
     }
 
     /// Stable line number of the first line.
@@ -265,6 +275,8 @@ struct OpenBlock {
     /// Entries are tagged `id | gen << 24` (style ids are below 2^24):
     /// dropping the cache is a new generation, not a 2 KB memset.
     cache_gen: u32,
+    /// Decline's own images the dictionary names.
+    images: Vec<ImageKey>,
 }
 
 const NO_ENTRY: (u32, u32) = (u32::MAX, 0);
@@ -358,6 +370,7 @@ impl OpenBlock {
             link_bytes: 0,
             cache: [NO_ENTRY; CACHE],
             cache_gen: 1,
+            images: Vec::new(),
         }
     }
 
@@ -429,6 +442,7 @@ impl OpenBlock {
             ambiguous: b.ambiguous,
             head_continues: b.head_continues,
             has_marks: b.has_marks,
+            images: b.images.into_boxed_slice(),
         }
     }
 
@@ -466,6 +480,12 @@ impl OpenBlock {
                     room(&mut self.styles, 15);
                     self.style_starts.push(self.styles.len() as u16);
                     put_style(&mut self.styles, &s);
+                    if s.attrs.contains(Attrs::OWN_IMAGE) {
+                        let key = crate::image::placeholder_key(&s);
+                        if !self.images.contains(&key) {
+                            self.images.push(key);
+                        }
+                    }
                     *e.insert(self.style_starts.len() as u32)
                 }
             }
@@ -1481,6 +1501,8 @@ pub struct Scrollback {
     /// The style table the slot cache was filled from: its epoch and sweep
     /// count. `[0, 0]` = unknown, so the cache is dropped each line.
     cache_key: [u64; 2],
+    /// Image lists of blocks freed since [`Scrollback::take_freed_images`].
+    freed_images: Vec<ImageKey>,
     scratch: Scratch,
 }
 
@@ -1498,6 +1520,7 @@ impl Scrollback {
             popped_from: None,
             search_popped: None,
             cache_key: [0, 0],
+            freed_images: Vec::new(),
             scratch: Scratch::default(),
         }
     }
@@ -1569,6 +1592,10 @@ impl Scrollback {
     }
 
     pub fn clear(&mut self) {
+        for b in &self.blocks {
+            self.freed_images.extend_from_slice(&b.data.images);
+        }
+        self.freed_images.append(&mut self.open.images);
         self.blocks = VecDeque::new();
         self.open = OpenBlock::new(self.end, self.open.ambiguous);
         self.sealed_bytes = 0;
@@ -1703,8 +1730,15 @@ impl Scrollback {
         }
     }
 
+    /// Move the image lists of blocks freed since the last call to `out`:
+    /// each names an image once per block (images.md §4.3).
+    pub fn take_freed_images(&mut self, out: &mut Vec<ImageKey>) {
+        out.append(&mut self.freed_images);
+    }
+
     fn free_oldest(&mut self) {
         if let Some(b) = self.blocks.pop_front() {
+            self.freed_images.extend_from_slice(&b.data.images);
             self.sealed_bytes -= b.data.bytes();
             self.start = self.start.max(b.data.first + b.len as u64);
         }
@@ -1728,6 +1762,7 @@ impl Scrollback {
             b.len -= 1;
             if b.len == 0 {
                 let b = self.blocks.pop_back().expect("a block");
+                self.freed_images.extend_from_slice(&b.data.images);
                 self.sealed_bytes -= b.data.bytes();
             }
             // The next push starts a new open block where this one ends.
@@ -2167,6 +2202,7 @@ impl Scrollback {
                 ambiguous: o.ambiguous,
                 head_continues: o.head_continues,
                 has_marks: o.has_marks,
+                images: o.images.clone().into_boxed_slice(),
             };
             out.push((Arc::new(data), o.lines()));
         }

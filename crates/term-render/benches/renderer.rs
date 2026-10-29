@@ -16,7 +16,7 @@ use term_font::Fonts;
 use term_render::{CommandBuffer, Frame, FrameInput, PaneDraw, PaneRender, PxRect, RectInstance, Renderer, Theme, rgb};
 
 fn screen(cols: usize, lines: usize) -> Term {
-    let mut t = Term::new(cols, lines, 0);
+    let mut t = Term::new(cols, lines, 0, term_core::ImagePool::process());
     let mut s = String::new();
     for l in 0..lines {
         for c in 0..cols {

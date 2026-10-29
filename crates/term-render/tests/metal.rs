@@ -66,7 +66,7 @@ fn offscreen_render_reads_back() {
     theme.background_opacity = 128;
     theme.palette[1] = rgb(0xff0000) & 0x00FF_FFFF | 0x80 << 24;
     // Cell (0,0): half-transparent red; (1,0): opaque #112233; (0,1): 'M'.
-    let mut t = Term::new(COLS, LINES, 0);
+    let mut t = Term::new(COLS, LINES, 0, term_core::ImagePool::process());
     t.advance(b"\x1b[?25l\x1b[41m \x1b[48;2;17;34;51m \x1b[0m\r\nM");
 
     let input = FrameInput {
@@ -183,7 +183,7 @@ fn snapshot_frames_draw_like_the_live_terminal() {
     }
     let mut renderer = Renderer::new(Fonts::new("Menlo", 24.0));
     let theme = Theme::default();
-    let mut t = Term::new(12, 4, 100);
+    let mut t = Term::new(12, 4, 100, term_core::ImagePool::process());
     let steps: [(&str, Option<&str>, bool); 9] = [
         ("\x1b[41mred\x1b[0m \x1b[4;2munder\x1b[0m\r\n\x1b[1mbold\x1b[7m inv", None, true),
         // The cursor moves onto a dim underlined cell: rows unchanged.
@@ -250,7 +250,7 @@ fn border_has_no_gaps_between_cells() {
     let ink = |p: [u8; 4]| p[0] == 255 && p[1] == 255 && p[2] == 255;
     for size in [15.0, 24.0, 26.0, 31.0, 37.0] {
         let mut renderer = Renderer::new(Fonts::new("Menlo", size));
-        let mut t = Term::new(7, 4, 0);
+        let mut t = Term::new(7, 4, 0, term_core::ImagePool::process());
         t.advance("\x1b[?25l╭──┬──╮\r\n│ab│cd│\r\n├──┼──┤\r\n╰──┴──╯".as_bytes());
         let px = render(&mut renderer, &mut t, &theme);
         let (cw, ch) = px.cell;

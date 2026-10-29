@@ -54,7 +54,7 @@ fn decode_cp(g: &GlyphInstance) -> char {
 }
 
 fn term(cols: usize, lines: usize, bytes: &str) -> Term {
-    let mut t = Term::new(cols, lines, 100);
+    let mut t = Term::new(cols, lines, 100, term_core::ImagePool::process());
     t.advance(bytes.as_bytes());
     t
 }
@@ -377,7 +377,7 @@ proptest! {
         lines in 1usize..8,
         steps in prop::collection::vec(step(), 1..12),
     ) {
-        let mut t = Term::new(cols, lines, 20);
+        let mut t = Term::new(cols, lines, 20, term_core::ImagePool::process());
         t.state.set_sweep_at(Some(8));
         let theme = Theme::default();
         let mut frame = Frame::default();

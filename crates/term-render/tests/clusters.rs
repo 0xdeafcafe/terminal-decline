@@ -86,7 +86,7 @@ fn theme() -> Theme {
 /// against the live terminal's frame, and the snapshot frame's glyphs.
 fn render(renderer: &mut Renderer, text: &str, ambiguous: u8) -> (Pixels, Vec<GlyphInstance>) {
     let theme = theme();
-    let mut t = Term::new(COLS, 1, 0);
+    let mut t = Term::new(COLS, 1, 0, term_core::ImagePool::process());
     t.state.set_ambiguous_width(ambiguous);
     t.advance(format!("\x1b[?25l{text}").as_bytes());
     let input = FrameInput {

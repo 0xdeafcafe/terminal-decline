@@ -11,7 +11,7 @@ const LINES: usize = 100_000;
 
 /// 100k lines of log-like output at 160 columns, one rare word in it.
 fn terminal() -> Term {
-    let mut t = Term::new(160, 50, LINES);
+    let mut t = Term::new(160, 50, LINES, term_core::ImagePool::process());
     let mut out = String::new();
     for i in 0..LINES {
         let word = if i == LINES / 3 { "needle" } else { "request" };

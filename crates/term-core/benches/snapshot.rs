@@ -10,7 +10,7 @@ use term_core::{RowKey, Snapshot, Term};
 /// A screen of coloured text, `lines` rows of history below the screen's
 /// worth.
 fn screen(cols: usize, lines: usize, history: usize) -> Term {
-    let mut t = Term::new(cols, lines, history.max(1));
+    let mut t = Term::new(cols, lines, history.max(1), term_core::ImagePool::process());
     let mut s = String::new();
     for l in 0..lines + history {
         for c in 0..cols {

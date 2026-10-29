@@ -8,7 +8,7 @@
 use term_core::Term;
 
 fn measure(name: &str, line: impl Fn(usize) -> String) {
-    let mut t = Term::new(160, 50, 10_000);
+    let mut t = Term::new(160, 50, 10_000, term_core::ImagePool::process());
     for i in 0..20_000 {
         t.advance(line(i).as_bytes());
         t.advance(b"\r\n");

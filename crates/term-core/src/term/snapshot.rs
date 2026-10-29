@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::{CursorShape, LinkValue, Terminal};
 use crate::cell::{Cell, Row, Width};
+use crate::image::{SnapPlacement, SnapVirtual};
 use crate::scrollback::HistoryReader;
 use crate::style::Style;
 
@@ -164,6 +165,11 @@ pub struct Snapshot {
     /// The styles of the history rows copied this time.
     pub history_styles: Vec<Style>,
     pub highlights: Vec<Highlight>,
+    /// kitty direct placements that reach into the view, ready images only
+    /// (images.md §4.4). Empty until kitty graphics lands (I.2).
+    pub placements: Vec<SnapPlacement>,
+    /// The virtual placements placeholder cells in view refer to.
+    pub virtual_placements: Vec<SnapVirtual>,
     pub cursor: SnapCursor,
     /// The epoch of each screen's table (primary, alternate) whose styles
     /// have all been sent through this snapshot, so a renderer that is new
@@ -248,6 +254,14 @@ impl Terminal {
         out.style_updates.clear();
         out.history_styles.clear();
         out.highlights.clear();
+        out.placements.clear();
+        out.virtual_placements.clear();
+        // Images the pool evicted since the last command or snapshot are
+        // lost (§5.2); nothing is drawn from them yet, so the pool is told
+        // of no drawn images until drawing lands (I.4).
+        if !self.graphics.is_empty() {
+            self.graphics.apply_evictions();
+        }
         out.terminal_id = self.terminal_id;
         out.history_epoch = self.history_epoch;
         out.popped_from = popped;

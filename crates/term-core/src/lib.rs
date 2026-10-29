@@ -7,6 +7,7 @@
 
 pub mod cell;
 pub mod clusters;
+pub mod image;
 mod links;
 pub mod rows;
 pub mod scrollback;
@@ -19,6 +20,7 @@ pub mod word;
 
 pub use cell::{Cell, Color, ColorKind, Mark, MarkKind, Row};
 
+pub use image::{ImageHost, ImageJob, ImageKey, ImagePool, JobDone, PixelBuffer};
 pub use rows::{CellRef, Content, RowRef, StyleKey, Width};
 pub use search::{Hit, HitBatch, Query, SearchJob, WordMatch};
 pub use style::{Attrs, LinkId, Style, Underline};

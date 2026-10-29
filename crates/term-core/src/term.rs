@@ -8,6 +8,7 @@ use std::sync::Arc;
 use vte::{OscLarge, Params, Perform};
 
 use crate::cell::{Cell, Color, Mark, MarkKind, Row, Width};
+use crate::image::{Graphics, ImageJob, ImagePool, ImageState, JobDone};
 pub use crate::links::LinkValue;
 use crate::rows::{Content, RowRef};
 use crate::scrollback::{HistoryStats, Scrollback};
@@ -405,12 +406,22 @@ pub struct Terminal {
     bulk_ascii: bool,
     /// The search, while the find bar is open (§13.4).
     search: Option<Box<search::SearchState>>,
+    /// The images of the screen shown and of the other one (images.md
+    /// §4.1), each with the process-wide pool.
+    graphics: Box<Graphics>,
+    other_graphics: Box<Graphics>,
+    /// Work to run off the lock, taken by the session (§4.2).
+    image_jobs: Vec<ImageJob>,
 }
 
 impl Terminal {
-    pub fn new(cols: usize, lines: usize, scrollback_limit: usize) -> Terminal {
+    /// A terminal of `cols` × `lines` keeping `scrollback_limit` lines of
+    /// history, whose images count against `pool` (every terminal of a
+    /// process shares [`ImagePool::process`]).
+    pub fn new(cols: usize, lines: usize, scrollback_limit: usize, pool: Arc<ImagePool>) -> Terminal {
         let cols = cols.max(2);
         let lines = lines.max(1);
+        let terminal_id = snapshot::next_terminal_id();
         Terminal {
             cols,
             lines,
@@ -470,10 +481,13 @@ impl Terminal {
             generation: 1,
             counter: 0,
             batch_start: 1,
-            terminal_id: snapshot::next_terminal_id(),
+            terminal_id,
             history_epoch: 0,
             bulk_ascii: true,
             search: None,
+            graphics: Box::new(Graphics::new(terminal_id, pool.clone())),
+            other_graphics: Box::new(Graphics::new(terminal_id, pool)),
+            image_jobs: Vec::new(),
         }
         .with_rows_touched()
     }
@@ -1576,6 +1590,7 @@ impl Terminal {
         }
         std::mem::swap(&mut self.screen, &mut self.other_screen);
         std::mem::swap(&mut self.styles, &mut self.other_styles);
+        std::mem::swap(&mut self.graphics, &mut self.other_graphics);
         // The templates and the pen's link id name ids in the other
         // screen's tables.
         self.drop_pen_link_id();
@@ -1636,8 +1651,55 @@ impl Terminal {
         self.touch_screen_rows();
     }
 
+    /// The pool this terminal's images count against.
+    pub fn image_pool(&self) -> &Arc<ImagePool> {
+        self.graphics.pool()
+    }
+
+    /// Whether this terminal handles images (the hidden switch, §11).
+    pub fn images_enabled(&self) -> bool {
+        self.graphics.pool().enabled()
+    }
+
+    /// The shown screen's images.
+    pub fn graphics(&self) -> &Graphics {
+        &self.graphics
+    }
+
+    /// Move the image jobs queued since the last call to `out`, to run with
+    /// the lock released (after each parse slice and each snapshot).
+    pub fn take_image_jobs(&mut self, out: &mut Vec<ImageJob>) {
+        out.append(&mut self.image_jobs);
+    }
+
+    /// A job taken with [`Terminal::take_image_jobs`] finished. One for
+    /// another terminal, or for an image since replaced or deleted (its
+    /// generation differs), is dropped. Returns whether to redraw.
+    pub fn image_job_done(&mut self, done: JobDone) -> bool {
+        if done.terminal_id != self.terminal_id {
+            return false;
+        }
+        for g in [&mut self.graphics, &mut self.other_graphics] {
+            if let Some(image) = g.image_mut(done.image)
+                && image.generation == done.generation
+            {
+                image.state = match done.result {
+                    Ok(()) => ImageState::Ready,
+                    Err(_) => ImageState::Failed,
+                };
+                if let Some(id) = image.pool {
+                    g.pool().set_busy(id, false);
+                }
+                self.generation = self.generation.wrapping_add(1);
+                return true;
+            }
+        }
+        false
+    }
+
     fn reset(&mut self) {
-        let mut fresh = Terminal::new(self.cols, self.lines, self.scrollback.limit());
+        // The same pool: RIS frees this terminal's images, not the budget.
+        let mut fresh = Terminal::new(self.cols, self.lines, self.scrollback.limit(), self.graphics.pool().clone());
         // New tables, with epochs that carry on from these.
         let cells = self.cols * self.lines;
         fresh.styles = StyleTable::new(self.epochs + 1, cells, self.sweep_at_test);
@@ -1668,6 +1730,8 @@ impl Terminal {
         // The same terminal to the renderer: counters carry on, and the
         // cleared history gets a new epoch (§9.1).
         fresh.terminal_id = self.terminal_id;
+        fresh.graphics = Box::new(Graphics::new(self.terminal_id, self.graphics.pool().clone()));
+        fresh.other_graphics = Box::new(Graphics::new(self.terminal_id, self.graphics.pool().clone()));
         fresh.counter = self.counter;
         fresh.batch_start = self.batch_start;
         fresh.history_epoch = self.history_epoch + 1;
@@ -3297,10 +3361,11 @@ pub struct Term {
 }
 
 impl Term {
-    pub fn new(cols: usize, lines: usize, scrollback_limit: usize) -> Term {
+    /// A parser and a [`Terminal::new`].
+    pub fn new(cols: usize, lines: usize, scrollback_limit: usize, pool: Arc<ImagePool>) -> Term {
         Term {
             parser: vte::Parser::new(),
-            state: Terminal::new(cols, lines, scrollback_limit),
+            state: Terminal::new(cols, lines, scrollback_limit, pool),
         }
     }
 

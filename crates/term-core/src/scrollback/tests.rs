@@ -1085,3 +1085,34 @@ fn plain_lines_are_small() {
     assert!(per_line <= 52, "{per_line} bytes per line");
     assert_eq!(sb.get(9_999).unwrap().0.cells.len(), 43);
 }
+
+#[test]
+fn blocks_list_own_images_once_and_give_them_back_when_freed() {
+    let own = |id: u8| Style {
+        fg: Color::rgb(0, 0, id),
+        attrs: Attrs::OWN_IMAGE,
+        ..Style::DEFAULT
+    };
+    // A kitty placeholder style (no OWN_IMAGE) isn't listed: placeholder
+    // text doesn't keep kitty images (images.md §4.3).
+    let kitty = Style {
+        fg: Color::rgb(0, 0, 9),
+        ..Style::DEFAULT
+    };
+    let styles = [Style::DEFAULT, own(1), own(2), kitty];
+    let mut sb = Scrollback::new(1000);
+    for id in [1, 1, 2, 3, 1] {
+        let mut row = Row::new(10, Cell::BLANK);
+        put(&mut row, &styles, 0, id, "ab");
+        sb.push(&row, &styles);
+    }
+    sb.seal();
+    let block = sb.sealed().next().unwrap().0.clone();
+    assert_eq!(block.images(), &[ImageKey::Own(1), ImageKey::Own(2)]);
+    let mut freed = Vec::new();
+    sb.take_freed_images(&mut freed);
+    assert!(freed.is_empty());
+    sb.set_limit(0);
+    sb.take_freed_images(&mut freed);
+    assert_eq!(freed, vec![ImageKey::Own(1), ImageKey::Own(2)]);
+}

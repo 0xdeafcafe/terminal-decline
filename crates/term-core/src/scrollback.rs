@@ -36,15 +36,18 @@
 //!   slot is 7, `varint(index)`: the dictionary entry (0 = default). Runs
 //!   count columns; columns after the last run are in the default style.
 //! - `clusters`: `count`, then per cluster `gap` (scalars since the last
-//!   one ended) and `extra` (its scalars after the first).
+//!   one ended) and `extra << 1 | wide` (its scalars after the first, and
+//!   whether it takes two cells: a cluster's width is stored, not worked
+//!   out again).
 //! - `widths`: `count`, then per exception `gap` (text entries since the
-//!   last one) and the width (1 or 2): only cells whose width isn't what
-//!   the Unicode table, the mode 2027 rule and the block's ambiguous
-//!   setting give.
+//!   last one) and the width (1 or 2): only single-scalar cells whose
+//!   width isn't what the Unicode table and the block's ambiguous setting
+//!   give.
 //! - `FILL`: the row's last column was an empty cell whose style shows,
 //!   so the last run's style continues to the end of the row at any width.
 
 use std::collections::{HashMap, VecDeque};
+use std::hash::{BuildHasherDefault, Hasher};
 use std::sync::Arc;
 
 use crate::cell::{Cell, Color, ColorKind, Row, Width};
@@ -57,7 +60,8 @@ const PART: usize = u16::MAX as usize;
 /// A checkpoint (a text offset) every this many lines.
 const CHECKPOINT: usize = 16;
 /// The hidden backstop: history never holds more than this many bytes (it
-/// frees whole blocks from the oldest end until it doesn't).
+/// frees whole blocks from the oldest end until it doesn't, each time a
+/// block is sealed).
 pub const BYTE_LIMIT: usize = 32 << 20;
 /// Rows wider than this are cut to it when stored (§11.2: a line fits in
 /// an empty block).
@@ -195,7 +199,7 @@ struct OpenBlock {
     ambiguous: u8,
     head_continues: bool,
     /// Style (link left out) → dictionary slot, for this block only.
-    dict: HashMap<Style, u32>,
+    dict: HashMap<Style, u32, BuildHasherDefault<FxHasher>>,
     /// Screen style id → slot, indexed by `id & 63`, in front of `dict`:
     /// the common case is one compare per run. Reset with the block, and
     /// whenever the screen's table may have reused ids (a sweep, another
@@ -204,6 +208,55 @@ struct OpenBlock {
 }
 
 const NO_ENTRY: (u32, u32) = (u32::MAX, 0);
+
+/// FxHash, for the dictionary's map: a style is a few small words, and
+/// SipHash's resistance to chosen keys buys nothing here.
+#[derive(Default)]
+struct FxHasher(u64);
+
+impl FxHasher {
+    #[inline]
+    fn add(&mut self, w: u64) {
+        self.0 = (self.0.rotate_left(5) ^ w).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+}
+
+impl Hasher for FxHasher {
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.add(b as u64);
+        }
+    }
+    #[inline]
+    fn write_u8(&mut self, i: u8) {
+        self.add(i as u64);
+    }
+    #[inline]
+    fn write_u16(&mut self, i: u16) {
+        self.add(i as u64);
+    }
+    #[inline]
+    fn write_u32(&mut self, i: u32) {
+        self.add(i as u64);
+    }
+    #[inline]
+    fn write_u64(&mut self, i: u64) {
+        self.add(i);
+    }
+    #[inline]
+    fn write_usize(&mut self, i: usize) {
+        self.add(i as u64);
+    }
+    #[inline]
+    fn write_isize(&mut self, i: isize) {
+        self.add(i as u64);
+    }
+}
 
 impl OpenBlock {
     fn new(first: u64, ambiguous: u8) -> OpenBlock {
@@ -218,7 +271,7 @@ impl OpenBlock {
             width: u16::MAX,
             ambiguous,
             head_continues: false,
-            dict: HashMap::new(),
+            dict: HashMap::default(),
             cache: [NO_ENTRY; 64],
         }
     }
@@ -377,15 +430,19 @@ impl OpenBlock {
 
         let edge = wrapped && cells[cols - 1].width() == Width::EdgeSpacer;
         let text_cols = cols - edge as usize;
-        let text_end = if wrapped { text_cols } else { text_end(cells) };
-        let last = cells[cols - 1];
-        let fill = !wrapped && last.shows_empty() && last.bits() & (Cell::CONTENT | Cell::KIND) == 0 && !last.is_spacer();
+        // Runs go up to the last cell that would draw something (blank
+        // cells after it are dropped), the text up to the last one with
+        // content other than a space.
         let run_end = if wrapped {
             cols
         } else {
-            let shows = cells.iter().rposition(|c| c.shows_empty()).map_or(0, |i| i + 1);
-            text_end.max(shows)
+            // A wide cell's spacer is in its style, even when blank.
+            let n = stored_len(cells);
+            if n > 0 && n < cols && cells[n - 1].is_wide() { n + 1 } else { n }
         };
+        let text_end = if wrapped { text_cols } else { text_end(&cells[..run_end]) };
+        let last = cells[cols - 1];
+        let fill = !wrapped && last.shows_empty() && last.bits() & (Cell::CONTENT | Cell::KIND) == 0 && !last.is_spacer();
 
         // The text, and the clusters and width exceptions it needs.
         scratch.clusters.clear();
@@ -417,9 +474,12 @@ impl OpenBlock {
                 } else {
                     self.text.extend_from_slice(s.as_bytes());
                     if n > 1 {
-                        scratch.clusters.push((scalars - cluster_end, n - 1));
+                        // A cluster's width goes in its entry: no need to
+                        // segment it again when it is read back.
+                        let wide = c.is_wide() as u32;
+                        scratch.clusters.push((scalars - cluster_end, (n - 1) << 1 | wide));
                         cluster_end = scalars + n;
-                        predicted = unicode::cluster_width(s, amb);
+                        predicted = 1 + wide as u8;
                     } else {
                         predicted = single_width(s.chars().next().unwrap_or(' '), amb);
                     }
@@ -572,6 +632,21 @@ fn ascii_text_end(cells: &[Cell]) -> usize {
     len
 }
 
+/// Cells up to and including the last that isn't blank ([`Cell::is_blank`]).
+fn stored_len(cells: &[Cell]) -> usize {
+    // Skip trailing blanks 8 at a time (an OR over 64 bytes, which
+    // vectorises), then one at a time.
+    let blank = |c: &[Cell]| c.iter().fold(0, |a, c| a | c.bits()) & Cell::NOT_BLANK == 0;
+    let mut len = cells.len();
+    while len >= 8 && blank(&cells[len - 8..len]) {
+        len -= 8;
+    }
+    while len > 0 && cells[len - 1].is_blank() {
+        len -= 1;
+    }
+    len
+}
+
 /// Columns of text to store for an unwrapped row: up to the last cell with
 /// content other than a space, or a wide one (and its spacer).
 fn text_end(cells: &[Cell]) -> usize {
@@ -687,9 +762,9 @@ impl<'a> View<'a> {
         if flags & flag::STYLED != 0 {
             let mut pos = runs_at;
             let mut col = 0;
-            // The slot of the run before and its id in `styles`: runs next
-            // to each other often go back and forth between two styles.
-            let mut seen: [(u32, Cell); 2] = [(0, Cell::BLANK); 2];
+            // Slot → template in `styles`, direct-mapped: a style used by
+            // several runs is decoded once (a miss just adds it again).
+            let mut seen: [(u32, Cell); 16] = [(0, Cell::BLANK); 16];
             for _ in 0..get_varint(meta, &mut pos) {
                 let v = get_varint(meta, &mut pos);
                 let mut slot = v & 7;
@@ -697,22 +772,16 @@ impl<'a> View<'a> {
                     slot = get_varint(meta, &mut pos);
                 }
                 let cells = (v >> 3) as usize;
+                let e = &mut seen[(slot & 15) as usize];
                 let t = if slot == 0 {
                     Cell::BLANK
-                } else if seen[0].0 == slot {
-                    seen[0].1
-                } else if seen[1].0 == slot {
-                    seen.swap(0, 1);
-                    seen[0].1
+                } else if e.0 == slot {
+                    e.1
                 } else {
                     let s = self.style(slot);
-                    let id = styles.iter().position(|x| *x == s).unwrap_or_else(|| {
-                        styles.push(s);
-                        styles.len() - 1
-                    });
-                    let t = Cell::template(id as u32, s.shows_empty());
-                    seen[1] = seen[0];
-                    seen[0] = (slot, t);
+                    styles.push(s);
+                    let t = Cell::template(styles.len() as u32 - 1, s.shows_empty());
+                    *e = (slot, t);
                     t
                 };
                 let have = row.cells.len().min(col + cells);
@@ -756,7 +825,8 @@ impl<'a> View<'a> {
         let mut wpos = *pos;
         let mut cpos = clusters_at;
 
-        // Scalar index where the next cluster starts, and its extra scalars.
+        // Scalar index where the next cluster starts, its extra scalars
+        // and whether it is wide.
         let mut next_cluster = u32::MAX;
         let mut extra = 0;
         if clusters > 0 {
@@ -780,13 +850,15 @@ impl<'a> View<'a> {
         while let Some((at, c)) = chars.next() {
             let mut end = at + c.len_utf8();
             let cluster = scalar == next_cluster;
+            let mut cluster_width = 1;
             if cluster {
-                for _ in 0..extra {
+                cluster_width = 1 + (extra & 1) as u8;
+                for _ in 0..extra >> 1 {
                     if let Some((i, d)) = chars.next() {
                         end = i + d.len_utf8();
                     }
                 }
-                scalar += 1 + extra;
+                scalar += 1 + (extra >> 1);
                 if clusters > 0 {
                     next_cluster = scalar + get_varint(meta, &mut cpos);
                     extra = get_varint(meta, &mut cpos);
@@ -809,7 +881,7 @@ impl<'a> View<'a> {
                 }
                 w
             } else if cluster {
-                unicode::cluster_width(&text[at..end], amb)
+                cluster_width
             } else {
                 single_width(c, amb)
             };
@@ -869,7 +941,7 @@ impl<'a> View<'a> {
             let (mut need, count) = (0u64, get_varint(meta, &mut pos));
             for _ in 0..count {
                 let gap = get_varint(meta, &mut pos);
-                let extra = get_varint(meta, &mut pos);
+                let extra = get_varint(meta, &mut pos) >> 1;
                 if extra == 0 {
                     return Err("a cluster of one scalar".into());
                 }
@@ -1025,7 +1097,7 @@ impl Scrollback {
     #[doc(hidden)]
     pub fn set_byte_limit(&mut self, bytes: usize) {
         self.byte_limit = bytes;
-        self.trim();
+        self.backstop();
     }
 
     /// Bytes held, for measuring.
@@ -1124,6 +1196,16 @@ impl Scrollback {
         let data = self.open.seal();
         self.sealed_bytes += data.bytes();
         self.blocks.push_back(BlockEntry { data: Arc::new(data), len });
+        self.backstop();
+    }
+
+    /// Free blocks from the oldest end while history holds more than the
+    /// byte backstop. Checked when a block is sealed: the open block
+    /// grows by at most 64 KB a part in between.
+    fn backstop(&mut self) {
+        while self.sealed_bytes + self.open.bytes() > self.byte_limit && !self.blocks.is_empty() {
+            self.free_oldest();
+        }
     }
 
     /// The first line still stored (hidden or not).
@@ -1139,9 +1221,6 @@ impl Scrollback {
         while let Some(b) = self.blocks.front()
             && b.data.first + b.len as u64 <= self.start
         {
-            self.free_oldest();
-        }
-        while self.sealed_bytes + self.open.bytes() > self.byte_limit && !self.blocks.is_empty() {
             self.free_oldest();
         }
     }
@@ -1288,8 +1367,8 @@ impl Scrollback {
         if bytes != self.sealed_bytes {
             return Err(format!("sealed blocks hold {bytes} bytes, counted {}", self.sealed_bytes));
         }
-        if !self.blocks.is_empty() && self.sealed_bytes + self.open.bytes() > self.byte_limit {
-            return Err(format!("{} bytes held, over the backstop", self.sealed_bytes + self.open.bytes()));
+        if self.sealed_bytes > self.byte_limit {
+            return Err(format!("sealed blocks hold {} bytes, over the backstop", self.sealed_bytes));
         }
         let o = &self.open;
         for (name, cap) in [

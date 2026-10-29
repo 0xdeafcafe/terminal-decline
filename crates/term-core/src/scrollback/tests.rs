@@ -202,7 +202,8 @@ fn emoji_line_lists_its_clusters() {
     let mut sb = Scrollback::new(10);
     sb.push(&row, &d);
     let (meta, text) = stored(&sb);
-    assert_eq!(meta, [0x08, 4, 0x0D, 1, 6, 1, 1, 1, 1, 4]);
+    // Each cluster's extra scalars, shifted, with its width in bit 0.
+    assert_eq!(meta, [0x08, 4, 0x0D, 3, 6, 3, 1, 3, 1, 9]);
     assert_eq!(text.len(), 67);
     assert_eq!(line_bytes(&meta, &text), 79);
     let (back, _) = sb.get(0).unwrap();
@@ -795,10 +796,11 @@ fn the_backstop_frees_whole_blocks() {
             *cell = template(&styles, 1 + (i * 160 + c) % 4000).with_char('█');
         }
         sb.push(&row, &styles);
-        assert!(sb.blocks.is_empty() || sb.sealed_bytes + sb.open.bytes() <= 1 << 20);
+        assert!(sb.sealed_bytes <= 1 << 20);
+        assert!(sb.memory_bytes() <= (1 << 20) + (1 << 20), "{}", sb.memory_bytes());
     }
     assert!(sb.len() < 20_000);
-    assert!(sb.stats().sealed_bytes + sb.open.bytes() <= 1 << 20);
+    assert!(sb.stats().sealed_bytes <= 1 << 20);
     sb.check_all().unwrap();
     // The lines left read back.
     let (back, back_styles) = sb.get(0).unwrap();

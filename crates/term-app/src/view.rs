@@ -2746,9 +2746,11 @@ impl WindowView {
     }
 }
 
-/// A key press and release put on the app's event queue for the key
-/// window (the test-only `key` command): it goes where a real key goes,
-/// local event monitors and the menus first. The characters are the
+/// A key press and release handed to the app for the key window (the
+/// test-only `key` command): it goes where a real key goes, local event
+/// monitors and the menus first. It is handled before this returns, not
+/// queued: the next control command or dump (which may be the very next
+/// thing in the pty's output) must see what the key did. The characters are the
 /// ASCII-capable layout's; the arrow keys get AppKit's function-key
 /// characters and flags, as real ones do, so menu shortcuts match them.
 fn post_key(mtm: MainThreadMarker, keycode: u16, flags: u64) {
@@ -2788,7 +2790,7 @@ fn post_key(mtm: MainThreadMarker, keycode: u16, flags: u64) {
             keycode,
         );
         if let Some(event) = event {
-            app.postEvent_atStart(&event, false);
+            app.sendEvent(&event);
         }
     }
 }

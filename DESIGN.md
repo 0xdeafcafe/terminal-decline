@@ -177,7 +177,11 @@ Oct 2026, 1.90 → 2.16 MB) and no measurable parse speed.
   (splits design §3.3). Shelf-packed; only the texture that fills up grows
   (caps: 4096² and 2048², 16 MB each), and growing copies the old texture
   into the corner of the new one on the GPU, so glyphs already placed stay
-  where they are and nothing is rebuilt. At the cap it is emptied and
+  where they are and nothing is rebuilt. The textures are managed (a CPU
+  copy and a GPU copy), so the same blit synchronises the new texture
+  before new glyphs are written into its CPU copy: without that, a GPU
+  with its own copy (GitHub's virtual GPU) drew every copied glyph blank.
+  At the cap it is emptied and
   refilled with what's on screen, and every pane built before is built
   again. Glyphs are rasterised once by Core Text; ASCII is pre-rasterised
   for each new font setting. When fonts no window uses are dropped (a

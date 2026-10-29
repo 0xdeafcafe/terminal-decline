@@ -8,7 +8,7 @@ use vte::{OscLarge, Params, Perform};
 
 use crate::cell::{Cell, Color, Row, Width};
 use crate::rows::{Content, RowRef};
-use crate::scrollback::Scrollback;
+use crate::scrollback::{HistoryStats, Scrollback};
 use crate::style::{Attrs, Style, Underline};
 use crate::style_table::{StyleStats, StyleTable};
 use crate::unicode::{self, Segmenter};
@@ -347,12 +347,10 @@ pub struct Terminal {
     /// Unique in the process: a new terminal (after a caught parser panic,
     /// say) never repeats an old one's counters or line numbers.
     terminal_id: u64,
-    /// Bumped when history is cleared (ED 3, RIS).
+    /// Bumped when history is cleared (ED 3, RIS). (The lowest line
+    /// pulled back from history since the last snapshot, `popped_from`,
+    /// is kept by the scrollback.)
     history_epoch: u64,
-    /// The lowest line number pulled back from history since the last
-    /// snapshot. Nothing pulls lines back yet (pull-back comes with
-    /// reflow); the snapshot already carries it.
-    popped_from: Option<u64>,
     /// Write printable ASCII runs in bulk ([`Terminal::write_ascii`]); off
     /// only in tests, as the reference the bulk path is compared against.
     bulk_ascii: bool,
@@ -416,7 +414,6 @@ impl Terminal {
             batch_start: 1,
             terminal_id: snapshot::next_terminal_id(),
             history_epoch: 0,
-            popped_from: None,
             bulk_ascii: true,
         }
         .with_rows_touched()
@@ -487,7 +484,9 @@ impl Terminal {
     }
 
     fn history_row(&self, i: usize) -> RowRef<'_> {
-        let (row, styles) = self.scrollback.get(i).unwrap_or_default();
+        let mut row = Row::default();
+        let mut styles = Vec::new();
+        self.scrollback.get_at_width(i, self.cols, &mut row, &mut styles);
         RowRef::new(Cow::Owned(row), Cow::Owned(styles))
     }
 
@@ -578,10 +577,12 @@ impl Terminal {
     /// §6.3 of the cells design): 1 or 2 cells, for output from now on.
     /// Cells already written keep their width, so nothing moves; programs
     /// already running keep the width they worked out themselves. The
-    /// grapheme state is cleared. (When history records the setting per
-    /// block, this also seals the open block.)
+    /// grapheme state is cleared, and history's open block is sealed (if
+    /// it holds any lines): each block records the setting its lines were
+    /// written with, so they read back as written.
     pub fn set_ambiguous_width(&mut self, width: u8) {
         self.ambiguous = width.clamp(1, 2);
+        self.scrollback.set_ambiguous(self.ambiguous);
         self.clear_grapheme();
     }
 
@@ -612,6 +613,12 @@ impl Terminal {
     /// Bytes used by scrollback, for measuring.
     pub fn scrollback_bytes(&self) -> usize {
         self.scrollback.memory_bytes()
+    }
+
+    /// What history holds, for measuring: bytes, and sealed blocks' bytes
+    /// and lines.
+    pub fn history_stats(&self) -> HistoryStats {
+        self.scrollback.stats()
     }
 
     /// The stable position of what is shown at view row `view_line` and
@@ -878,10 +885,9 @@ impl Terminal {
             self.other_top_line += removed.len() as u64;
             // Those rows' ids are in the primary screen's table.
             for row in removed {
-                if self.scrollback.limit() > 0 {
-                    self.scrollback.push(&row, self.other_styles.styles());
-                    self.follow_history();
-                }
+                self.scrollback
+                    .push_keyed(&row, self.other_styles.styles(), self.other_styles.version());
+                self.follow_history();
             }
             if let Some(saved) = &mut self.saved_primary {
                 saved.cursor.row = cursor.row;
@@ -1045,15 +1051,13 @@ impl Terminal {
         self.epochs
     }
 
-    /// Copy a row of the active screen into scrollback. The row itself is
+    /// Copy a row of the primary screen into scrollback. The row itself is
     /// left for the caller to reuse as the new blank line. Callers also
-    /// advance the screen's `top_line`, which counts rows whether or not
-    /// they were stored.
+    /// advance the screen's `top_line`; the scrollback counts the row
+    /// whether or not it keeps it, so its line numbers stay the screen's.
+    #[inline]
     fn push_scrollback(&mut self, row: &Row) {
-        if self.scrollback.limit() == 0 {
-            return;
-        }
-        self.scrollback.push(row, self.styles.styles());
+        self.scrollback.push_keyed(row, self.styles.styles(), self.styles.version());
         self.follow_history();
     }
 
@@ -1334,7 +1338,6 @@ impl Terminal {
         fresh.counter = self.counter;
         fresh.batch_start = self.batch_start;
         fresh.history_epoch = self.history_epoch + 1;
-        fresh.popped_from = self.popped_from;
         *self = fresh;
         self.touch_all_rows();
     }
@@ -2646,12 +2649,13 @@ impl Terminal {
             ));
         }
         let primary_top = if self.alt_active { self.other_top_line } else { self.top_line };
-        if primary_top < self.scrollback.len() as u64 {
+        if primary_top != self.scrollback.total() {
             return Err(format!(
-                "primary screen starts at line {primary_top}, before its {} scrollback lines",
-                self.scrollback.len()
+                "primary screen starts at line {primary_top}, history ends at {}",
+                self.scrollback.total()
             ));
         }
+        self.scrollback.check().map_err(|e| format!("history: {e}"))?;
         if self.last_cluster.len() > crate::clusters::MAX_BYTES {
             return Err(format!("the last grapheme is {} bytes", self.last_cluster.len()));
         }
@@ -2727,6 +2731,11 @@ fn check_cell(cell: Cell, styles: &StyleTable) -> Result<(), String> {
     }
     if !cell.is_cluster() && cell.codepoint() != 0 && char::from_u32(cell.codepoint()).is_none() {
         return Err(format!("cell {bits:#x} holds no scalar"));
+    }
+    // C0 controls are executed, never printed; history's text relies on
+    // it (0x0A ends a stored line).
+    if !cell.is_cluster() && (1..0x20).contains(&cell.codepoint()) {
+        return Err(format!("cell {bits:#x} holds a C0 control"));
     }
     if cell.is_spacer() && (cell.codepoint() != 0 || cell.is_cluster()) {
         return Err(format!("spacer {bits:#x} holds a character"));

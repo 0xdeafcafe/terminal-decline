@@ -53,6 +53,10 @@ impl RowFlags {
     /// The row comes from history: its cells' style ids index
     /// [`Snapshot::history_styles`], not the screen's table.
     pub const HISTORY: RowFlags = RowFlags(1 << 1);
+    /// A history row whose last style fills to the end of the row (a
+    /// full-width background, §11.3): its cells already carry it to the
+    /// screen's width.
+    pub const FILL: RowFlags = RowFlags(1 << 2);
 
     #[inline]
     pub const fn contains(self, other: RowFlags) -> bool {
@@ -192,6 +196,17 @@ impl Snapshot {
     }
 }
 
+/// A copied row's cluster store, appended: its text in one copy, holes
+/// and all (at most half of it, §6.1), with its spans moved up.
+fn copy_clusters(row: &Row, text: &mut String, spans: &mut Vec<(u32, u16)>) {
+    if let Some(store) = row.clusters() {
+        let (t, s) = store.raw();
+        let base = text.len() as u32;
+        text.push_str(t);
+        spans.extend(s.map(|(at, len)| if len == 0 { (base, 0) } else { (base + at, len) }));
+    }
+}
+
 fn to_u16(n: usize) -> u16 {
     n.min(u16::MAX as usize) as u16
 }
@@ -220,7 +235,7 @@ impl Terminal {
         let cols = to_u16(self.cols);
         let same_terminal = out.terminal_id == self.terminal_id;
         let same_history = same_terminal && out.history_epoch == self.history_epoch && out.cols == cols;
-        let popped = self.popped_from;
+        let popped = self.scrollback.take_popped_from();
         out.rows.clear();
         out.cells.clear();
         out.cluster_text.clear();
@@ -230,7 +245,7 @@ impl Terminal {
         out.highlights.clear();
         out.terminal_id = self.terminal_id;
         out.history_epoch = self.history_epoch;
-        out.popped_from = self.popped_from.take();
+        out.popped_from = popped;
         out.screen = if self.alt_active { ScreenId::Alternate } else { ScreenId::Primary };
         if !same_terminal {
             out.mirrored = [None; 2];
@@ -275,8 +290,9 @@ impl Terminal {
                 let key = RowKey::History { line, col: 0 };
                 flags.set(RowFlags::HISTORY, true);
                 flags.set(RowFlags::WRAPPED, self.scrollback.wrapped(i));
+                flags.set(RowFlags::FILL, self.scrollback.fill(i));
                 let kept = same_history && popped.is_none_or(|p| line < p) && have(key);
-                let copied = !kept && self.scrollback.get_into(i, &mut out.row, &mut out.row_styles);
+                let copied = !kept && self.scrollback.get_at_width(i, self.cols, &mut out.row, &mut out.row_styles);
                 if copied {
                     // The row's own style list joins the snapshot's, and its
                     // cells' ids move up by where it starts.
@@ -288,6 +304,7 @@ impl Terminal {
                             .iter()
                             .map(|c| c.with_style(Cell::template(c.style_id() + base, c.shows_empty()))),
                     );
+                    copy_clusters(&out.row, &mut out.cluster_text, &mut out.cluster_spans);
                 }
                 (key, copied)
             } else {
@@ -297,15 +314,7 @@ impl Terminal {
                 let copied = !(same_terminal && have(key));
                 if copied {
                     out.cells.extend_from_slice(&row.cells);
-                    if let Some(store) = row.clusters() {
-                        // The store's text in one copy, holes and all (at
-                        // most half of it, §6.1), with its spans moved up.
-                        let (text, spans) = store.raw();
-                        let base = out.cluster_text.len() as u32;
-                        out.cluster_text.push_str(text);
-                        out.cluster_spans
-                            .extend(spans.map(|(at, len)| if len == 0 { (base, 0) } else { (base + at, len) }));
-                    }
+                    copy_clusters(row, &mut out.cluster_text, &mut out.cluster_spans);
                 }
                 (key, copied)
             };

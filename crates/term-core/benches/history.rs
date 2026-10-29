@@ -123,6 +123,19 @@ fn bench(c: &mut Criterion) {
             });
         });
     }
+    // As the terminal stores rows: one style table, so the slot cache is
+    // kept from line to line.
+    for kind in kinds {
+        let (rows, styles) = rows(kind);
+        push.bench_with_input(BenchmarkId::new("keyed", kind), &rows, |b, rows| {
+            let mut sb = Scrollback::new(LINES);
+            b.iter(|| {
+                for row in rows.iter().cycle().take(LINES) {
+                    sb.push_keyed(black_box(row), &styles, [1, 0]);
+                }
+            });
+        });
+    }
     push.finish();
 
     let mut decode = c.benchmark_group("history decode");

@@ -626,7 +626,14 @@ fn styles() -> impl Strategy<Value = Vec<Style>> {
 }
 
 fn codepoint() -> impl Strategy<Value = u32> {
-    prop_oneof![Just(0u32), Just(' ' as u32), (0x21u32..0x7f), any::<char>().prop_map(|c| c as u32),]
+    // Never a C0 control: those are executed, not printed, and history's
+    // text relies on it.
+    prop_oneof![
+        Just(0u32),
+        Just(' ' as u32),
+        (0x21u32..0x7f),
+        any::<char>().prop_map(|c| c as u32).prop_filter("C0", |&c| c >= 0x20),
+    ]
 }
 
 /// One narrow cell, or a wide cell and its spacer (which always share the

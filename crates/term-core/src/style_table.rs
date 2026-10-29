@@ -184,6 +184,14 @@ impl StyleTable {
         self.epoch
     }
 
+    /// Changes whenever an id may stand for another style: its epoch and
+    /// sweep count (ids are only reused after a sweep). History's slot
+    /// cache is kept while this stays the same.
+    #[inline]
+    pub fn version(&self) -> [u64; 2] {
+        [self.epoch, self.sweeps]
+    }
+
     /// The styles by id, freed ids included (nothing on the screen uses
     /// those).
     #[inline]

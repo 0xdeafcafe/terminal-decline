@@ -1,12 +1,12 @@
 {
-  "_comment": "Upper limits for scripts/bench-gate.py. Scrollback bytes per line are deterministic (same input, same encoding), so they are safe to gate on. Keys are the labels printed by `cargo run --release -p term-core --example scrollback_mem`.",
+  "_comment": "Upper limits for scripts/bench-gate.py. Scrollback bytes per line are deterministic (same input, same encoding), so they are safe to gate on. Keys are the labels printed by `cargo run --release -p term-core --example scrollback_mem`. Lowered with scrollback v2 (cells design PR 7); never raise them.",
   "scrollback_bytes_per_line": {
-    "plain 40 chars": 60,
-    "ls --color": 110,
-    "full-width background": 200,
-    "compiler error": 95,
-    "CJK": 105,
+    "plain 40 chars": 50,
+    "ls --color": 70,
+    "full-width background": 35,
+    "compiler error": 75,
+    "CJK": 75,
     "emoji-heavy": 95,
-    "gradient 160 cells": 1800
+    "gradient 160 cells": 2100
   }
 }

@@ -1,4 +1,9 @@
 //! Bytes per scrollback line for typical output: `cargo run --release -p term-core --example scrollback_mem`
+//!
+//! The first figure counts everything history holds for 10k lines (the
+//! open block's spare capacity included); the sealed one only the sealed
+//! blocks, as §11.4 of the cells design counts. (A placeholder image row
+//! joins with kitty placeholders, PR 10.)
 
 use term_core::Term;
 
@@ -9,10 +14,12 @@ fn measure(name: &str, line: impl Fn(usize) -> String) {
         t.advance(b"\r\n");
     }
     let bytes = t.state.scrollback_bytes();
+    let h = t.state.history_stats();
     println!(
-        "{name:<28} {:>6} bytes/line  ({:.1} MB for 10k lines)",
+        "{name:<28} {:>6} bytes/line  ({:.1} MB for 10k lines; sealed blocks {} bytes/line)",
         bytes / t.state.scrollback_len(),
-        bytes as f64 / 1e6
+        bytes as f64 / 1e6,
+        h.sealed_bytes / h.sealed_lines.max(1),
     );
 }
 

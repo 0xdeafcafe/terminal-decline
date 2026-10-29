@@ -253,16 +253,22 @@ fn selection_and_dump_show_clusters() {
 }
 
 #[test]
-fn history_keeps_a_clusters_first_scalar_until_v2() {
-    let mut t = term(10, 2, "e\u{301}👍\u{1F3FD}\r\n\r\n\r\n");
-    t.state.scroll_view(2);
+fn history_keeps_whole_clusters() {
+    // With mode 2027 on, then ❤ + VS16 written one cell wide with it off:
+    // history keeps both widths as written.
+    let mut t = term(10, 2, "e\u{301}👍\u{1F3FD}\r\n\x1b[?2027l\u{2764}\u{FE0F}x\r\n\r\n\r\n");
+    t.state.scroll_view(3);
     assert_eq!(
         cells(&t, 0)[..3],
         [
-            ("e".into(), Width::Narrow),
-            ("👍".into(), Width::Wide),
+            ("e\u{301}".into(), Width::Narrow),
+            ("👍\u{1F3FD}".into(), Width::Wide),
             (String::new(), Width::Spacer)
         ]
+    );
+    assert_eq!(
+        cells(&t, 1)[..2],
+        [("\u{2764}\u{FE0F}".into(), Width::Narrow), ("x".into(), Width::Narrow)]
     );
 }
 

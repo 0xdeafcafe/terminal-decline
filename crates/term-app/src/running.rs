@@ -357,29 +357,53 @@ fn name_of(pid: libc::pid_t) -> Option<String> {
     (n > 0).then(|| String::from_utf8_lossy(&buf[..n as usize]).into_owned())
 }
 
-/// The title and text of the question asked before closing a window
-/// running `program`.
-pub fn close_question(program: &str) -> (String, String) {
-    (
-        "Close this window?".into(),
-        format!("{program} is still running in it. Closing the window ends it."),
-    )
+/// What is about to close, for [`close_question`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Closing {
+    /// One pane of several.
+    Pane,
+    /// A window (or tab), with all its panes.
+    Window,
 }
 
-/// The title and text of the question asked before quitting while
-/// `programs` run, one per window.
-pub fn quit_question(app_name: &str, programs: &[String]) -> (String, String) {
+/// The names in `programs`, each once, in order, joined with commas.
+fn names(programs: &[String]) -> String {
     let mut names: Vec<&str> = Vec::new();
     for p in programs {
         if !names.contains(&p.as_str()) {
             names.push(p);
         }
     }
-    let text = match programs.len() {
-        1 => format!("{} is still running. Quitting ends it.", programs[0]),
-        n => format!(
-            "Programs are still running in {n} windows ({}). Quitting ends them.",
-            names.join(", ")
+    names.join(", ")
+}
+
+/// The title and text of the question asked once before closing a pane
+/// or a window while `programs` (one per pane, at least one) run in it.
+pub fn close_question(what: Closing, programs: &[String]) -> (String, String) {
+    let what = match what {
+        Closing::Pane => "pane",
+        Closing::Window => "window",
+    };
+    let text = match programs {
+        [one] => format!("{one} is still running in it. Closing the {what} ends it."),
+        _ => format!(
+            "Programs are still running in {} of its panes ({}). Closing the {what} ends them.",
+            programs.len(),
+            names(programs)
+        ),
+    };
+    (format!("Close this {what}?"), text)
+}
+
+/// The title and text of the question asked before quitting while
+/// `programs` run, one per pane.
+pub fn quit_question(app_name: &str, programs: &[String]) -> (String, String) {
+    let text = match programs {
+        [one] => format!("{one} is still running. Quitting ends it."),
+        _ => format!(
+            "Programs are still running in {} panes ({}). Quitting ends them.",
+            programs.len(),
+            names(programs)
         ),
     };
     (format!("Quit {app_name}?"), text)
@@ -688,11 +712,22 @@ mod tests {
     #[test]
     fn questions_name_the_programs() {
         assert_eq!(
-            close_question("vim"),
+            close_question(Closing::Window, &["vim".into()]),
             (
                 "Close this window?".into(),
                 "vim is still running in it. Closing the window ends it.".into()
             )
+        );
+        assert_eq!(
+            close_question(Closing::Pane, &["vim".into()]),
+            (
+                "Close this pane?".into(),
+                "vim is still running in it. Closing the pane ends it.".into()
+            )
+        );
+        assert_eq!(
+            close_question(Closing::Window, &["vim".into(), "top".into(), "vim".into()]).1,
+            "Programs are still running in 3 of its panes (vim, top). Closing the window ends them."
         );
         assert_eq!(
             quit_question("Terminal Decline", &["top".into()]),
@@ -700,7 +735,7 @@ mod tests {
         );
         assert_eq!(
             quit_question("X", &["vim".into(), "vim".into(), "top".into()]).1,
-            "Programs are still running in 3 windows (vim, top). Quitting ends them."
+            "Programs are still running in 3 panes (vim, top). Quitting ends them."
         );
     }
 }

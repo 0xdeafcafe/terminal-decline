@@ -69,13 +69,19 @@ pub enum SavedNode {
     },
 }
 
-/// One pane as saved: its working directory, and the command it was
-/// running (as [`SavedWindow::command`]).
+/// One pane as saved: its working directory, the command it was
+/// running (as [`SavedWindow::command`]), and whether it ran the window's
+/// own program.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct SavedPane {
     pub cwd: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
+    /// It ran the program the window was opened with (`-e PROGRAM`, a
+    /// pin's, `command` in the config), which it runs again; else (a
+    /// split) the user's shell.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub program: bool,
 }
 
 /// Saved windows as they reopen: one list per window, its tabs in order.
@@ -273,6 +279,7 @@ mod tests {
                         a: Box::new(SavedNode::Pane(SavedPane {
                             cwd: Some("/a".into()),
                             command: None,
+                            ..SavedPane::default()
                         })),
                         b: Box::new(SavedNode::Split {
                             dir: crate::panes::Dir::Down,
@@ -280,8 +287,9 @@ mod tests {
                             a: Box::new(SavedNode::Pane(SavedPane {
                                 cwd: Some("/b".into()),
                                 command: None,
+                                ..SavedPane::default()
                             })),
-                            b: Box::new(SavedNode::Pane(SavedPane { cwd: None, command: None })),
+                            b: Box::new(SavedNode::Pane(SavedPane::default())),
                         }),
                     },
                     focused: 1,
@@ -340,7 +348,8 @@ mod tests {
             **a,
             SavedNode::Pane(SavedPane {
                 cwd: Some("/a".into()),
-                command: None
+                command: None,
+                ..SavedPane::default()
             })
         );
         assert_eq!(**b, SavedNode::Pane(SavedPane::default()));
@@ -357,6 +366,7 @@ mod tests {
                 a: Box::new(SavedNode::Pane(SavedPane {
                     cwd: Some("/a".into()),
                     command: Some("ssh host".into()),
+                    ..SavedPane::default()
                 })),
                 b: Box::new(SavedNode::Pane(SavedPane::default())),
             },

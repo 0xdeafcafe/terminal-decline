@@ -1186,3 +1186,330 @@ fn smoke_confirm_close_asks_while_a_program_runs() {
     assert!(elapsed < Duration::from_secs(15), "closed after {elapsed:?}");
     assert!(dumps(&dir).is_empty());
 }
+
+/// A shell loop that waits (at most 10 s) until `cond` holds.
+fn wait_for(cond: &str) -> String {
+    format!("i=0; while ! {{ {cond}; }} && [ $i -lt 200 ]; do sleep 0.05; i=$((i+1)); done; ")
+}
+
+/// A shell snippet that asks for a dump and waits (at most 10 s) until
+/// it is written.
+fn dump_and_wait(dir: &TempDir) -> String {
+    let file = dir.dump_file();
+    let count = format!("$(cat '{}' 2>/dev/null | wc -l)", file.display());
+    format!("n={count}; {}{}", osc("dump"), wait_for(&format!("[ {count} -gt $n ]")))
+}
+
+/// Splits run the user's login shell: these tests make it zsh with its
+/// startup files from `dir` (a `.zshrc` that does what the test needs).
+fn with_zsh(cmd: &mut Command, dir: &TempDir, zshrc: &str) {
+    std::fs::write(dir.path().join(".zshrc"), zshrc).unwrap();
+    cmd.env("SHELL", "/bin/zsh").env("ZDOTDIR", dir.path());
+}
+
+fn panes(d: &Value) -> &Vec<Value> {
+    d["panes"].as_array().unwrap_or_else(|| panic!("no panes in {d}"))
+}
+
+fn pane_screen(p: &Value) -> &str {
+    p["screen"].as_str().unwrap()
+}
+
+/// Cmd+D splits the focused pane: the new pane runs the user's shell in
+/// the pane's folder, gets focus and the keys, and both programs are told
+/// their sizes. Focus moves with the `focus` control; Cmd+W closes the
+/// focused pane and leaves the other running at its old size; a pane whose
+/// program exits closes.
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_split_focus_and_close_panes() {
+    if !have_metal() {
+        return;
+    }
+    let dir = TempDir::new("split");
+    let d = dir.path().display();
+    // The panes the splits open run this; `role` says what to do.
+    let zshrc = format!(
+        r#"PS1='%% '
+case "$(cat '{d}/role' 2>/dev/null)" in
+  echo) echo "two in ${{PWD:t}}"; stty size > '{d}/size2'; touch '{d}/two-ready'
+        read -r line; print -r -- "got:$line" > '{d}/two-got'; sleep 20 ;;
+  exit) touch '{d}/three-ran'; exit 0 ;;
+esac
+"#
+    );
+    let script = format!(
+        "cd '{d}'; s0=$(stty size); echo \"one $s0\"; echo echo > '{d}/role'; {split}\
+         {wait_two}{wait_size}echo \"one now $(stty size)\"; {dump}\
+         {keys}{wait_got}{dump}\
+         {focus0}{dump}\
+         {focus1}{cmd_w}{wait_back}{dump}\
+         echo exit > '{d}/role'; {split_down}{wait_three}\
+         j=0; while [ $j -lt 50 ]; do {dump}tail -1 '{file}' | grep -q '\"dividers\":0' && break; sleep 0.1; j=$((j+1)); done; \
+         {quit}sleep 20",
+        split = osc("split right"),
+        split_down = osc("split down"),
+        wait_two = wait_for(&format!("[ -e '{d}/two-ready' ]")),
+        wait_size = wait_for("[ \"$(stty size)\" != \"$s0\" ]"),
+        wait_got = wait_for(&format!("[ -s '{d}/two-got' ]")),
+        wait_back = wait_for("[ \"$(stty size)\" = \"$s0\" ]"),
+        wait_three = wait_for(&format!("[ -e '{d}/three-ran' ]")),
+        dump = dump_and_wait(&dir),
+        // q z q Return, typed as keys into the key window.
+        keys = [osc("key 12"), osc("key 6"), osc("key 12"), osc("key 36")].concat(),
+        focus0 = osc("focus 0"),
+        focus1 = osc("focus 1"),
+        cmd_w = osc("key 13 cmd"),
+        file = dir.dump_file().display(),
+        quit = osc("quit"),
+    );
+    let mut cmd = Command::new(APP);
+    cmd.args(["-e", "/bin/sh", "-c", &script])
+        .env("XDG_CONFIG_HOME", dir.config_home())
+        .env("DECLINE_TEST_DUMP", dir.dump_file())
+        .current_dir(dir.path());
+    with_zsh(&mut cmd, &dir, &zshrc);
+    let (status, _) = run(&mut cmd);
+    assert!(status.success(), "{status}");
+    let all = dumps(&dir);
+    assert!(all.len() >= 5, "{all:?}");
+    for x in &all {
+        check_dump(x);
+    }
+    let (split, typed, back, closed, last) = (&all[0], &all[1], &all[2], &all[3], all.last().unwrap());
+    let first = &panes(split)[0];
+    let first_line = pane_screen(first).lines().next().unwrap();
+    let full: Vec<u32> = first_line
+        .trim_start_matches("one ")
+        .trim_end_matches('|')
+        .split(' ')
+        .map(|n| n.parse().unwrap())
+        .collect();
+
+    // Split right: two panes side by side, the new one focused, one divider.
+    let p = panes(split);
+    assert_eq!((p.len(), num(split, "dividers")), (2, 1.0), "{split}");
+    assert_eq!(
+        (p[0]["focused"].clone(), p[1]["focused"].clone()),
+        (false.into(), true.into()),
+        "{split}"
+    );
+    let rect = |p: &Value| -> Vec<i64> { p["rect"].as_array().unwrap().iter().map(|v| v.as_i64().unwrap()).collect() };
+    let (a, b) = (rect(&p[0]), rect(&p[1]));
+    assert_eq!((a[0], a[1], b[1]), (0, 0, 0), "{split}");
+    assert!(b[0] > a[0] + a[2] - 1 && b[3] == a[3], "{a:?} {b:?}");
+    let base = dir.path().file_name().unwrap().to_string_lossy().into_owned();
+    assert!(pane_screen(&p[1]).starts_with(&format!("two in {base}|")), "{}", pane_screen(&p[1]));
+    // Each program was told its pane's size; the first pane got narrower.
+    let grid = |p: &Value| format!("{} {}", p["lines"], p["cols"]);
+    assert!(
+        pane_screen(&p[0]).contains(&format!("one now {}|", grid(&p[0]))),
+        "{}",
+        pane_screen(&p[0])
+    );
+    assert_eq!(std::fs::read_to_string(dir.path().join("size2")).unwrap().trim(), grid(&p[1]));
+    assert!((p[0]["cols"].as_u64().unwrap() as u32) < full[1], "{split}");
+    assert_eq!(p[0]["lines"].as_u64().unwrap() as u32, full[0], "{split}");
+
+    // The keys went to the focused (new) pane only.
+    let p = panes(typed);
+    assert_eq!(std::fs::read_to_string(dir.path().join("two-got")).unwrap().trim(), "got:qzq");
+    assert!(pane_screen(&p[1]).contains("qzq"), "{}", pane_screen(&p[1]));
+    assert!(!pane_screen(&p[0]).contains("qzq"), "{}", pane_screen(&p[0]));
+
+    // `focus 0` moved focus back.
+    let p = panes(back);
+    assert_eq!(
+        (p[0]["focused"].clone(), p[1]["focused"].clone()),
+        (true.into(), false.into()),
+        "{back}"
+    );
+
+    // Cmd+W in the second pane closed it; the first, still running, fills
+    // the window again.
+    let p = panes(closed);
+    assert_eq!((p.len(), num(closed, "dividers")), (1, 0.0), "{closed}");
+    assert_eq!(p[0]["id"], panes(split)[0]["id"]);
+    assert_eq!(
+        (num(closed, "lines") as u32, num(closed, "cols") as u32),
+        (full[0], full[1]),
+        "{closed}"
+    );
+
+    // The third pane's shell exited at once: its pane closed.
+    assert!(dir.path().join("three-ran").exists());
+    assert_eq!((panes(last).len(), num(last, "dividers")), (1, 0.0), "{last}");
+}
+
+/// With `confirm_close`, closing a pane whose program is running asks
+/// first; a pane at its shell's prompt closes without asking.
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_confirm_close_asks_for_a_pane() {
+    if !have_metal() {
+        return;
+    }
+    let dir = TempDir::new("confirm-pane");
+    let d = dir.path().display();
+    std::fs::create_dir_all(dir.config_home().join("terminal-decline")).unwrap();
+    std::fs::write(dir.config_home().join("terminal-decline/config.toml"), "confirm_close = true\n").unwrap();
+    let zshrc = format!(
+        r#"PS1='%% '
+if [ "$(cat '{d}/role' 2>/dev/null)" = job ]; then touch '{d}/job'; sleep 30; fi
+touch '{d}/prompt'
+"#
+    );
+    let script = format!(
+        "echo job > '{d}/role'; {split}{wait_job}sleep 1; {close}{dump}\
+         {quit}sleep 20",
+        split = osc("split right"),
+        wait_job = wait_for(&format!("[ -e '{d}/job' ]")),
+        close = osc("close-pane"),
+        dump = dump_and_wait(&dir),
+        quit = osc("quit"),
+    );
+    let mut cmd = Command::new(APP);
+    cmd.args(["-e", "/bin/sh", "-c", &script])
+        .env("XDG_CONFIG_HOME", dir.config_home())
+        .env("DECLINE_TEST_DUMP", dir.dump_file())
+        .current_dir(dir.path());
+    with_zsh(&mut cmd, &dir, &zshrc);
+    let (status, _) = run(&mut cmd);
+    assert!(status.success(), "{status}");
+    let all = dumps(&dir);
+    assert_eq!(all.len(), 1, "{all:?}");
+    assert_eq!(all[0]["sheet"], true, "{}", all[0]);
+    assert_eq!(panes(&all[0]).len(), 2, "{}", all[0]);
+
+    // At the prompt: closed at once.
+    let dir = TempDir::new("confirm-pane-idle");
+    let d = dir.path().display();
+    std::fs::create_dir_all(dir.config_home().join("terminal-decline")).unwrap();
+    std::fs::write(dir.config_home().join("terminal-decline/config.toml"), "confirm_close = true\n").unwrap();
+    let zshrc = format!("PS1='%% '\ntouch '{d}/prompt'\n");
+    let script = format!(
+        "s0=$(stty size); {split}{wait_prompt}sleep 0.5; {close}{wait_back}{dump}{quit}sleep 20",
+        split = osc("split right"),
+        wait_prompt = wait_for(&format!("[ -e '{d}/prompt' ]")),
+        close = osc("close-pane"),
+        wait_back = wait_for("[ \"$(stty size)\" = \"$s0\" ]"),
+        dump = dump_and_wait(&dir),
+        quit = osc("quit"),
+    );
+    let mut cmd = Command::new(APP);
+    cmd.args(["-e", "/bin/sh", "-c", &script])
+        .env("XDG_CONFIG_HOME", dir.config_home())
+        .env("DECLINE_TEST_DUMP", dir.dump_file())
+        .current_dir(dir.path());
+    with_zsh(&mut cmd, &dir, &zshrc);
+    let (status, _) = run(&mut cmd);
+    assert!(status.success(), "{status}");
+    let all = dumps(&dir);
+    assert_eq!(all.len(), 1, "{all:?}");
+    assert_eq!(all[0]["sheet"], false, "{}", all[0]);
+    assert_eq!(panes(&all[0]).len(), 1, "{}", all[0]);
+}
+
+/// A window saved with three panes reopens with them after a restart:
+/// the same shares, each pane in its folder, the window's program in the
+/// panes that ran it and the user's shell in the split, with the command
+/// it was running typed at its prompt, and the same pane focused. Saved
+/// again, it gives back what it was restored from.
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_restore_round_trips_panes() {
+    if !have_metal() {
+        return;
+    }
+    let dir = TempDir::new("restore-panes");
+    let sub = |name: &str| {
+        let p = dir.path().join(name);
+        std::fs::create_dir_all(&p).unwrap();
+        p.display().to_string()
+    };
+    let (a, b, c) = (sub("pane-a"), sub("pane-b"), sub("pane-c"));
+    let layout = serde_json::json!({
+        "root": {"split": {"dir": "right", "ratio": 0.4,
+            "a": {"pane": {"cwd": a, "program": true}},
+            "b": {"split": {"dir": "down", "ratio": 0.5,
+                "a": {"pane": {"cwd": b, "program": true}},
+                "b": {"pane": {"cwd": c, "command": "touch 'ran here'"}}}}}},
+        "focused": 1
+    });
+    let restore = dir.path().join("restore.json");
+    let saved = serde_json::json!([{"cwd": b, "frame": [100.0, 100.0, 900.0, 600.0], "panes": layout}]);
+    std::fs::write(&restore, saved.to_string()).unwrap();
+    let file = dir.dump_file().display().to_string();
+    // The split's shell dumps once the command is in its line editor.
+    let zshrc = format!(
+        r#"PS1='READY> '
+td_seen=
+td-line-pre-redraw() {{
+  [[ -n $BUFFER && -z $td_seen ]] || return 0
+  td_seen=1
+  {{ sleep 0.3; {dump}}} > /dev/tty 2>&1 &!
+}}
+zle -N zle-line-pre-redraw td-line-pre-redraw
+"#,
+        dump = osc("dump"),
+    );
+    // The panes running the window's program each dump; the first there
+    // waits for the shell's dump, saves and quits.
+    let saved_file = format!("{file}.saved");
+    let script = format!(
+        "echo \"in $(basename \"$PWD\")\"; {dump}if mkdir '{d}/saver' 2>/dev/null; then \
+           {wait_typed}{dump_last}{save}{wait_saved}{quit}fi; sleep 20",
+        d = dir.path().display(),
+        dump = osc("dump"),
+        wait_typed = wait_for(&format!("grep -q 'READY> touch' '{file}' 2>/dev/null")),
+        dump_last = dump_and_wait(&dir),
+        save = osc("save"),
+        wait_saved = wait_for(&format!("[ -s '{saved_file}' ]")),
+        quit = osc("quit"),
+    );
+    let mut cmd = Command::new(APP);
+    cmd.arg("--restore")
+        .arg(&restore)
+        .args(["-e", "/bin/sh", "-c", &script])
+        .env("XDG_CONFIG_HOME", dir.config_home())
+        .env("DECLINE_TEST_DUMP", dir.dump_file())
+        .current_dir(dir.path());
+    with_zsh(&mut cmd, &dir, &zshrc);
+    let (status, _) = run(&mut cmd);
+    assert!(status.success(), "{status}");
+    let all = dumps(&dir);
+    let last = all.last().unwrap_or_else(|| panic!("no dumps"));
+    check_dump(last);
+    let p = panes(last);
+    assert_eq!((p.len(), num(last, "dividers")), (3, 2.0), "{last}");
+    assert!(pane_screen(&p[0]).starts_with("in pane-a|"), "{}", pane_screen(&p[0]));
+    assert!(pane_screen(&p[1]).starts_with("in pane-b|"), "{}", pane_screen(&p[1]));
+    assert!(pane_screen(&p[2]).contains("READY> touch 'ran here'|"), "{}", pane_screen(&p[2]));
+    assert!(!dir.path().join("pane-c/ran here").exists(), "it ran without Enter");
+    let focused: Vec<bool> = p.iter().map(|p| p["focused"] == true).collect();
+    assert_eq!(focused, [false, true, false], "{last}");
+    // Left 40%, the right half stacked.
+    let rect = |p: &Value| -> Vec<i64> { p["rect"].as_array().unwrap().iter().map(|v| v.as_i64().unwrap()).collect() };
+    let (ra, rb, rc) = (rect(&p[0]), rect(&p[1]), rect(&p[2]));
+    let width = rb[0] + rb[2];
+    let share = ra[2] as f64 / width as f64;
+    assert!((share - 0.4).abs() < 0.02, "{ra:?} {rb:?}");
+    assert_eq!((rb[0], rc[0]), (rc[0], rb[0]));
+    assert!(rb[1] == 0 && rc[1] > rb[1] + rb[3] - 1, "{rb:?} {rc:?}");
+
+    // Saved again: the same layout.
+    let again: Value = serde_json::from_str(&std::fs::read_to_string(&saved_file).unwrap()).unwrap();
+    let again = &again[0]["panes"];
+    assert_eq!(again["focused"], 1, "{again}");
+    let root = &again["root"]["split"];
+    assert_eq!(root["dir"], "right");
+    assert!((root["ratio"].as_f64().unwrap() - 0.4).abs() < 1e-6, "{root}");
+    assert_eq!(root["a"]["pane"]["cwd"], a.as_str());
+    assert_eq!(root["a"]["pane"]["program"], true);
+    let right = &root["b"]["split"];
+    assert_eq!(right["dir"], "down");
+    assert_eq!(right["a"]["pane"]["cwd"], b.as_str());
+    assert_eq!(right["a"]["pane"]["program"], true);
+    assert_eq!(right["b"]["pane"]["cwd"], c.as_str());
+    assert!(right["b"]["pane"].get("program").is_none(), "{right}");
+}

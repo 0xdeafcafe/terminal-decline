@@ -1,10 +1,15 @@
 //! Fonts through Core Text: cell metrics and glyph rasterising. Box
 //! drawing, blocks, braille and Powerline are drawn in code ([`sprite`]).
 
+#[cfg(test)]
+mod legacy_tests;
+mod registry;
 pub mod sprite;
 
+pub use registry::{FontId, GlyphKey, SPRITE_FONT};
 pub use sprite::{SpriteId, is_code_drawn};
 
+use std::cell::RefCell;
 use std::ffi::c_void;
 use std::ptr::NonNull;
 
@@ -58,7 +63,8 @@ pub struct RasterGlyph {
 }
 
 pub struct Fonts {
-    faces: [CFRetained<CTFont>; 4],
+    /// The four configured faces (ids 0–3) and every fallback since.
+    registry: RefCell<registry::Registry>,
     pub metrics: Metrics,
     rgb: CFRetained<CGColorSpace>,
 }
@@ -87,7 +93,7 @@ impl Fonts {
         let bold_italic = with(CTFontSymbolicTraits::BoldTrait | CTFontSymbolicTraits::ItalicTrait);
         let metrics = metrics(&regular);
         Fonts {
-            faces: [regular, bold, italic, bold_italic],
+            registry: RefCell::new(registry::Registry::new([regular, bold, italic, bold_italic])),
             metrics,
             rgb: CGColorSpace::new_device_rgb().expect("rgb colour space"),
         }
@@ -95,51 +101,97 @@ impl Fonts {
 
     /// Family name of the regular face actually loaded.
     pub fn family(&self) -> String {
-        unsafe { self.faces[0].family_name() }.to_string()
+        self.family_of(0).expect("the regular face")
     }
 
     /// Family name of the font that draws `ch`: the loaded one, or the system
     /// fallback Core Text picks for it.
     pub fn family_for(&self, ch: char, style: Style) -> Option<String> {
-        let (font, _) = glyph_for(self.face(style), ch)?;
-        Some(unsafe { font.family_name() }.to_string())
+        let (id, _) = self.registry.borrow_mut().resolve(ch, style)?;
+        self.family_of(id)
+    }
+
+    /// Family name of font `id`; `None` for [`SPRITE_FONT`] and ids never
+    /// handed out.
+    pub fn family_of(&self, id: FontId) -> Option<String> {
+        let reg = self.registry.borrow();
+        let face = reg.faces.get(id as usize)?;
+        Some(unsafe { face.font.family_name() }.to_string())
+    }
+
+    /// The font id of a configured face.
+    pub fn face_id(style: Style) -> FontId {
+        style as FontId
+    }
+
+    /// The id for `font`, registering it if it is new: the same face (by
+    /// `CFEqual`) always gets the same id. For fonts Core Text picks while
+    /// shaping (F2.2). `None` only once 65535 fonts are registered.
+    pub fn font_id(&self, font: &CTFont) -> Option<FontId> {
+        self.registry.borrow_mut().id(font)
     }
 
     /// Horizontal advance of `ch`, in device pixels.
     pub fn advance(&self, ch: char, style: Style) -> Option<f64> {
-        let (font, mut g) = glyph_for(self.face(style), ch)?;
+        let (id, mut g) = self.registry.borrow_mut().resolve(ch, style)?;
+        let reg = self.registry.borrow();
+        let font = &reg.faces[id as usize].font;
         let mut adv = CGSize::default();
         unsafe { font.advances_for_glyphs(CTFontOrientation::Horizontal, NonNull::from(&mut g), &mut adv, 1) };
         Some(adv.width)
     }
 
-    fn face(&self, style: Style) -> &CTFont {
-        &self.faces[style as usize]
+    /// The key for `ch` drawn alone in `style`: a sprite key for code-drawn
+    /// characters ([`is_code_drawn`]), otherwise the glyph in the face or in
+    /// the fallback Core Text picks, with colour glyphs covering 2 cells.
+    /// `None` when no font has the character. Lookups are cached per
+    /// character and style.
+    pub fn glyph_key(&self, ch: char, style: Style) -> Option<GlyphKey> {
+        if let Some(id) = SpriteId::for_char(ch) {
+            return Some(GlyphKey::sprite(id, 1));
+        }
+        let (font, glyph) = self.registry.borrow_mut().resolve(ch, style)?;
+        let color = self.registry.borrow().faces[font as usize].color;
+        Some(GlyphKey {
+            font,
+            glyph,
+            cells: if color { 2 } else { 1 },
+            variant: 0,
+        })
     }
 
     /// The glyph for `ch`: a coverage bitmap (or BGRA for colour glyphs),
     /// `None` for glyphs with no ink. Code-drawn characters
     /// ([`is_code_drawn`]) come from [`sprite`], sized exactly to the cell
-    /// and the same in every style.
+    /// and the same in every style. The same as
+    /// `rasterize_key(glyph_key(ch, style)?)`.
     pub fn rasterize(&self, ch: char, style: Style) -> Option<RasterGlyph> {
-        if let Some(id) = SpriteId::for_char(ch) {
-            return sprite::rasterize(id, &self.metrics, 1);
-        }
-        let base = self.face(style);
-        let (font, glyph) = glyph_for(base, ch)?;
-        let color = unsafe { font.symbolic_traits() }.contains(CTFontSymbolicTraits::ColorGlyphsTrait);
+        self.rasterize_key(self.glyph_key(ch, style)?)
+    }
 
-        let mut g = glyph;
+    /// The bitmap `key` names; `None` for glyphs with no ink and for font
+    /// ids never handed out. Colour glyphs are scaled down to fit
+    /// `key.cells` cells; sprites are drawn across them.
+    pub fn rasterize_key(&self, key: GlyphKey) -> Option<RasterGlyph> {
+        if let Some(id) = key.sprite_id() {
+            return sprite::rasterize(id, &self.metrics, key.cells as u32);
+        }
+        let reg = self.registry.borrow();
+        let face = reg.faces.get(key.font as usize)?;
+        let font = &face.font;
+        let color = face.color;
+
+        let mut g = key.glyph;
         let mut rect = CGRect::default();
         unsafe { font.bounding_rects_for_glyphs(CTFontOrientation::Horizontal, NonNull::from(&mut g), &mut rect, 1) };
         if rect.size.width <= 0.0 || rect.size.height <= 0.0 {
             return None; // spaces and other invisible glyphs
         }
 
-        // Colour glyphs (emoji) are drawn at a size that fits two cells.
+        // Colour glyphs (emoji) are drawn at a size that fits their cells.
         let m = self.metrics;
         let scale = if color {
-            let fit_w = (m.cell_width * 2) as f64 / rect.size.width;
+            let fit_w = (m.cell_width * key.cells.max(1) as u32) as f64 / rect.size.width;
             let fit_h = m.cell_height as f64 / rect.size.height;
             fit_w.min(fit_h).min(1.0)
         } else {
@@ -197,7 +249,7 @@ impl Fonts {
 }
 
 /// The glyph for `ch` in `font`, or in the system fallback font for it.
-fn glyph_for(font: &CTFont, ch: char) -> Option<(CFRetained<CTFont>, CGGlyph)> {
+pub(crate) fn glyph_for(font: &CTFont, ch: char) -> Option<(CFRetained<CTFont>, CGGlyph)> {
     let mut utf16 = [0u16; 2];
     let units = ch.encode_utf16(&mut utf16).len();
     let mut glyphs = [0 as CGGlyph; 2];

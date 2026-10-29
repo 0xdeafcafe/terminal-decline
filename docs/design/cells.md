@@ -1117,6 +1117,33 @@ pub struct ShapedGlyph {
 }
 ```
 
+**Landed in F2.1** (`term_font::registry`, private; the API is on `Fonts`):
+
+- `Fonts::glyph_key(ch, style)` gives the key for one character drawn
+  alone, `Fonts::rasterize_key(key)` draws it, and `rasterize(ch, style)`
+  is now just `rasterize_key(glyph_key(ch, style)?)`. A test compares its
+  bitmaps with the code it replaced, for 33 characters × 4 styles × Menlo
+  and Monaco × 3 sizes: identical. `Fonts::font_id(&CTFont)` is the entry
+  for F2.2's CTRun fonts; `family_of(id)` and `face_id(style)` go with it.
+- Ids 0–3 are always the four configured faces in `Style` order, even when
+  two are the same font (a family with no bold); a lookup by font finds the
+  first. Fallbacks get 4 onwards. `SPRITE_FONT` is never handed out: once
+  65535 fonts are registered a new fallback simply has no glyph.
+- The registry sits in a `RefCell` inside `Fonts`, so `rasterize` keeps
+  `&self`. `Fonts` stays `Send` and not `Sync`, as before. Font ids belong
+  to one `Fonts`: a new `Fonts` (a font or size change) starts again from
+  4, so whatever caches by `GlyphKey` must be emptied with it, as
+  `Renderer::set_fonts` already does.
+- The fallback lookup is cached per (character, style), not per character:
+  a bold face can fall back to a different font than the regular one. ASCII
+  goes through a 128 × 4 table, everything else a hash map. Misses are
+  cached too.
+- `cells` only changes the bitmap for colour glyphs (fitted to the cells)
+  and sprites (drawn across them). `glyph_key` sets 2 for colour glyphs and
+  1 for everything else, wide CJK included, so the same coverage glyph has
+  one key whatever its width. F2.2's `shape()` and F3.2 should keep to that
+  rule, or the glyph texture holds the same bitmap twice.
+
 `Fonts::shape(text: &[u16], face, features, out: &mut Vec<ShapedGlyph>)`:
 1. builds a CTLine from the run's text, with the face and `font_features`;
 2. walks its CTRuns, putting each run's font through the registry;
@@ -1169,8 +1196,10 @@ aren't characters. Still to come for this design:
 - the curly, dotted and dashed underline patterns as sprites from 0x1000
   (F2.3);
 - caching sprites under `GlyphKey { font: SPRITE_FONT, glyph: id, cells }`
-  in the same mask texture as text (F3.2). Today the renderer reaches them
-  through the per-character path.
+  in the same mask texture as text (F3.2). The key exists since F2.1
+  (`GlyphKey::sprite(id, cells)`, and `glyph_key` returns it for code-drawn
+  characters); today the renderer still reaches sprites through the
+  per-character path.
 
 ### 10.5 Decorations
 
@@ -2317,7 +2346,7 @@ go in order, and the font and render agents run alongside.
 | 13c | core | **search filters** (§13.6): 4-byte grams in 4 KB, built in the background only; still in 1.0 | S | 13b |
 | 14 | core (+ app for the decoder) | placement table and decline's own images (§8) for B.3/B.5, with the `ImageDecoder` trait and the 32 MB budget; the ImageIO decoder is a term-app part | M | 12 |
 | 15 | app | settings: `ambiguous_width` (and later `image_memory` with B.3), read by config and passed to term-core; main session | S | 7 |
-| F2.1 | font | font registry, `GlyphKey`, rasterise by (font, glyph); `rasterize(char, style)` kept as a wrapper | M | 1 |
+| F2.1 | font | font registry, `GlyphKey`, rasterise by (font, glyph); `rasterize(char, style)` kept as a wrapper. **Landed** (§10.2) | M | 1 |
 | F2.2 | font | CTLine shaping of runs (`shape()`) and the shaped-cluster cache; clusters now, ligatures in B.1 | M | F2.1 |
 | F2.3 | font | underline pattern sprites (curly, dotted, dashed) from id 0x1000; box/block/Powerline/braille shapes are done (F.6, `c4033dd`) | S | F2.1 |
 | F3.1 | render | resolve through `Style`: underline colour, double underline, overline, strike | S | 1 |

@@ -269,15 +269,32 @@ fn clearing_the_alternate_screen_frees_its_links() {
 }
 
 #[test]
-fn history_has_no_links_yet() {
-    // History v1 stores styles without their link: links come back with
-    // scrollback v2's per-block link table (PR 7).
+fn history_keeps_links() {
+    // Each history block has its own link table: links come back by value
+    // and the hovered one is highlighted in history rows too.
     let mut t = Term::new(10, 2, 100);
-    t.advance(b"\x1b]8;;https://h\x1b\\old\x1b]8;;\x1b\\\r\n\r\nnew");
+    t.advance(b"\x1b]8;id=1;https://h\x1b\\old\x1b]8;;\x1b\\ \x1b]8;;https://o\x1b\\x\x1b]8;;\x1b\\\r\n\r\nnew");
     assert_eq!(t.state.scrollback_len(), 1);
     t.state.scroll_view(1);
-    assert_eq!(t.state.visible_row(0).text().trim_end(), "old");
-    assert_eq!(at(&t, 0, 0), None);
+    assert_eq!(t.state.visible_row(0).text().trim_end(), "old x");
+    assert_eq!(at(&t, 0, 0), link("https://h", Some("1")));
+    assert_eq!(at(&t, 0, 2), link("https://h", Some("1")));
+    assert_eq!(at(&t, 0, 3), None);
+    assert_eq!(at(&t, 0, 4), link("https://o", None));
+    // The screen's link table may forget it; history doesn't.
+    t.advance(b"\x1b[2J");
+    t.state.sweep_styles_now().unwrap();
+    assert_eq!(at(&t, 0, 0), link("https://h", Some("1")));
+    t.state.set_hover(Some(t.state.point_at(0, 1)));
+    let mut snap = Snapshot::default();
+    t.state.snapshot(&mut snap, |_| false);
+    let hovered: Vec<_> = snap
+        .row_highlights(&snap.rows[0])
+        .iter()
+        .map(|h| (h.cols.clone(), h.kind))
+        .collect();
+    assert_eq!(hovered, vec![(0..3, HighlightKind::HoveredLink)]);
+    check(&t);
 }
 
 // ---------------------------------------------------------------------------
@@ -413,7 +430,35 @@ fn select_a_commands_output() {
     assert_eq!(plain.state.command_output(plain.state.point_at(0, 1)), None);
 }
 
-/// Marks scrolled into history are kept beside its lines: prompts there
+/// Marks in history work as on the screen: the same session on a tall
+/// screen (all of it shown) and a short one (most of it in history) gives
+/// the same marks, prompt jumps and command output everywhere.
+#[test]
+fn marks_in_history_work_as_on_the_screen() {
+    let run = |lines: usize| {
+        let mut t = Term::new(20, lines, 100);
+        session(&mut t, "one", "1\r\n", 0);
+        session(&mut t, "two", "2\r\n22\r\n", 1);
+        session(&mut t, "quiet", "", 0);
+        t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07slow\r\n\x1b]133;C\x07still\r\ngoing");
+        t
+    };
+    let (tall, short) = (run(12), run(3));
+    assert!(short.state.scrollback_len() >= 6);
+    for line in 0..12u64 {
+        assert_eq!(tall.state.marks_at(line), short.state.marks_at(line), "line {line}");
+        assert_eq!(tall.state.previous_prompt(line), short.state.previous_prompt(line), "line {line}");
+        assert_eq!(tall.state.next_prompt(line), short.state.next_prompt(line), "line {line}");
+        for col in [0, 3, 8] {
+            let p = Point { line, col };
+            assert_eq!(tall.state.command_output(p), short.state.command_output(p), "{p:?}");
+        }
+    }
+    assert!(short.state.command_output(Point { line: 1, col: 0 }).is_some());
+    check(&short);
+}
+
+/// Marks scrolled into history are kept with its lines: prompts there
 /// are found going up and down, outputs there are selected, and they go
 /// with their lines when history drops them or is cleared.
 #[test]

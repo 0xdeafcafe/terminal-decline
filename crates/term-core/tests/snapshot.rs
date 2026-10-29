@@ -392,7 +392,55 @@ fn snapshot_dimensions_and_counter() {
     assert_eq!((snap.cols, snap.lines, snap.rows.len()), (7, 3, 3));
     assert_eq!(snap.counter, t.state.change_counter());
     assert_eq!(snap.terminal_id, t.state.terminal_id());
-    assert_eq!(snap.popped_from, None, "nothing pulls lines back yet");
+    assert_eq!(snap.popped_from, None, "no lines pulled back");
+}
+
+/// Lines pulled back from history hand their numbers out again: the
+/// snapshot names the lowest one popped, the history rows from there on
+/// are copied again, and the ones before it stay cached.
+#[test]
+fn lines_pulled_back_are_copied_again() {
+    let mut t = Term::new(10, 2, 100);
+    t.advance(b"a\r\nb\r\nc\r\nd\r\ne\r\nf");
+    t.state.scroll_view(2);
+    let mut cache = Cache::default();
+    cache.take(&mut t);
+    assert_eq!(cache.take(&mut t), Vec::<usize>::new(), "all cached");
+    // Line 3 ("d") goes back on the screen and comes out again changed.
+    t.state.pull_back_for_test(1);
+    assert_eq!(t.state.history_stats().open_lines, 3);
+    t.advance(b"\x1b[1;1HD\x1b[2;1H\r\n");
+    t.state.scroll_view_to_bottom();
+    t.state.scroll_view(2);
+    let copied = cache.take(&mut t);
+    assert_eq!(cache.snap.popped_from, Some(3));
+    let rows: Vec<RowKey> = cache.snap.rows.iter().map(|r| r.key).collect();
+    assert_eq!(
+        rows[..2],
+        [RowKey::History { line: 2, col: 0 }, RowKey::History { line: 3, col: 0 }]
+    );
+    assert_eq!(copied, [1], "line 2 kept, line 3 copied again");
+    assert_eq!(t.state.visible_row(1).text().trim_end(), "D", "{}", t.state.dump());
+    // The mark goes with the snapshot that carried it.
+    cache.take(&mut t);
+    assert_eq!(cache.snap.popped_from, None);
+}
+
+/// A history row whose last style filled its row says so, and carries
+/// the style to the screen's width.
+#[test]
+fn full_width_backgrounds_fill_history_rows() {
+    let mut t = Term::new(10, 2, 100);
+    t.advance(b"\x1b[44m+1\x1b[K\x1b[0m\r\nplain\r\n\r\n");
+    t.state.resize(14, 2);
+    t.state.scroll_view(2);
+    let mut snap = Snapshot::default();
+    t.state.snapshot(&mut snap, |_| false);
+    assert!(snap.rows[0].flags.contains(RowFlags::FILL));
+    assert!(!snap.rows[1].flags.contains(RowFlags::FILL));
+    let cells = snap.row_cells(&snap.rows[0]).unwrap();
+    assert_eq!(cells.len(), 14);
+    assert_eq!(snap.history_styles[cells[13].style_id() as usize].bg, Color::indexed(4));
 }
 
 #[test]

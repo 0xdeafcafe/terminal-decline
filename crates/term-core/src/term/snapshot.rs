@@ -9,10 +9,12 @@
 //! each row and the cursor.
 
 use std::ops::Range;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::{CursorShape, Terminal};
+use super::{CursorShape, LinkValue, Terminal};
 use crate::cell::{Cell, Row, Width};
+use crate::scrollback::HistoryReader;
 use crate::style::Style;
 
 /// Where [`Terminal`] ids come from: unique in the process, so a terminal
@@ -53,6 +55,10 @@ impl RowFlags {
     /// The row comes from history: its cells' style ids index
     /// [`Snapshot::history_styles`], not the screen's table.
     pub const HISTORY: RowFlags = RowFlags(1 << 1);
+    /// A history row whose last style fills to the end of the row (a
+    /// full-width background, §11.3): its cells already carry it to the
+    /// screen's width.
+    pub const FILL: RowFlags = RowFlags(1 << 2);
 
     #[inline]
     pub const fn contains(self, other: RowFlags) -> bool {
@@ -167,6 +173,7 @@ pub struct Snapshot {
     /// Decoding buffers for history rows, kept to save allocating.
     row: Row,
     row_styles: Vec<Style>,
+    row_links: Vec<Option<Arc<LinkValue>>>,
 }
 
 impl Snapshot {
@@ -190,6 +197,17 @@ impl Snapshot {
     /// `row`'s highlights.
     pub fn row_highlights(&self, row: &SnapRow) -> &[Highlight] {
         &self.highlights[row.highlights.start as usize..row.highlights.end as usize]
+    }
+}
+
+/// A copied row's cluster store, appended: its text in one copy, holes
+/// and all (at most half of it, §6.1), with its spans moved up.
+fn copy_clusters(row: &Row, text: &mut String, spans: &mut Vec<(u32, u16)>) {
+    if let Some(store) = row.clusters() {
+        let (t, s) = store.raw();
+        let base = text.len() as u32;
+        text.push_str(t);
+        spans.extend(s.map(|(at, len)| if len == 0 { (base, 0) } else { (base + at, len) }));
     }
 }
 
@@ -221,7 +239,7 @@ impl Terminal {
         let cols = to_u16(self.cols);
         let same_terminal = out.terminal_id == self.terminal_id;
         let same_history = same_terminal && out.history_epoch == self.history_epoch && out.cols == cols;
-        let popped = self.popped_from;
+        let popped = self.scrollback.take_popped_from();
         out.rows.clear();
         out.cells.clear();
         out.cluster_text.clear();
@@ -231,7 +249,7 @@ impl Terminal {
         out.highlights.clear();
         out.terminal_id = self.terminal_id;
         out.history_epoch = self.history_epoch;
-        out.popped_from = self.popped_from.take();
+        out.popped_from = popped;
         out.screen = if self.alt_active { ScreenId::Alternate } else { ScreenId::Primary };
         if !same_terminal {
             out.mirrored = [None; 2];
@@ -250,16 +268,19 @@ impl Terminal {
         let selection = self.selection.map(|s| s.ordered());
         // The hovered link's id in the screen's table: cells are compared
         // with it, which is comparing by value within one table.
-        let hovered = self.hover.and_then(|p| self.link_at(p)).and_then(|l| self.styles.links().find(&l));
+        let hovered_link = self.hover.and_then(|p| self.link_at(p));
+        let hovered = hovered_link.as_ref().and_then(|l| self.styles.links().find(l));
         // Off an OSC 8 link, a plain URL there is highlighted the same way
         // (on history rows too: it is read from the text).
         let hovered_url = self
             .hover
-            .filter(|&p| self.link_at(p).is_none())
+            .filter(|_| hovered_link.is_none())
             .and_then(|p| self.url_at(p))
             .map(|(a, b, _)| (a, b));
         let history = self.scrollback.len();
         let first = history - self.display_offset;
+        // History rows are read one after another.
+        let mut reader = HistoryReader::default();
         for view_line in 0..self.lines {
             let line = self.point_at(view_line, 0).line;
             let highlights = out.highlights.len() as u32;
@@ -277,15 +298,25 @@ impl Terminal {
                 }
             }
             let i = first + view_line;
-            // History rows (v1) hold no links, so only screen rows can
-            // show the hovered one.
-            if let Some(id) = hovered
-                && i >= history
-            {
-                let row = &self.screen[i - history];
+            // A history row's links are its own: compared by value.
+            let history_row = (i < history && hovered_link.is_some()).then(|| self.history_row(i));
+            let on_link = |col: usize| -> bool {
+                match &history_row {
+                    Some(r) => col < r.len() && r.link(col) == hovered_link.as_ref(),
+                    None => {
+                        let row = &self.screen[i - history];
+                        hovered.is_some_and(|id| row.cells.get(col).is_some_and(|c| self.styles.get(c.style_id()).link == id))
+                    }
+                }
+            };
+            if hovered_link.is_some() {
+                let len = match &history_row {
+                    Some(r) => r.len(),
+                    None => self.screen[i - history].cells.len(),
+                };
                 let mut run: Option<usize> = None;
-                for col in 0..=row.cells.len() {
-                    let on = row.cells.get(col).is_some_and(|c| self.styles.get(c.style_id()).link == id);
+                for col in 0..=len {
+                    let on = on_link(col);
                     match (on, run) {
                         (true, None) => run = Some(col),
                         (false, Some(start)) => {
@@ -321,8 +352,12 @@ impl Terminal {
                 let key = RowKey::History { line, col: 0 };
                 flags.set(RowFlags::HISTORY, true);
                 flags.set(RowFlags::WRAPPED, self.scrollback.wrapped(i));
+                flags.set(RowFlags::FILL, self.scrollback.fill(i));
                 let kept = same_history && popped.is_none_or(|p| line < p) && have(key);
-                let copied = !kept && self.scrollback.get_into(i, &mut out.row, &mut out.row_styles);
+                let copied = !kept
+                    && self
+                        .scrollback
+                        .read(i, self.cols, &mut out.row, &mut out.row_styles, &mut out.row_links, &mut reader);
                 if copied {
                     // The row's own style list joins the snapshot's, and its
                     // cells' ids move up by where it starts.
@@ -334,6 +369,7 @@ impl Terminal {
                             .iter()
                             .map(|c| c.with_style(Cell::template(c.style_id() + base, c.shows_empty()))),
                     );
+                    copy_clusters(&out.row, &mut out.cluster_text, &mut out.cluster_spans);
                 }
                 (key, copied)
             } else {
@@ -343,15 +379,7 @@ impl Terminal {
                 let copied = !(same_terminal && have(key));
                 if copied {
                     out.cells.extend_from_slice(&row.cells);
-                    if let Some(store) = row.clusters() {
-                        // The store's text in one copy, holes and all (at
-                        // most half of it, §6.1), with its spans moved up.
-                        let (text, spans) = store.raw();
-                        let base = out.cluster_text.len() as u32;
-                        out.cluster_text.push_str(text);
-                        out.cluster_spans
-                            .extend(spans.map(|(at, len)| if len == 0 { (base, 0) } else { (base + at, len) }));
-                    }
+                    copy_clusters(row, &mut out.cluster_text, &mut out.cluster_spans);
                 }
                 (key, copied)
             };

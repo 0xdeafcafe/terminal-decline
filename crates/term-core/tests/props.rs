@@ -668,7 +668,14 @@ fn styles() -> impl Strategy<Value = Vec<Style>> {
 }
 
 fn codepoint() -> impl Strategy<Value = u32> {
-    prop_oneof![Just(0u32), Just(' ' as u32), (0x21u32..0x7f), any::<char>().prop_map(|c| c as u32),]
+    // Never a C0 control: those are executed, not printed, and history's
+    // text relies on it.
+    prop_oneof![
+        Just(0u32),
+        Just(' ' as u32),
+        (0x21u32..0x7f),
+        any::<char>().prop_map(|c| c as u32).prop_filter("C0", |&c| c >= 0x20),
+    ]
 }
 
 /// One narrow cell, or a wide cell and its spacer (which always share the
@@ -867,6 +874,13 @@ enum StyleStep {
     Snapshot,
     /// Scroll the view (into history and back).
     View(isize),
+    /// Pull history lines back onto the screen (their line numbers are
+    /// handed out again).
+    PullBack(usize),
+    /// Change the scrollback limit.
+    Limit(usize),
+    /// Change the ambiguous-width setting (seals history's open block).
+    Ambiguous(u8),
 }
 
 fn style_step() -> impl Strategy<Value = StyleStep> {
@@ -876,6 +890,9 @@ fn style_step() -> impl Strategy<Value = StyleStep> {
         1 => Just(StyleStep::Sweep),
         4 => Just(StyleStep::Snapshot),
         1 => (-6isize..=6).prop_map(StyleStep::View),
+        1 => (1usize..=4).prop_map(StyleStep::PullBack),
+        1 => select(vec![0usize, 3, 5, 100]).prop_map(StyleStep::Limit),
+        1 => (1u8..=2).prop_map(StyleStep::Ambiguous),
     ]
 }
 
@@ -1014,8 +1031,21 @@ proptest! {
                     swept.state.scroll_view(*d);
                     plain.state.scroll_view(*d);
                 }
+                StyleStep::PullBack(n) => {
+                    swept.state.pull_back_for_test(*n);
+                    plain.state.pull_back_for_test(*n);
+                }
+                StyleStep::Limit(n) => {
+                    swept.state.set_scrollback_limit(*n);
+                    plain.state.set_scrollback_limit(*n);
+                }
+                StyleStep::Ambiguous(w) => {
+                    swept.state.set_ambiguous_width(*w);
+                    plain.state.set_ambiguous_width(*w);
+                }
             }
             swept.state.check_invariants().map_err(TestCaseError::fail)?;
+            swept.state.check_history().map_err(TestCaseError::fail)?;
             prop_assert_eq!(screen_state(&swept), screen_state(&plain), "after {:?}", step);
             let (a, b) = swept.state.style_stats();
             // A sweep leaves at most the screen's cells + 2 ids in use, so

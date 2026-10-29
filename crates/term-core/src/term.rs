@@ -10,7 +10,7 @@ use vte::{OscLarge, Params, Perform};
 use crate::cell::{Cell, Color, Mark, MarkKind, Row, Width};
 pub use crate::links::LinkValue;
 use crate::rows::{Content, RowRef};
-use crate::scrollback::Scrollback;
+use crate::scrollback::{HistoryStats, Scrollback};
 use crate::style::{Attrs, LinkId, Style, Underline};
 use crate::style_table::{StyleStats, StyleTable};
 use crate::unicode::{self, Segmenter};
@@ -388,12 +388,10 @@ pub struct Terminal {
     /// Unique in the process: a new terminal (after a caught parser panic,
     /// say) never repeats an old one's counters or line numbers.
     terminal_id: u64,
-    /// Bumped when history is cleared (ED 3, RIS).
+    /// Bumped when history is cleared (ED 3, RIS). (The lowest line
+    /// pulled back from history since the last snapshot, `popped_from`,
+    /// is kept by the scrollback.)
     history_epoch: u64,
-    /// The lowest line number pulled back from history since the last
-    /// snapshot. Nothing pulls lines back yet (pull-back comes with
-    /// reflow); the snapshot already carries it.
-    popped_from: Option<u64>,
     /// Write printable ASCII runs in bulk ([`Terminal::write_ascii`]); off
     /// only in tests, as the reference the bulk path is compared against.
     bulk_ascii: bool,
@@ -416,7 +414,7 @@ impl Terminal {
             epochs: 2,
             sweep_at_test: None,
             alt_active: false,
-            scrollback: Scrollback::new(scrollback_limit),
+            scrollback: Scrollback::with_widths_as_written(scrollback_limit),
             display_offset: 0,
             top_line: 0,
             other_top_line: 0,
@@ -463,7 +461,6 @@ impl Terminal {
             batch_start: 1,
             terminal_id: snapshot::next_terminal_id(),
             history_epoch: 0,
-            popped_from: None,
             bulk_ascii: true,
         }
         .with_rows_touched()
@@ -535,8 +532,21 @@ impl Terminal {
     }
 
     fn history_row(&self, i: usize) -> RowRef<'_> {
-        let (row, styles) = self.scrollback.get(i).unwrap_or_default();
-        RowRef::new(Cow::Owned(row), Cow::Owned(styles))
+        let mut row = Row::default();
+        let (mut styles, mut links) = (Vec::new(), Vec::new());
+        self.scrollback.get_at_width(i, self.cols, &mut row, &mut styles, &mut links);
+        RowRef::new(Cow::Owned(row), Cow::Owned(styles)).with_links(Cow::Owned(links))
+    }
+
+    /// The history index (0 = oldest kept) of buffer line `line`, if it is
+    /// a stored history line.
+    fn history_index(&self, line: u64) -> Option<usize> {
+        if self.alt_active || line >= self.top_line {
+            return None;
+        }
+        let back = self.top_line - line;
+        let sb = self.scrollback.len();
+        (back <= sb as u64).then(|| sb - back as usize)
     }
 
     /// The cursor's position on the screen, and the pen it writes with.
@@ -616,10 +626,18 @@ impl Terminal {
     /// §6.3 of the cells design): 1 or 2 cells, for output from now on.
     /// Cells already written keep their width, so nothing moves; programs
     /// already running keep the width they worked out themselves. The
-    /// grapheme state is cleared. (When history records the setting per
-    /// block, this also seals the open block.)
+    /// grapheme state is cleared, and history's open block is sealed (if
+    /// it holds any lines): each block records the setting its lines were
+    /// written with, so they read back as written.
     pub fn set_ambiguous_width(&mut self, width: u8) {
-        self.ambiguous = width.clamp(1, 2);
+        let width = width.clamp(1, 2);
+        if width != self.ambiguous {
+            // Cells written before keep their old width: history checks
+            // each one's width from now on.
+            self.scrollback.set_widths_as_written(false);
+        }
+        self.ambiguous = width;
+        self.scrollback.set_ambiguous(self.ambiguous);
         self.clear_grapheme();
     }
 
@@ -650,6 +668,32 @@ impl Terminal {
     /// Bytes used by scrollback, for measuring.
     pub fn scrollback_bytes(&self) -> usize {
         self.scrollback.memory_bytes()
+    }
+
+    /// What history holds, for measuring: bytes, and sealed blocks' bytes
+    /// and lines.
+    pub fn history_stats(&self) -> HistoryStats {
+        self.scrollback.stats()
+    }
+
+    /// The scrollback limit in lines (the `scrollback` setting).
+    pub fn scrollback_limit(&self) -> usize {
+        self.scrollback.limit()
+    }
+
+    /// Change the scrollback limit on a running terminal (live config
+    /// reload). A smaller limit drops the oldest lines at once, as output
+    /// pushing them out would; 0 drops them all. A larger one keeps more
+    /// from now on, and brings back lines still stored but hidden past
+    /// the old limit. The view keeps its place as far as what is left
+    /// allows. Line numbers ([`Point`]s) don't change.
+    pub fn set_scrollback_limit(&mut self, limit: usize) {
+        if limit == self.scrollback.limit() {
+            return;
+        }
+        self.scrollback.set_limit(limit);
+        self.display_offset = self.display_offset.min(self.scrollback.len());
+        self.touch();
     }
 
     /// The stable position of what is shown at view row `view_line` and
@@ -699,8 +743,7 @@ impl Terminal {
     }
 
     /// The OSC 8 hyperlink at `p`, by value (on either half of a wide
-    /// character). History lines have none until history stores links
-    /// (scrollback v2).
+    /// character), on the screen or in history.
     pub fn link_at(&self, p: Point) -> Option<LinkValue> {
         self.row_at(p.line)?.link(p.col).cloned()
     }
@@ -726,15 +769,11 @@ impl Terminal {
 
     /// The OSC 133 marks on line `line`, in the order they were written
     /// (by column; at the same column a command's output and end come
-    /// before the next prompt). History keeps the marks of its lines
-    /// beside them, at the width they were written.
+    /// before the next prompt), on the screen or in history.
     pub fn marks_at(&self, line: u64) -> Vec<Mark> {
         let mut marks: Vec<Mark> = match self.screen_line(line) {
             Some(row) => row.marks().collect(),
-            None => match self.history_index(line) {
-                Some(i) => self.scrollback.marks(i).to_vec(),
-                None => Vec::new(),
-            },
+            None => self.history_index(line).map_or_else(Vec::new, |i| self.scrollback.marks(i)),
         };
         marks.sort_by_key(|m| (m.col, mark_rank(m.kind)));
         marks
@@ -746,33 +785,23 @@ impl Terminal {
         self.screen.get(r)
     }
 
-    /// The first line stored: history's oldest on the primary screen.
-    fn first_line(&self) -> u64 {
-        if self.alt_active {
-            self.top_line
-        } else {
-            self.top_line - self.scrollback.len() as u64
-        }
-    }
-
-    /// History line `line`'s index in the scrollback, if it is there
-    /// (the primary screen's history; the alternate screen has none).
-    fn history_index(&self, line: u64) -> Option<usize> {
-        if self.alt_active || line >= self.top_line {
-            return None;
-        }
-        line.checked_sub(self.first_line()).map(|i| i as usize)
-    }
-
-    /// History's lines holding marks, oldest first, from its list of them.
-    fn history_marked(&self) -> impl DoubleEndedIterator<Item = u64> + '_ {
-        let first = self.first_line();
-        let marked = if self.alt_active { None } else { Some(self.scrollback.marked()) };
-        marked.into_iter().flatten().map(move |i| first + i as u64)
+    /// History's lines with marks, as buffer lines, nearest first: before
+    /// `from` going up, at or after it going down. The alternate screen
+    /// has no history.
+    fn history_marked(&self, from: u64, up: bool) -> impl Iterator<Item = u64> + '_ {
+        let base = self.top_line.saturating_sub(self.scrollback.len() as u64);
+        let mut at = (!self.alt_active && !(up && from <= base)).then(|| (from.clamp(base, self.top_line) - base) as usize);
+        std::iter::from_fn(move || {
+            let i = self.scrollback.marked(at?, up)?;
+            at = Some(if up { i } else { i + 1 });
+            Some(base + i as u64)
+        })
     }
 
     /// Lines holding marks, nearest first: before `line` going up, or
-    /// after it going down (`None`: every one, oldest first).
+    /// after it going down (`None`: every one, oldest first). History
+    /// lines are found from their flags, skipping blocks without marks
+    /// (§11.6).
     fn marked_lines(&self, line: Option<u64>, up: bool) -> Box<dyn Iterator<Item = u64> + '_> {
         let top = self.top_line;
         let hi = top + self.lines as u64;
@@ -780,13 +809,13 @@ impl Terminal {
         match line {
             Some(line) if up => {
                 let screen = (top..line.min(hi)).rev().filter(has);
-                Box::new(screen.chain(self.history_marked().rev().filter(move |&l| l < line)))
+                Box::new(screen.chain(self.history_marked(line, true)))
             }
             Some(line) => {
                 let screen = (line.saturating_add(1).max(top)..hi).filter(has);
-                Box::new(self.history_marked().filter(move |&l| l > line).chain(screen))
+                Box::new(self.history_marked(line.saturating_add(1), false).chain(screen))
             }
-            None => Box::new(self.history_marked().chain((top..hi).filter(has))),
+            None => Box::new(self.history_marked(0, false).chain((top..hi).filter(has))),
         }
     }
 
@@ -1093,10 +1122,13 @@ impl Terminal {
             self.other_top_line += removed.len() as u64;
             // Those rows' ids are in the primary screen's table.
             for row in removed {
-                if self.scrollback.limit() > 0 {
-                    self.scrollback.push(&row, self.other_styles.styles());
-                    self.follow_history();
-                }
+                self.scrollback.push_keyed(
+                    &row,
+                    self.other_styles.styles(),
+                    self.other_styles.links().as_slice(),
+                    self.other_styles.version(),
+                );
+                self.follow_history();
             }
             if let Some(saved) = &mut self.saved_primary {
                 saved.cursor.row = cursor.row;
@@ -1289,15 +1321,14 @@ impl Terminal {
         self.epochs
     }
 
-    /// Copy a row of the active screen into scrollback. The row itself is
+    /// Copy a row of the primary screen into scrollback. The row itself is
     /// left for the caller to reuse as the new blank line. Callers also
-    /// advance the screen's `top_line`, which counts rows whether or not
-    /// they were stored.
+    /// advance the screen's `top_line`; the scrollback counts the row
+    /// whether or not it keeps it, so its line numbers stay the screen's.
+    #[inline]
     fn push_scrollback(&mut self, row: &Row) {
-        if self.scrollback.limit() == 0 {
-            return;
-        }
-        self.scrollback.push(row, self.styles.styles());
+        self.scrollback
+            .push_keyed(row, self.styles.styles(), self.styles.links().as_slice(), self.styles.version());
         self.follow_history();
     }
 
@@ -1606,6 +1637,8 @@ impl Terminal {
         // Like xterm, a full reset clears scrollback too.
         fresh.scrollback = std::mem::replace(&mut self.scrollback, Scrollback::new(0));
         fresh.scrollback.clear();
+        // Every cell is new, written at the current setting.
+        fresh.scrollback.set_widths_as_written(true);
         // Keep line numbers counting up from the primary screen's.
         let primary_top = if self.alt_active { self.other_top_line } else { self.top_line };
         fresh.top_line = primary_top;
@@ -1616,7 +1649,6 @@ impl Terminal {
         fresh.counter = self.counter;
         fresh.batch_start = self.batch_start;
         fresh.history_epoch = self.history_epoch + 1;
-        fresh.popped_from = self.popped_from;
         *self = fresh;
         self.touch_all_rows();
     }
@@ -2884,6 +2916,67 @@ impl Terminal {
         self.bulk_ascii = on;
     }
 
+    /// Test aid: every stored history line read through (its sections,
+    /// text and the block's checkpoints), a pass over all of history.
+    #[doc(hidden)]
+    pub fn check_history(&self) -> Result<(), String> {
+        self.scrollback.check_all()
+    }
+
+    /// Test aid: pull the newest `n` history lines back onto the top of
+    /// the primary screen, as they were stored (no reflow; that comes with
+    /// PR 11), dropping as many rows from the bottom. Their line numbers
+    /// are handed out again as output pushes them back, which is what the
+    /// snapshot's `popped_from` is for.
+    #[doc(hidden)]
+    pub fn pull_back_for_test(&mut self, n: usize) {
+        if self.alt_active {
+            return;
+        }
+        self.clear_grapheme();
+        self.styles.set_sweeps_blocked(true);
+        let (mut row, mut styles, mut links) = (Row::default(), Vec::new(), Vec::new());
+        for _ in 0..n {
+            if !self.scrollback.pop_into(self.cols, &mut row, &mut styles, &mut links) {
+                break;
+            }
+            let ids: Vec<Cell> = styles
+                .iter()
+                .map(|s| {
+                    let mut s = *s;
+                    if let Some(Some(l)) = links.get(s.link as usize) {
+                        s.link = self.styles.links_mut().intern(l);
+                    }
+                    if s == Style::DEFAULT { Cell::BLANK } else { self.intern(s) }
+                })
+                .collect();
+            for c in &mut row.cells {
+                *c = c.with_style(ids[c.style_id() as usize]);
+            }
+            // To the screen's width, as a resize without reflow does.
+            let mut one = VecDeque::from([std::mem::take(&mut row)]);
+            resize_screen(&mut one, &mut Cursor::default(), self.cols, 1);
+            let mut back = one.pop_front().expect("one row");
+            if back.cells.last().is_some_and(|c| c.width() == Width::EdgeSpacer) && !back.wrapped {
+                let last = back.cells.len() - 1;
+                back.cells[last] = back.cells[last].style_part();
+            }
+            back.seq = 0;
+            snapshot::touch(&mut back, &mut self.counter, self.batch_start);
+            self.screen.pop_back();
+            self.screen.push_front(back);
+            self.top_line -= 1;
+            self.cursor.row = (self.cursor.row + 1).min(self.lines - 1);
+        }
+        self.styles.set_sweeps_blocked(false);
+        if self.styles.needs_sweep() {
+            self.sweep_styles(false);
+        }
+        self.display_offset = self.display_offset.min(self.scrollback.len());
+        self.selection = None;
+        self.touch();
+    }
+
     /// Test aid: sweep the style tables once they hold `n` ids (at least
     /// 2), instead of 1.5 × the screen's cells; `None` goes back to that.
     /// With a small `n` sweeps and renumberings happen every few prints, so
@@ -3030,11 +3123,18 @@ impl Terminal {
             ));
         }
         let primary_top = if self.alt_active { self.other_top_line } else { self.top_line };
-        if primary_top < self.scrollback.len() as u64 {
+        if primary_top != self.scrollback.total() {
             return Err(format!(
-                "primary screen starts at line {primary_top}, before its {} scrollback lines",
-                self.scrollback.len()
+                "primary screen starts at line {primary_top}, history ends at {}",
+                self.scrollback.total()
             ));
+        }
+        self.scrollback.check().map_err(|e| format!("history: {e}"))?;
+        let primary = if self.alt_active { &self.other_screen } else { &self.screen };
+        for (r, row) in primary.iter().enumerate() {
+            self.scrollback
+                .check_widths(row)
+                .map_err(|e| format!("primary row {r}, as history would store it: {e}"))?;
         }
         if self.last_cluster.len() > crate::clusters::MAX_BYTES {
             return Err(format!("the last grapheme is {} bytes", self.last_cluster.len()));
@@ -3111,6 +3211,11 @@ fn check_cell(cell: Cell, styles: &StyleTable) -> Result<(), String> {
     }
     if !cell.is_cluster() && cell.codepoint() != 0 && char::from_u32(cell.codepoint()).is_none() {
         return Err(format!("cell {bits:#x} holds no scalar"));
+    }
+    // C0 controls are executed, never printed; history's text relies on
+    // it (0x0A ends a stored line).
+    if !cell.is_cluster() && (1..0x20).contains(&cell.codepoint()) {
+        return Err(format!("cell {bits:#x} holds a C0 control"));
     }
     if cell.is_spacer() && (cell.codepoint() != 0 || cell.is_cluster()) {
         return Err(format!("spacer {bits:#x} holds a character"));

@@ -489,3 +489,40 @@ fn vs16_next_to_a_narrow_char_overwrites_it() {
     cursor=(0,2) alt=false offset=0
     ");
 }
+
+#[test]
+fn the_scrollback_limit_changes_on_a_running_terminal() {
+    let mut t = Term::new(10, 2, 100);
+    for n in 0..50 {
+        t.advance(format!("line{n}\r\n").as_bytes());
+    }
+    assert_eq!(t.state.scrollback_len(), 49);
+    t.state.scroll_view(40);
+    let top = t.state.point_at(0, 0);
+    // Smaller: the oldest lines go at once; the view keeps its place.
+    t.state.set_scrollback_limit(45);
+    assert_eq!((t.state.scrollback_limit(), t.state.scrollback_len()), (45, 45));
+    assert_eq!(t.state.point_at(0, 0), top);
+    t.state.check_invariants().unwrap();
+    // Smaller than where the view is: it moves to the oldest line kept.
+    t.state.set_scrollback_limit(10);
+    assert_eq!(t.state.display_offset(), 10);
+    assert_eq!(text(&t, 0), "line39");
+    // Larger: lines still stored come back, and more are kept from now on.
+    t.state.set_scrollback_limit(1000);
+    assert_eq!(t.state.scrollback_len(), 49);
+    for n in 50..100 {
+        t.advance(format!("line{n}\r\n").as_bytes());
+    }
+    assert_eq!(t.state.scrollback_len(), 99);
+    // 0 keeps nothing, and line numbers carry on.
+    t.state.set_scrollback_limit(0);
+    assert_eq!((t.state.scrollback_len(), t.state.display_offset()), (0, 0));
+    t.advance(b"more\r\n");
+    assert_eq!(t.state.scrollback_len(), 0);
+    t.state.check_invariants().unwrap();
+    t.state.set_scrollback_limit(5);
+    t.advance(b"again\r\n");
+    assert_eq!(t.state.scrollback_len(), 1);
+    t.state.check_invariants().unwrap();
+}

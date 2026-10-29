@@ -144,6 +144,13 @@ impl Clusters {
         }
     }
 
+    /// Make room for `slots` more clusters and `bytes` more text, so a row
+    /// read back from history fills its store with one allocation each.
+    pub fn reserve(&mut self, slots: usize, bytes: usize) {
+        self.spans.reserve(slots);
+        self.text.reserve(bytes.min(MAX_ROW_BYTES));
+    }
+
     /// Free every slot, keeping the allocations.
     pub fn clear(&mut self) {
         self.text.clear();

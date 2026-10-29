@@ -28,6 +28,13 @@ fn osc(cmd: &str) -> String {
     format!("printf '\\033]7770;{cmd}\\007'; ")
 }
 
+/// Shell that waits until this script's process group owns the terminal.
+/// `set -m` forks the job and hands it the terminal a moment later, and
+/// closing the window before that finds only the shell running.
+fn in_foreground() -> &'static str {
+    "until [ \"$(ps -o tpgid= -p $$)\" = \"$(ps -o pgid= -p $$)\" ]; do sleep 0.05; done; "
+}
+
 struct TempDir(PathBuf);
 
 impl TempDir {
@@ -1082,7 +1089,17 @@ fn smoke_confirm_close_asks_while_a_program_runs() {
     std::fs::write(dir.config_home().join("terminal-decline/config.toml"), "confirm_close = true\n").unwrap();
     // A job in the foreground, as an interactive shell runs one.
     let job = dir.path().join("job.sh");
-    std::fs::write(&job, format!("{}sleep 1; {}{}sleep 20\n", osc("close"), osc("dump"), osc("quit"))).unwrap();
+    std::fs::write(
+        &job,
+        format!(
+            "{}{}sleep 1; {}{}sleep 20\n",
+            in_foreground(),
+            osc("close"),
+            osc("dump"),
+            osc("quit")
+        ),
+    )
+    .unwrap();
     let (status, _) = decline(&dir, &format!("set -m; /bin/sh '{}'; sleep 20", job.display()), true);
     assert!(status.success(), "{status}");
     let d = dumps(&dir);

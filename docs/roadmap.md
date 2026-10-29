@@ -85,6 +85,8 @@ set, not only perf work: shaping, images and the updater each cost something.
 | E.13 | vttest (named menus) and esctest2 (checked-in list of accepted failures) | M |
 | E.14 | Small bugs: VS16 with autowrap off; CSI M on the top row | S |
 | E.15 | Privacy statement: no telemetry; only network call is the update check; crash reports local; "Report a problem" opens a pre-filled issue | S |
+| E.17 | Rename to Terminal Decline everywhere (app, bundle id, command with `decline` alias, config dir with migration, pins, cask) | S |
+| E.18 | Preferences: Cmd+, opens a tab running the built-in settings TUI (sectioned list, live preview, keeps comments in config.toml); design in docs/design/preferences.md | M |
 | E.16 | Release: make repo + tap public, **then** tag `0.1.0`; changelog (git-cliff); cask caveats + `zap`; smoke on macOS 14 | S |
 
 ## B — Betas to 1.0 (0.x releases)

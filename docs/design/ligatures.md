@@ -200,6 +200,30 @@ their frame build drops by ≥ 20%.
 
 ## 5. Cost
 
+**Measured in B1.1 (29 Oct 2026): no-go for shaping under the lock.**
+`cargo bench -p term-font --bench shape`, warm, one CTLine per row of
+real Rust/TypeScript code, busy machine:
+
+| font | 80 cells | 160 cells | 300 cells | first CTLine |
+|---|---|---|---|---|
+| JetBrains Mono | 72 µs | 147 µs | 297 µs | 1.1 ms |
+| Fira Code | 49 µs | 99 µs | 212 µs | 0.9 ms |
+| Cascadia Code | 50 µs | 104 µs | 242 µs | 0.6 ms |
+| Iosevka | 67 µs | 96 µs | 160 µs | 4.0 ms |
+| Monaspace Neon | 16 µs | 33 µs | 68 µs | 0.17 ms |
+| Menlo (fast path) | 0.9 µs | 1.7 µs | 3.1 µs | — |
+
+The time is the fonts' own `calt` lookups in Core Text (JetBrains Mono
+with `calt` off: ~22 µs at 300 cells). A full 300×100 redraw of code is
+~30 ms, 100×30 ~2–3 ms, against 0.5 ms. So B1.2 must: shape outside the
+terminal lock; cache by row (and keep B1.4's text cache); and shape only
+the stretches that can ligate (runs of operator/punctuation characters
+and their neighbours, per the font's `calt` input classes if cheap to
+read), drawing the rest through the per-character fast path. B1.2
+measures each step against §4.2's limits.
+
+The estimates below were written before the measurement.
+
 CTLine time depends heavily on the font. Measured on this Mac with Core
 Text from Swift, one CTLine of Latin text: Menlo 4.5 µs (160 chars) /
 6.4 µs (300); SF Mono 4.4 µs (160); Courier New, whose GSUB has no Latin

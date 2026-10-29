@@ -29,9 +29,9 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use crate::keys::{KeyEventType, KeyInput, flags};
 
 /// The app's actions that can be bound: its menu items. The pane actions
-/// (splits, focus, resize, zoom, `close_tab`, `close_window`) have
-/// defaults but no menu items or handlers yet; until they do, their keys
-/// do what they did before.
+/// that move dividers and zoom (`resize_pane_*`, `equalize_panes`,
+/// `toggle_pane_zoom`) have defaults but no menu items or handlers yet;
+/// until they do, their keys do what they did before.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum MenuAction {
     NewWindow,
@@ -150,8 +150,9 @@ impl MenuAction {
         }
     }
 
-    /// Its menu item, as the menus and the preferences show it. The pane
-    /// actions have no items yet; these are the names they will have.
+    /// Its menu item, as the menus and the preferences show it. The
+    /// divider and zoom actions have no items yet; these are the names
+    /// they will have.
     pub fn label(self) -> &'static str {
         match self {
             MenuAction::NewWindow => "New Window",
@@ -188,14 +189,14 @@ impl MenuAction {
         }
     }
 
-    /// The menu item's action, sent up the responder chain. (`close`
-    /// stays `performClose:`, closing the tab, until panes can close on
-    /// their own.)
+    /// The menu item's action, sent up the responder chain. `close`
+    /// closes the focused pane, and the tab with its last pane;
+    /// `close_tab` is the title bar's close button.
     pub fn selector(self) -> &'static CStr {
         match self {
             MenuAction::NewWindow => c"newWindow:",
             MenuAction::NewTab => c"newTab:",
-            MenuAction::Close => c"performClose:",
+            MenuAction::Close => c"closePane:",
             MenuAction::Copy => c"copy:",
             MenuAction::Paste => c"paste:",
             MenuAction::SelectAll => c"selectAll:",
@@ -885,14 +886,13 @@ mod tests {
         };
         assert_eq!(b.resolve(&bracket("]", COMMAND)), Some(&Bound::Menu(MenuAction::FocusPaneNext)));
         assert_eq!(b.resolve(&bracket("}", COMMAND | SHIFT)), Some(&Bound::Menu(MenuAction::NextTab)));
-        // One action per default chord, and names and selectors are distinct
-        // (Close and CloseTab share `performClose:` for now).
+        // One action per default chord, and names and selectors are distinct.
         let chords: BTreeSet<Chord> = DEFAULTS.iter().map(|(c, _)| chord(c)).collect();
         assert_eq!(chords.len(), DEFAULTS.len());
         let names: BTreeSet<&str> = MenuAction::ALL.iter().map(|a| a.name()).collect();
         assert_eq!(names.len(), MenuAction::ALL.len());
         let selectors: BTreeSet<&CStr> = MenuAction::ALL.iter().map(|a| a.selector()).collect();
-        assert_eq!(selectors.len(), MenuAction::ALL.len() - 1);
+        assert_eq!(selectors.len(), MenuAction::ALL.len());
     }
 
     #[test]

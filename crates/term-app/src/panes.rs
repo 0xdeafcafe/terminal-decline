@@ -1057,6 +1057,7 @@ mod tests {
         let saved = p.save(|id| SavedPane {
             cwd: Some(format!("/p{id}")),
             command: (id == 2).then(|| "nvim 'a b.rs'".into()),
+            program: id == 1,
         });
         assert_eq!((saved.focused, saved.zoomed), (3, Some(3)));
         let json = serde_json::to_string(&saved).unwrap();
@@ -1085,8 +1086,8 @@ mod tests {
             root: SavedNode::Split {
                 dir: Dir::Down,
                 ratio: f32::NAN,
-                a: Box::new(SavedNode::Pane(SavedPane { cwd: None, command: None })),
-                b: Box::new(SavedNode::Pane(SavedPane { cwd: None, command: None })),
+                a: Box::new(SavedNode::Pane(SavedPane::default())),
+                b: Box::new(SavedNode::Pane(SavedPane::default())),
             },
             focused: 7,
             zoomed: Some(9),

@@ -382,6 +382,74 @@ term-app's view is split in two, still with one pane per window:
   view. Whether full screen is shown direct or composited (Metal HUD)
   wasn't checked.
 
+### 3.7 Landed (B2.3b)
+
+Panes split, close and take focus; dividers are drawn but don't drag yet
+(B2.3c), and there is no zoom.
+
+- **Actions** on `WindowView`, in the responder chain behind the pane
+  views: `splitRight:` / `splitDown:`, `closePane:` (Shell > Close, now
+  Cmd+W), `closeWindow:` (every tab), `selectPane{Left,Right,Up,Down}:`,
+  `selectNextPane:` / `selectPreviousPane:`. Shell menu: Split Right,
+  Split Down, Close, Close Tab, Close Window; Window menu: the six
+  Select items. A refused split (too small) or no pane that way beeps.
+  Resize, equalize and zoom keep their defaults with no items yet.
+- **A split** runs the user's login shell (the config's `env` and
+  `cwd`; never the window's own program, so a pin's split is a shell) in
+  the focused pane's working directory, sized from its rect, and gets
+  focus. Closing a pane moves focus first, then removes its view and
+  hangs up; the last pane closes the tab. A pane's program exiting closes
+  that pane only; a held pane closes on a key in it.
+- **Focus** follows the first responder. `becomeFirstResponder` sets the
+  tree's focus, shows the pane's last title (each pane keeps its own;
+  "Settings" for the Settings pane, `title` from the config wins), and
+  reports focus-in when the window is key. `resignFirstResponder`
+  commits marked text (after `discardMarkedText`, unless the input
+  method committed it itself), reports focus-out, and sends kitty
+  releases for keys still down (`keys::focus_release`); a modifier
+  release a pane never saw pressed is dropped. A left click that focuses
+  a pane is swallowed through its mouse-up; `acceptsFirstMouse` is YES
+  only for unfocused panes, so clicking the focused pane of an inactive
+  window still only activates it.
+- **Drawing**: the focused pane alone blinks; the others draw the hollow
+  cursor. Dividers (`Palette::divider`) go to `present_panes` from the
+  layout, kept in `State` and laid out with the panes.
+- **Mouse and cursor**: each pane view has a tracking area (mouse moved,
+  key window, visible rect) and the window's `acceptsMouseMovedEvents`
+  is no longer set. `WindowView::resetCursorRects` puts the I-beam over
+  each pane below the title bar (also with one pane: before, the arrow).
+  `contentMinSize` follows `Panes::min_size` with several panes.
+- **Keys**: Cmd+← / → / ⌫ send ^A / ^E / ^U only with Cmd or Cmd+Shift
+  alone.
+- **`confirm_close`** asks once per close: Cmd+W on a pane running a
+  program asks about that pane; closing a tab or window names every
+  running pane's program ("in 2 of its panes"); quitting counts panes.
+  The Settings pane never counts.
+- **Settings** is per pane: the preferences run in one pane (`Pane::
+  settings`), which alone may record chords, gets `type-settings`, and is
+  what Cmd+, focuses; its splits are ordinary shells. If it closes while
+  the tab stays, Cmd+, opens a new Settings tab.
+- **Restore**: `SavedWindow::panes` is written with more than one pane
+  (each pane's folder, the command in its shell's foreground, and the new
+  `SavedPane::program`: it ran the window's program, which it runs again;
+  otherwise the user's shell). Each restored pane types its own command
+  at its prompt. A saved zoom is dropped until zoom lands.
+- **Test control**: `split right|down`, `focus N|next|previous|left|
+  right|up|down`, `close-pane` and `save` (the windows as a restart saves
+  them, to `<dump>.saved`); dumps list every pane (`panes`: id, rect,
+  grid, focused, screen) and `dividers`. Smoke tests: a split runs the
+  shell in the pane's folder and both programs see their sizes; keys go
+  to the focused pane only; `focus`; Cmd+W closes the focused pane and the
+  other fills the window again; an exiting pane closes; `confirm_close`
+  asks for a busy pane and not for an idle one; a 3-pane layout restores
+  (shares, folders, programs, typed command, focus) and saves back the
+  same.
+- **Measured** (release, M1 Max under load from other agents, load
+  average 31–41; 100×30 window at 2×, idle zsh in each split, 25 s after
+  opening): `footprint` 31 MB with 1 pane, 32 MB with 2, 33 MB with 4
+  (about 0.6 MB per extra idle pane); 0.0% CPU and 0 idle wake-ups
+  (`top -stats cpu,idlew`, three 3 s samples) with 1, 2 and 4 panes.
+
 ## 4. Input and focus
 
 - The focused pane's PaneView is the window's first responder. Focus

@@ -9,10 +9,11 @@ use std::time::Instant;
 
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, ProtocolObject, Sel};
-use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
+use objc2::{AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSApplication, NSCursor, NSDragOperation, NSDraggingInfo, NSEvent, NSEventModifierFlags, NSMenu, NSMenuItem, NSPasteboard,
-    NSPasteboardTypeFileURL, NSPasteboardTypeString, NSPasteboardTypeURL, NSResponder, NSTextInputClient, NSView,
+    NSApplication, NSCursor, NSDragOperation, NSDraggingInfo, NSEvent, NSEventModifierFlags, NSEventType, NSMenu, NSMenuItem, NSPasteboard,
+    NSPasteboardTypeFileURL, NSPasteboardTypeString, NSPasteboardTypeURL, NSResponder, NSTextInputClient, NSTrackingArea,
+    NSTrackingAreaOptions, NSView,
 };
 use objc2_foundation::{
     NSArray, NSAttributedString, NSAttributedStringKey, NSNotFound, NSObjectProtocol, NSPoint, NSRange, NSRect, NSSize, NSString, NSURL,
@@ -47,6 +48,34 @@ define_class!(
             true
         }
 
+        /// The focused pane works as before: the click that activates the
+        /// window only activates it. Another pane takes that click, and
+        /// with it focus (which swallows it).
+        #[unsafe(method(acceptsFirstMouse:))]
+        fn accepts_first_mouse(&self, _event: Option<&NSEvent>) -> bool {
+            self.window_view().and_then(|w| w.focused_pane()).is_some_and(|f| f != self.pane())
+        }
+
+        /// AppKit makes the pane first responder itself: before a click
+        /// reaches it, and when focus moves with the keys.
+        #[unsafe(method(becomeFirstResponder))]
+        fn become_first_responder(&self) -> bool {
+            let ok: bool = unsafe { msg_send![super(self), becomeFirstResponder] };
+            if ok && let Some(w) = self.window_view() {
+                w.pane_focused(self.pane(), self.clicked_now());
+            }
+            ok
+        }
+
+        #[unsafe(method(resignFirstResponder))]
+        fn resign_first_responder(&self) -> bool {
+            let ok: bool = unsafe { msg_send![super(self), resignFirstResponder] };
+            if ok {
+                self.lose_focus();
+            }
+            ok
+        }
+
         #[unsafe(method(isFlipped))]
         fn is_flipped(&self) -> bool {
             true
@@ -69,17 +98,23 @@ define_class!(
 
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) {
-            self.mouse_button_event(event, 0, true);
+            if !self.swallowing(false) {
+                self.mouse_button_event(event, 0, true);
+            }
         }
 
         #[unsafe(method(mouseUp:))]
         fn mouse_up(&self, event: &NSEvent) {
-            self.mouse_button_event(event, 0, false);
+            if !self.swallowing(true) {
+                self.mouse_button_event(event, 0, false);
+            }
         }
 
         #[unsafe(method(mouseDragged:))]
         fn mouse_dragged(&self, event: &NSEvent) {
-            self.mouse_motion(event, Some(0));
+            if !self.swallowing(false) {
+                self.mouse_motion(event, Some(0));
+            }
         }
 
         #[unsafe(method(rightMouseDown:))]
@@ -282,7 +317,81 @@ impl PaneView {
         let view: Retained<PaneView> = unsafe { msg_send![super(this), initWithFrame: frame] };
         let types = unsafe { [NSPasteboardTypeFileURL, NSPasteboardTypeURL, NSPasteboardTypeString] };
         view.registerForDraggedTypes(&NSArray::from_slice(&types));
+        // Mouse moves over this pane, for mode 1003 (the window's
+        // `acceptsMouseMovedEvents` is off). Its rect follows the view.
+        let options = NSTrackingAreaOptions::MouseMoved | NSTrackingAreaOptions::ActiveInKeyWindow | NSTrackingAreaOptions::InVisibleRect;
+        let area = unsafe {
+            NSTrackingArea::initWithRect_options_owner_userInfo(NSTrackingArea::alloc(), NSRect::ZERO, options, Some(&view), None)
+        };
+        view.addTrackingArea(&area);
         view
+    }
+
+    /// Whether the event being handled is a left click in this view.
+    fn clicked_now(&self) -> bool {
+        let mtm = MainThreadMarker::from(self);
+        let Some(event) = NSApplication::sharedApplication(mtm).currentEvent() else {
+            return false;
+        };
+        if event.r#type() != NSEventType::LeftMouseDown {
+            return false;
+        }
+        let ours = event
+            .window(mtm)
+            .zip(self.window())
+            .is_some_and(|(e, w)| std::ptr::eq::<objc2_app_kit::NSWindow>(&*e, &*w));
+        let at = self.convertPoint_fromView(event.locationInWindow(), None);
+        let b = self.bounds();
+        ours && at.x >= b.origin.x && at.y >= b.origin.y && at.x < b.origin.x + b.size.width && at.y < b.origin.y + b.size.height
+    }
+
+    /// Whether the left button's events belong to the click that focused
+    /// this pane; `up`: its release, which ends that.
+    fn swallowing(&self, up: bool) -> bool {
+        self.with(|_, p| {
+            let swallow = p.swallow_click;
+            if up {
+                p.swallow_click = false;
+            }
+            swallow
+        })
+        .unwrap_or(false)
+    }
+
+    /// Another pane (or nothing, as the window closes) took the keys:
+    /// text being composed is committed, as NSTextView does, the program
+    /// is told if it asked for focus events, and keys still down are
+    /// released for a program that asked for releases (kitty flag 2).
+    fn lose_focus(&self) {
+        let Some(modes) = self.key_modes() else { return };
+        if modes.composing {
+            // The input method may commit it itself (through `insertText`).
+            if let Some(ctx) = self.inputContext() {
+                ctx.discardMarkedText();
+            }
+            let marked = self.with(|_, p| std::mem::take(&mut p.marked)).unwrap_or_default();
+            if !marked.is_empty() {
+                let modes = KeyModes { composing: false, ..modes };
+                self.send_input(crate::keys::committed_text(None, modes, &marked));
+            }
+        }
+        let Some((report, down)) = self.with(|win, p| {
+            let report = win.focused && p.session.lock_term().state.modes().focus_events;
+            p.swallow_click = false;
+            (report, p.keys_down.take())
+        }) else {
+            return;
+        };
+        for code in down {
+            let plain = crate::ascii_layout::chars(code).0;
+            if let Some(bytes) = crate::keys::focus_release(code, plain, modes) {
+                self.send_raw(bytes);
+            }
+        }
+        if report {
+            self.send_raw(b"\x1b[O".to_vec());
+        }
+        self.request_redraw();
     }
 
     fn window_view(&self) -> Option<Retained<WindowView>> {
@@ -305,9 +414,10 @@ impl PaneView {
         }
     }
 
-    fn close_window(&self) {
+    /// Close this pane (the window with its last).
+    fn close(&self) {
         if let Some(w) = self.window_view() {
-            w.close_window();
+            w.close_pane(self.pane());
         }
     }
 
@@ -416,7 +526,7 @@ impl PaneView {
         // A held pane closes on any key; Cmd shortcuts (copy the error,
         // close, quit) still go to the menus.
         if input.flags & crate::keys::flags::COMMAND == 0 && self.with(|_, p| p.held) == Some(true) {
-            self.close_window();
+            self.close();
             return;
         }
         let Some(modes) = self.key_modes() else { return };
@@ -496,18 +606,27 @@ impl PaneView {
     }
 
     /// A modifier key went down or up: reported only when the program
-    /// asked for every key (kitty flag 8).
+    /// asked for every key (kitty flag 8). A release is dropped if this
+    /// pane didn't see the press (it went to another pane).
     fn handle_flags_changed(&self, event: &NSEvent) {
         let Some(modes) = self.key_modes() else { return };
-        if modes.kitty_flags & crate::keys::kitty::ALL_KEYS == 0 {
-            return;
-        }
         // `flagsChanged` events have no characters.
         let input = KeyInput {
             keycode: event.keyCode(),
             flags: event.modifierFlags().0,
             ..KeyInput::default()
         };
+        let seen = self.with(|_, p| match crate::keys::modifier_pressed(input.keycode, input.flags) {
+            Some(true) => {
+                p.keys_down.press(input.keycode);
+                true
+            }
+            Some(false) => p.keys_down.release(input.keycode),
+            None => true,
+        });
+        if seen != Some(true) || modes.kitty_flags & crate::keys::kitty::ALL_KEYS == 0 {
+            return;
+        }
         if let KeyAction::Send(bytes) = crate::keys::translate(&input, modes) {
             self.send_raw(bytes);
         }

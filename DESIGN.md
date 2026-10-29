@@ -224,8 +224,9 @@ tables and landing pads: 1.34 → 1.50 MB) and no measurable parse speed.
   Cmd+C copy (selection), Cmd+V paste (bracketed paste when on), Cmd+N new
   window, Cmd+T new tab, Cmd+Shift+[ / ] previous / next tab, Cmd+1…8 that
   tab and Cmd+9 the last, Cmd+W close, Cmd+Q quit, Cmd+K clear scrollback,
-  Cmd+= / Cmd+- font size, Ctrl+Cmd+F full screen. Pins may disable or
-  remap these in their config.
+  Cmd+= / Cmd+- font size, Ctrl+Cmd+F full screen. These are the
+  defaults of the `[keybind]` config (below), which remaps or unbinds them
+  and makes keys send text; pins may override it in their own config.
 - Secure Keyboard Entry (decline menu, with a checkmark; kept in user
   defaults as `SecureKeyboardEntry`): `EnableSecureEventInput` so no other
   process sees the keys typed, as in Terminal.app. macOS has one switch
@@ -365,6 +366,27 @@ the installed `Decline.app`.
 `~/.config/decline/config.toml`: font family/size, colours (16 + fg/bg/cursor/
 selection), padding, opacity/blur, option-as-meta, scrollback lines, shell.
 Read once at start; later: reload on file change (FSEvents, no polling).
+
+Shortcuts (`[keybind]`, `keybind`): a chord (`"cmd+k"`, `"ctrl+shift+t"`,
+`"cmd+enter"`; modifiers cmd, ctrl, alt, shift; keys by character or name)
+set to a menu action (new_window, new_tab, close, copy, paste, select_all,
+clear_scrollback, font_bigger, font_smaller, font_reset,
+toggle_full_screen, next_tab, previous_tab, and find, a placeholder whose
+Edit > Find… item stays disabled until the find bar exists), `"none"`, or
+`{ text = "…" }`. The menus' own shortcuts are the defaults and each entry
+replaces or removes one chord; the menus are built from the result, so
+they show what works (an action's first chord shows, any others work
+hidden, as Cmd+1…9 do), and the fixed items (Quit, Hide, Minimize,
+Cmd+1…9) give up a chord the config names. Cmd chords bound to actions
+are matched by the menus; the view performs those without Cmd and sends
+text bindings before `keys::translate`. An unbound key, `"none"`
+included, does what it does with no config: Cmd+← / → / ⌫ edit the line,
+other Cmd keys do nothing, the rest go to the program. Characters are
+matched on the ASCII-capable layout, so bindings work on non-Latin
+layouts. A pin's `[keybind]` merges over the user's chord by chord (each
+layer's chords are spelled one way before merging, so `"command+D"`
+replaces `"cmd+d"`). A bad entry is a config notice naming it and is
+ignored.
 
 Fonts (`config::Config::font_config` → `term_font::Fonts::with_config`):
 `font_family`, `font_size`, `font_fallback = [..]` (tried in order before

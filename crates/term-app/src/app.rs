@@ -16,6 +16,7 @@ use term_font::Fonts;
 use term_pty::Command;
 
 use crate::config::Config;
+use crate::keybind::{Keybinds, MenuAction};
 use crate::reload::SavedWindow;
 use crate::secure_input::{self, SecureInput};
 use crate::view::{Launch, TerminalView, content_size, delegate_of};
@@ -534,14 +535,50 @@ fn submenu(mtm: MainThreadMarker, bar: &NSMenu, title: &str, items: &[Retained<N
     menu
 }
 
+/// A menu item for `action`, showing the first chord bound to it, plus
+/// hidden items for any other chords (their keys still work, as Cmd+1…9
+/// do).
+fn bound(mtm: MainThreadMarker, title: &str, action: MenuAction, binds: &Keybinds) -> Vec<Retained<NSMenuItem>> {
+    let sel = Some(Sel::register(action.selector()));
+    let chords = binds.chords(action);
+    let mut items = vec![item(mtm, title, sel, "")];
+    for (i, chord) in chords.iter().enumerate() {
+        let it = if i == 0 {
+            items[0].clone()
+        } else {
+            let hidden = item(mtm, title, sel, "");
+            hidden.setHidden(true);
+            hidden.setAllowsKeyEquivalentWhenHidden(true);
+            items.push(hidden.clone());
+            hidden
+        };
+        let (key, mask) = chord.key_equivalent();
+        it.setKeyEquivalent(&NSString::from_str(&key));
+        it.setKeyEquivalentModifierMask(NSEventModifierFlags(mask));
+    }
+    items
+}
+
+/// A menu item whose shortcut isn't configurable (`chord`, as `"cmd+q"`),
+/// unless the config binds that chord to something else: then it has none.
+fn fixed(mtm: MainThreadMarker, title: &str, action: Sel, chord: &str, binds: &Keybinds) -> Retained<NSMenuItem> {
+    let it = item(mtm, title, Some(action), "");
+    if binds.keeps_fixed(chord)
+        && let Ok(c) = crate::keybind::Chord::parse(chord)
+    {
+        let (key, mask) = c.key_equivalent();
+        it.setKeyEquivalent(&NSString::from_str(&key));
+        it.setKeyEquivalentModifierMask(NSEventModifierFlags(mask));
+    }
+    it
+}
+
 /// The menu bar. macOS needs one; these are the standard items plus the
-/// terminal's few shortcuts.
-pub fn build_menus(mtm: MainThreadMarker, app_name: &str) -> Retained<NSMenu> {
+/// terminal's few shortcuts, with the keys `binds` gives them.
+pub fn build_menus(mtm: MainThreadMarker, app_name: &str, binds: &Keybinds) -> Retained<NSMenu> {
     let bar = NSMenu::new(mtm);
-    let full_screen = item(mtm, "Enter Full Screen", Some(sel!(toggleFullScreen:)), "f");
-    full_screen.setKeyEquivalentModifierMask(NSEventModifierFlags::Command | NSEventModifierFlags::Control);
-    let hide_others = item(mtm, "Hide Others", Some(sel!(hideOtherApplications:)), "h");
-    hide_others.setKeyEquivalentModifierMask(NSEventModifierFlags::Command | NSEventModifierFlags::Option);
+    let b = |title: &str, action: MenuAction| bound(mtm, title, action, binds);
+    let f = |title: &str, action: Sel, chord: &str| fixed(mtm, title, action, chord, binds);
     submenu(
         mtm,
         &bar,
@@ -549,60 +586,56 @@ pub fn build_menus(mtm: MainThreadMarker, app_name: &str) -> Retained<NSMenu> {
         &[
             item(mtm, "Secure Keyboard Entry", Some(sel!(toggleSecureKeyboardEntry:)), ""),
             NSMenuItem::separatorItem(mtm),
-            item(mtm, &format!("Hide {app_name}"), Some(sel!(hide:)), "h"),
-            hide_others,
+            f(&format!("Hide {app_name}"), sel!(hide:), "cmd+h"),
+            f("Hide Others", sel!(hideOtherApplications:), "alt+cmd+h"),
             NSMenuItem::separatorItem(mtm),
-            item(mtm, &format!("Quit {app_name}"), Some(sel!(terminate:)), "q"),
+            f(&format!("Quit {app_name}"), sel!(terminate:), "cmd+q"),
         ],
     );
-    submenu(
-        mtm,
-        &bar,
-        "Shell",
-        &[
-            item(mtm, "New Window", Some(sel!(newWindow:)), "n"),
-            item(mtm, "New Tab", Some(sel!(newTab:)), "t"),
-            NSMenuItem::separatorItem(mtm),
-            item(mtm, "Close", Some(sel!(performClose:)), "w"),
-        ],
-    );
-    submenu(
-        mtm,
-        &bar,
-        "Edit",
-        &[
-            item(mtm, "Copy", Some(sel!(copy:)), "c"),
-            item(mtm, "Paste", Some(sel!(paste:)), "v"),
-            item(mtm, "Select All", Some(sel!(selectAll:)), "a"),
-            NSMenuItem::separatorItem(mtm),
-            item(mtm, "Clear Scrollback", Some(sel!(clearBuffer:)), "k"),
-        ],
-    );
-    submenu(
-        mtm,
-        &bar,
-        "View",
-        &[
-            item(mtm, "Bigger", Some(sel!(increaseFontSize:)), "="),
-            item(mtm, "Smaller", Some(sel!(decreaseFontSize:)), "-"),
-            item(mtm, "Actual Size", Some(sel!(resetFontSize:)), "0"),
-            NSMenuItem::separatorItem(mtm),
-            full_screen,
-        ],
-    );
-    // AppKit's own tab actions; with these in the menu it adds no copies.
-    let mut window_items = vec![
-        item(mtm, "Minimize", Some(sel!(performMiniaturize:)), "m"),
-        item(mtm, "Zoom", Some(sel!(performZoom:)), ""),
-        NSMenuItem::separatorItem(mtm),
-        item(mtm, "Show Previous Tab", Some(sel!(selectPreviousTab:)), "{"),
-        item(mtm, "Show Next Tab", Some(sel!(selectNextTab:)), "}"),
-        item(mtm, "Move Tab to New Window", Some(sel!(moveTabToNewWindow:)), ""),
-        item(mtm, "Merge All Windows", Some(sel!(mergeAllWindows:)), ""),
+    let shell = [
+        b("New Window", MenuAction::NewWindow),
+        b("New Tab", MenuAction::NewTab),
+        vec![NSMenuItem::separatorItem(mtm)],
+        b("Close", MenuAction::Close),
     ];
+    submenu(mtm, &bar, "Shell", &shell.concat());
+    let edit = [
+        b("Copy", MenuAction::Copy),
+        b("Paste", MenuAction::Paste),
+        b("Select All", MenuAction::SelectAll),
+        vec![NSMenuItem::separatorItem(mtm)],
+        b("Clear Scrollback", MenuAction::ClearScrollback),
+        vec![NSMenuItem::separatorItem(mtm)],
+        // Disabled until the find bar exists: nothing answers its action.
+        b("Find…", MenuAction::Find),
+    ];
+    submenu(mtm, &bar, "Edit", &edit.concat());
+    let view = [
+        b("Bigger", MenuAction::FontBigger),
+        b("Smaller", MenuAction::FontSmaller),
+        b("Actual Size", MenuAction::FontReset),
+        vec![NSMenuItem::separatorItem(mtm)],
+        b("Enter Full Screen", MenuAction::ToggleFullScreen),
+    ];
+    submenu(mtm, &bar, "View", &view.concat());
+    // AppKit's own tab actions; with these in the menu it adds no copies.
+    let mut window_items = [
+        vec![
+            f("Minimize", sel!(performMiniaturize:), "cmd+m"),
+            item(mtm, "Zoom", Some(sel!(performZoom:)), ""),
+            NSMenuItem::separatorItem(mtm),
+        ],
+        b("Show Previous Tab", MenuAction::PreviousTab),
+        b("Show Next Tab", MenuAction::NextTab),
+        vec![
+            item(mtm, "Move Tab to New Window", Some(sel!(moveTabToNewWindow:)), ""),
+            item(mtm, "Merge All Windows", Some(sel!(mergeAllWindows:)), ""),
+        ],
+    ]
+    .concat();
     // Cmd+1…9: hidden, as in Safari, but their keys still work.
     for n in 1..=9 {
-        let select = item(mtm, &format!("Show Tab {n}"), Some(sel!(selectTab:)), &n.to_string());
+        let select = f(&format!("Show Tab {n}"), sel!(selectTab:), &format!("cmd+{n}"));
         select.setTag(n);
         select.setHidden(true);
         select.setAllowsKeyEquivalentWhenHidden(true);
@@ -623,9 +656,10 @@ pub fn run(config: Config, notices: Vec<String>, app_name: &str, restore: Vec<cr
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
     crate::notify::on_click(crate::view::bring_to_front);
+    let menus = build_menus(mtm, app_name, &config.keybinds());
     let delegate = AppDelegate::new(mtm, config, notices, restore);
     app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
-    app.setMainMenu(Some(&build_menus(mtm, app_name)));
+    app.setMainMenu(Some(&menus));
     app.run();
 }
 

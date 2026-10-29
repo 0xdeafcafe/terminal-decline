@@ -8,6 +8,8 @@ use serde::{Deserialize, Deserializer};
 use term_font::{CellWidth, FontConfig};
 use term_render::Theme;
 
+use crate::keybind::{self, KeybindConfig, Keybinds};
+
 /// Which Option key acts as Meta (sends ESC + key). Off by default, like
 /// Terminal.app and Ghostty, so Option still types @ [ ] { } | \\ ~ on
 /// European keyboard layouts.
@@ -88,6 +90,9 @@ pub struct Config {
     /// Window title for a pin; also shown in the Window menu.
     pub title: Option<String>,
     pub colors: Colors,
+    /// `[keybind]`: shortcuts remapped, unbound, or sending text; see
+    /// [`crate::keybind`].
+    pub keybind: KeybindConfig,
     /// Set in a pin's config: the app bundle it belongs to.
     #[allow(dead_code)]
     pub pin_app: Option<String>,
@@ -117,6 +122,7 @@ impl Default for Config {
             env: BTreeMap::new(),
             title: None,
             colors: Colors::default(),
+            keybind: KeybindConfig::default(),
             pin_app: None,
         }
     }
@@ -181,7 +187,11 @@ pub fn load(layers: &[&Path]) -> (Config, Vec<String>) {
     let mut table = toml::Table::new();
     for &path in layers {
         match read_table(path) {
-            Ok(t) => merge(&mut table, t),
+            Ok(mut t) => {
+                // So a pin's "command+d" replaces the user's "cmd+d".
+                keybind::canonicalize(&mut t);
+                merge(&mut table, t)
+            }
             Err(e) => errors.push(e),
         }
     }
@@ -278,6 +288,11 @@ impl Config {
                 format!("config: {key}: no font named {name:?} is installed; ignored")
             })
             .collect()
+    }
+
+    /// The shortcuts in effect: the menus' own with `[keybind]` applied.
+    pub fn keybinds(&self) -> Keybinds {
+        Keybinds::new(&self.keybind)
     }
 
     pub fn theme(&self) -> Theme {
@@ -557,6 +572,67 @@ mod tests {
         assert!(!c.copy_on_select);
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert!(errors[0].starts_with("config: copy_on_select: "), "{errors:?}");
+    }
+
+    #[test]
+    fn keybind_entries_are_checked_one_by_one() {
+        let (c, errors) = parse(
+            "[keybind]\n\"cmd+k\" = \"none\"\n\"cmd+j\" = \"explode\"\n\"hyper+x\" = \"copy\"\n\
+             \"ctrl+shift+t\" = { text = \"\\u001b[116;6u\" }\n",
+        );
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.starts_with("config: keybind.cmd+j: unknown action \"explode\"")),
+            "{errors:?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.starts_with("config: keybind.hyper+x: ") && e.contains("unknown modifier")),
+            "{errors:?}"
+        );
+        let b = c.keybinds();
+        assert_eq!(b.get(&keybind::Chord::parse("cmd+k").unwrap()), None);
+        assert_eq!(
+            b.get(&keybind::Chord::parse("ctrl+shift+t").unwrap()),
+            Some(&keybind::Bound::Text("\x1b[116;6u".into()))
+        );
+        let (_, errors) = parse("keybind = 'cmd+k'");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+    }
+
+    /// A pin's `[keybind]` is layered on the user's chord by chord, however
+    /// either spells it.
+    #[test]
+    fn pin_keybinds_override_the_users() {
+        use keybind::{Bound, Chord, MenuAction};
+        let dir = TempDir::new("cfg-keybind");
+        let user = dir.join("config.toml");
+        let pin = dir.join("pin.toml");
+        std::fs::write(
+            &user,
+            "[keybind]\n\"cmd+d\" = { text = \"user\" }\n\"cmd+l\" = \"clear_scrollback\"\n\"shift+cmd+t\" = \"new_window\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &pin,
+            "[keybind]\n\"command+D\" = \"none\"\n\"cmd+shift+t\" = { text = \"pin\" }\n\"cmd+w\" = \"none\"\n",
+        )
+        .unwrap();
+        let (c, errors) = load(&[&user, &pin]);
+        assert!(errors.is_empty(), "{errors:?}");
+        let b = c.keybinds();
+        let get = |s: &str| b.get(&Chord::parse(s).unwrap()).cloned();
+        assert_eq!(get("cmd+d"), None, "the pin unbinds the user's text");
+        assert_eq!(get("cmd+shift+t"), Some(Bound::Text("pin".into())));
+        assert_eq!(get("cmd+l"), Some(Bound::Menu(MenuAction::ClearScrollback)), "the user's own stays");
+        assert_eq!(get("cmd+w"), None, "the pin unbinds a default");
+        assert_eq!(get("cmd+k"), Some(Bound::Menu(MenuAction::ClearScrollback)));
+        // The user's config alone.
+        let (c, _) = load(&[&user]);
+        assert_eq!(c.keybinds().get(&Chord::parse("cmd+d").unwrap()), Some(&Bound::Text("user".into())));
     }
 
     #[test]

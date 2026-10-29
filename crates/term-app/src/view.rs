@@ -16,8 +16,8 @@ use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, ProtocolObject, Sel};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSCursor, NSEvent, NSEventModifierFlags, NSPasteboard, NSPasteboardTypeString, NSResponder, NSTextInputClient, NSView, NSWindow,
-    NSWindowDelegate,
+    NSApplication, NSCursor, NSEvent, NSEventModifierFlags, NSPasteboard, NSPasteboardTypeString, NSResponder, NSTextInputClient, NSView,
+    NSWindow, NSWindowDelegate,
 };
 use objc2_foundation::{
     NSArray, NSAttributedString, NSAttributedStringKey, NSKeyValueObservingOptions, NSNotFound, NSNotification,
@@ -33,6 +33,7 @@ use term_render::{FrameInput, Renderer, Theme};
 use crate::config::Config;
 use crate::control::{self, Control, Dump};
 use crate::frame_policy::{self, Decision};
+use crate::keybind::{self, Keybinds};
 use crate::keys::{KeyAction, KeyEventType, KeyInput, KeyModes, KeysDown, Mods, encode_key, paste_bytes};
 use crate::latency::{self, FrameKeys, Latency};
 use crate::layout::{self, CellSize, Padding};
@@ -49,6 +50,8 @@ struct State {
     renderer: Renderer,
     link: Retained<CADisplayLink>,
     config: Rc<Config>,
+    /// The shortcuts in effect (`[keybind]`).
+    binds: Keybinds,
     theme: Theme,
     scale: f64,
     font_size: f64,
@@ -567,6 +570,7 @@ impl TerminalView {
             renderer,
             link,
             font_size: config.font_size,
+            binds: config.keybinds(),
             config,
             theme,
             scale: launch.scale,
@@ -1079,6 +1083,26 @@ impl TerminalView {
             return;
         }
         let Some(modes) = self.key_modes() else { return };
+        // `[keybind]` first; an input method composing gets every key but
+        // Cmd ones.
+        let decision = self.with_state(|st| {
+            if modes.composing && input.flags & crate::keys::flags::COMMAND == 0 {
+                return None;
+            }
+            st.binds.decide(&input).map(|d| match d {
+                keybind::Decision::Send(text) => Err(text.as_bytes().to_vec()),
+                keybind::Decision::Perform(action) => Ok(action),
+            })
+        });
+        match decision.flatten() {
+            Some(Err(bytes)) => return self.send_input(bytes),
+            Some(Ok(action)) => {
+                let app = NSApplication::sharedApplication(MainThreadMarker::from(self));
+                unsafe { app.sendAction_to_from(Sel::register(action.selector()), None, Some(self)) };
+                return;
+            }
+            None => {}
+        }
         let action = crate::keys::translate(&input, modes);
         if input.flags & crate::keys::flags::COMMAND == 0 {
             NSCursor::setHiddenUntilMouseMoves(true);

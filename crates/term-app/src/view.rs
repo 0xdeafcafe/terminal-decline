@@ -1354,6 +1354,7 @@ impl TerminalView {
             KeyModes {
                 app_cursor: t.state.modes().app_cursor,
                 app_keypad: t.state.modes().app_keypad,
+                newline: t.state.modes().linefeed_newline,
                 kitty_flags: t.state.kitty_keyboard_flags(),
                 option_as_meta: st.config.option_as_meta,
                 composing: !st.marked.is_empty(),

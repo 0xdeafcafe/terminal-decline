@@ -1415,3 +1415,47 @@ fn view_stays_put_while_output_scrolls() {
     t.state.scroll_view_to_bottom();
     assert_eq!(screen(&t), ["dd", "ee"]);
 }
+
+// OSC 8 and OSC 133 aren't in xterm. These follow the hyperlink spec
+// (egmontkoblinger's "Hyperlinks in terminal emulators", which kitty,
+// iTerm2, VTE and WezTerm implement) and FinalTerm's shell integration
+// marks as kitty and WezTerm read them.
+
+#[test]
+fn osc8_is_independent_of_sgr_and_ended_by_an_empty_uri() {
+    let mut t = new(20, 2);
+    t.advance(b"\x1b]8;;http://a\x1b\\\x1b[0mx\x1b[1my\x1b]8;;\x1b\\z");
+    let uri = |t: &Term, col| t.state.link_at(t.state.point_at(0, col)).map(|l| l.uri);
+    assert_eq!(uri(&t, 0).as_deref(), Some("http://a"), "SGR 0 doesn't end a link");
+    assert_eq!(uri(&t, 1).as_deref(), Some("http://a"));
+    assert_eq!(uri(&t, 2), None);
+    // A new link replaces the old one without an end in between.
+    t.advance(b"\x1b]8;;http://b\x1b\\b");
+    assert_eq!(uri(&t, 3).as_deref(), Some("http://b"));
+}
+
+#[test]
+fn osc8_link_is_saved_and_restored_with_the_cursor() {
+    let mut t = new(20, 2);
+    t.advance(b"\x1b]8;;http://s\x1b\\\x1b[s\x1b]8;;\x1b\\a\x1b[ub");
+    assert_eq!(t.state.link_at(t.state.point_at(0, 0)).map(|l| l.uri).as_deref(), Some("http://s"));
+}
+
+#[test]
+fn osc133_marks_where_the_cursor_is() {
+    use term_core::{Mark, MarkKind};
+    let mut t = new(20, 3);
+    t.advance(b"\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\x\r\n\x1b]133;C\x1b\\out\r\n\x1b]133;D;2\x1b\\");
+    let line = |r| t.state.point_at(r, 0).line;
+    let kinds = |r| t.state.marks_at(line(r)).into_iter().map(|m| (m.kind, m.col)).collect::<Vec<_>>();
+    assert_eq!(kinds(0), [(MarkKind::Prompt, 0), (MarkKind::Input, 2)]);
+    assert_eq!(kinds(1), [(MarkKind::Output, 0)]);
+    assert_eq!(
+        t.state.marks_at(line(2)),
+        [Mark {
+            kind: MarkKind::End,
+            col: 0,
+            status: Some(2)
+        }]
+    );
+}

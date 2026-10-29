@@ -4,10 +4,12 @@
 //! id in a style table) can change without touching those crates.
 
 use std::borrow::Cow;
+use std::sync::Arc;
 
 pub use crate::cell::Width;
-use crate::cell::{Cell, Row};
+use crate::cell::{Cell, Mark, Row};
 use crate::clusters::Clusters;
+use crate::links::LinkValue;
 use crate::style::Style;
 
 /// What a cell shows.
@@ -129,12 +131,25 @@ impl<'a> CellRef<'a> {
 pub struct RowRef<'a> {
     row: Cow<'a, Row>,
     styles: Cow<'a, [Style]>,
+    /// The links `styles` refer to, by id: the screen's link table, or a
+    /// history row's own list.
+    links: Cow<'a, [Option<Arc<LinkValue>>]>,
 }
 
 impl<'a> RowRef<'a> {
-    /// `row`'s style ids index `styles`.
+    /// `row`'s style ids index `styles`; it has no links.
     pub(crate) fn new(row: Cow<'a, Row>, styles: Cow<'a, [Style]>) -> RowRef<'a> {
-        RowRef { row, styles }
+        RowRef {
+            row,
+            styles,
+            links: Cow::Borrowed(&[]),
+        }
+    }
+
+    /// `styles`' link ids index `links`.
+    pub(crate) fn with_links(mut self, links: Cow<'a, [Option<Arc<LinkValue>>]>) -> RowRef<'a> {
+        self.links = links;
+        self
     }
 
     /// Cells stored in this row.
@@ -169,6 +184,21 @@ impl<'a> RowRef<'a> {
     #[inline]
     pub fn wrapped(&self) -> bool {
         self.row.wrapped
+    }
+
+    /// The OSC 8 hyperlink of the cell at `col` (a wide character's
+    /// spacer has its link too), if it has one.
+    pub fn link(&self, col: usize) -> Option<&LinkValue> {
+        let id = self.cell(col).style().link;
+        if id == 0 {
+            return None;
+        }
+        self.links.get(id as usize)?.as_deref()
+    }
+
+    /// The row's OSC 133 marks, by kind.
+    pub fn marks(&self) -> impl Iterator<Item = Mark> + '_ {
+        self.row.marks()
     }
 
     /// The row's text: one entry per character (spacers skipped), empty

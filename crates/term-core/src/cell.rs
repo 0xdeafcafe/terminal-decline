@@ -218,14 +218,40 @@ pub struct Row {
     pub cells: Vec<Cell>,
     /// The line continues onto the next row (soft wrap).
     pub wrapped: bool,
-    /// Only rows with clusters have one (§6.1).
+    /// Only rows with clusters or prompt marks have one (§6.1).
     extra: Option<Box<RowExtra>>,
 }
 
-/// What only some rows need. Prompt marks (§11.6) join it later.
+/// What only some rows need.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct RowExtra {
     clusters: Clusters,
+    /// OSC 133 marks on this row, one per kind, by kind (§11.6).
+    marks: [Option<Mark>; 4],
+}
+
+/// What an OSC 133 mark says starts there (FinalTerm's shell
+/// integration): A, B, C and D. The numbers are the stored kinds of §11.3.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[repr(u8)]
+pub enum MarkKind {
+    /// `133;A`: the prompt starts.
+    Prompt = 1,
+    /// `133;B`: the prompt ends and the command line (what is typed) starts.
+    Input = 2,
+    /// `133;C`: the command runs; its output starts.
+    Output = 3,
+    /// `133;D`: the command finished, maybe with its exit status.
+    End = 4,
+}
+
+/// An OSC 133 mark: where on its row it was set, and for
+/// [`MarkKind::End`] the exit status, if the shell sent one.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct Mark {
+    pub kind: MarkKind,
+    pub col: u16,
+    pub status: Option<u32>,
 }
 
 /// A store whose buffers are under this is kept, emptied, when its row is
@@ -252,26 +278,54 @@ impl Row {
         }
         self.wrapped = false;
         if self.extra.is_some() {
-            self.clear_clusters();
+            self.clear_extra();
         }
     }
 
+    /// Free every cluster and drop every mark.
     #[cold]
-    fn clear_clusters(&mut self) {
+    fn clear_extra(&mut self) {
         if let Some(x) = &mut self.extra {
             if x.clusters.capacity_bytes() > KEEP_EXTRA_BYTES {
                 self.extra = None;
             } else {
                 x.clusters.clear();
+                x.marks = [None; 4];
             }
         }
     }
 
-    /// Fill every cell with `fill` (not a cluster), freeing all clusters.
+    /// Fill every cell with `fill` (not a cluster), freeing all clusters
+    /// and dropping the row's marks.
     pub fn fill(&mut self, fill: Cell) {
         self.cells.fill(fill);
         if self.extra.is_some() {
-            self.clear_clusters();
+            self.clear_extra();
+        }
+    }
+
+    /// The row's OSC 133 marks, by kind (prompt, input, output, end).
+    #[inline]
+    pub fn marks(&self) -> impl Iterator<Item = Mark> + '_ {
+        self.extra.iter().flat_map(|x| x.marks.iter().flatten().copied())
+    }
+
+    /// The row has an OSC 133 mark.
+    #[inline]
+    pub fn has_marks(&self) -> bool {
+        self.extra.as_ref().is_some_and(|x| x.marks.iter().any(Option::is_some))
+    }
+
+    /// Set `mark`, replacing the row's mark of the same kind.
+    pub fn set_mark(&mut self, mark: Mark) {
+        let x = self.extra.get_or_insert_with(Default::default);
+        x.marks[mark.kind as usize - 1] = Some(mark);
+    }
+
+    /// Drop the row's marks.
+    pub fn clear_marks(&mut self) {
+        if let Some(x) = &mut self.extra {
+            x.marks = [None; 4];
         }
     }
 
@@ -366,6 +420,13 @@ impl Row {
         if cols < self.cells.len() {
             let len = self.cells.len();
             self.free_clusters(cols..len);
+            if let Some(x) = &mut self.extra {
+                for m in &mut x.marks {
+                    if m.is_some_and(|m| m.col as usize >= cols) {
+                        *m = None;
+                    }
+                }
+            }
         }
         self.cells.resize(cols, Cell::BLANK);
     }
@@ -494,5 +555,38 @@ mod tests {
         assert_eq!(row.cells, vec![fill; 5]);
         row.reset(2, Cell::BLANK);
         assert_eq!(row.cells, vec![Cell::BLANK; 2]);
+    }
+
+    #[test]
+    fn marks_one_per_kind() {
+        let mut row = Row::new(10, Cell::BLANK);
+        assert!(!row.has_marks());
+        let mark = |kind, col| Mark { kind, col, status: None };
+        row.set_mark(mark(MarkKind::Input, 8));
+        row.set_mark(mark(MarkKind::Prompt, 0));
+        row.set_mark(mark(MarkKind::Input, 9));
+        let end = Mark {
+            kind: MarkKind::End,
+            col: 0,
+            status: Some(1),
+        };
+        row.set_mark(end);
+        assert!(row.has_marks());
+        assert_eq!(
+            row.marks().collect::<Vec<_>>(),
+            vec![mark(MarkKind::Prompt, 0), mark(MarkKind::Input, 9), end],
+            "by kind, the later B replacing the earlier"
+        );
+        // Narrowing drops marks past the new width; reset drops them all.
+        row.resize_cells(9);
+        assert_eq!(row.marks().count(), 2);
+        row.reset(9, Cell::BLANK);
+        assert!(!row.has_marks());
+        row.set_mark(mark(MarkKind::Output, 3));
+        row.fill(Cell::BLANK);
+        assert!(!row.has_marks());
+        row.set_mark(mark(MarkKind::Output, 3));
+        row.clear_marks();
+        assert!(!row.has_marks());
     }
 }

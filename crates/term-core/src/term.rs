@@ -3,13 +3,15 @@
 
 use std::borrow::Cow;
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 use vte::{OscLarge, Params, Perform};
 
-use crate::cell::{Cell, Color, Row, Width};
+use crate::cell::{Cell, Color, Mark, MarkKind, Row, Width};
+pub use crate::links::LinkValue;
 use crate::rows::{Content, RowRef};
 use crate::scrollback::Scrollback;
-use crate::style::{Attrs, Style, Underline};
+use crate::style::{Attrs, LinkId, Style, Underline};
 use crate::style_table::{StyleStats, StyleTable};
 use crate::unicode::{self, Segmenter};
 
@@ -104,9 +106,12 @@ impl Cursor {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct SavedCursor {
     cursor: Cursor,
+    /// The pen's OSC 8 link, by value: the saved pen's `link` id belongs
+    /// to one screen's link table, so restoring looks the link up again.
+    link: Option<Arc<LinkValue>>,
     origin: bool,
     line_drawing: bool,
 }
@@ -210,15 +215,6 @@ pub enum ViewTop {
     At { point: Point, offset: usize },
 }
 
-/// An OSC 8 hyperlink, by value: links are compared by URI and id, never
-/// by table id, since screen and history number them differently.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct LinkValue {
-    pub uri: String,
-    /// The `id=` parameter, if the program gave one.
-    pub id: Option<String>,
-}
-
 impl Selection {
     /// A plain, cell-by-cell selection.
     pub fn new(anchor: Point, head: Point) -> Selection {
@@ -281,6 +277,16 @@ pub struct Terminal {
     other_top_line: u64,
 
     cursor: Cursor,
+    /// The OSC 8 link new characters get, by value (§5.5), and its id in
+    /// the active screen's link table once a print has interned it (0
+    /// until then). The id is dropped whenever the link changes, the
+    /// screen switches or the cursor is restored; while set, the sweep
+    /// keeps it.
+    pen_link: Option<Arc<LinkValue>>,
+    pen_link_id: LinkId,
+    /// Where the app's pointer is, so the snapshot highlights the
+    /// hyperlink under it (§9.2).
+    hover: Option<Point>,
     saved_primary: Option<SavedCursor>,
     saved_alt: Option<SavedCursor>,
     scroll_top: usize,
@@ -380,6 +386,9 @@ impl Terminal {
             top_line: 0,
             other_top_line: 0,
             cursor: Cursor::default(),
+            pen_link: None,
+            pen_link_id: 0,
+            hover: None,
             saved_primary: None,
             saved_alt: None,
             scroll_top: 0,
@@ -484,6 +493,7 @@ impl Terminal {
 
     fn screen_row(&self, r: usize) -> RowRef<'_> {
         RowRef::new(Cow::Borrowed(&self.screen[r]), Cow::Borrowed(self.styles.styles()))
+            .with_links(Cow::Borrowed(self.styles.links().as_slice()))
     }
 
     fn history_row(&self, i: usize) -> RowRef<'_> {
@@ -660,11 +670,150 @@ impl Terminal {
         }
     }
 
-    /// The hyperlink at `p`, by value. There are no links yet (OSC 8 comes
-    /// with the link table), so this is always `None`.
+    /// The OSC 8 hyperlink at `p`, by value (on either half of a wide
+    /// character). History lines have none until history stores links
+    /// (scrollback v2).
     pub fn link_at(&self, p: Point) -> Option<LinkValue> {
-        let _ = p;
-        None
+        self.row_at(p.line)?.link(p.col).cloned()
+    }
+
+    /// The pointer is at `p` (or off the terminal): the snapshot
+    /// highlights every cell of the hyperlink there, compared by value,
+    /// so all the pieces of a link light up together.
+    pub fn set_hover(&mut self, p: Option<Point>) {
+        if p != self.hover {
+            self.hover = p;
+            self.touch();
+        }
+    }
+
+    pub fn hover(&self) -> Option<Point> {
+        self.hover
+    }
+
+    /// The OSC 8 link new characters get, if any.
+    pub fn pen_link(&self) -> Option<&LinkValue> {
+        self.pen_link.as_deref()
+    }
+
+    /// The OSC 133 marks on line `line`, in the order they were written
+    /// (by column; at the same column a command's output and end come
+    /// before the next prompt). History lines have none until history stores marks
+    /// (scrollback v2).
+    pub fn marks_at(&self, line: u64) -> Vec<Mark> {
+        let mut marks: Vec<Mark> = match self.screen_line(line) {
+            Some(row) => row.marks().collect(),
+            None => Vec::new(),
+        };
+        marks.sort_by_key(|m| (m.col, mark_rank(m.kind)));
+        marks
+    }
+
+    /// The screen row at buffer line `line`, if it is on the screen.
+    fn screen_line(&self, line: u64) -> Option<&Row> {
+        let r = line.checked_sub(self.top_line)? as usize;
+        self.screen.get(r)
+    }
+
+    /// The first line stored: history's oldest on the primary screen.
+    fn first_line(&self) -> u64 {
+        if self.alt_active {
+            self.top_line
+        } else {
+            self.top_line - self.scrollback.len() as u64
+        }
+    }
+
+    /// Lines holding marks, nearest first: before `line` going up, or
+    /// after it going down. (With history v2 this skips blocks without
+    /// marks, §11.6; today history holds none, so only screen lines are
+    /// read.)
+    fn marked_lines(&self, line: u64, up: bool) -> Box<dyn Iterator<Item = u64> + '_> {
+        let lo = self.first_line().max(self.top_line);
+        let hi = self.top_line + self.lines as u64;
+        let has = move |l: &u64| self.screen_line(*l).is_some_and(Row::has_marks);
+        if up {
+            Box::new((lo..line.min(hi)).rev().filter(has))
+        } else {
+            Box::new((line.saturating_add(1).max(lo)..hi).filter(has))
+        }
+    }
+
+    /// Where the nearest prompt (OSC 133 A) above line `line` starts.
+    pub fn previous_prompt(&self, line: u64) -> Option<Point> {
+        self.marked_lines(line, true).find_map(|l| self.prompt_on(l))
+    }
+
+    /// Where the nearest prompt (OSC 133 A) below line `line` starts.
+    pub fn next_prompt(&self, line: u64) -> Option<Point> {
+        self.marked_lines(line, false).find_map(|l| self.prompt_on(l))
+    }
+
+    fn prompt_on(&self, line: u64) -> Option<Point> {
+        self.marks_at(line)
+            .into_iter()
+            .find(|m| m.kind == MarkKind::Prompt)
+            .map(|m| Point { line, col: m.col as usize })
+    }
+
+    /// The output of the command `p` is in, its prompt and command line
+    /// included in what counts as "in": from its OSC 133 C mark to just
+    /// before the next D or A mark (or the cursor, while it runs), first
+    /// and last cell. `None` if there is no C mark for it or the output
+    /// is empty.
+    pub fn command_output(&self, p: Point) -> Option<(Point, Point)> {
+        // Every mark in the order written. (Screen lines only, until
+        // history keeps marks; then this reads only the lines of blocks
+        // with marks.)
+        let lines = self.top_line..self.top_line + self.lines as u64;
+        let marks: Vec<(Point, MarkKind)> = lines
+            .filter(|&l| self.screen_line(l).is_some_and(Row::has_marks))
+            .flat_map(|line| {
+                self.marks_at(line)
+                    .into_iter()
+                    .map(move |m| (Point { line, col: m.col as usize }, m.kind))
+            })
+            .collect();
+        // The nearest A or C at or before `p`.
+        let mut i = marks
+            .iter()
+            .rposition(|&(q, k)| q <= p && matches!(k, MarkKind::Prompt | MarkKind::Output))?;
+        let next = |from: usize, kinds: &[MarkKind]| (from + 1..marks.len()).find(|&j| kinds.contains(&marks[j].1));
+        if marks[i].1 == MarkKind::Prompt {
+            // `p` is on the prompt or command line: this command's output.
+            i = next(i, &[MarkKind::Output, MarkKind::Prompt]).filter(|&j| marks[j].1 == MarkKind::Output)?;
+        }
+        let from = marks[i].0;
+        let end = match next(i, &[MarkKind::End, MarkKind::Prompt]) {
+            Some(j) => marks[j].0,
+            // Still running: up to the cursor.
+            None => Point {
+                line: self.top_line + self.cursor.row as u64,
+                col: self.cursor.col,
+            },
+        };
+        // The cell before `end`.
+        let last = match end.col {
+            0 => Point {
+                line: end.line.checked_sub(1)?,
+                col: self.cols - 1,
+            },
+            c => Point {
+                line: end.line,
+                col: c - 1,
+            },
+        };
+        (from <= last).then_some((from, last))
+    }
+
+    /// Select the output of the command `p` is in ([`Terminal::command_output`]).
+    /// False, with the selection unchanged, if there is none.
+    pub fn select_output(&mut self, p: Point) -> bool {
+        let Some((a, b)) = self.command_output(p) else {
+            return false;
+        };
+        self.set_selection(Some(Selection::new(a, b)));
+        true
     }
 
     /// Select the word at `p`, on its logical line: a word that a soft wrap
@@ -871,7 +1020,7 @@ impl Terminal {
         self.top_line += removed.len() as u64;
         if self.alt_active {
             // The primary screen is hidden; its cursor is the saved one.
-            let mut cursor = self.saved_primary.map(|s| s.cursor).unwrap_or_default();
+            let mut cursor = self.saved_primary.as_ref().map(|s| s.cursor).unwrap_or_default();
             let mut other = std::mem::take(&mut self.other_screen);
             let removed = resize_screen(&mut other, &mut cursor, cols, lines);
             self.other_screen = other;
@@ -923,6 +1072,8 @@ impl Terminal {
                     *epochs
                 },
                 false,
+                // The other screen's pen link isn't interned there.
+                &[],
             );
         }
         // Resizing changes every row (§9.1).
@@ -976,9 +1127,35 @@ impl Terminal {
     #[cold]
     #[inline(never)]
     fn intern_pen(&mut self) -> Cell {
+        if let Some(link) = &self.pen_link
+            && self.pen_link_id == 0
+        {
+            // Held by the sweep from here on, so interning the style
+            // below can't free it.
+            self.pen_link_id = self.styles.links_mut().intern(link);
+        }
+        self.cursor.pen.link = self.pen_link_id;
         let c = self.intern(self.cursor.pen);
         self.pen_cell = Some(c);
         c
+    }
+
+    /// OSC 8: new characters get `link` (or none). The pen holds it by
+    /// value and interns it at the next print.
+    fn set_link(&mut self, link: Option<LinkValue>) {
+        if self.pen_link.as_deref() == link.as_ref() {
+            return;
+        }
+        self.pen_link = link.map(Arc::new);
+        self.drop_pen_link_id();
+    }
+
+    /// The pen's link id is no longer good (another link, another screen's
+    /// table, a restored cursor): the next print looks it up again.
+    fn drop_pen_link_id(&mut self) {
+        self.pen_link_id = 0;
+        self.cursor.pen.link = 0;
+        self.pen_cell = None;
     }
 
     /// The pen's style changed: its template is out of date, and so is the
@@ -1020,6 +1197,7 @@ impl Terminal {
                 *epochs
             },
             give_back,
+            &[self.pen_link_id],
         );
         if renumbered {
             // Every row's cells changed bits.
@@ -1173,11 +1351,41 @@ impl Terminal {
         }
         r.free_clusters(start..end);
         r.cells[start..end].fill(blank);
+        if start == 0 && end == len {
+            // The whole row erased: its prompt marks go with it.
+            r.clear_marks();
+        }
+    }
+
+    /// OSC 133: a shell integration mark at the cursor. `kind` is A, B,
+    /// C or D (N, kitty's "new command", counts as A); for D, `rest[0]`
+    /// may be the exit status. Secondary and right prompts (`k=s`,
+    /// `k=c`, `k=r` on A) aren't prompts to jump to, so are ignored.
+    fn prompt_mark(&mut self, kind: &[u8], rest: &[&[u8]]) {
+        let kind = match kind {
+            b"A" | b"N" => {
+                if rest.iter().any(|p| matches!(*p, b"k=s" | b"k=c" | b"k=r")) {
+                    return;
+                }
+                MarkKind::Prompt
+            }
+            b"B" => MarkKind::Input,
+            b"C" => MarkKind::Output,
+            b"D" => MarkKind::End,
+            _ => return,
+        };
+        let status = match kind {
+            MarkKind::End => rest.first().and_then(|p| std::str::from_utf8(p).ok()?.parse::<u32>().ok()),
+            _ => None,
+        };
+        let col = self.cursor.col.min(u16::MAX as usize) as u16;
+        self.screen[self.cursor.row].set_mark(Mark { kind, col, status });
     }
 
     fn save_cursor(&mut self) {
         let saved = SavedCursor {
             cursor: self.cursor,
+            link: self.pen_link.clone(),
             origin: self.modes.origin,
             line_drawing: self.line_drawing,
         };
@@ -1189,20 +1397,24 @@ impl Terminal {
     }
 
     fn restore_cursor(&mut self) {
-        let saved = if self.alt_active { self.saved_alt } else { self.saved_primary };
-        match saved {
+        let saved = if self.alt_active { &self.saved_alt } else { &self.saved_primary };
+        match saved.clone() {
             Some(s) => {
                 // The saved pen is a style by value: it is interned again
-                // in this screen's table at the next print.
+                // in this screen's table at the next print, and so is its
+                // link, from its URI.
                 self.cursor = s.cursor;
+                self.pen_link = s.link;
                 self.modes.origin = s.origin;
                 self.line_drawing = s.line_drawing;
             }
             None => {
                 self.cursor = Cursor::default();
+                self.pen_link = None;
                 self.modes.origin = false;
             }
         }
+        self.drop_pen_link_id();
         self.pen_changed();
         self.cursor.row = self.cursor.row.min(self.lines - 1);
         self.cursor.col = self.cursor.col.min(self.cols - 1);
@@ -1273,8 +1485,9 @@ impl Terminal {
         }
         std::mem::swap(&mut self.screen, &mut self.other_screen);
         std::mem::swap(&mut self.styles, &mut self.other_styles);
-        // The templates name ids in the other screen's table.
-        self.pen_cell = None;
+        // The templates and the pen's link id name ids in the other
+        // screen's tables.
+        self.drop_pen_link_id();
         self.erase_cell = None;
         std::mem::swap(&mut self.top_line, &mut self.other_top_line);
         if on {
@@ -1297,7 +1510,7 @@ impl Terminal {
         debug_assert!(self.alt_active);
         let epoch = self.next_epoch();
         self.styles = StyleTable::new(epoch, self.cols * self.lines, self.sweep_at_test);
-        self.pen_cell = None;
+        self.drop_pen_link_id();
         self.erase_cell = None;
         let blank = self.blank();
         for row in &mut self.screen {
@@ -1321,6 +1534,7 @@ impl Terminal {
         fresh.bulk_ascii = self.bulk_ascii;
         fresh.ambiguous = self.ambiguous;
         fresh.grapheme_log = self.grapheme_log.take();
+        fresh.hover = self.hover;
         // Like xterm, a full reset clears scrollback too.
         fresh.scrollback = std::mem::replace(&mut self.scrollback, Scrollback::new(0));
         fresh.scrollback.clear();
@@ -1800,6 +2014,7 @@ impl Terminal {
             self.modes.bracketed_paste,
         ) = keep_mouse;
         self.cursor.pen = Style::DEFAULT;
+        self.set_link(None);
         self.pen_changed();
         self.cursor.pending_wrap = false;
         self.scroll_top = 0;
@@ -1865,7 +2080,10 @@ impl Terminal {
     }
 
     fn sgr(&mut self, params: &Params) {
+        // SGR leaves the OSC 8 link alone, SGR 0 included.
+        let link = self.cursor.pen.link;
         apply_sgr(&mut self.cursor.pen, params);
+        self.cursor.pen.link = link;
         self.pen_changed();
     }
 }
@@ -2097,6 +2315,18 @@ fn osc_size_policy(prefix: &[u8]) -> OscLarge {
 }
 
 /// Add a scalar to the recorded clusters: to the last one if it `joins`.
+/// Where a mark sorts among marks at the same column. They can share one
+/// when the output before them was empty: the previous command's output
+/// (C), its end (D), then the next prompt (A) and its command line (B).
+fn mark_rank(kind: MarkKind) -> u8 {
+    match kind {
+        MarkKind::Output => 0,
+        MarkKind::End => 1,
+        MarkKind::Prompt => 2,
+        MarkKind::Input => 3,
+    }
+}
+
 fn log_scalar(log: &mut Vec<String>, c: char, joins: bool) {
     match log.last_mut() {
         Some(last) if joins => last.push(c),
@@ -2492,6 +2722,8 @@ impl Perform for Terminal {
                     self.notification = Some(Notification { title, body });
                 }
             }
+            [b"8", ..] => self.set_link(crate::links::parse_osc8(params)),
+            [b"133", kind, rest @ ..] => self.prompt_mark(kind, rest),
             [b"7", url, ..] => {
                 let url = String::from_utf8_lossy(url);
                 if let Some(rest) = url.strip_prefix("file://") {
@@ -2619,12 +2851,26 @@ impl Terminal {
                     }
                 }
                 check_clusters(row).map_err(|e| format!("{name} row {r}: {e}"))?;
+                if let Some(m) = row.marks().find(|m| m.col as usize >= cols) {
+                    return Err(format!("{name} row {r}: mark {m:?} past column {cols}"));
+                }
             }
         }
         // The cached templates name live ids of the active screen's table,
         // with the styles they stand for.
         if let Some(t) = self.pen_cell {
             check_template(t, &self.cursor.pen, &self.styles).map_err(|e| format!("pen template: {e}"))?;
+        }
+        match (&self.pen_link, self.pen_link_id) {
+            (None, 0) => {}
+            (Some(link), id) if id == 0 || self.styles.links().get(id) == Some(link) => {}
+            (link, id) => return Err(format!("pen link {link:?} has id {id}")),
+        }
+        if self.pen_cell.is_some() && self.cursor.pen.link != self.pen_link_id {
+            return Err(format!(
+                "pen style has link {}, pen link id {}",
+                self.cursor.pen.link, self.pen_link_id
+            ));
         }
         if let Some(t) = self.erase_cell {
             let erase = Style {

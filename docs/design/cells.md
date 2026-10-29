@@ -589,6 +589,108 @@ How OSC 8 links are handled:
   renderer compare links by value (URI and id), never by id: screen and
   history ids differ.
 
+**Landed (PR 9, screen only).** What was built (`links.rs`,
+`style_table.rs`, `cell.rs`, `rows.rs`, `term.rs`, `snapshot.rs`), and
+where it differs from §5.5 and §11.6. It went in alongside PR 7 rather
+than after it, so history is untouched: what PR 7 must carry is at the
+end.
+- **The link table** lives inside each screen's `StyleTable`, so it is
+  swapped with it on a screen switch and made again with it when the
+  alternate screen is cleared (1049 on entry, 1047 on leaving) or on
+  RIS. Links are `Arc<LinkValue>` (URI and id parameter), indexed by
+  value in a `HashMap`, so a lookup allocates nothing; ids are never
+  renumbered (a style's hash includes its link id), and a freed id is
+  reused lowest first. Trailing free ids are dropped and an empty table
+  starts over.
+- **The pen** holds the link by value (`pen_link`) and its id in the
+  active table (`pen_link_id`, 0 until a print interns it). The id is
+  dropped when the link changes, on every screen switch, cursor
+  restore, DECSTR and RIS. SGR, SGR 0 included, leaves the link alone
+  (the hyperlink spec). Erased cells take the erase style, which has no
+  link. Saved cursors (DECSC, CSI s, 1048, 1049) hold the link by value
+  and restoring looks it up again.
+- **Sweeping:** after a style sweep frees styles, links that no live
+  style and not the pen's `pen_link_id` refer to are freed (one pass
+  over the style table, only when it holds links). The pen's id is a
+  holder because interning the pen's style can sweep after its link was
+  interned and before any cell uses it; the test
+  `sweeps_free_links_no_style_uses` fails without it.
+- **Parsing:** `OSC 8 ; params ; URI` with the URI rebuilt from
+  `parts[2..]` joined by `;`; `id=` is read out of `:`-separated
+  parameters, an empty one is none. An empty URI, a URI over 4 KB, an
+  id over 256 bytes, control characters, invalid UTF-8 or 16 parts (vte
+  may have cut it short) all end the current link.
+- **Reading:** `Terminal::link_at(p)` (either half of a wide
+  character), `RowRef::link(col)` (a `RowRef` now carries the links its
+  styles refer to: the screen's table, or for history a list of its
+  own, empty until v2), `pen_link()`, and `StyleStats::links`.
+- **The hovered link:** `set_hover(Option<Point>)` / `hover()`; the
+  snapshot finds the link there, looks up its id in the screen's table
+  and adds `HoveredLink` ranges for every run of cells with that id, so
+  all the pieces of a link (other colours, other rows) light up, sorted
+  left to right with the selection. Hovering bumps `generation` but no
+  row's counter: it is an overlay. History rows get none until v2.
+- **Prompt marks** (§11.6) are in `RowExtra` as `marks: [Option<Mark>;
+  4]`, one per kind (a second B on a row replaces the first), with
+  `Mark { kind, col, status }` and `MarkKind` numbered as §11.3 stores
+  them (1 A, 2 B, 3 C, 4 D). OSC 133 A (and N) / B / C / D[;status] set
+  one at the cursor; A with `k=s`, `k=c` or `k=r` (secondary and right
+  prompts) and other letters are ignored. Marks move with their rows;
+  they go when the row is reset, filled (DECALN) or erased whole (EL 2,
+  ED, ED 0 from column 0), but not on a partial erase, since a shell
+  redrawing its command line erases from the cursor; narrowing drops
+  marks past the new width. `check_invariants` checks every mark is
+  inside the row.
+- **The API for E.5:** `marks_at(line)` (in the order written: by
+  column, and at one column C, D, A, B, since an empty output puts the
+  previous command's C and D where the next prompt starts),
+  `previous_prompt(line)` / `next_prompt(line)` (the A marks), and
+  `command_output(p)` / `select_output(p)`: from the C mark of the
+  command `p` is in (on its output, prompt or command line) to the cell
+  before the next D or A, or up to the cursor while it runs; `None` for
+  an empty output. They read screen lines only for now.
+- **Not done here: plain-URL detection.** The design doesn't place it,
+  and the roadmap has it in E.2; since it needs logical lines, it would
+  fit in term-core next to `select_word` as `url_at(p)`.
+- **What PR 7's history format must carry** (§11.3, §11.5, as designed;
+  nothing new): `Scrollback::push` gets the screen's `LinkTable` with
+  its styles (a style's `link` indexes it, `links().as_slice()`), and
+  the block keeps the link value in its own link table, the style
+  dictionary's `link` pointing there; the `MARKS` section from
+  `Row::marks()` and `has_marks` per block. Decoding gives a row its
+  marks (`Row::set_mark`) and its own link list, which
+  `history_row` passes to `RowRef::with_links`. Then `link_at`, the
+  hover highlight in `snapshot` (now `i >= history` only, comparing
+  ids), `marked_lines` and `command_output`'s mark list (now
+  `screen_line` only) read history too; the props test's
+  `history()` comparison already compares links and marks by value.
+- **Tests:** `tests/links.rs` (cells linked while OSC 8 is set, `;` in
+  URIs, the limits, SGR and erasing, wide characters, pieces sharing an
+  id, the hover highlight, saved cursors across 1049, DECSTR and RIS,
+  sweeps freeing links, the pen's link through sweeps, the alternate
+  table, the marks and the prompt and output lookups, input split one
+  byte per read); `links.rs` and `cell.rs` unit tests; three
+  conformance tests against the hyperlink spec and OSC 133. The
+  property tests compare links and marks by value between a terminal
+  sweeping at 8 ids and one sweeping as usual, with OSC 8 and 133
+  pieces in both generators. The fuzz dictionary gains OSC 8 with an id
+  and `;` in the URI, and OSC 133 A/B/C/D; the fuzz input gains hover
+  (`FF 'H' l c`, then a snapshot) and select-output (`FF 'O' l c`)
+  steps; `read_back` calls `link_at`, `marks_at`, the prompt lookups
+  and `command_output` for every visible line; the corpus gains
+  `seed-links`.
+- **Measured** (`parse_1k`, interleaved A/B against `main` at
+  `9b0651c`, 9 pairs; the machine was loaded at 20-40 with other
+  agents' builds and benchmarks, so medians moved by up to ±20% between
+  runs and the 3% gate on medians couldn't be read; best of 9): plain
+  7.93 → 8.08 ms (+1.9%), coloured 25.93 → 26.09 (+0.6%), `tui` 15.99
+  → 16.20 (+1.3%), `seq` 31.73 → 31.22 (−1.6%), unicode 33.33 → 29.98,
+  clusters 47.35 → 45.20 (both noise). An earlier 5-pair run gave plain
+  −0.4%, coloured +0.6%, `tui` +2.9%, `seq` +3.3% best-of. What the
+  write path gained is a load and a store of the pen's link id per SGR
+  and one compare per erase; printing is unchanged. Rerun the gate on a
+  quiet machine before merging.
+
 ---
 
 ## 6. Grapheme clusters
@@ -2923,7 +3025,7 @@ go in order, and the font and render agents run alongside.
 | 6 | core | **clusters per row and mode 2027** (the width rule of §6.3, legacy mode, REP by value, the extended `repair_wide`); `Terminal::set_ambiguous_width`; selection text and `dump()` show clusters. **Landed**; what changed from the design is at the end of §6.4 | M | 5 |
 | 7 | core | **scrollback v2** (§11) at the written width only: `BlockData` (shared) and `BlockEntry`, meta and contiguous text, checkpoints, per-block ambiguous setting, `FILL`, `pop()` with the lowest-popped mark, the 32 MB backstop, the 64-entry slot cache; `scrollback_mem` gains emoji, placeholder, gradient and sealed figures; bench limits lowered | L | 6 |
 | 8 | core | row change counters, `terminal_id`, `history_epoch`, `popped_from`, the snapshot with highlight ranges, the screen it shows and style updates (§9). **Landed**; what changed from the design is at the end of §9.2 | S | 5 |
-| 9 | core | OSC 8 link table and OSC 133 prompt marks, on the screen and in v2 | S | 7 |
+| 9 | core | OSC 8 link table and OSC 133 prompt marks, on the screen and in v2. **Landed on the screen**; history waits for PR 7 (end of §5.5) | S | 7 |
 | 10 | core | kitty placeholders (cell kind, diacritic table, step-by-step inference, v2 list) | S | 7 |
 | 11 | core | **screen reflow, pull-back and tracked positions** (F.4, §12.2): the two ignored resize tests settled (§19) | L | 7, 8 |
 | 12 | core | **history at another width** (§12.3): rows-at-width counts, `ViewTop::At { point, offset }` across width changes, `FILL` at another width | M | 11 |
@@ -3102,7 +3204,10 @@ in that app:
 
 - **Between PRs 5 and 7,** history still uses v1. As built, v1 keeps
   underline colour, underline style and overline (§5.4, Landed); only
-  links are lost, and there are none until PR 9.
+  links are lost. With PR 9 before PR 7, OSC 8 links and OSC 133 marks
+  work on the screen and are dropped when their lines scroll into
+  history, so prompt jumps and selecting output reach only the screen.
+
 - **Between PRs 6 and 7,** clusters work on the screen, but v1 history keeps
   only each cluster's first scalar: a family emoji scrolled into history
   comes back as 👨, and `e` + U+0301 as `e`.

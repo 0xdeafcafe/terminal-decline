@@ -1513,7 +1513,8 @@ changed from the design, and what is left:
 - **API:** `Renderer::prepare(&mut Terminal, &FrameInput)` and
   `Frame::build(&mut Terminal, &FrameInput, glyphs)`; `FrameInput` no
   longer carries the terminal. For R.1 the snapshot call moves out of
-  `build`.
+  `build`: done early in B1.2 (`Frame::snapshot` with the lock,
+  `Frame::build_snapshot` without; ligatures.md §4.3).
 - **What a cached row is:** its backgrounds, glyphs and decorations,
   placed where the row was last drawn (not at y = 0): a row that stayed is
   one `memcpy` into the frame, and a row that moved (a scroll, or other

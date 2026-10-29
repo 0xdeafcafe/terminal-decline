@@ -371,6 +371,19 @@ Stripped, that binary is 913 KB against 331 KB for an empty one. So the
 app should grow by about 300–350 KB rather than 151 KB; the exact number
 is measured when `prefs` is wired into the app.
 
+Wired into the app (29 Oct 2026, same machine and profile, against
+5cd7a5f just before): the release binary grew from 2,276,400 to
+2,913,968 bytes (+623 KB; stripped 1,748,728 → 2,238,304, +478 KB), its
+`__text` by 391 KB. `cargo bloat --crates` puts term-prefs at 155 KB,
+toml_edit at 73 KB, and the rest in the app's own code (the host, the
+Settings tab, Serialize for Config) and std, of which the app now links
+more than the estimate assumed.
+
+The prefs process in a Settings tab, from that release build: 2.8 MB
+footprint (`footprint -p`), 0 idle wakeups and 0.0% CPU over 10 s
+(`top -stats idlew`), 3 threads (the TUI's, the file watch's and one
+the system starts). The same process from a debug build: 3.8 MB.
+
 ## Testing
 
 - Schema and `Config`: the field names of Config and Colors, from a small
@@ -395,11 +408,13 @@ is measured when `prefs` is wired into the app.
   `XDG_CONFIG_HOME`: keys in, the file and the screen checked; exit 0 on
   `q`; SIGHUP in the middle of an edit leaves a valid file.
 - Smoke, through a control verb `settings`: Cmd+, opens one prefs tab and
-  a second focuses it; an edit recolours another window (the dump's
-  foreground and background) and writes no notice text into it; recording
-  a chord: arm it, post a Cmd key with `CGEventPostToPid` (as the latency
-  harness does), and check the reply and that the menu action didn't run;
-  the prefs program's footprint and its 0 idle wakeups are recorded.
+  a second focuses it; an edit typed into it (`type-settings`) recolours
+  another window (the dump's foreground and background) and writes no
+  notice text into it, nor does a mistake made by hand meanwhile;
+  recording a chord: arm it, put Cmd+N on the app's event queue (the
+  `key` control verb; `CGEventPostToPid` needs a permission test runs
+  don't have), and check the binding written and that no window opened;
+  the prefs program's footprint and idle wakeups are printed.
 - The rename's tests are listed with its steps.
 
 ## Rename to Terminal Decline

@@ -216,6 +216,16 @@ pub const SETTINGS: &[Setting] = &[
         ),
         "from the theme",
     ),
+    unset(
+        setting(
+            "colors.split_divider",
+            "Split divider",
+            Appearance,
+            Editor::Colour,
+            "The line between panes, over the theme's",
+        ),
+        "the background mixed a quarter of the way to the foreground",
+    ),
     setting(
         "colors.palette",
         "Palette",
@@ -229,6 +239,13 @@ pub const SETTINGS: &[Setting] = &[
         Appearance,
         number(0.0, 1.0, 0.05),
         "Below 1 the desktop shows through (this tab stays opaque)",
+    ),
+    setting(
+        "unfocused_pane_opacity",
+        "Unfocused panes",
+        Appearance,
+        number(0.0, 1.0, 0.05),
+        "How opaque panes without focus are drawn; 1 doesn't dim them",
     ),
     new_windows(setting(
         "blur",
@@ -501,6 +518,7 @@ mod tests {
                 "theme",
                 "colors",
                 "opacity",
+                "unfocused_pane_opacity",
                 "blur",
                 "padding",
                 "font_family",
@@ -525,7 +543,10 @@ mod tests {
                 "pin_app",
             ]
         );
-        assert_eq!(colors_keys(), ["foreground", "background", "cursor", "selection", "palette"]);
+        assert_eq!(
+            colors_keys(),
+            ["foreground", "background", "cursor", "selection", "split_divider", "palette"]
+        );
     }
 
     #[test]

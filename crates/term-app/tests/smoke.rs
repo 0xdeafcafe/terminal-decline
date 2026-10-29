@@ -804,8 +804,8 @@ fn dump_until(dir: &TempDir, pattern: &str) -> String {
 
 /// Editing the config while the window is open: a new background is drawn
 /// (written the way editors save, a new file renamed over the old), and an
-/// edit with a mistake becomes a notice in the window, as does a setting
-/// that waits for new windows.
+/// edit with a mistake becomes a notice in the window, once; that a
+/// setting waits for new windows isn't written into it.
 #[test]
 #[ignore = "opens a window; run with --run-ignored"]
 fn smoke_config_reloads_when_edited() {
@@ -823,11 +823,12 @@ fn smoke_config_reloads_when_edited() {
          printf \"[colors]\\nbackground = '#102030'\\n\" > '{f}.tmp'; mv '{f}.tmp' '{f}'; \
          {wait2}\
          printf \"font_sise = 3\\ncolumns = 50\\n[colors]\\nbackground = '#102030'\\n\" > '{f}'; \
-         {wait3}{quit}sleep 20",
+         {wait3}printf \"font_sise = 3\\ncolumns = 60\\n[colors]\\nbackground = '#102030'\\n\" > '{f}'; \
+         sleep 1; {dump}{quit}sleep 20",
         dump = osc("dump"),
         wait1 = dump_until(&dir, "\"seq\":1"),
         wait2 = dump_until(&dir, "#102030"),
-        wait3 = dump_until(&dir, "columns changed"),
+        wait3 = dump_until(&dir, "font_sise"),
         quit = osc("quit"),
     );
     let (status, _) = decline(&dir, &script, true);
@@ -846,16 +847,131 @@ fn smoke_config_reloads_when_edited() {
     assert_eq!(last["background"], "#102030", "{last}");
     let s = screen(last);
     assert!(s.starts_with("before|"), "{s}");
-    assert!(s.contains("terminal-decline: config: font_sise: unknown field"), "{s}");
-    assert!(
-        s.contains("terminal-decline: config: columns changed: it applies to new windows|"),
-        "{s}"
-    );
+    assert_eq!(s.matches("terminal-decline: config: font_sise: unknown field").count(), 1, "{s}");
+    assert!(!s.contains("new windows"), "{s}");
     assert!(
         !screen(&d[recoloured]).contains("terminal-decline:"),
         "a good edit shows nothing: {}",
         screen(&d[recoloured])
     );
+}
+
+/// Settings… (the `settings` control command, as Cmd+, does): a tab
+/// running `terminal-decline prefs`, titled Settings, beside the window; a
+/// second Cmd+, brings the same tab back rather than opening another. An
+/// edit made in it recolours the other tab at once, and no notice is
+/// written into that tab while Settings is open, even for a mistake made
+/// by hand meanwhile. The prefs program's footprint and its idle wakeups
+/// are printed.
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_settings_opens_one_tab_that_edits_the_config() {
+    if !have_metal() {
+        return;
+    }
+    let dir = TempDir::new("settings");
+    let conf_dir = dir.config_home().join("terminal-decline");
+    std::fs::create_dir_all(&conf_dir).unwrap();
+    let file = conf_dir.join("config.toml");
+    std::fs::write(&file, "# mine\n[colors]\nbackground = '#000000'\n").unwrap();
+    let (f, d) = (file.display(), dir.path().display());
+    // `[ ]` so the pattern doesn't match this script's own command line.
+    let prefs = "pgrep -f 'terminal-decline[ ]prefs --layer'";
+    let wait_prefs = format!("i=0; until {prefs} > '{d}/pid' || [ $i -ge 200 ]; do sleep 0.05; i=$((i+1)); done; sleep 1; ");
+    let script = format!(
+        "echo before; {dump}{wait1}{settings}{wait_prefs}{front}{settings}sleep 0.5; echo focused; {dump}{wait2}\
+         {edit}{wait3}\
+         {{ printf 'font_sise = 3\\n'; cat '{f}'; }} > '{f}.tmp'; mv '{f}.tmp' '{f}'; sleep 1; \
+         p=$(cat '{d}/pid'); /usr/bin/footprint -p $p > '{d}/footprint.txt' 2>&1; \
+         top -l 2 -s 3 -pid $p -stats pid,idlew,cpu,th > '{d}/top.txt' 2>&1; \
+         echo edited; {dump}{wait4}{quit}sleep 20",
+        dump = osc("dump"),
+        settings = osc("settings"),
+        front = osc("front"),
+        edit = osc("type-settings /background\\\\r\\177\\177\\177\\177\\177\\177\\177102030\\\\r"),
+        quit = osc("quit"),
+        wait1 = dump_until(&dir, "\"seq\":1"),
+        wait2 = dump_until(&dir, "focused[|]"),
+        wait3 = dump_until(&dir, "#102030"),
+        wait4 = dump_until(&dir, "edited[|]"),
+    );
+    let (status, _) = decline(&dir, &script, true);
+    assert!(status.success(), "{status}");
+    let all = dumps(&dir);
+    assert!(all.len() >= 4, "{all:?}");
+    for x in &all {
+        check_dump(x);
+        assert_eq!(x["window"], 1, "only the shell's tab dumps: {x}");
+    }
+    let with = |line: &str| {
+        all.iter()
+            .find(|x| screen(x).contains(&format!("\n{line}|")))
+            .unwrap_or_else(|| panic!("no dump after {line}: {all:?}"))
+    };
+    // One Settings tab, in front after the second Cmd+, too.
+    let after = with("focused");
+    assert_eq!(num(after, "tabs"), 2.0, "{after}");
+    assert_eq!(after["visible"], false, "Settings is in front: {after}");
+    // The edit, written by the TUI into the file, recoloured this tab.
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(text.contains("# mine") && text.contains("background = \"#102030\""), "{text}");
+    let recoloured = all.iter().find(|x| x["background"] == "#102030").expect("never recoloured");
+    assert!(!screen(recoloured).contains("terminal-decline:"), "{}", screen(recoloured));
+    let last = with("edited");
+    assert!(screen(last).starts_with("before|"), "{}", screen(last));
+    assert!(
+        !screen(last).contains("terminal-decline:"),
+        "no notices while Settings is open: {}",
+        screen(last)
+    );
+    let footprint = std::fs::read_to_string(dir.path().join("footprint.txt")).unwrap_or_default();
+    let top = std::fs::read_to_string(dir.path().join("top.txt")).unwrap_or_default();
+    eprintln!("prefs footprint:\n{footprint}\nprefs top:\n{top}");
+    assert!(footprint.contains("Footprint") || footprint.contains("footprint"), "{footprint}");
+}
+
+/// Recording a shortcut in Settings: the TUI asks (OSC 7771), a Cmd key
+/// posted through the window server is taken before the menus (Cmd+N
+/// opens no window) and sent back, and the TUI binds it.
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_settings_records_a_chord_before_the_menus() {
+    if !have_metal() {
+        return;
+    }
+    let dir = TempDir::new("record");
+    let file = dir.config_home().join("terminal-decline/config.toml");
+    let (f, d) = (file.display(), dir.path().display());
+    let prefs = "pgrep -f 'terminal-decline[ ]prefs --layer'";
+    let wait_prefs = format!("i=0; until {prefs} > '{d}/pid' || [ $i -ge 200 ]; do sleep 0.05; i=$((i+1)); done; sleep 1; ");
+    let wait_file =
+        |what: &str| format!("i=0; until grep -q '{what}' '{f}' 2>/dev/null || [ $i -ge 100 ]; do sleep 0.1; i=$((i+1)); done; ");
+    // In mkdir order: only the first window runs the test, so a window
+    // Cmd+N opened by mistake shows up as a second dumper.
+    let script = format!(
+        "if mkdir '{d}/first' 2>/dev/null; then echo first; {settings}{wait_prefs}\
+         {select}sleep 1; {key}sleep 1; {yes}{wait}echo done; {dump}sleep 1; {quit}\
+         else echo extra; {dump}fi; sleep 20",
+        settings = osc("settings"),
+        select = osc("type-settings \\\\e[C\\\\e[C\\\\e[B\\\\e[Bc"),
+        key = osc("key 45 cmd"),
+        yes = osc("type-settings y"),
+        wait = wait_file("cmd+n"),
+        dump = osc("dump"),
+        quit = osc("quit"),
+    );
+    let (status, _) = decline(&dir, &script, true);
+    assert!(status.success(), "{status}");
+    let text = std::fs::read_to_string(&file).unwrap_or_default();
+    assert!(text.contains("\"cmd+n\" = \"new_tab\""), "{text}");
+    assert!(text.contains("\"cmd+t\" = \"none\""), "{text}");
+    let all = dumps(&dir);
+    assert!(
+        all.iter().all(|x| !screen(x).starts_with("extra|")),
+        "Cmd+N reached the menus: {all:?}"
+    );
+    assert_eq!(all.len(), 1, "{all:?}");
+    assert_eq!(num(&all[0], "tabs"), 2.0, "{}", all[0]);
 }
 
 /// Files dropped on the window are typed in as a paste: each path quoted

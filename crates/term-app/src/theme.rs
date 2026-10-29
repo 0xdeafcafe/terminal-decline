@@ -9,7 +9,7 @@
 
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::config::Colors;
 
@@ -90,6 +90,21 @@ impl<'de> Deserialize<'de> for ThemeChoice {
             Err(_) => Err(serde::de::Error::custom(
                 "use a theme's name (\"solarized-dark\") or { light = \"…\", dark = \"…\" }",
             )),
+        }
+    }
+}
+
+impl Serialize for ThemeChoice {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        match self {
+            ThemeChoice::One(name) => s.serialize_str(name),
+            ThemeChoice::ByAppearance { light, dark } => {
+                let mut m = s.serialize_map(Some(2))?;
+                m.serialize_entry("light", light)?;
+                m.serialize_entry("dark", dark)?;
+                m.end()
+            }
         }
     }
 }

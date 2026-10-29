@@ -16,9 +16,9 @@ use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, ProtocolObject, Sel};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSAlert, NSAlertFirstButtonReturn, NSApplication, NSCursor, NSDragOperation, NSDraggingInfo, NSEvent, NSEventModifierFlags, NSMenu,
-    NSMenuItem, NSModalResponse, NSPasteboard, NSPasteboardTypeFileURL, NSPasteboardTypeString, NSPasteboardTypeURL, NSResponder,
-    NSTextInputClient, NSView, NSWindow, NSWindowDelegate,
+    NSAlert, NSAlertFirstButtonReturn, NSApplication, NSCursor, NSDragOperation, NSDraggingInfo, NSEvent, NSEventMask,
+    NSEventModifierFlags, NSMenu, NSMenuItem, NSModalResponse, NSPasteboard, NSPasteboardTypeFileURL, NSPasteboardTypeString,
+    NSPasteboardTypeURL, NSResponder, NSTextInputClient, NSView, NSWindow, NSWindowDelegate,
 };
 use objc2_foundation::{
     NSArray, NSAttributedString, NSAttributedStringKey, NSKeyValueObservingOptions, NSNotFound, NSNotification,
@@ -110,7 +110,23 @@ struct State {
     /// Whether the window could be seen when last checked
     /// (`sync_visibility`), so hiding and showing happen once each.
     shown: bool,
+    /// This is the Settings tab, which the app started itself: a fixed
+    /// title, always opaque, not a running program for `confirm_close`,
+    /// and the only session whose chord recording is honoured.
+    settings: bool,
+    /// A chord being recorded for the preferences (OSC 7771).
+    recording: Option<Recording>,
+    /// Bumped by each recording, so a timeout cancels only its own.
+    recordings: u64,
 }
+
+/// A local key-down monitor waiting for the chord to record.
+struct Recording {
+    monitor: Retained<AnyObject>,
+}
+
+/// How long a chord recording waits for a key.
+const RECORD_TIMEOUT: Duration = Duration::from_secs(10);
 
 struct AutoScroll {
     /// Lines a second; positive scrolls back into history.
@@ -399,6 +415,9 @@ define_class!(
 
         #[unsafe(method(windowDidResignKey:))]
         fn window_did_resign_key(&self, _n: &NSNotification) {
+            // Another window or tab, or another app: a chord being
+            // recorded is cancelled.
+            self.finish_recording(None);
             self.set_focus(false);
             // The tab put behind resigns key before its group selects
             // another tab; look again once that has happened.
@@ -549,6 +568,18 @@ pub struct Launch {
     pub scale: f64,
     /// Shown at the top of the window, before the program's output.
     pub notices: Rc<[String]>,
+    /// The Settings tab (see `State::settings`).
+    pub settings: bool,
+}
+
+/// The renderer's theme for a window: the Settings tab stays opaque
+/// whatever `opacity` says, so it can always be read.
+fn window_theme(config: &Config, appearance: Appearance, settings: bool) -> Theme {
+    let mut theme = config.theme(appearance);
+    if settings {
+        theme.background_opacity = 255;
+    }
+    theme
 }
 
 impl TerminalView {
@@ -577,12 +608,13 @@ impl TerminalView {
         let id = self.ivars().id;
         let layer = &self.ivars().layer;
         let renderer = Renderer::new(launch.fonts);
-        let opaque = config.opacity >= 1.0;
+        let settings = launch.settings;
+        let opaque = config.opacity >= 1.0 || settings;
         term_render::configure_layer(layer, renderer.device(), opaque);
         layer.setContentsScale(launch.scale);
 
         let appearance = self.appearance();
-        let theme = config.theme(appearance);
+        let theme = window_theme(&config, appearance, settings);
         let m = renderer.metrics();
         let size = self.frame().size;
         let pad = padding_for(&config, self.titlebar_height(), launch.scale);
@@ -614,6 +646,11 @@ impl TerminalView {
         hooks.on_events = Some(Box::new(move |events| {
             DispatchQueue::main().exec_async(move || with_view(id, |v| v.events(events)));
         }));
+        if settings {
+            hooks.on_record_chord = Some(Box::new(move || {
+                DispatchQueue::main().exec_async(move || with_view(id, |v| v.start_recording()));
+            }));
+        }
         let session = Session::spawn(&launch.command, pty_size(cols, lines, m), t, hooks)?;
 
         let link = unsafe { self.displayLinkWithTarget_selector(self, sel!(tick:)) };
@@ -655,6 +692,9 @@ impl TerminalView {
             top_inset: self.titlebar_height(),
             hidden: 0,
             shown: true,
+            settings,
+            recording: None,
+            recordings: 0,
         });
         if let Some(window) = self.window() {
             unsafe {
@@ -679,7 +719,7 @@ impl TerminalView {
     fn events(&self, events: Events) {
         let mtm = MainThreadMarker::from(self);
         let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
-        let fixed_title = self.with_state(|st| st.config.title.is_some()).unwrap_or(true);
+        let fixed_title = self.with_state(|st| st.settings || st.config.title.is_some()).unwrap_or(true);
         let window = self.window();
         if let Some(window) = &window
             && !fixed_title
@@ -1047,15 +1087,19 @@ impl TerminalView {
                 st.renderer.set_fonts(Fonts::with_config(&fonts, scale));
             }
             st.binds = config.keybinds();
-            st.theme = config.theme(st.appearance);
+            st.theme = window_theme(&config, st.appearance, st.settings);
             {
                 let mut t = st.session.lock_term();
                 t.state.set_default_colors(crate::config::query_colors(&st.theme));
-                for n in notices {
-                    crate::session::write_late_notice(&mut t, n);
+                // Not into a full-screen program (vim, the preferences):
+                // the lines would land under its cursor in its colours.
+                if !st.settings && !t.state.alt_screen_active() {
+                    for n in notices {
+                        crate::session::write_late_notice(&mut t, n);
+                    }
                 }
             }
-            self.ivars().layer.setOpaque(config.opacity >= 1.0);
+            self.ivars().layer.setOpaque(config.opacity >= 1.0 || st.settings);
         });
         if changed.is_some() {
             // Padding or cell size may have changed the grid.
@@ -1087,7 +1131,7 @@ impl TerminalView {
                 return false;
             }
             st.appearance = appearance;
-            let theme = st.config.theme(appearance);
+            let theme = window_theme(&st.config, appearance, st.settings);
             let recolour = theme.foreground != st.theme.foreground
                 || theme.background != st.theme.background
                 || theme.palette != st.theme.palette
@@ -1122,6 +1166,7 @@ impl TerminalView {
         if let Some(window) = observed {
             unsafe { window.removeObserver_forKeyPath(self, &NSString::from_str(LAYOUT_RECT)) };
         }
+        self.finish_recording(None);
         let st = self.ivars().state.borrow_mut().take();
         if let Some(st) = st {
             st.link.invalidate();
@@ -1226,10 +1271,105 @@ impl TerminalView {
     }
 
     /// The program running in the foreground, if it isn't the shell (see
-    /// [`crate::running`]).
+    /// [`crate::running`]). Never the Settings tab: closing it loses
+    /// nothing, each edit being written at once.
     pub fn running_program(&self) -> Option<String> {
-        let pid = self.with_state(|st| st.session.pid()).flatten()?;
+        let pid = self.with_state(|st| (!st.settings).then(|| st.session.pid()).flatten()).flatten()?;
         crate::running::foreground_program(pid)
+    }
+
+    /// Whether this is the Settings tab.
+    pub fn is_settings(&self) -> bool {
+        self.with_state(|st| st.settings).unwrap_or(false)
+    }
+
+    /// Type `bytes` as if typed (the test-only `type-settings`).
+    pub fn type_bytes(&self, bytes: Vec<u8>) {
+        self.send_input(bytes);
+    }
+
+    /// The preferences asked for a chord (`OSC 7771 ; record-chord`, only
+    /// heard in the Settings tab): the next key down in this window is
+    /// taken before the menus, the input method and `[keybind]` see it,
+    /// and sent back as `OSC 7771 ; chord ; <chord>`. Plain Esc, the
+    /// window losing focus (a tab switch too) or [`RECORD_TIMEOUT`]
+    /// cancel.
+    fn start_recording(&self) {
+        let Some(settings) = self.with_state(|st| st.settings) else {
+            return;
+        };
+        if !settings {
+            return;
+        }
+        // Asked again while waiting: the old monitor goes, silently.
+        if let Some(old) = self.with_state(|st| st.recording.take()).flatten() {
+            unsafe { NSEvent::removeMonitor(&old.monitor) };
+        }
+        if !self.window().is_some_and(|w| w.isKeyWindow()) {
+            self.send_raw(keybind::chord_reply(None).into_bytes());
+            return;
+        }
+        let id = self.ivars().id;
+        let handler = RcBlock::new(move |event: NonNull<NSEvent>| -> *mut NSEvent {
+            let mut taken = false;
+            with_view(id, |v| taken = v.recorded_key(unsafe { event.as_ref() }));
+            if taken { std::ptr::null_mut() } else { event.as_ptr() }
+        });
+        let monitor = unsafe { NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::KeyDown, &handler) };
+        let Some(monitor) = monitor else {
+            self.send_raw(keybind::chord_reply(None).into_bytes());
+            return;
+        };
+        let Some(token) = self.with_state(|st| {
+            st.recordings += 1;
+            st.recording = Some(Recording { monitor });
+            st.recordings
+        }) else {
+            return;
+        };
+        let _ = DispatchQueue::main().after(DispatchTime::NOW.time(RECORD_TIMEOUT.as_nanos() as i64), move || {
+            with_view(id, |v| {
+                if v.with_state(|st| st.recordings == token && st.recording.is_some()) == Some(true) {
+                    v.finish_recording(None);
+                }
+            })
+        });
+    }
+
+    /// A key down while a chord is recorded: whether it was taken.
+    fn recorded_key(&self, event: &NSEvent) -> bool {
+        if self.with_state(|st| st.recording.is_some()) != Some(true) {
+            return false;
+        }
+        let ours = self
+            .window()
+            .zip(event.window(MainThreadMarker::from(self)))
+            .is_some_and(|(w, e)| std::ptr::eq::<NSWindow>(&*w, &*e));
+        if !ours {
+            return false;
+        }
+        let input = key_input(event);
+        let mods = crate::keys::flags::COMMAND | crate::keys::flags::CONTROL | crate::keys::flags::OPTION | crate::keys::flags::SHIFT;
+        if input.keycode == 0x35 && input.flags & mods == 0 {
+            self.finish_recording(None);
+            return true;
+        }
+        let chord = self.with_state(|st| keybind::recorded_chord(&input, &st.binds)).flatten();
+        // A key with no character or name: keep waiting.
+        if chord.is_some() {
+            self.finish_recording(chord);
+        }
+        true
+    }
+
+    /// Ends a chord recording, if one is waiting, replying with `chord`
+    /// or, for `None`, that it was cancelled.
+    fn finish_recording(&self, chord: Option<keybind::Chord>) {
+        let Some(rec) = self.with_state(|st| st.recording.take()).flatten() else {
+            return;
+        };
+        unsafe { NSEvent::removeMonitor(&rec.monitor) };
+        self.send_raw(keybind::chord_reply(chord.as_ref()).into_bytes());
     }
 
     /// Ask, in a sheet on `window`, whether to close it while `program`
@@ -1819,6 +1959,9 @@ impl TerminalView {
                 }
                 Some(Control::Front) => bring_to_front(self.ivars().id),
                 Some(Control::Drop(paths)) => self.paste_text(&crate::desktop::dropped_text(&paths)),
+                Some(Control::Settings) => crate::app::show_settings_now(),
+                Some(Control::TypeSettings(bytes)) => crate::app::type_into_settings(bytes),
+                Some(Control::Key { keycode, flags }) => post_key(MainThreadMarker::from(self), keycode, flags),
                 Some(Control::Close) => {
                     if let Some(window) = self.window() {
                         window.performClose(None);
@@ -1881,6 +2024,40 @@ impl TerminalView {
                 self.with_state(|st| write_dump(st, window));
                 self.run_controls();
             }
+        }
+    }
+}
+
+/// A key press and release put on the app's event queue for the key
+/// window (the test-only `key` command): it goes where a real key goes,
+/// local event monitors and the menus first. The characters are the
+/// ASCII-capable layout's.
+fn post_key(mtm: MainThreadMarker, keycode: u16, flags: u64) {
+    let app = NSApplication::sharedApplication(mtm);
+    let Some(window) = app.keyWindow() else { return };
+    let flags = NSEventModifierFlags(flags as usize);
+    let (plain, shifted) = crate::ascii_layout::chars(keycode);
+    let typed = if flags.contains(NSEventModifierFlags::Shift) {
+        shifted
+    } else {
+        plain
+    };
+    let text = |c: Option<char>| NSString::from_str(&c.map(String::from).unwrap_or_default());
+    for kind in [objc2_app_kit::NSEventType::KeyDown, objc2_app_kit::NSEventType::KeyUp] {
+        let event = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+            kind,
+            NSPoint::new(0.0, 0.0),
+            flags,
+            0.0,
+            window.windowNumber(),
+            None,
+            &text(typed),
+            &text(plain),
+            false,
+            keycode,
+        );
+        if let Some(event) = event {
+            app.postEvent_atStart(&event, false);
         }
     }
 }

@@ -19,7 +19,7 @@ fn main() {
             paths.config_dir.display()
         )),
     };
-    if matches!(args.first().map(String::as_str), Some("pin" | "import"))
+    if matches!(args.first().map(String::as_str), Some("pin" | "import" | "prefs"))
         && let Some(m) = &moved
     {
         eprintln!("terminal-decline: {m}");
@@ -34,6 +34,11 @@ fn main() {
         });
     }
 
+    // Settings… (Cmd+,), or run by hand: the preferences in this terminal.
+    if args.first().map(String::as_str) == Some("prefs") {
+        std::process::exit(terminal_decline::prefs::run(&args[1..], &paths));
+    }
+
     if args.first().map(String::as_str) == Some("import") {
         std::process::exit(match terminal_decline::import::run(&args[1..], &paths) {
             Ok(()) => 0,
@@ -45,9 +50,12 @@ fn main() {
     }
 
     let mut layers: Vec<PathBuf> = vec![paths.config_file()];
-    // Running as a pin: its settings, on top of the user's config.
+    // Running as a pin: its settings, on top of the user's config, and
+    // the file Settings… edits.
+    let mut edit = 0;
     if let Some(p) = pin::own_pin_config(&paths) {
         layers.push(p);
+        edit = 1;
     }
     let mut command = None;
     let mut restore = Vec::new();
@@ -91,6 +99,7 @@ fn main() {
         layers,
         themes_dir: paths.themes_dir(),
         command,
+        edit,
     };
     let (config, mut errors) = from.load();
     errors.splice(0..0, moved);

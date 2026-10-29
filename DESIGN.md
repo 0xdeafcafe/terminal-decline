@@ -534,23 +534,51 @@ contents, so only a real change reloads. A reload reads every layer again
   `font_size` replaces a size set with Cmd+= / Cmd+-), `padding`,
   `opacity`, `option_as_meta`, `copy_on_select` and `[keybind]` (the menus
   are rebuilt);
-- to new windows only, with a notice naming them (`terminal-decline: config:
-  columns changed: it applies to new windows`): `command`, `cwd`, `env`,
-  `columns`, `lines`, `blur` (a view set up with the window), `title`, and
-  `scrollback` (term-core has no way to change a running terminal's
-  limit; once it does, the new limit can apply from the next line).
+- to new windows only: `command`, `cwd`, `env`, `columns`, `lines`,
+  `blur` (a view set up with the window), `title`, and `scrollback`
+  (term-core has no way to change a running terminal's limit; once it
+  does, the new limit can apply from the next line). The list is the
+  settings schema's (`term_prefs::schema::new_windows_keys`, read by
+  `config::new_windows_only`); Settings marks those rows, and a reload
+  says so on stderr only (`terminal-decline: config: columns changed: it
+  applies to new windows`), never in a window.
 
 `confirm_close` (see Files, folders and Services) applies at once.
 
 Errors in the edited file are notices in every window, written after the
-program's output, as at startup; new windows show the errors of the
-config in effect.
+program's output, as at startup, but only those new since the last load,
+and never into a terminal on the alternate screen (vim, Claude Code, the
+preferences), where they would land under the program's cursor in its
+colours. While the Settings tab is open no notices are written at all:
+it shows the same messages, from the same loader. New windows show the
+errors of the config in effect.
+
+Settings… (Terminal Decline menu, Cmd+, — the `settings` action) is
+`terminal-decline prefs` (crate `term-prefs`, design in
+docs/design/preferences.md) in a tab of the front window; a second
+Cmd+, brings the same tab back. The app runs its own binary (the main
+app's, found by bundle id, when in a pin) directly, not through the
+login shell (term-pty's `Command::direct`), with `--layer` for each
+config file, `--edit` for the one edited (the user's, or a pin's own
+file) and `--in-app`. The tab is titled "Settings", stays opaque, gets no
+startup notices, and isn't a running program for `confirm_close`.
+"Edit config.toml" beside it opens the file with `open -t`. The program
+checks each edit with the app's loader through `prefs::AppHost`
+(`term_prefs::Host`) before writing it, so the TUI's messages are the
+app's own. To record a shortcut it sends `OSC 7771 ; record-chord`,
+honoured only in that tab (a session hook set by the app, so no other
+program can ask): a local key-down monitor takes the next key in that
+window before the menus, the input method and `[keybind]`, and the app
+replies through the PTY input with `OSC 7771 ; chord ; <chord>`
+(`keybind::recorded_chord`, spelled as `Chord`'s `Display`) or
+`OSC 7771 ; cancelled` (plain Esc, the window losing focus, a tab switch,
+or 10 s).
 
 Shortcuts (`[keybind]`, `keybind`): a chord (`"cmd+k"`, `"ctrl+shift+t"`,
 `"cmd+enter"`; modifiers cmd, ctrl, alt, shift; keys by character or name)
 set to a menu action (new_window, new_tab, close, copy, paste, select_all,
 clear_scrollback, font_bigger, font_smaller, font_reset,
-toggle_full_screen, next_tab, previous_tab, and find, a placeholder whose
+toggle_full_screen, next_tab, previous_tab, settings (Cmd+,), and find, a placeholder whose
 Edit > Find… item stays disabled until the find bar exists; and the pane
 actions of docs/design/splits.md §5, split_right/down, close_tab,
 close_window, focus_pane_left/right/up/down/next/previous,
@@ -620,7 +648,8 @@ screen, because esctest reads the screen back through it.
 | `cat` 100 MB coloured text | 1.44–1.53 s | 1.90 s |
 | CPU time during that `cat` | 1.6 s | 4.4 s |
 | Footprint after it (10k lines scrollback) | 59 MB | 145–177 MB |
-| Binary size | 2.16 MB (unwinding; 1.90 MB aborting; 29 Oct 2026) | — |
+| Binary size | 2.78 MB with the preferences (2.17 MB before them; unwinding; 29 Oct 2026) | — |
+| Settings tab (prefs process) | 2.8 MB footprint, 0 idle wakeups | — |
 | Parse, plain text (1 KB pieces) | 423 MB/s | — |
 | Parse, coloured / TUI / `seq` / Unicode | 172 / 289 / 110 / 131 MB/s | — |
 

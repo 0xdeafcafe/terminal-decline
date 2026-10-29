@@ -17,7 +17,9 @@ The Homebrew cask installs `Terminal Decline.app` and the command as both
 `terminal-decline` and `decline`.
 
 Settings: `~/.config/terminal-decline/config.toml` (font, colours, opacity,
-padding, scrollback, `option_as_meta`, …). Pin settings:
+padding, scrollback, `option_as_meta`, …), edited by hand or with
+Settings… (Cmd+,), which opens them in a tab (`terminal-decline prefs`
+does the same in any terminal). Pin settings:
 `~/.config/terminal-decline/pins/`. It was called Decline before; the first
 run moves `~/.config/decline` there.
 

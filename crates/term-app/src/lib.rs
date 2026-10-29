@@ -22,6 +22,7 @@ pub mod notify;
 pub mod panes;
 pub mod paths;
 pub mod pin;
+pub mod prefs;
 pub mod reload;
 pub mod running;
 pub mod secure_input;
@@ -52,6 +53,7 @@ usage: terminal-decline [--config FILE] [-e PROGRAM [ARGS...]]
        terminal-decline pin --list | --remove NAME | --update
        terminal-decline import ghostty [PATH] [--write [--force]]
        terminal-decline import iterm FILE.itermcolors [--name NAME] [--write [--force]]
+       terminal-decline prefs [--layer FILE]... [--edit N]
 
 Runs a terminal window. With -e, runs PROGRAM instead of your login shell.
 `terminal-decline pin` makes PROGRAM its own macOS app, with its own Dock icon.";

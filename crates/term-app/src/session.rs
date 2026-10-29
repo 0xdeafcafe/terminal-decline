@@ -79,6 +79,11 @@ pub struct Hooks {
     /// of the terminal. Unlike drawing, this happens while the window is
     /// hidden too (a background tab's title is in the tab bar).
     pub on_events: Option<Box<dyn Fn(Events) + Send>>,
+    /// The Settings tab only: called for each `OSC 7771 ; record-chord` in
+    /// the output, the preferences asking the app to record a chord. Set
+    /// by the app when it starts the preferences itself, so no other
+    /// program can ask. `None` ignores the sequence like any unknown OSC.
+    pub on_record_chord: Option<Box<dyn FnMut() + Send>>,
 }
 
 impl Hooks {
@@ -89,6 +94,7 @@ impl Hooks {
             on_control: None,
             on_parsed: None,
             on_events: None,
+            on_record_chord: None,
         }
     }
 }
@@ -258,12 +264,15 @@ impl Session {
             mut on_control,
             on_parsed,
             on_events,
+            mut on_record_chord,
         } = hooks;
         let reader = std::thread::Builder::new().name("pty-reader".into()).spawn(move || {
             // A panic anywhere else in the loop stops the session too.
             let read = catch_unwind(AssertUnwindSafe(|| -> Result<(), Bug> {
                 let mut buf = vec![0u8; READ_BUF];
                 let mut scanner = on_control.as_ref().map(|_| ControlScanner::default());
+                let mut prefs = on_record_chord.as_ref().map(|_| ControlScanner::new(crate::control::PREFS_PREFIX));
+                let mut asked = Vec::new();
                 let mut found = Vec::new();
                 let parse = |bytes: &[u8]| -> Result<(), Bug> {
                     if bytes.is_empty() {
@@ -295,6 +304,14 @@ impl Session {
                         }
                     }
                     parse(&buf[start..n])?;
+                    if let (Some(scanner), Some(record)) = (&mut prefs, &mut on_record_chord) {
+                        scanner.feed(&buf[..n], &mut asked);
+                        for (_, what) in asked.drain(..) {
+                            if what == "record-chord" {
+                                record();
+                            }
+                        }
+                    }
                     if !dirty2.swap(true, Ordering::AcqRel) {
                         wake();
                     }

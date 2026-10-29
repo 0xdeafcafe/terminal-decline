@@ -14,6 +14,10 @@ pub struct Command {
     pub env: Vec<(String, String)>,
     /// The shell to use instead of the user's login shell.
     pub shell: Option<String>,
+    /// Run `argv[0]`, an absolute path, itself instead of through the
+    /// login shell: no `.zprofile`, and it starts even when the shell is
+    /// broken or doesn't take `$0` / `$@` (the app's own Settings).
+    pub direct: bool,
 }
 
 /// The environment for the child: `inherited`, then ours, then `extra`.
@@ -53,6 +57,20 @@ pub fn build_argv(shell: &str, argv: &[String]) -> Vec<String> {
         out.extend(argv.iter().cloned());
     }
     out
+}
+
+/// The program to exec and its argv (argv[0] first): `argv` itself for
+/// a [`Command::direct`] one, else `shell` with [`build_argv`]. A direct
+/// command needs an absolute path, so the user's PATH is never consulted.
+pub fn exec_argv(cmd: &Command, shell: &str) -> Result<(String, Vec<String>), String> {
+    if !cmd.direct {
+        return Ok((shell.to_string(), build_argv(shell, &cmd.argv)));
+    }
+    match cmd.argv.first() {
+        Some(p) if Path::new(p).is_absolute() => Ok((p.clone(), cmd.argv.clone())),
+        Some(p) => Err(format!("{p:?} is not an absolute path")),
+        None => Err("no program to run".into()),
+    }
 }
 
 /// The directory to start in: `cwd` if it is an existing directory,
@@ -146,6 +164,32 @@ mod tests {
     fn argv_runs_through_the_shell() {
         let argv = build_argv("/bin/sh", &s(&["vim", "a file.txt"]));
         assert_eq!(argv, s(&["-sh", "-c", "exec \"$0\" \"$@\"", "vim", "a file.txt"]));
+    }
+
+    #[test]
+    fn direct_commands_skip_the_shell() {
+        let cmd = Command {
+            argv: s(&["/opt/td/terminal-decline", "prefs", "--in-app"]),
+            direct: true,
+            ..Command::default()
+        };
+        let (program, argv) = exec_argv(&cmd, "/bin/zsh").unwrap();
+        assert_eq!(program, "/opt/td/terminal-decline");
+        assert_eq!(argv, s(&["/opt/td/terminal-decline", "prefs", "--in-app"]));
+        let relative = Command {
+            argv: s(&["terminal-decline"]),
+            ..cmd.clone()
+        };
+        assert!(exec_argv(&relative, "/bin/zsh").is_err());
+        assert!(exec_argv(&Command { argv: vec![], ..cmd }, "/bin/zsh").is_err());
+        let through_shell = Command {
+            argv: s(&["vim"]),
+            ..Command::default()
+        };
+        assert_eq!(
+            exec_argv(&through_shell, "/bin/sh").unwrap(),
+            ("/bin/sh".into(), build_argv("/bin/sh", &s(&["vim"])))
+        );
     }
 
     #[test]

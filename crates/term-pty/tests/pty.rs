@@ -159,6 +159,18 @@ fn output_then_exit() {
 }
 
 #[test]
+fn direct_commands_run_without_the_shell() {
+    // A shell that can't run anything: a direct command never uses it, and
+    // its arguments reach the program as they are.
+    let mut s = spawn("direct", &["/bin/echo", "direct", "$0"], |cmd, _| {
+        cmd.shell = Some("/nonexistent/shell".into());
+        cmd.direct = true;
+    });
+    s.wait_for_text("direct $0");
+    s.wait_exit();
+}
+
+#[test]
 fn empty_argv_is_a_login_shell() {
     let mut s = spawn("login", &[], |_, _| {});
     // The echoed input contains "<%s>", not "<-sh>".

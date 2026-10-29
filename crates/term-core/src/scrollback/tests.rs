@@ -439,6 +439,25 @@ fn dictionary_entries() {
 }
 
 #[test]
+fn widths_without_a_lookup_agree_with_the_table() {
+    for &(lo, hi) in &ALWAYS_WIDE {
+        for cp in lo..=hi {
+            let Some(c) = char::from_u32(cp) else { continue };
+            for amb in [1, 2] {
+                let table = if unicode::props(c).width_with(amb) == 2 { 2 } else { 1 };
+                assert_eq!(single_width(c, amb), table, "U+{cp:04X} at {amb}");
+                assert!(!unicode::props(c).ambiguous(), "U+{cp:04X}");
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for c in ['a', 'é', '漢', '😀', '\u{10FFFD}'] {
+        push_utf8(&mut out, c);
+    }
+    assert_eq!(out, "aé漢😀\u{10FFFD}".as_bytes());
+}
+
+#[test]
 fn varint_edge_values() {
     let cases: &[(u32, usize)] = &[
         (0, 1),
@@ -839,7 +858,7 @@ fn freeing_keeps_at_most_one_spare_block_and_clear_frees_all() {
     sb.check_all().unwrap();
     sb.clear();
     assert!(sb.is_empty());
-    assert!(sb.memory_bytes() < 1024, "{}", sb.memory_bytes());
+    assert!(sb.memory_bytes() < 4096, "{}", sb.memory_bytes());
     assert!(sb.get(0).is_none());
     sb.push(&row, &[Style::DEFAULT]);
     assert_eq!(sb.len(), 1);

@@ -218,20 +218,40 @@ struct OpenBlock {
     has_marks: bool,
     /// Style (its link an index in `links`) → dictionary slot, for this
     /// block only.
-    dict: HashMap<Style, u32, BuildHasherDefault<FxHasher>>,
+    dict: HashMap<Key, u32, BuildHasherDefault<FxHasher>>,
     links: Vec<Arc<LinkValue>>,
     /// Link → its index in `links` (1 onwards).
     link_index: HashMap<Arc<LinkValue>, u32>,
     /// Bytes the links count.
     link_bytes: usize,
-    /// Screen style id → slot, indexed by `id & 63`, in front of `dict`:
+    /// Screen style id → slot, indexed by `id & 255`, in front of `dict`:
     /// the common case is one compare per run. Reset with the block, and
     /// whenever the screen's table may have reused ids (a sweep, another
     /// table).
-    cache: [(u32, u32); 64],
+    cache: [(u32, u32); CACHE],
 }
 
 const NO_ENTRY: (u32, u32) = (u32::MAX, 0);
+
+/// Entries in the slot cache. 256 rather than §11.2's 64: a gradient
+/// line has a new style in each of its 160 cells, and 2 KB per terminal
+/// is cheap.
+const CACHE: usize = 256;
+
+/// A style as the dictionary's key, hashed as three words (as the
+/// screen's style table hashes it) rather than field by field.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Key(Style);
+
+impl std::hash::Hash for Key {
+    #[inline]
+    fn hash<H: Hasher>(&self, h: &mut H) {
+        let s = &self.0;
+        h.write_u64(s.fg.0 as u64 | (s.bg.0 as u64) << 32);
+        h.write_u64(s.underline_color.0 as u64 | (s.link as u64) << 32);
+        h.write_u64(s.attrs.bits() as u64 | (s.underline as u64) << 16 | (s.image_id_high as u64) << 24);
+    }
+}
 
 /// FxHash, for the dictionary's map: a style is a few small words, and
 /// SipHash's resistance to chosen keys buys nothing here.
@@ -300,7 +320,7 @@ impl OpenBlock {
             links: Vec::new(),
             link_index: HashMap::new(),
             link_bytes: 0,
-            cache: [NO_ENTRY; 64],
+            cache: [NO_ENTRY; CACHE],
         }
     }
 
@@ -330,20 +350,31 @@ impl OpenBlock {
             + self.checkpoints.capacity() * 2
             + self.styles.capacity()
             + self.style_starts.capacity() * 2
-            + self.dict.capacity() * (std::mem::size_of::<(Style, u32)>() + 1)
+            + self.dict.capacity() * (std::mem::size_of::<(Key, u32)>() + 1)
             + self.link_bytes
             + self.link_index.capacity() * (std::mem::size_of::<(Arc<LinkValue>, u32)>() + 1)
     }
 
     fn reset_cache(&mut self) {
-        self.cache = [NO_ENTRY; 64];
+        self.cache = [NO_ENTRY; CACHE];
     }
 
     /// Turn it into a sealed block, leaving an empty one starting where it
     /// ended.
     fn seal(&mut self) -> BlockData {
         let next = OpenBlock::new(self.first + self.lines() as u64, self.ambiguous);
-        let b = std::mem::replace(self, next);
+        let mut b = std::mem::replace(self, next);
+        // The next block takes over the dictionary's map, emptied: a
+        // gradient fills one with ~13k styles a block, and growing it
+        // again from nothing rehashes it a dozen times. One much bigger
+        // than this block needed is shrunk.
+        let used = b.dict.len();
+        let mut dict = std::mem::take(&mut b.dict);
+        dict.clear();
+        if dict.capacity() > 4 * used.max(16) {
+            dict.shrink_to(2 * used);
+        }
+        self.dict = dict;
         BlockData {
             meta: b.meta.into_boxed_slice(),
             starts: b.starts.into_boxed_slice(),
@@ -367,7 +398,7 @@ impl OpenBlock {
         if id == 0 {
             return 0;
         }
-        let e = self.cache[(id & 63) as usize];
+        let e = self.cache[(id as usize) & (CACHE - 1)];
         if e.0 == id {
             return e.1;
         }
@@ -385,18 +416,20 @@ impl OpenBlock {
         };
         let slot = if s == Style::DEFAULT {
             0
-        } else if let Some(&slot) = self.dict.get(&s) {
-            slot
         } else {
-            room(&mut self.style_starts, 1);
-            room(&mut self.styles, 15);
-            self.style_starts.push(self.styles.len() as u16);
-            put_style(&mut self.styles, &s);
-            let slot = self.style_starts.len() as u32;
-            self.dict.insert(s, slot);
-            slot
+            // One hash, whether the style is new or not.
+            match self.dict.entry(Key(s)) {
+                std::collections::hash_map::Entry::Occupied(e) => *e.get(),
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    room(&mut self.style_starts, 1);
+                    room(&mut self.styles, 15);
+                    self.style_starts.push(self.styles.len() as u16);
+                    put_style(&mut self.styles, &s);
+                    *e.insert(self.style_starts.len() as u32)
+                }
+            }
         };
-        self.cache[(id & 63) as usize] = (id, slot);
+        self.cache[(id as usize) & (CACHE - 1)] = (id, slot);
         slot
     }
 
@@ -458,10 +491,16 @@ impl OpenBlock {
         let cols = cells.len();
         let wrapped = row.wrapped;
 
+        // The cells up to the last that draws anything: blank cells after
+        // it are dropped (a wrapped row keeps them all). Most rows end in
+        // blanks, so this one backward scan is most of the work for short
+        // lines; everything after looks at these cells only.
+        let len = if wrapped { cols } else { stored_len(cells) };
+
         // Common case: every cell is narrow ASCII (or empty) in the
         // default style, so the text is a byte copy and there are no runs.
-        if cells.iter().fold(0, |a, c| a | c.bits()) & !0x7F == 0 && !row.has_marks() {
-            let end = if wrapped { cols } else { ascii_text_end(cells) };
+        if cells[..len].iter().fold(0, |a, c| a | c.bits()) & !0x7F == 0 && !row.has_marks() {
+            let end = if wrapped { cols } else { trim_spaces(&cells[..len]) };
             room(&mut self.meta, 6);
             if wrapped {
                 self.meta.push(flag::WRAPPED);
@@ -487,8 +526,11 @@ impl OpenBlock {
             cols
         } else {
             // A wide cell's spacer is in its style, even when blank.
-            let n = stored_len(cells);
-            if n > 0 && n < cols && cells[n - 1].is_wide() { n + 1 } else { n }
+            if len > 0 && len < cols && cells[len - 1].is_wide() {
+                len + 1
+            } else {
+                len
+            }
         };
         let text_end = if wrapped { text_cols } else { text_end(&cells[..run_end]) };
         let last = cells[cols - 1];
@@ -540,8 +582,7 @@ impl OpenBlock {
                     0 => ' ',
                     cp => char::from_u32(cp).unwrap_or(' '),
                 };
-                let mut buf = [0u8; 4];
-                self.text.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+                push_utf8(&mut self.text, ch);
                 predicted = single_width(ch, amb);
                 scalars += 1;
             }
@@ -560,18 +601,23 @@ impl OpenBlock {
         // Runs, by column, merged when neighbours share a slot; the
         // default tail needs none.
         scratch.runs.clear();
-        let mut last_id = u32::MAX;
-        let mut slot = 0;
-        for &c in &cells[..run_end] {
-            let id = c.style_id();
-            if id != last_id {
-                last_id = id;
-                slot = self.slot(id, styles, links);
-            }
+        let cells_run = &cells[..run_end];
+        let mut i = 0;
+        while i < cells_run.len() {
+            // Cells of one style id, then their slot once. (Two ids can
+            // share a slot: styles differing only in a link that
+            // isn't kept.)
+            let id = cells_run[i].style_id();
+            let n = cells_run[i..]
+                .iter()
+                .position(|c| c.style_id() != id)
+                .unwrap_or(cells_run.len() - i);
+            let slot = self.slot(id, styles, links);
             match scratch.runs.last_mut() {
-                Some((n, s)) if *s == slot => *n += 1,
-                _ => scratch.runs.push((1, slot)),
+                Some((m, s)) if *s == slot => *m += n as u32,
+                _ => scratch.runs.push((n as u32, slot)),
             }
+            i += n;
         }
         while scratch.runs.last().is_some_and(|r| r.1 == 0) {
             scratch.runs.pop();
@@ -672,25 +718,48 @@ fn room<T>(v: &mut Vec<T>, add: usize) {
     }
 }
 
+/// Append `c` as UTF-8: always a 4-byte store, then cut to its length, so
+/// no `memcpy` call for a 1–4 byte copy. The caller has made room.
+#[inline]
+fn push_utf8(out: &mut Vec<u8>, c: char) {
+    let mut buf = [0u8; 4];
+    let n = c.encode_utf8(&mut buf).len();
+    let len = out.len();
+    out.extend_from_slice(&buf);
+    out.truncate(len + n);
+}
+
+/// Scripts that are two cells wide whatever the ambiguous-width setting
+/// (none of their characters is ambiguous): CJK ideographs, kana and
+/// Hangul syllables. Checked against the table for every scalar in them.
+const ALWAYS_WIDE: [(u32, u32); 5] = [
+    (0x3041, 0x3096),
+    (0x30A1, 0x30FA),
+    (0x3400, 0x4DBF),
+    (0x4E00, 0x9FFF),
+    (0xAC00, 0xD7A3),
+];
+
 /// The width a single scalar's cell is given when written (§6.3): 2 for
 /// wide characters (and ambiguous ones with the setting at 2), else 1.
+/// ASCII and the common wide scripts need no table lookup.
 #[inline]
 fn single_width(c: char, ambiguous: u8) -> u8 {
-    if c.is_ascii() {
+    let cp = c as u32;
+    if cp < 0x80 {
         return 1;
+    }
+    if (0x3041..=0xD7A3).contains(&cp) && ALWAYS_WIDE.iter().any(|&(lo, hi)| (lo..=hi).contains(&cp)) {
+        return 2;
     }
     if unicode::props(c).width_with(ambiguous) == 2 { 2 } else { 1 }
 }
 
-/// Columns of text to store for an unwrapped row of narrow ASCII: up to the
-/// last cell that is neither empty nor a space.
-fn ascii_text_end(cells: &[Cell]) -> usize {
-    // Most trailing cells were never written: skip them 8 at a time (an
-    // OR over 64 bytes, which vectorises), then one at a time.
+/// `cells` (narrow ASCII, ending in a cell that isn't blank) without the
+/// typed spaces at their end.
+#[inline]
+fn trim_spaces(cells: &[Cell]) -> usize {
     let mut len = cells.len();
-    while len >= 8 && cells[len - 8..len].iter().fold(0, |a, c| a | c.bits()) == 0 {
-        len -= 8;
-    }
     while len > 0 && matches!(cells[len - 1].bits(), 0 | 0x20) {
         len -= 1;
     }
@@ -698,13 +767,16 @@ fn ascii_text_end(cells: &[Cell]) -> usize {
 }
 
 /// Cells up to and including the last that isn't blank ([`Cell::is_blank`]).
+#[inline]
 fn stored_len(cells: &[Cell]) -> usize {
-    // Skip trailing blanks 8 at a time (an OR over 64 bytes, which
-    // vectorises), then one at a time.
-    let blank = |c: &[Cell]| c.iter().fold(0, |a, c| a | c.bits()) & Cell::NOT_BLANK == 0;
+    // Skip trailing blanks 16 at a time (an OR over 128 bytes, which
+    // vectorises, with no bounds checks), then one at a time.
     let mut len = cells.len();
-    while len >= 8 && blank(&cells[len - 8..len]) {
-        len -= 8;
+    for chunk in cells.rchunks_exact(16) {
+        if chunk.iter().fold(0, |a, c| a | c.bits()) & Cell::NOT_BLANK != 0 {
+            break;
+        }
+        len -= 16;
     }
     while len > 0 && cells[len - 1].is_blank() {
         len -= 1;

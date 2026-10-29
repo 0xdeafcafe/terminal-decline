@@ -80,3 +80,31 @@ fn probe_and_inflate_mutations() {
         }
     }
 }
+
+#[test]
+fn decoders_on_mutated_images() {
+    use term_image::decode::{Limits, decode};
+    let fixtures: [&[u8]; 4] = [
+        include_bytes!("fixtures/quadrants-64x48.jpg"),
+        include_bytes!("fixtures/quadrants-64x48.gif"),
+        include_bytes!("fixtures/rgba-4x2-adam7.png"),
+        include_bytes!("fixtures/gradient-300x300-adam7.png"),
+    ];
+    let limits = Limits { transient: 4 << 20 };
+    let mut r = Rng(17);
+    for _ in 0..1500 {
+        for base in fixtures {
+            let mut m = base.to_vec();
+            for _ in 0..1 + r.next() % 6 {
+                let i = (r.next() as usize) % m.len();
+                m[i] = r.next() as u8;
+            }
+            if r.next().is_multiple_of(4) {
+                m.truncate((r.next() as usize) % (m.len() + 1));
+            }
+            let (w, h) = (1 + (r.next() % 80) as u32, 1 + (r.next() % 80) as u32);
+            let mut t = VecPixels::new(w, h);
+            let _ = decode(&m, &mut t, &limits);
+        }
+    }
+}

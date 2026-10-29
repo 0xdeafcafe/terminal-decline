@@ -710,6 +710,22 @@ is measured in PR I.5.
   orientation transform. When a smaller size is wanted (§7.2), ImageIO's
   thumbnail path (`kCGImageSourceThumbnailMaxPixelSize`) decodes at that
   size directly.
+- **As decided (§12, question 3) and built in I.1**: decoding is pure
+  Rust instead, in `term_image::decode` (the `png`, `jpeg-decoder` and
+  `gif` crates), fuzzed with the other targets; term-app's host only runs
+  it on the queue. `decode(bytes, into, limits)` writes premultiplied BGRA
+  at `into`'s size (`fit` picks it from the header), averaging down and
+  applying the EXIF orientation as rows stream; JPEG uses the decoder's
+  DCT scaling (up to 1/8 each way) first, so a phone photo drawn small is
+  never decoded at full size. Each decoder's own allocations are capped
+  (`Limits::transient`). Colour profiles are ignored (taken as sRGB).
+  Measured (`cargo bench -p term-image --bench decode`, M-series Mac):
+  PNG 1624 × 1018 screenshot 4.3 ms at its size, 7.6 ms halved; JPEG
+  1600 × 1200 11.8 ms, 3.1 ms at 400 × 300; binary size +321 KB
+  stripped for the three decoders (on top of +50 KB for the parsers and
+  Sixel), more than the 100–150 KB estimated. `jpeg-decoder` starts one
+  short-lived thread per colour component for images over 128 × 128 (its
+  built-in heuristic; rayon is off).
 - ImageIO parses untrusted bytes from programs (possibly remote), and a
   crash in it takes every window. Sniffing in Rust narrows what reaches
   it, and decoding off the lock keeps a slow image from stalling frames,
@@ -956,7 +972,7 @@ A string abandoned (`dcs_end(false)`, CAN/SUB) drops the image.
 | GPU time, one window-sized image | + ≤ 0.1 ms | Metal counters, as the render bench does |
 | Footprint: images at the budget | peak − idle ≤ 32 MB + 4 MB (the 4 MB for metadata, ImageIO's own buffers beyond the reserved headroom, and allocator slack; measured and the margin set from the numbers in I.5) | `scripts/pressure/run.py` gains `images_flood` (mpv-like: 500 id-less 1600×1000 frames) and `images_tiny` (20,000 1×1 images); `/usr/bin/footprint -p <pid>` before, at peak, after |
 | Footprint with no images | unchanged (the pool and an empty `Graphics` are < 1 KB) | standard set before/after each PR |
-| Binary size | + ~60 KB (miniz_oxide) + ~40 KB (decoder, sniffing, protocols) | `ls -l` of the release library, recorded per PR |
+| Binary size | + ~60 KB (miniz_oxide) + ~40 KB (decoder, sniffing, protocols); measured in I.1: +50 KB for those, +321 KB for the PNG/JPEG/GIF decoders (stripped, thin LTO) | `ls -l` of the release library, recorded per PR |
 | Idle | 0% CPU, 0 wakeups, also with a lost image in view | `top -l 2 -s 5 -stats cpu,idlew` with an image on screen, and with the budget full of protected images and a lost one in view |
 | Parse speed of text | unchanged (an APC/DCS branch only) | `cargo bench -p term-core --bench parse` within noise; the parse-speed gate (cells §17.4) |
 

@@ -8,7 +8,9 @@
 //!   orientation) and GIF from their headers;
 //! - [`iterm`]: the arguments of iTerm2's `OSC 1337;File=`;
 //! - [`sixel`]: a streaming Sixel decoder;
-//! - [`convert`]: raw RGB / RGBA pixels to premultiplied BGRA.
+//! - [`convert`]: raw RGB / RGBA pixels to premultiplied BGRA;
+//! - [`decode`]: PNG, JPEG and GIF (first frame), decoded at the size
+//!   they are drawn.
 //!
 //! Pixels are written into a [`PixelTarget`] that someone else allocates
 //! (in the terminal, a Metal buffer counted against the image budget), so
@@ -17,6 +19,7 @@
 
 pub mod base64;
 pub mod convert;
+pub mod decode;
 pub mod inflate;
 pub mod iterm;
 pub mod kitty;

@@ -61,6 +61,13 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "decode"
+path = "fuzz_targets/decode.rs"
+test = false
+doc = false
+bench = false
+
 # The same vendored vte as the main workspace.
 [patch.crates-io]
 vte = { path = "../vendor/vte" }

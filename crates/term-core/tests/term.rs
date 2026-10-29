@@ -543,7 +543,8 @@ fn the_image_pool_is_kept_across_a_reset() {
         terminal_id,
         image: term_core::ImageKey::Kitty(1),
         generation: 1,
-        result: Ok(()),
+        result: Ok(std::sync::Arc::new(term_core::image::VecBuffer::new(1, 1)) as std::sync::Arc<dyn term_core::PixelBuffer>),
+        opaque: false,
     };
     assert!(!t.state.image_job_done(done(u64::MAX)));
     let id = t.state.terminal_id();

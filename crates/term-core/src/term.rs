@@ -9,7 +9,7 @@ use vte::{OscLarge, Params, Perform};
 
 use crate::cell::{Cell, Color, Mark, MarkKind, Row, Width};
 use crate::image::placeholder::{self, PLACEHOLDER, Piece};
-use crate::image::{Graphics, ImageJob, ImagePool, ImageState, JobDone};
+use crate::image::{Graphics, ImageHost, ImageJob, ImageKey, ImagePool, ImageState, JobDone, RustHost};
 pub use crate::links::LinkValue;
 use crate::rows::{Content, RowRef};
 use crate::scrollback::{HistoryStats, Scrollback};
@@ -17,12 +17,14 @@ use crate::style::{Attrs, LinkId, Style, Underline};
 use crate::style_table::{StyleStats, StyleTable};
 use crate::unicode::{self, Segmenter};
 
+mod graphics;
 mod history;
 mod reflow;
 mod replies;
 mod search;
 mod snapshot;
 
+pub use graphics::HeadRead;
 pub use replies::DynamicColor;
 pub use search::SearchCount;
 pub use snapshot::{Highlight, HighlightKind, RowFlags, RowKey, ScreenId, SnapCursor, SnapRow, Snapshot};
@@ -424,6 +426,20 @@ pub struct Terminal {
     /// A placeholder was written on a screen since the last reset: only
     /// then does the snapshot look for them to flag rows.
     placeholders_written: bool,
+    /// The APC string being read (kitty graphics, images.md §3.1).
+    apc: graphics::Apc,
+    /// The graphics command of the chunk being read.
+    chunk: Option<term_image::kitty::Command>,
+    /// The kitty transmission in progress (§3.2).
+    upload: Option<Box<graphics::Upload>>,
+    /// A command waiting for its medium's header (§3.4).
+    parked: Option<Box<graphics::Parked>>,
+    /// Replies that wait for a job: (image, generation, to whom).
+    deferred_replies: Vec<(ImageKey, u32, graphics::ReplyTo)>,
+    /// Media and decoding (the app's, or the pure-Rust one).
+    image_host: Arc<dyn ImageHost>,
+    /// Stop the parser for header reads, so they happen unlocked.
+    reads_off_lock: bool,
 }
 
 /// The placeholder cell diacritics go to, and what was inferred so far.
@@ -516,6 +532,13 @@ impl Terminal {
             image_jobs: Vec::new(),
             placeholder: None,
             placeholders_written: false,
+            apc: graphics::Apc::Idle,
+            chunk: None,
+            upload: None,
+            parked: None,
+            deferred_replies: Vec::new(),
+            image_host: Arc::new(RustHost::new()),
+            reads_off_lock: false,
         }
         .with_rows_touched()
     }
@@ -1415,8 +1438,12 @@ impl Terminal {
         let n = n.min(bottom - top + 1);
         let blank = self.blank();
         let to_history = top == 0 && !self.alt_active;
+        let old_top = self.top_line;
         if top == 0 {
             self.top_line += n as u64;
+        }
+        if self.graphics.has_placements() {
+            self.scroll_placements(old_top, (top, bottom), n, true, to_history);
         }
         if top == 0 && bottom == self.lines - 1 {
             // Common case, the whole screen: each top row goes round the ring
@@ -1447,12 +1474,35 @@ impl Terminal {
     fn scroll_down(&mut self, n: usize) {
         let (top, bottom) = (self.scroll_top, self.scroll_bottom);
         let n = n.min(bottom - top + 1);
+        if self.graphics.has_placements() {
+            self.scroll_placements(self.top_line, (top, bottom), n, false, false);
+        }
         self.screen.make_contiguous()[top..=bottom].rotate_right(n);
         let blank = self.blank();
         for row in self.screen.range_mut(top..top + n) {
             row.reset(self.cols, blank);
         }
         self.touch_rows(top..top + n);
+    }
+
+    /// Direct placements follow a scroll (cells §8.2): a whole primary
+    /// screen needs nothing (line numbers move with the text), except
+    /// dropping those whose lines left history; a region moves those
+    /// inside it; the alternate screen drops those scrolled off.
+    #[cold]
+    fn scroll_placements(&mut self, old_top: u64, region: (usize, usize), n: usize, up: bool, to_history: bool) {
+        let whole = region == (0, self.lines - 1);
+        if !(whole && to_history) {
+            self.graphics
+                .scroll_region(old_top, self.top_line, self.lines, region, n, up, to_history);
+        }
+        if self.alt_active {
+            self.graphics.drop_above(self.top_line);
+        } else if up && region.0 == 0 {
+            // Lines pushed past the scrollback's limit take their images.
+            let first = self.top_line.saturating_sub(self.scrollback.len() as u64 + n as u64);
+            self.graphics.drop_above(first);
+        }
     }
 
     fn linefeed(&mut self) {
@@ -1653,6 +1703,12 @@ impl Terminal {
         std::mem::swap(&mut self.screen, &mut self.other_screen);
         std::mem::swap(&mut self.styles, &mut self.other_styles);
         std::mem::swap(&mut self.graphics, &mut self.other_graphics);
+        // The alternate screen's images start and end with it (cells §8.2).
+        if on {
+            self.graphics.clear();
+        } else {
+            self.other_graphics.clear();
+        }
         // The templates and the pen's link id name ids in the other
         // screen's tables.
         self.drop_pen_link_id();
@@ -1748,25 +1804,41 @@ impl Terminal {
         if done.terminal_id != self.terminal_id {
             return false;
         }
+        let mut found = None;
         for g in [&mut self.graphics, &mut self.other_graphics] {
+            let pool = g.pool().clone();
             if let Some(image) = g.image_mut(done.image)
                 && image.generation == done.generation
             {
-                image.state = match done.result {
-                    Ok(()) => ImageState::Ready,
-                    Err(_) => ImageState::Failed,
+                let r = match done.result {
+                    Ok(pixels) => {
+                        image.state = ImageState::Ready;
+                        image.opaque |= done.opaque;
+                        if let Some(id) = image.pool {
+                            pool.set_pixels(id, pixels);
+                        }
+                        Ok(())
+                    }
+                    Err(e) => {
+                        image.state = ImageState::Failed;
+                        Err(e)
+                    }
                 };
                 if let Some(id) = image.pool {
-                    g.pool().set_busy(id, false);
+                    pool.set_busy(id, false);
                 }
-                self.generation = self.generation.wrapping_add(1);
-                return true;
+                found = Some(r);
+                break;
             }
         }
-        false
+        let Some(r) = found else { return false };
+        self.job_reply(done.image, done.generation, r);
+        self.generation = self.generation.wrapping_add(1);
+        true
     }
 
     fn reset(&mut self) {
+        self.abandon_upload();
         // The same pool: RIS frees this terminal's images, not the budget.
         let mut fresh = Terminal::new(self.cols, self.lines, self.scrollback.limit(), self.graphics.pool().clone());
         // New tables, with epochs that carry on from these.
@@ -1801,6 +1873,9 @@ impl Terminal {
         fresh.terminal_id = self.terminal_id;
         fresh.graphics = Box::new(Graphics::new(self.terminal_id, self.graphics.pool().clone()));
         fresh.other_graphics = Box::new(Graphics::new(self.terminal_id, self.graphics.pool().clone()));
+        fresh.image_host = self.image_host.clone();
+        fresh.reads_off_lock = self.reads_off_lock;
+        fresh.parked = self.parked.take();
         fresh.counter = self.counter;
         fresh.batch_start = self.batch_start;
         fresh.history_epoch = self.history_epoch + 1;
@@ -2719,6 +2794,19 @@ impl Perform for Terminal {
 
     fn apc_start(&mut self) {
         self.clear_grapheme();
+        self.apc = graphics::Apc::Start;
+    }
+
+    fn apc_put(&mut self, data: &[u8]) {
+        self.apc_put_bytes(data);
+    }
+
+    fn apc_end(&mut self, complete: bool) {
+        self.apc_finish(complete);
+    }
+
+    fn terminated(&self) -> bool {
+        self.waiting_for_head()
     }
 
     fn execute(&mut self, byte: u8) {
@@ -2832,8 +2920,17 @@ impl Perform for Terminal {
                             self.screen[r].wrapped = false;
                         }
                         self.screen_cleared();
+                        if self.graphics.has_placements() {
+                            let top = self.top_line;
+                            self.graphics
+                                .delete_placements(Some((top, top + self.lines as u64)), false, |_| true);
+                        }
                     }
                     3 => {
+                        if self.graphics.has_placements() {
+                            let top = self.top_line;
+                            self.graphics.delete_placements(None, false, |p| p.line < top);
+                        }
                         self.scrollback.clear();
                         self.history_epoch += 1;
                         self.view = None;
@@ -3521,6 +3618,16 @@ pub struct Term {
 }
 
 impl Term {
+    /// Parse until `bytes` are done or a command waits for a medium's
+    /// header ([`Terminal::take_head_read`], with
+    /// [`Terminal::set_reads_off_lock`]); returns the bytes parsed.
+    pub fn advance_until_head(&mut self, bytes: &[u8]) -> usize {
+        if self.state.waiting_for_head() {
+            return 0;
+        }
+        self.parser.advance_until_terminated(&mut self.state, bytes)
+    }
+
     /// A parser and a [`Terminal::new`].
     pub fn new(cols: usize, lines: usize, scrollback_limit: usize, pool: Arc<ImagePool>) -> Term {
         Term {
@@ -3533,7 +3640,20 @@ impl Term {
     /// characters may be split across chunks anywhere: the parser carries
     /// its state from one call to the next.
     pub fn advance(&mut self, bytes: &[u8]) {
-        self.parser.advance(&mut self.state, bytes);
+        if self.state.reads_off_lock {
+            // Headers read here, with no lock to release.
+            let mut rest = bytes;
+            while !rest.is_empty() {
+                let n = self.advance_until_head(rest);
+                rest = &rest[n..];
+                if let Some(read) = self.state.take_head_read() {
+                    let head = self.state.image_host.read_head(read.medium(), read.max);
+                    self.state.head_read_done(read, head);
+                }
+            }
+        } else {
+            self.parser.advance(&mut self.state, bytes);
+        }
         #[cfg(debug_assertions)]
         if let Err(e) = self.state.check_invariants() {
             panic!("terminal invariant broken: {e}");

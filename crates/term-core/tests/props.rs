@@ -233,8 +233,45 @@ fn movement() -> impl Strategy<Value = Vec<u8>> {
     ]
 }
 
+/// kitty graphics commands (images.md §3): transmits (raw, chunked,
+/// id-less, broken), places, deletes of every kind and queries, with
+/// small images so many fit.
+fn graphics() -> impl Strategy<Value = Vec<u8>> {
+    const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let id = prop_oneof![
+        Just(String::new()),
+        (1u32..5).prop_map(|i| format!(",i={i}")),
+        (1u32..3).prop_map(|n| format!(",I={n}"))
+    ];
+    let action = select(vec!["a=t", "a=T", "a=p", "a=q", "a=d", "a=T,U=1", "a=T,C=1", "a=p,p=2", "a=f"]);
+    let delete = select(vec![
+        "",
+        ",d=a",
+        ",d=A",
+        ",d=i",
+        ",d=I",
+        ",d=c",
+        ",d=p,x=2,y=2",
+        ",d=x,x=1",
+        ",d=y,y=3",
+        ",d=z,z=0",
+        ",d=r,x=1,y=3",
+        ",d=N",
+    ]);
+    let size = (1u32..40, 1u32..60, select(vec![24u32, 32]));
+    let more = select(vec!["", ",m=1", ",q=1", ",q=2"]);
+    let payload =
+        prop::collection::vec(any::<u8>(), 0..40).prop_map(|b| b.iter().map(|&x| B64[(x & 63) as usize] as char).collect::<String>());
+    let end = select(vec!["\x1b\\", "\x18", "\x1b\\\x1b[c"]);
+    (id, action, delete, size, more, payload, end).prop_map(|(id, action, delete, (w, h, f), more, payload, end)| {
+        let delete = if action == "a=d" { delete } else { "" };
+        format!("\x1b_G{action}{id}{delete},f={f},s={w},v={h}{more};{payload}{end}").into_bytes()
+    })
+}
+
 fn chunk() -> impl Strategy<Value = Vec<u8>> {
     let piece = prop_oneof![
+        2 => graphics(),
         5 => ascii(),
         3 => unicode(),
         3 => cluster(),
@@ -377,6 +414,41 @@ proptest! {
         }
         prop_assert_eq!(whole.state.dump(), parts.state.dump());
         prop_assert_eq!(&whole.state.replies(), &parts.state.replies());
+    }
+}
+
+proptest! {
+    #![proptest_config(config())]
+
+    /// Graphics streams with text, scrolling, resizes, ED and RIS, and
+    /// snapshots: the image maps agree, every placement's image exists,
+    /// and the pool counts what its entries hold, within the budget.
+    #[test]
+    fn graphics_streams_keep_the_image_invariants(
+        steps in prop::collection::vec(prop_oneof![
+            6 => graphics().prop_map(Step::Output),
+            4 => chunk().prop_map(Step::Output),
+            1 => select(vec![&b"\x1b[2J"[..], b"\x1b[3J", b"\x1bc", b"\x1b[?1049h", b"\x1b[?1049l", b"\x1b[2;4r\n\n\n\x1b[r", b"\n\n\n\n\n\n\n\n"])
+                .prop_map(|b| Step::Output(b.to_vec())),
+            1 => (1usize..=60, 1usize..=20).prop_map(|(c, l)| Step::Resize(c, l)),
+            1 => (-10isize..=10).prop_map(Step::ScrollView),
+        ], 1..40),
+    ) {
+        let pool = term_core::ImagePool::new(256 << 10);
+        let mut t = Term::new(20, 6, 30, pool.clone());
+        let mut snap = Snapshot::default();
+        for step in &steps {
+            apply(&mut t, step);
+            check(&t)?;
+            pool.check().map_err(TestCaseError::fail)?;
+            prop_assert!(pool.used() <= pool.limit(), "pool holds {} of {}", pool.used(), pool.limit());
+            t.state.snapshot(&mut snap, |_| false);
+            for p in &snap.placements {
+                prop_assert!(p.view_row + (p.rows as i32) > 0 && p.view_row < t.state.lines() as i32);
+            }
+        }
+        drop(t);
+        prop_assert_eq!(pool.used(), 0, "a dropped terminal gives every byte back");
     }
 }
 

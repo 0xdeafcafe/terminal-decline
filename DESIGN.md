@@ -290,7 +290,11 @@ rather than when a frame is drawn.
 A dogfood restart saves each window's directory and frame, plus, for tabs,
 the index of their tab group and which tab was in front
 (`reload::SavedWindow`); they reopen as tabs of one window, in order. Files
-from builds before tabs restore as plain windows.
+from builds before tabs restore as plain windows. The build keeps its
+bundle path from startup: if the bundle is gone rather than replaced (the
+build from before the rename to Terminal Decline, removed by the dogfood
+script), it restarts into `Terminal Decline.app` in the same folder
+(`reload::relaunch_target`).
 
 ## Notifications and progress
 

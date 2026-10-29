@@ -264,18 +264,23 @@ impl AppDelegate {
             return;
         }
         let Ok(exe) = std::env::current_exe() else { return };
-        let _ = crate::reload::watch(exe, || {
-            dispatch2::DispatchQueue::main().exec_async(|| {
+        // Kept from now: once the bundle is gone, the executable can't be
+        // resolved to it any more.
+        let _ = crate::reload::watch(exe, move || {
+            dispatch2::DispatchQueue::main().exec_async(move || {
                 let delegate = DELEGATE.with(|d| d.borrow().as_ref().and_then(|w| w.load()));
                 if let Some(delegate) = delegate {
-                    delegate.restart_into_new_build();
+                    delegate.restart_into_new_build(&bundle);
                 }
             });
         });
     }
 
-    fn restart_into_new_build(&self) {
-        let Some(bundle) = crate::reload::own_bundle() else { return };
+    fn restart_into_new_build(&self, bundle: &std::path::Path) {
+        let Some(bundle) = crate::reload::relaunch_target(bundle) else {
+            eprintln!("decline: {} is gone and no new build is beside it", bundle.display());
+            return;
+        };
         let saved = self.saved_windows();
         let restored = crate::reload::save(&saved).and_then(|file| crate::reload::relaunch(&bundle, &file));
         if let Err(e) = restored {

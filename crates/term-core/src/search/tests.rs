@@ -304,6 +304,44 @@ fn match_from_historys_line_ends_onto_the_screen() {
     }
 }
 
+/// A resize reflows the screen and the lines pulled back from history:
+/// hits are then those of the reflowed text.
+#[test]
+fn resize_keeps_hits_equal_to_the_reflowed_text() {
+    for query in [q("needle", false, WordMatch::Contains), q("needle", false, WordMatch::FullWord)] {
+        let mut t = Term::new(12, 3, 1000);
+        for i in 0..20 {
+            t.advance(format!("{i} xx needle yy needle\r\n").as_bytes());
+        }
+        t.advance(b"needle needle needle");
+        assert_eq!(search(&mut t, query.clone()), naive(&t, &query));
+        for (cols, lines) in [(7, 3), (5, 2), (16, 4), (9, 5)] {
+            t.state.resize(cols, lines);
+            t.state.refresh_search();
+            assert_eq!(t.state.search_hits(), naive(&t, &query), "{cols}x{lines}");
+            assert_eq!(t.state.search_hits().len(), 43, "{cols}x{lines}");
+        }
+    }
+}
+
+/// Found by `equals_naive_search`: a resize pulls lines back from
+/// history, which lets lines hidden by the limit show again; their hits
+/// are found.
+#[test]
+fn lines_shown_again_by_a_resize_are_searched() {
+    let mut t = Term::new(6, 3, 8);
+    let query = q("A", false, WordMatch::Contains);
+    search(&mut t, query.clone());
+    t.advance(format!("aA\r\n{}\r\nab", "a".repeat(66)).as_bytes());
+    t.state.refresh_search();
+    assert_eq!(t.state.search_hits(), naive(&t, &query));
+    assert!(t.state.search_hits().is_empty(), "\"aA\" is hidden by the limit");
+    t.state.resize(14, 4);
+    t.state.refresh_search();
+    assert_eq!(t.state.search_hits(), naive(&t, &query));
+    assert_eq!(t.state.search_hits().len(), 1);
+}
+
 const PIECES: &[&str] = &[
     "a", "b", "A", "B", "ab", "é", "É", "σ", "Σ", "ς", "e\u{301}", "中", " ", "_", "-", "\r\n", "aaa", "ß",
 ];
@@ -340,7 +378,8 @@ proptest! {
     #![proptest_config(ProptestConfig { cases: 200, ..ProptestConfig::default() })]
 
     /// Search finds what a naive search over the whole text finds, through
-    /// block boundaries, hidden lines and output after it started.
+    /// block boundaries, hidden lines, output after it started and a
+    /// resize (which reflows).
     #[test]
     fn equals_naive_search(
         cols in 6usize..14,
@@ -348,6 +387,7 @@ proptest! {
         before in output(),
         later in output(),
         query in query(),
+        resize in prop::option::of((4usize..16, 1usize..6)),
     ) {
         let mut t = Term::new(cols, 3, limit);
         feed(&mut t, &before);
@@ -356,5 +396,10 @@ proptest! {
         feed(&mut t, &later);
         t.state.refresh_search();
         prop_assert_eq!(t.state.search_hits(), naive(&t, &query));
+        if let Some((cols, lines)) = resize {
+            t.state.resize(cols, lines);
+            t.state.refresh_search();
+            prop_assert_eq!(t.state.search_hits(), naive(&t, &query));
+        }
     }
 }

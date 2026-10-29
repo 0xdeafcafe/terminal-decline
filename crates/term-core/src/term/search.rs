@@ -42,7 +42,8 @@ pub(crate) struct SearchState {
     /// live rule).
     history_to: u64,
     /// The first visible history line when hits were last brought up to
-    /// date: hiding lines before it can make its start a word's start.
+    /// date: hiding lines before it, or showing them again, can change
+    /// whether its start is a word's start; lines shown again are new.
     first_visible: u64,
     /// Where history's text ended (after its last cell or line end) when
     /// the screen was last searched, and when the job was taken. Ends With
@@ -88,6 +89,24 @@ impl SearchState {
             Some(self.blocks.iter().flat_map(|b| b.1.iter()))
         };
         history.into_iter().flatten().chain(self.screen.iter())
+    }
+
+    /// Drop history's hit that starts at `at`, if there is one.
+    fn drop_starting_at(&mut self, at: (u64, u16)) {
+        let at = Point {
+            line: at.0,
+            col: at.1 as usize,
+        };
+        for b in self.blocks.iter_mut().rev() {
+            b.1.retain(|h| h.start() != at);
+            if b.0 <= at.line {
+                break;
+            }
+        }
+        self.blocks.retain(|b| !b.1.is_empty());
+        if self.current.is_some_and(|c| c.start() == at) {
+            self.current = None;
+        }
     }
 
     /// Drop history's hits that end at `at`.
@@ -412,8 +431,9 @@ impl Terminal {
             changed = true;
         }
         let first_moved = s.first_visible != first;
-        if first > s.first_visible {
-            self.search_history_start(&mut s);
+        if first_moved {
+            let old = s.first_visible;
+            self.search_history_start(&mut s, old);
             changed = true;
         }
         s.first_visible = first;
@@ -504,27 +524,43 @@ impl Terminal {
         }
     }
 
-    /// Lines were hidden by the limit: a match at the start of the first
-    /// visible line now has nothing before it, so it may start a word
-    /// where it didn't before (§13.8). Search that line's start again,
-    /// with the lines after it up to a match's reach. A match that runs on
-    /// to the screen is the screen's.
-    fn search_history_start(&mut self, s: &mut SearchState) {
+    /// The first visible history line moved from `old` (§11.2). Lines
+    /// shown again (a pop lets lines hidden by the limit show) are
+    /// searched; and whether a match at the start of the line that was
+    /// first starts a word can change either way (§13.8), so that start is
+    /// searched again: with nothing before it once lines are hidden, with
+    /// the shown lines before it otherwise. The lines after are taken up
+    /// to a match's reach; a match that runs on to the screen is the
+    /// screen's.
+    fn search_history_start(&mut self, s: &mut SearchState, old: u64) {
         let Some(m) = s.matcher.clone() else { return };
-        if !matches!(m.word(), WordMatch::StartsWith | WordMatch::FullWord) {
+        let first = self.scrollback.first_visible();
+        let starts_word = matches!(m.word(), WordMatch::StartsWith | WordMatch::FullWord);
+        if first > old && !starts_word {
             return;
         }
         let sb = self.scrollback.len();
-        let first = self.scrollback.first_visible();
+        let shown = old.saturating_sub(first).min(sb as u64) as usize;
         let (mut cells, mut row, mut styles) = (Cells::default(), Row::default(), Vec::new());
         let mut k = 0;
-        while k < sb && (k == 0 || cells.text.len() < m.reach()) {
+        let mut boundary = 0;
+        while k < sb && (k <= shown || cells.text.len() < boundary + m.reach()) {
+            if k == shown {
+                boundary = cells.text.len();
+            }
             self.scrollback.get_into(k, &mut row, &mut styles);
             cells.push_row(&row, first + k as u64);
             k += 1;
         }
+        if k <= shown {
+            // Every visible line was shown again.
+            boundary = cells.text.len();
+        }
         if cells.text.is_empty() {
             return;
+        }
+        if starts_word && let Some(p) = cells.start_at(boundary) {
+            s.drop_starting_at(p);
         }
         // The scalar after these lines: the next one's first (its line end
         // if it is empty), or the screen's.
@@ -534,13 +570,23 @@ impl Terminal {
         };
         let (mut scratch, mut raw) = (Vec::new(), Vec::new());
         m.find(&cells.text, None, after, &mut scratch, &mut raw);
-        let hits: Vec<Hit> = raw
-            .iter()
-            .filter(|&&(a, _)| a == 0)
-            .filter_map(|&(a, b)| Some(Hit::from_parts(cells.start_at(a)?, cells.end_at(b)?)))
-            .collect();
-        if !hits.is_empty() {
-            s.add(self.scrollback.block_first(first), hits);
+        let mut per: Vec<(u64, Vec<Hit>)> = Vec::new();
+        for &(a, b) in &raw {
+            if a > boundary {
+                break;
+            }
+            let (Some(st), Some(en)) = (cells.start_at(a), cells.end_at(b)) else {
+                continue;
+            };
+            let h = Hit::from_parts(st, en);
+            let block = self.scrollback.block_first(h.line);
+            match per.last_mut() {
+                Some(p) if p.0 == block => p.1.push(h),
+                _ => per.push((block, vec![h])),
+            }
+        }
+        for (block, hits) in per {
+            s.add(block, hits);
         }
     }
 

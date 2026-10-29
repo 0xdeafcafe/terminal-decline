@@ -35,11 +35,16 @@ pub struct GlyphKey {
     /// fitted to these cells and sprites drawn across them; coverage glyphs
     /// are drawn at the font's size whatever this says.
     pub cells: u8,
-    /// Spare (synthetic bold, a later subpixel phase); 0 today.
+    /// Flags for how the glyph is drawn: [`GlyphKey::FITTED`] for icons;
+    /// the other bits are spare (synthetic bold, a later subpixel phase).
     pub variant: u8,
 }
 
 impl GlyphKey {
+    /// `variant` flag: an icon, scaled down and centred to fit `cells`
+    /// cells and never drawn past them (E.4; see `term_font::fit`).
+    pub const FITTED: u8 = 1;
+
     /// The key for a code-drawn shape across `cells` cells.
     pub fn sprite(id: SpriteId, cells: u8) -> GlyphKey {
         GlyphKey {
@@ -86,13 +91,55 @@ impl Hash for CfKey {
     }
 }
 
+/// What makes two CTFonts draw the same glyphs: PostScript name, size and
+/// variation axes. `CFEqual` is stricter than this: the font
+/// `CTFontCreateForString` returns for an emoji and the one CTLine puts in
+/// its run are different objects that aren't `CFEqual`, though their
+/// descriptors are identical, and without this they got two ids and every
+/// glyph two bitmaps.
+struct FaceKey {
+    name: String,
+    size: u64,
+    variation: Option<CFRetained<CFType>>,
+}
+
+impl FaceKey {
+    fn of(font: &CTFont) -> FaceKey {
+        unsafe {
+            FaceKey {
+                name: font.post_script_name().to_string(),
+                size: font.size().to_bits(),
+                variation: font.variation().map(|v| CFRetained::<CFType>::from(&*v)),
+            }
+        }
+    }
+}
+
+impl PartialEq for FaceKey {
+    fn eq(&self, other: &FaceKey) -> bool {
+        self.name == other.name && self.size == other.size && self.variation == other.variation
+    }
+}
+
+impl Eq for FaceKey {}
+
+impl Hash for FaceKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        (&self.name, self.size).hash(state)
+    }
+}
+
 /// What a character resolves to in one style: a font id and glyph, or
 /// nothing (no font has it, or the registry is full).
 pub(crate) type Resolved = Option<(FontId, CGGlyph)>;
 
 pub(crate) struct Registry {
     pub faces: Vec<Face>,
+    /// Every font object seen, by `CFEqual`: the fast lookup.
     by_font: HashMap<CfKey, FontId>,
+    /// One per face, by name, size and variation, for font objects
+    /// `by_font` hasn't seen yet.
+    by_face: HashMap<FaceKey, FontId>,
     /// ASCII lookups per style skip the hash map.
     ascii: [[Option<Resolved>; 128]; 4],
     /// Every other character looked up, per style: the cmap lookup and,
@@ -105,6 +152,7 @@ impl Registry {
         let mut reg = Registry {
             faces: Vec::with_capacity(8),
             by_font: HashMap::new(),
+            by_face: HashMap::new(),
             ascii: [[None; 128]; 4],
             other: HashMap::new(),
         };
@@ -113,6 +161,7 @@ impl Registry {
         for font in faces {
             let id = reg.faces.len() as FontId;
             reg.by_font.entry(CfKey(font.clone())).or_insert(id);
+            reg.by_face.entry(FaceKey::of(&font)).or_insert(id);
             reg.faces.push(face(font));
         }
         reg
@@ -125,12 +174,22 @@ impl Registry {
         if let Some(&id) = self.by_font.get(&key) {
             return Some(id);
         }
+        // Another object for a face already registered: remember it too, so
+        // the next lookup is the cheap one. Core Text hands out a stable
+        // object per face and lookup path, so this adds a few entries, not
+        // one per line.
+        let face_key = FaceKey::of(font);
+        if let Some(&id) = self.by_face.get(&face_key) {
+            self.by_font.insert(key, id);
+            return Some(id);
+        }
         if self.faces.len() >= SPRITE_FONT as usize {
             return None;
         }
         let id = self.faces.len() as FontId;
         self.faces.push(face(key.0.clone()));
         self.by_font.insert(key, id);
+        self.by_face.insert(face_key, id);
         Some(id)
     }
 

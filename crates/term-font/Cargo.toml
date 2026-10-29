@@ -8,3 +8,10 @@ license.workspace = true
 objc2-core-text.workspace = true
 objc2-core-graphics.workspace = true
 objc2-core-foundation.workspace = true
+
+[dev-dependencies]
+criterion = { version = "0.7", default-features = false }
+
+[[bench]]
+name = "shape"
+harness = false

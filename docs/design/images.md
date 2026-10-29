@@ -1210,6 +1210,56 @@ I.2 and I.3 land).
   of freed blocks back (rather than `push` returning them). The terminal
   starts taking them with I.3, when own images exist.
 
+**Landed (I.2).** What was built (`term-core/src/term/graphics.rs`, the
+`Graphics` deletes and scrolling in `image.rs`, `image/host.rs`, tests
+in `tests/kitty.rs` and a graphics property test in `tests/props.rs`),
+and where it differs from §3 and §4:
+- **Routing, chunks, commands, replies** as §3.1–§3.3, §3.5 and §3.6.
+  Reply codes: `EINVAL`, `ENOENT`, `EBADF` (any medium error),
+  `ENODATA`, `EFBIG`, `EBADPNG` (kitty's for data that doesn't decode).
+  A new transmit with another medium abandons an upload in progress,
+  as a delete does. Commands with `P`/`Q`/`H`/`V` or an animation
+  action are dropped with no reply; icat with an animated GIF is not
+  checked yet.
+- **The host**: the terminal holds an `Arc<dyn ImageHost>`
+  (`set_image_host`, kept across RIS); until the app sets one it is
+  `RustHost::new()` (Vec buffers, term-image decoding, media refused).
+  `RustHost::with_media()` is the test host (`std::fs` files, the temp
+  file rules simplified to the temp directory and the name, a map for
+  shared memory). `run_job(host, terminal_id, job)` runs a job;
+  `ImageJob::Read` gained `size` and `compressed`, and `JobDone` carries
+  the pixels and opacity.
+- **Headers off the lock**: PNG from a file or shared memory is sized
+  from its first 64 KB at once for `a=t` too, so every image has its
+  size when stored. With `set_reads_off_lock(true)` the parser stops
+  after such a command (`Term::advance_until_head`); the session takes
+  `take_head_read()`, reads it unlocked and calls `head_read_done`.
+  Off (the default, and tests), `Term::advance` reads it inline;
+  normal parsing doesn't go through the stopping parser.
+- **Budget**: reservations are made when the size is known (raw: at the
+  first chunk; PNG: encoded bytes as they arrive, the pixels at the
+  last chunk; media: at open), not when a job starts as §4.2 says.
+  The encoded copy is not kept after decoding yet (§5.4), and the
+  `ImageHost::decode` signature doesn't report opacity, so PNG images
+  are never "opaque" for the id-less replacement (mpv sends `f=24`).
+- **Placements**: scroll regions move those wholly inside, drop those
+  scrolled out, and leave those crossing a margin (cells §8.2); the
+  alternate screen drops them as they scroll off, and its images are
+  cleared on entering and leaving it; ED 2 deletes those on screen, ED
+  3 those in history; lines leaving history drop theirs one scroll
+  late. The image cap drops the oldest unplaced image first, the
+  placement cap the topmost placement.
+- **Snapshot**: the shape of `SnapPlacement` and `SnapVirtual` is
+  unchanged; placements reaching into the view are listed in (z, pool
+  id, serial) order with their view row (negative above the view, one
+  row per line), and when any row in view has placeholders, every
+  virtual placement of a ready image is listed (not only those the
+  cells name). The snapshot doesn't call `drawn`: the frame does (I.4).
+- **Not built**: the producer hold-back and the stalled-upload stop by
+  the pool (§3.2, §4.2), `image_file_transfer` (the app's host decides),
+  re-decoding lost images (§5.4), images in the `dump`, the
+  `images` bench (§9).
+
 **Landed (I.4).** Drawing, in term-render (`images.rs` without Metal,
 `pixels.rs`, `metal.rs`, `shaders.metal`); where it differs from §6:
 - **`MetalPixels`** is a shared-storage `MTLBuffer` with rows padded to

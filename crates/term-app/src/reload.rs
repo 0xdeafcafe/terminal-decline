@@ -105,11 +105,20 @@ pub fn tab_groups(saved: Vec<SavedWindow>) -> Vec<Vec<SavedWindow>> {
     out
 }
 
-/// The app bundle this binary runs from, if any.
+/// The bundle this process's executable is in, if any: the app (its
+/// launcher, or the static binary in a bundle from before the launcher), or
+/// a pin (its stub or clone), which has no dogfood marker.
 pub fn own_bundle() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?.canonicalize().ok()?;
     let contents = exe.parent()?.parent()?;
     (contents.file_name()? == "Contents").then(|| contents.parent().map(Path::to_path_buf))?
+}
+
+/// The file whose replacement means a new build is installed: the library
+/// the launcher loaded, in a bundle that has one, else the executable.
+pub fn running_code(bundle: &Path, exe: PathBuf) -> PathBuf {
+    let library = bundle.join("Contents/Frameworks/libterminal_decline.dylib");
+    if library.is_file() { library } else { exe }
 }
 
 pub fn is_dogfood_bundle(bundle: &Path) -> bool {

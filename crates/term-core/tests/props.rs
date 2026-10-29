@@ -1108,3 +1108,126 @@ fn truecolour_gradient_keeps_the_table_bounded() {
         assert!(s.bytes < 4096, "memory given back: {s:?}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Reflow (§12.2): resizing moves text between rows and history, but never
+// changes it.
+
+/// Text, line breaks and the styles that change what a reflow keeps: wide
+/// characters, clusters, coloured erases (FILL lines) and OSC 133 marks.
+fn reflow_piece() -> impl Strategy<Value = Vec<u8>> {
+    prop_oneof![
+        6 => ascii(),
+        3 => select(vec!["漢字", "a\u{301}", "👍\u{1F3FD}", "e\u{301}x", "界ア", "❤\u{FE0F}", "🇺🇸"]).prop_map(|s| s.as_bytes().to_vec()),
+        3 => Just(b"\r\n".to_vec()),
+        1 => Just(b"\x1b[41m\x1b[K\x1b[0m".to_vec()),
+        1 => Just(b"\x1b[44mblue\x1b[0m".to_vec()),
+        1 => Just(b"\x1b]133;A\x07$ ".to_vec()),
+        1 => Just(b"\x1b]133;C\x07".to_vec()),
+    ]
+}
+
+#[derive(Clone, Debug)]
+enum ReflowStep {
+    Output(Vec<u8>),
+    Resize(usize, usize),
+    ScrollView(isize),
+}
+
+fn reflow_step() -> impl Strategy<Value = ReflowStep> {
+    prop_oneof![
+        6 => prop::collection::vec(reflow_piece(), 1..8).prop_map(|p| ReflowStep::Output(p.concat())),
+        3 => (2usize..=24, 1usize..=8).prop_map(|(c, l)| ReflowStep::Resize(c, l)),
+        1 => (-6isize..=6).prop_map(ReflowStep::ScrollView),
+    ]
+}
+
+/// All the text the terminal holds, history and screen, one logical line
+/// per line (an empty cell is a space, trailing spaces dropped), with the
+/// blank lines at the end dropped. Read row by row through the view, so
+/// it doesn't depend on how selections treat the ends of wrapped rows.
+fn all_text(t: &mut Term) -> String {
+    let view = t.state.view_top();
+    let mut rows = Vec::new();
+    t.state.scroll_view(isize::MAX / 2);
+    while t.state.display_offset() > 0 {
+        rows.push(row_text(&t.state.visible_row(0)));
+        t.state.scroll_view(-1);
+    }
+    for l in 0..t.state.lines() {
+        rows.push(row_text(&t.state.visible_row(l)));
+    }
+    t.state.set_view_top(view);
+    let mut out = String::new();
+    let mut line = String::new();
+    for (text, wrapped) in rows {
+        line.push_str(&text);
+        if !wrapped {
+            out.push_str(line.trim_end_matches(' '));
+            out.push('\n');
+            line.clear();
+        }
+    }
+    out.push_str(line.trim_end_matches(' '));
+    out.trim_end_matches(['\n', ' ']).to_string()
+}
+
+fn row_text(r: &RowRef) -> (String, bool) {
+    let mut text = String::new();
+    for c in r.cells() {
+        match c.width() {
+            Width::Spacer | Width::EdgeSpacer => {}
+            _ if c.content() == Content::Empty => text.push(' '),
+            _ => c.push_text(&mut text),
+        }
+    }
+    (text, r.wrapped())
+}
+
+proptest! {
+    #![proptest_config(Config { cases: 128, ..config() })]
+
+    /// Resizing back and forth, to any sizes, keeps all the text, in
+    /// order, and the selection on the same text.
+    #[test]
+    fn resizing_keeps_the_text(
+        start in (2usize..=24, 1usize..=8),
+        steps in prop::collection::vec(reflow_step(), 1..30),
+        sizes in prop::collection::vec((2usize..=24, 1usize..=8), 1..6),
+    ) {
+        let mut t = Term::new(start.0, start.1, 100_000);
+        for step in &steps {
+            match step {
+                ReflowStep::Output(b) => t.advance(b),
+                ReflowStep::Resize(c, l) => {
+                    let before = all_text(&mut t);
+                    t.state.resize(*c, *l);
+                    t.state.check_invariants().map_err(TestCaseError::fail)?;
+                    prop_assert_eq!(all_text(&mut t), before, "resize to {}x{}", c, l);
+                }
+                ReflowStep::ScrollView(d) => t.state.scroll_view(*d),
+            }
+        }
+        // Select the middle of the screen, then resize back and forth.
+        let (lines, cols) = (t.state.lines(), t.state.cols());
+        let a = t.state.point_at(0, 0);
+        let b = t.state.point_at(lines - 1, cols - 1);
+        t.state.set_selection(Some(Selection::new(a, b)));
+        // Selections leave out empty cells ending a wrapped row, which a
+        // reflow can move into the middle of one: compare without spaces.
+        let sel = |t: &Term| t.state.selection_text().map(|s| s.replace(' ', "").trim_end_matches('\n').to_string());
+        let selected = sel(&t);
+        let before = all_text(&mut t);
+        let (c0, l0) = (t.state.cols(), t.state.lines());
+        for &(c, l) in &sizes {
+            t.state.resize(c, l);
+            t.state.check_invariants().map_err(TestCaseError::fail)?;
+            prop_assert_eq!(all_text(&mut t), before.clone(), "resize to {}x{}", c, l);
+            prop_assert_eq!(sel(&t), selected.clone(), "selection at {}x{}", c, l);
+        }
+        t.state.resize(c0, l0);
+        prop_assert_eq!(all_text(&mut t), before);
+        prop_assert_eq!(sel(&t), selected);
+        check(&t)?;
+    }
+}

@@ -298,7 +298,9 @@ impl AppDelegate {
         origin: crate::config::Source,
         app_name: &str,
     ) -> Retained<AppDelegate> {
-        // A choice made before the rename, under the old bundle id.
+        // A choice made before the rename, under the old bundle id. The
+        // main bundle is this process's: the app's, or in a pin the pin's
+        // own (its Secure Keyboard Entry choice is its own).
         if let Some(id) = objc2_foundation::NSBundle::mainBundle().bundleIdentifier() {
             secure_input::carry_over(&id.to_string());
         }
@@ -393,9 +395,10 @@ impl AppDelegate {
             return;
         }
         let Ok(exe) = std::env::current_exe() else { return };
+        let code = crate::reload::running_code(&bundle, exe);
         // Kept from now: once the bundle is gone, the executable can't be
         // resolved to it any more.
-        let _ = crate::reload::watch(exe, move || {
+        let _ = crate::reload::watch(code, move || {
             dispatch2::DispatchQueue::main().exec_async(move || {
                 let delegate = DELEGATE.with(|d| d.borrow().as_ref().and_then(|w| w.load()));
                 if let Some(delegate) = delegate {
@@ -822,14 +825,20 @@ impl AppDelegate {
     }
 }
 
-/// The binary the Settings tab runs: the main app's, also in a pin (whose
-/// own executable is a clone today and a launcher after P.2), found by its
-/// bundle id; else this one.
+/// The binary the Settings tab runs: the main app's executable. A stub
+/// pin knows the app it loaded the library from; a clone pin finds the
+/// app by its bundle id; the app and the bare binary run themselves.
 fn prefs_binary() -> std::path::PathBuf {
     let exe = std::env::current_exe()
         .and_then(|e| e.canonicalize())
         .unwrap_or_else(|_| "terminal-decline".into());
-    let paths = crate::Paths::from_env();
+    let paths = crate::Paths::current();
+    if let Some(app) = &paths.app_bundle {
+        let own = app.join("Contents/MacOS/terminal-decline");
+        if own.is_file() {
+            return own;
+        }
+    }
     if crate::pin::own_pin_config(&paths).is_none() {
         return exe;
     }
@@ -977,6 +986,17 @@ fn submenu(mtm: MainThreadMarker, bar: &NSMenu, title: &str, items: &[Retained<N
     menu
 }
 
+/// An item holding a submenu of `items`, for inside another menu.
+fn nested(mtm: MainThreadMarker, title: &str, items: &[Retained<NSMenuItem>]) -> Retained<NSMenuItem> {
+    let menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str(title));
+    for i in items {
+        menu.addItem(i);
+    }
+    let holder = item(mtm, title, None, "");
+    holder.setSubmenu(Some(&menu));
+    holder
+}
+
 /// A menu item for `action`, showing the first chord bound to it, plus
 /// hidden items for any other chords (their keys still work, as Cmd+1…9
 /// do).
@@ -1073,8 +1093,17 @@ pub fn build_menus(mtm: MainThreadMarker, app_name: &str, binds: &Keybinds) -> R
         vec![NSMenuItem::separatorItem(mtm)],
         b("Clear Scrollback", MenuAction::ClearScrollback),
         vec![NSMenuItem::separatorItem(mtm)],
-        // Disabled until the find bar exists: nothing answers its action.
-        b("Find…", MenuAction::Find),
+        vec![nested(
+            mtm,
+            "Find",
+            &[
+                b("Find…", MenuAction::Find),
+                b("Find Next", MenuAction::FindNext),
+                b("Find Previous", MenuAction::FindPrevious),
+                b("Use Selection for Find", MenuAction::UseSelectionForFind),
+            ]
+            .concat(),
+        )],
     ];
     submenu(mtm, &bar, "Edit", &edit.concat());
     let view = [

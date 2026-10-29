@@ -22,6 +22,9 @@ use std::sync::{Once, OnceLock};
 /// Where crash logs go: set once, by [`install`].
 static LOG_DIR: OnceLock<PathBuf> = OnceLock::new();
 
+/// How the process was started, for the report: set once, by [`set_role`].
+static ROLE: OnceLock<String> = OnceLock::new();
+
 thread_local! {
     /// The crash log written for this thread's last panic.
     static LAST_LOG: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
@@ -75,6 +78,17 @@ pub fn install(dir: PathBuf, abort_on_main: bool) {
     });
 }
 
+/// Name the role in crash reports: the app, a pin (by id) or the bare
+/// binary. The first call only.
+pub fn set_role(role: &crate::entry::Role) {
+    use crate::entry::Role;
+    let _ = ROLE.set(match role {
+        Role::App => "app".into(),
+        Role::Pin(info) => format!("pin {}", info.id),
+        Role::Bare => "binary".into(),
+    });
+}
+
 /// The crash log written for the last panic on this thread, if any.
 pub fn take_last_log() -> Option<PathBuf> {
     LAST_LOG.with(|l| l.borrow_mut().take())
@@ -93,10 +107,102 @@ pub fn tilde(path: &Path) -> String {
 fn report(info: &PanicHookInfo, backtrace: &Backtrace) -> String {
     let thread = std::thread::current();
     format!(
-        "Terminal Decline {} hit a bug\nthread '{}' {info}\n\nbacktrace:\n{backtrace}\n",
+        "Terminal Decline {} ({}) hit a bug\nthread '{}' {info}\n\nbacktrace:\n{backtrace}\n{}\n",
         env!("CARGO_PKG_VERSION"),
+        ROLE.get().map_or("binary", String::as_str),
         thread.name().unwrap_or("<unnamed>"),
+        image::describe(),
     )
+}
+
+/// Which Mach-O image this code is in, for symbolicating a report: its
+/// path, UUID and load address. The release keeps one dSYM per shipped
+/// image, named after it (`libterminal_decline.dylib.dSYM` for the app
+/// bundle's library, `terminal-decline.dSYM` for the static binary), and
+/// `dwarfdump --uuid` on it must give this UUID.
+mod image {
+    use std::ffi::{CStr, c_void};
+
+    const LC_UUID: u32 = 0x1b;
+    const MH_MAGIC_64: u32 = 0xfeed_facf;
+
+    pub struct Image {
+        pub path: String,
+        pub base: usize,
+        pub uuid: Option<[u8; 16]>,
+    }
+
+    /// The image holding this function.
+    pub fn this() -> Option<Image> {
+        let mut info: libc::Dl_info = unsafe { std::mem::zeroed() };
+        let addr = this as fn() -> Option<Image> as *const c_void;
+        if unsafe { libc::dladdr(addr, &mut info) } == 0 || info.dli_fbase.is_null() {
+            return None;
+        }
+        let path = if info.dli_fname.is_null() {
+            String::new()
+        } else {
+            unsafe { CStr::from_ptr(info.dli_fname) }.to_string_lossy().into_owned()
+        };
+        // SAFETY: dli_fbase is the image's mapped Mach-O header, and its
+        // load commands follow it in memory.
+        let uuid = unsafe { uuid_of(info.dli_fbase.cast()) };
+        Some(Image {
+            path,
+            base: info.dli_fbase as usize,
+            uuid,
+        })
+    }
+
+    /// `LC_UUID` of the 64-bit Mach-O header at `header`.
+    unsafe fn uuid_of(header: *const u8) -> Option<[u8; 16]> {
+        let word = |at: usize| unsafe { header.add(at).cast::<u32>().read_unaligned() };
+        if word(0) != MH_MAGIC_64 {
+            return None;
+        }
+        let ncmds = word(16);
+        let mut at = 32;
+        for _ in 0..ncmds {
+            let (cmd, size) = (word(at), word(at + 4) as usize);
+            if cmd == LC_UUID {
+                let mut uuid = [0u8; 16];
+                unsafe { std::ptr::copy_nonoverlapping(header.add(at + 8), uuid.as_mut_ptr(), 16) };
+                return Some(uuid);
+            }
+            if size == 0 {
+                return None;
+            }
+            at += size;
+        }
+        None
+    }
+
+    /// `8F3A…-…` as dwarfdump prints it.
+    pub fn uuid_text(u: &[u8; 16]) -> String {
+        let hex: String = u.iter().map(|b| format!("{b:02X}")).collect();
+        format!("{}-{}-{}-{}-{}", &hex[0..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..])
+    }
+
+    /// The dSYM a release keeps for the image at `path`.
+    pub fn dsym_name(path: &str) -> String {
+        let file = path.rsplit('/').next().unwrap_or(path);
+        format!("{file}.dSYM")
+    }
+
+    /// The report's last lines: `image: <path>`, its UUID, load address
+    /// and dSYM.
+    pub fn describe() -> String {
+        match this() {
+            Some(i) => format!(
+                "image: {}\nuuid: {}\nload address: {:#x}\ndSYM: {}",
+                i.path,
+                i.uuid.as_ref().map_or_else(|| "unknown".into(), uuid_text),
+                i.base,
+                dsym_name(&i.path),
+            ),
+            None => "image: unknown".into(),
+        }
+    }
 }
 
 /// The version, thread and panic message: the report up to the backtrace.
@@ -232,6 +338,29 @@ mod tests {
         });
         assert!(caught.is_err());
         assert_eq!(CONTAINED.get(), 0);
+    }
+
+    /// The report names the image this code runs from (here the test
+    /// binary) with the UUID dwarfdump would print.
+    #[test]
+    fn image_is_this_binary() {
+        let i = image::this().expect("dladdr");
+        let exe = std::env::current_exe().unwrap().canonicalize().unwrap();
+        assert_eq!(std::path::Path::new(&i.path).canonicalize().unwrap(), exe);
+        let uuid = image::uuid_text(&i.uuid.expect("LC_UUID"));
+        let out = std::process::Command::new("/usr/bin/dwarfdump").arg("--uuid").arg(&exe).output();
+        if let Ok(out) = out
+            && out.status.success()
+        {
+            let text = String::from_utf8_lossy(&out.stdout);
+            assert!(text.contains(&uuid), "{uuid} not in {text}");
+        }
+        assert_eq!(
+            image::dsym_name("/A/Contents/Frameworks/libterminal_decline.dylib"),
+            "libterminal_decline.dylib.dSYM"
+        );
+        let d = image::describe();
+        assert!(d.starts_with("image: ") && d.contains(&uuid), "{d}");
     }
 
     #[test]

@@ -12,6 +12,8 @@ pub mod control;
 pub mod crash;
 pub mod desktop;
 mod divider_view;
+pub mod entry;
+mod find_bar;
 pub mod frame_policy;
 pub mod import;
 pub mod keybind;
@@ -29,6 +31,7 @@ pub mod prefs;
 pub mod prompts;
 pub mod reload;
 pub mod running;
+pub mod search;
 pub mod secure_input;
 pub mod select;
 pub mod session;
@@ -38,6 +41,7 @@ pub mod theme;
 mod view;
 pub mod watch;
 
+pub use entry::{PinInfo, Role, run};
 pub use paths::Paths;
 
 /// The product's name as people see it, in menus, Services and questions.

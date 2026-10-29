@@ -17,9 +17,9 @@ use std::time::{Duration, Instant};
 use term_core::{Attrs, ColorKind, Term, Terminal};
 use term_pty::{Command, Size};
 use term_render::{Frame, FrameInput, GlyphSlot, GlyphSource, Theme};
-use terminal_decline::frame_policy::{self, Decision};
-use terminal_decline::keys::{self, KeyAction, KeyInput, KeyModes, flags};
-use terminal_decline::session::{Hooks, Outcome, Session};
+use terminal_decline_app::frame_policy::{self, Decision};
+use terminal_decline_app::keys::{self, KeyAction, KeyInput, KeyModes, flags};
+use terminal_decline_app::session::{Hooks, Outcome, Session};
 
 /// Upper bound for any single wait.
 const DEADLINE: Duration = Duration::from_secs(60);
@@ -396,7 +396,7 @@ fn events_arrive_without_drawing() {
     hooks.on_events = Some(Box::new(move |e| tx.send(e).unwrap()));
     let session = Session::spawn(&cmd, size(80, 24), Term::new(80, 24, 100), hooks).expect("spawn");
     let mut got = Vec::new();
-    while !got.iter().any(|e: &terminal_decline::session::Events| e.bell) {
+    while !got.iter().any(|e: &terminal_decline_app::session::Events| e.bell) {
         got.push(rx.recv_timeout(DEADLINE).expect("no events"));
     }
     let titles: Vec<_> = got.iter().filter_map(|e| e.title.as_deref()).collect();
@@ -537,10 +537,10 @@ fn shell_integration_snippets_mark_prompts() {
         assert!(t.scrollback_len() > 0, "{shell}: nothing in history\n{}", t.dump());
         // Back to the first prompt, and its output.
         for _ in 0..3 {
-            assert!(terminal_decline::prompts::jump(t, true), "{shell}\n{}", t.dump());
+            assert!(terminal_decline_app::prompts::jump(t, true), "{shell}\n{}", t.dump());
         }
         assert!(t.dump().starts_with(&format!("{PROMPT} echo one")), "{shell}\n{}", t.dump());
-        assert!(terminal_decline::prompts::select_output(t), "{shell}");
+        assert!(terminal_decline_app::prompts::select_output(t), "{shell}");
         assert_eq!(t.selection_text().as_deref(), Some("one\ntwo"), "{shell}");
         // The second command's end mark has its status.
         let second = t.next_prompt(t.point_at(0, 0).line).unwrap();
@@ -647,14 +647,14 @@ fn config_errors_show_before_the_output() {
     let home = TempDir::new("badconfig");
     let file = home.path().join("config.toml");
     std::fs::write(&file, "font_sise = 3\nfont_size = 15\n").unwrap();
-    let (config, errors) = terminal_decline::config::load(&[file.as_path()], std::path::Path::new("/nonexistent"));
+    let (config, errors) = terminal_decline_app::config::load(&[file.as_path()], std::path::Path::new("/nonexistent"));
     assert_eq!(config.font_size, 15.0);
     assert_eq!(errors.len(), 1, "{errors:?}");
     let cmd = command(&["/bin/sh", "-c", "echo program output; sleep 0.3"], home.path());
     let signal = Arc::new(Signal::default());
     let mut term = Term::new(300, 24, 100);
     for e in &errors {
-        terminal_decline::session::write_notice(&mut term, e);
+        terminal_decline_app::session::write_notice(&mut term, e);
     }
     let mut h = Harness {
         session: Some(Session::spawn(&cmd, size(300, 24), term, signal.clone().hooks()).unwrap()),
@@ -740,7 +740,7 @@ fn build_frame(frame: &mut Frame, t: &mut Terminal) {
 #[test]
 fn parser_panic_stops_only_that_session() {
     let logs = TempDir::new("crash-logs");
-    terminal_decline::crash::install(logs.path().to_path_buf(), false);
+    terminal_decline_app::crash::install(logs.path().to_path_buf(), false);
 
     let other = Harness::shell("survivor");
     let script = "printf 'before the bug\\n'; sleep 1; printf '\\033]7770;test-panic\\007'; echo after; sleep 30";
@@ -775,7 +775,7 @@ fn parser_panic_stops_only_that_session() {
     let screen = broken.dump();
     let expected = format!(
         "Terminal Decline hit a bug and stopped this session; details in {}",
-        terminal_decline::crash::tilde(&log)
+        terminal_decline_app::crash::tilde(&log)
     );
     assert!(has_line(&screen, &expected), "{screen}");
     assert!(has_line(&screen, "press any key to close"), "{screen}");
@@ -1352,8 +1352,9 @@ fn prefs_edits_records_chords_and_quits() {
     h.session().send(b"c".to_vec());
     h.wait_for("the prompt to press a shortcut", |d| d.contains("press the shortcut"));
     assert_eq!(recorded.load(Ordering::SeqCst), 1);
-    let chord = terminal_decline::keybind::Chord::parse("ctrl+cmd+t").unwrap();
-    h.session().send(terminal_decline::keybind::chord_reply(Some(&chord)).into_bytes());
+    let chord = terminal_decline_app::keybind::Chord::parse("ctrl+cmd+t").unwrap();
+    h.session()
+        .send(terminal_decline_app::keybind::chord_reply(Some(&chord)).into_bytes());
     let text = wait_file(&config, "the recorded chord", |t| t.contains("\"ctrl+cmd+t\" = \"new_tab\""));
     assert!(text.starts_with("# mine\nfont_size = 13 # big\n"), "{text}");
     h.session().send(b"q".to_vec());

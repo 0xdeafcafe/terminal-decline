@@ -2524,6 +2524,49 @@ resize(cols, lines), primary screen (style sweeps blocked throughout, §5.2):
   part stays stored, and where it meets the rest of the line one short row
   shows when scrolled back. Accepted.
 
+**Landed (PR 11).** What was built (`term/reflow.rs`, called from
+`Terminal::resize`), and where it differs from the above:
+
+- **One path for both cases.** A resize at the same width goes through
+  the same re-split as a new width (the rows come out as they were); only
+  step 1, pulling back the line the screen starts in, is skipped unless the
+  width changes or the screen grows. Lines are pulled back newest first
+  while they fit; how many rows one takes is worked out from a read of its
+  stored lines before they are popped.
+- **The cursor** is kept as an offset in its logical line (a pending wrap
+  counts as one past its column). When that offset is just past the end of
+  a line that fills its last row, the cursor waits to wrap in the last
+  column (pending wrap set) instead of opening an empty row, so the next
+  character carries on the line. Shrinking with text below the cursor
+  pushes top rows into history, the cursor's own row too; the cursor then
+  stays in row 0 (`resize_shrink_height_below_cursor_is_kept`, §19).
+- **Tracked positions:** the cursor, the primary screen's saved cursor,
+  the selection's two ends, the hover point and the view position. A
+  column past a stored row's cells counts as its last cell; a position in a
+  blank row that was dropped goes to the end of the last row left. Search
+  hits and placements don't exist yet (PRs 13b and 14 remap or drop them
+  here). The selection is no longer cleared on resize.
+- **The alternate screen** is resized without reflow. The primary screen
+  keeps its own size meanwhile (`check_invariants` allows that) and is
+  reflowed once when the program leaves; for that reflow the saved cursor
+  stands for the cursor, since 1049 restores it next.
+- **Selection text** reads history rows to their own width, which may now
+  be wider than the screen's.
+- **Measured** (`cargo bench -p term-core --bench resize`, new: 300×100,
+  100k lines of history, 60 coloured lines wrapping on the screen; per
+  resize, on a loaded machine): one column narrower or back 0.4 ms for ASCII
+  and 1.0 ms for CJK; ten rows shorter or back 0.75–0.9 ms. That is within
+  §12.4's 0.5–1 ms, except that a height-only resize re-splits the whole
+  screen when it could move rows as they are: a fast path for perf round 2.
+- **Tests:** the two resize tests ignored in conformance now pass (the
+  shrink one renamed and changed to expect what we do), new conformance
+  tests for re-wrapping, wide characters and clusters, the cursor, `FILL`
+  tails, the view and the alternate screen, and a property test
+  (`resizing_keeps_the_text`) that resizes back and forth and checks that
+  all text, history and screen, and the selected text stay the same. Tests
+  that expected truncation (in conformance, clusters, links and selection)
+  now expect the reflow.
+
 ### 12.3 History at another width
 
 - **Counting rows.** Rows at the current width are worked out per logical
@@ -3305,7 +3348,7 @@ go in order, and the font and render agents run alongside.
 | 8 | core | row change counters, `terminal_id`, `history_epoch`, `popped_from`, the snapshot with highlight ranges, the screen it shows and style updates (§9). **Landed**; what changed from the design is at the end of §9.2 | S | 5 |
 | 9 | core | OSC 8 link table and OSC 133 prompt marks, on the screen and in v2. **Landed** on the screen (end of §5.5), and in history with PR 7 (end of §11.8) | S | 7 |
 | 10 | core | kitty placeholders (cell kind, diacritic table, step-by-step inference, v2 list) | S | 7 |
-| 11 | core | **screen reflow, pull-back and tracked positions** (F.4, §12.2): the two ignored resize tests settled (§19) | L | 7, 8 |
+| 11 | core | **screen reflow, pull-back and tracked positions** (F.4, §12.2): the two ignored resize tests settled (§19). **Landed**; what changed from the design is at the end of §12.2 | L | 7, 8 |
 | 12 | core | **history at another width** (§12.3): rows-at-width counts, `ViewTop::At { point, offset }` across width changes, `FILL` at another width | M | 11 |
 | 13a | core | **UTF-16 counts and mapping** (§13.10): `utf16_len` per entry, UTF-16 checkpoints, `utf16_offset` / `point_at_utf16` / `utf16_piece` | S | 7 |
 | 13b | core | **search engine and hits** (§13.3–§13.8): `start_search`, `SearchJob` over `(Arc<BlockData>, len)`, block boundaries, the live-output rule, hits per block, the case-folding table, and a search benchmark with the prototype's cases | M | 11 |
@@ -3586,7 +3629,7 @@ in that app:
 1. **Shrinking the height with the cursor mid-screen:** keep losing nothing.
    Blank rows below the cursor are dropped first, then top rows go into
    history, and `resize_shrink_height_below_cursor_is_dropped` changes to
-   expect this.
+   expect this (settled in PR 11 as `resize_shrink_height_below_cursor_is_kept`).
 2. **The alternate screen** is freed on leaving 1049 or 1047 (both clear it
    anyway), along with its style and link tables and its images. It is kept
    after leaving 47, and freed once it has been hidden for 30 s.

@@ -1196,6 +1196,7 @@ mod tests {
             config_dir: dir.join("terminal-decline"),
             apps_dir: dir.join("Applications"),
             exe: PathBuf::from("terminal-decline"),
+            app_bundle: None,
         };
         let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let iterm = fixtures().join("sample.itermcolors");

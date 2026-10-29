@@ -68,14 +68,18 @@ fn selection_stays_put_while_the_view_scrolls() {
 }
 
 #[test]
-fn resize_clears_the_selection() {
+fn resize_moves_the_selection_with_its_text() {
     let mut t = Term::new(10, 2, 100);
     t.advance(b"hello");
     select(&mut t, (0, 0), (0, 4));
     t.state.resize(10, 2);
-    assert!(t.state.selection().is_some(), "same size is not a resize");
+    assert_eq!(copied(&t), "hello", "same size is not a resize");
     t.state.resize(12, 3);
-    assert!(t.state.selection().is_none());
+    assert_eq!(copied(&t), "hello");
+    t.state.resize(3, 3);
+    assert_eq!(copied(&t), "hello");
+    t.state.resize(10, 2);
+    assert_eq!(copied(&t), "hello");
 }
 
 #[test]

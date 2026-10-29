@@ -139,6 +139,15 @@ enum Kind {
     /// scalar, comparing folds. Its first scalar's fold, if ASCII, is
     /// jumped to with memchr.
     Fold(Vec<char>),
+    /// The same with an ASCII stretch (its longest, lower-cased): found
+    /// with memmem in the text lower-cased (ASCII only), then the scalars
+    /// before it (`lead` of them) walked back over and the whole query
+    /// checked from there.
+    FoldAt {
+        q: Vec<char>,
+        stretch: memmem::Finder<'static>,
+        lead: usize,
+    },
 }
 
 /// A compiled query (§13.5).
@@ -161,7 +170,7 @@ impl Matcher {
         } else if q.text.is_ascii() {
             Kind::Ascii(memmem::Finder::new(q.text.to_ascii_lowercase().as_bytes()).into_owned())
         } else {
-            Kind::Fold(q.text.chars().map(fold).collect())
+            fold_kind(q.text.chars().map(fold).collect())
         };
         Some(Matcher { kind, word: q.word, chars })
     }
@@ -207,6 +216,22 @@ impl Matcher {
                 scratch.extend(hay.iter().map(u8::to_ascii_lowercase));
                 find_all(f, scratch, &mut push);
             }
+            Kind::FoldAt { q, stretch, lead } => {
+                scratch.clear();
+                scratch.extend(hay.iter().map(u8::to_ascii_lowercase));
+                // Each place the stretch is found gives one start, in
+                // order: no match is found twice.
+                let mut at = 0;
+                while let Some(j) = stretch.find(&scratch[at..]) {
+                    let p = at + j;
+                    at = p + 1;
+                    if let Some(s) = back(hay, p, *lead)
+                        && let Some(e) = fold_match(q, hay, s)
+                    {
+                        push(s, e);
+                    }
+                }
+            }
             Kind::Fold(q) => {
                 let first = q[0];
                 let mut i = 0;
@@ -235,6 +260,43 @@ fn find_all(f: &memmem::Finder<'_>, hay: &[u8], push: &mut impl FnMut(usize, usi
         push(at + i, at + i + n);
         at += i + 1;
     }
+}
+
+/// The matcher for a folded query with non-ASCII letters: by its longest
+/// ASCII stretch when it has one.
+fn fold_kind(q: Vec<char>) -> Kind {
+    let (mut best, mut run) = ((0, 0), 0);
+    for (i, c) in q.iter().enumerate() {
+        run = if c.is_ascii() { run + 1 } else { 0 };
+        if run > best.1 {
+            best = (i + 1 - run, run);
+        }
+    }
+    let (lead, n) = best;
+    if n == 0 {
+        return Kind::Fold(q);
+    }
+    let stretch: String = q[lead..lead + n].iter().collect();
+    Kind::FoldAt {
+        stretch: memmem::Finder::new(stretch.as_bytes()).into_owned(),
+        q,
+        lead,
+    }
+}
+
+/// Where the scalar `n` scalars before offset `p` starts, if there are
+/// that many.
+fn back(hay: &[u8], mut p: usize, n: usize) -> Option<usize> {
+    for _ in 0..n {
+        if p == 0 {
+            return None;
+        }
+        p -= 1;
+        while p > 0 && hay[p] & 0xC0 == 0x80 {
+            p -= 1;
+        }
+    }
+    Some(p)
 }
 
 /// Where a match of the folded query `q` starting at `i` ends, if one does.

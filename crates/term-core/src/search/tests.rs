@@ -136,6 +136,24 @@ fn matcher_paths() {
 }
 
 #[test]
+fn fold_by_ascii_stretch() {
+    let find = |query: &str, hay: &str| {
+        let mut out = Vec::new();
+        let m = Matcher::new(&q(query, true, WordMatch::Contains)).unwrap();
+        assert!(matches!(m.kind, Kind::FoldAt { .. }), "{query}");
+        m.find(hay.as_bytes(), None, None, &mut Vec::new(), &mut out);
+        out
+    };
+    assert_eq!(find("Σigma", "σIGMA ΣIgma sigma ςigmaΣigma"), [(0, 6), (7, 13), (20, 26), (26, 32)]);
+    // The stretch after two non-ASCII scalars, one ASCII before them.
+    assert_eq!(find("xÉσab", "XéΣAB éσab xéςab"), [(0, 7), (15, 22)]);
+    // The stretch at the start of the text: nothing before it to walk back over.
+    assert_eq!(find("σab", "ab σab"), [(3, 7)]);
+    // Overlapping matches.
+    assert_eq!(find("éaéa", "éaéaéa"), [(0, 6), (3, 9)]);
+}
+
+#[test]
 fn hits_on_screen_and_across_a_wrap() {
     let mut t = Term::new(10, 4, 100, crate::ImagePool::process());
     t.advance(b"hello world, hello");

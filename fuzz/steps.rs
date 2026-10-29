@@ -12,6 +12,7 @@
 //! | `FF 'V' d`           | scroll the view by `d` (as `i8`)                |
 //! | `FF 'S' al ac hl hc` | select from visible (al, ac) to (hl, hc)        |
 //! | `FF 'C'`             | clear the selection                             |
+//! | `FF 'A' w`           | set the ambiguous width to `w % 2 + 1` cells    |
 //! | `FF` anything else   | a literal 0xFF byte; the next byte is read again |
 //!
 //! A command cut short by the end of the input is dropped. Other bytes are fed
@@ -39,6 +40,8 @@ pub enum Step {
     /// (wrapped into the grid when applied).
     Select(u8, u8, u8, u8),
     ClearSelection,
+    /// The ambiguous-width setting: 1 or 2.
+    Ambiguous(u8),
 }
 
 impl fmt::Debug for Step {
@@ -49,6 +52,7 @@ impl fmt::Debug for Step {
             Step::ScrollView(d) => write!(f, "ScrollView({d})"),
             Step::Select(al, ac, hl, hc) => write!(f, "Select({al}, {ac}, {hl}, {hc})"),
             Step::ClearSelection => write!(f, "ClearSelection"),
+            Step::Ambiguous(w) => write!(f, "Ambiguous({w})"),
         }
     }
 }
@@ -76,8 +80,9 @@ pub fn decode(data: &[u8]) -> Vec<Step> {
             [b'V', d, ..] => (Some(Step::ScrollView(*d as i8)), 2),
             [b'S', al, ac, hl, hc, ..] => (Some(Step::Select(*al, *ac, *hl, *hc)), 5),
             [b'C', ..] => (Some(Step::ClearSelection), 1),
+            [b'A', w, ..] => (Some(Step::Ambiguous(w % 2 + 1)), 2),
             // A known command without all its operands: drop it.
-            [b'R' | b'V' | b'S', ..] => break,
+            [b'R' | b'V' | b'S' | b'A', ..] => break,
             _ => {
                 run.push(CMD);
                 continue;
@@ -113,6 +118,7 @@ pub fn apply(term: &mut Term, step: &Step) {
             t.set_selection(Some(Selection::new(anchor, head)));
         }
         Step::ClearSelection => t.set_selection(None),
+        Step::Ambiguous(w) => t.set_ambiguous_width(w),
     }
 }
 

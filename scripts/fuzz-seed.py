@@ -8,7 +8,8 @@ The files are committed; re-run this after changing it:
 
 Each seed is terminal output in the style of a real program, with the
 fuzz-only commands from fuzz/steps.rs mixed in (0xFF 'R' = resize, 'V' =
-scroll the view, 'S' = select, 'C' = clear the selection).
+scroll the view, 'S' = select, 'C' = clear the selection, 'A' = set the
+ambiguous width).
 """
 import os
 import sys
@@ -36,6 +37,11 @@ def select(al, ac, hl, hc):
 
 
 CLEAR = bytes([0xFF, ord("C")])
+
+
+def ambiguous(width):
+    """Set the ambiguous width to `width` (1 or 2) cells."""
+    return bytes([0xFF, ord("A"), width - 1])
 
 
 def t(s):
@@ -107,6 +113,27 @@ def wide():
     return b"".join(out)
 
 
+def clusters():
+    """Grapheme clusters: widening and narrowing in place and at the right
+    margin, mode 2027 on and off, REP of a cluster, insert/delete over
+    clusters, and the ambiguous width changed between lines."""
+    out = [resize(12, 6)]
+    out.append(t("cafe\u0301 \u2764\ufe0f 1\ufe0f\u20e3 \U0001f44d\U0001f3fd\r\n"))
+    out.append(t("\U0001f1ec\U0001f1e7\U0001f468\u200d\U0001f469\u200d\U0001f467 \u0915\u094d\u0937\r\n"))
+    out.append(t(f"{at(3, 11)}ab\u2764\ufe0f{at(4, 12)}\u2764\ufe0f\u231a\ufe0e"))
+    out.append(t(f"{CSI}?7l{at(5, 12)}\u2764\ufe0f{CSI}?7h"))
+    out.append(t(f"{at(1, 1)}e\u0301{CSI}5b{at(2, 1)}{CSI}2@{CSI}3P{CSI}4h\u2764\ufe0f{CSI}4l"))
+    out.append(t(f"{CSI}?2027l\u2764\ufe0f\U0001f1ec\U0001f1e7 e\u0301{CSI}?2027$p{CSI}?2027h"))
+    out.append(ambiguous(2))
+    out.append(t("\r\n\u00a7\u00b1\u2460\u2500\u2500 \u2194\ufe0e \u2194\ufe0f\r\n"))
+    out.append(ambiguous(1))
+    out.append(t("\u00a7\u00b1\u2460\u2500\u2500\r\n" + "a\u0301" * 40 + "\u0301" * 40))
+    out.append(select(0, 0, 5, 11))
+    out.append(resize(7, 6))
+    out.append(resize(30, 6))
+    return b"".join(out)
+
+
 def scroll_regions():
     """DECSTBM, origin mode, margins with IL/DL/SU/SD, out-of-range values."""
     out = [t("".join(f"{i}\r\n" for i in range(30)))]
@@ -164,6 +191,7 @@ SEEDS = {
     "seed-less": less,
     "seed-sgr": sgr,
     "seed-wide": wide,
+    "seed-clusters": clusters,
     "seed-scroll-regions": scroll_regions,
     "seed-misc": misc,
     "seed-history": history,

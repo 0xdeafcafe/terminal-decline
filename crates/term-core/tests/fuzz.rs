@@ -34,7 +34,31 @@ fn push_random_bytes(out: &mut Vec<u8>, rng: &mut Rng, n: usize) {
             }
             40..=49 => {
                 // wide / non-ASCII characters
-                const WIDE: &[&str] = &["漢", "字", "あ", "🙂", "é", "界", "가"];
+                const WIDE: &[&str] = &[
+                    "漢",
+                    "字",
+                    "あ",
+                    "🙂",
+                    "é",
+                    "界",
+                    "가",
+                    "\u{301}",
+                    "\u{FE0F}",
+                    "\u{FE0E}",
+                    "\u{200D}",
+                    "\u{20E3}",
+                    "\u{1F1EC}",
+                    "\u{1F3FD}",
+                    "❤",
+                    "⌚",
+                    "§",
+                    "\u{94D}",
+                    "\u{915}",
+                    "\u{600}",
+                    "\u{1161}",
+                    "\x1b[?2027l",
+                    "\x1b[?2027h",
+                ];
                 out.extend_from_slice(WIDE[rng.below(WIDE.len())].as_bytes());
             }
             50..=57 => {

@@ -5,6 +5,8 @@
     "ls --color": 110,
     "full-width background": 200,
     "compiler error": 95,
-    "CJK": 105
+    "CJK": 105,
+    "emoji-heavy": 95,
+    "gradient 160 cells": 1800
   }
 }

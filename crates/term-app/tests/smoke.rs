@@ -830,6 +830,84 @@ fn smoke_pin_bundle_launches() {
     assert_eq!(num(&d[0], "font_size"), 17.0, "the pin's own settings were used");
 }
 
+/// A stub pin (pins.md §3), made from the bundled app by the pin module as
+/// `terminal-decline pin` does there, launched the way the Dock does: its
+/// stub finds the app through `$HOME/.config/terminal-decline/pin-app`
+/// (a temp `HOME`), checks and loads its library, and the pin's settings
+/// are used.
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_stub_pin_launches() {
+    use terminal_decline_app::pin::{self, Options};
+    if !have_metal() {
+        return;
+    }
+    let dir = TempDir::new("stub-pin");
+    let app = support::bundle(&dir.path().join("out"), &[]);
+    let unique = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+    );
+    let paths = terminal_decline_app::Paths {
+        config_dir: dir.config_home().join("terminal-decline"),
+        apps_dir: dir.path().join("Applications"),
+        exe: support::launcher(&app),
+        app_bundle: Some(app.clone()),
+    };
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(home.join(".config/terminal-decline")).unwrap();
+    std::fs::write(home.join(".config/terminal-decline/pin-app"), format!("{}\n", app.display())).unwrap();
+    let extra = dir.path().join("extra.toml");
+    std::fs::write(&extra, "font_size = 17\n").unwrap();
+    let script = format!("echo stub pinned {unique}; {}{}sleep 20", osc("dump"), osc("quit"));
+    let options = Options {
+        name: format!("Terminal Decline Stub {unique}"),
+        icon: None,
+        config: Some(extra),
+        cwd: None,
+        dir: paths.apps_dir.clone(),
+        dock: false,
+        command: vec!["/bin/sh".into(), "-c".into(), script],
+    };
+    let mut runner = |cmd: &mut Command| {
+        let program = cmd.get_program().to_string_lossy().into_owned();
+        assert!(!program.ends_with("defaults") && !program.ends_with("killall"), "{program}");
+        pin::system_runner(cmd)
+    };
+    let made = pin::create(options, &paths, &mut runner).expect("creating the pin");
+    let plist = std::fs::read_to_string(made.app.join("Contents/Info.plist")).unwrap();
+    assert!(plist.contains("<key>TDPinAbi</key>"), "{plist}");
+
+    let mut open = Command::new("/usr/bin/open");
+    open.arg("-n")
+        .arg("-W")
+        .arg("--env")
+        .arg(format!("DECLINE_TEST_DUMP={}", dir.dump_file().display()))
+        .arg("--env")
+        .arg(format!("XDG_CONFIG_HOME={}", dir.config_home().display()))
+        .arg("--env")
+        .arg(format!("HOME={}", home.display()))
+        .arg("--env")
+        .arg("TD_PIN_NO_ALERT=1")
+        .arg("--stderr")
+        .arg(dir.path().join("stderr.txt"))
+        .arg(&made.app);
+    let (status, _) = run(&mut open);
+    let lsregister = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister";
+    let _ = Command::new(lsregister).arg("-u").arg(&made.app).status();
+    let stderr = std::fs::read_to_string(dir.path().join("stderr.txt")).unwrap_or_default();
+    assert!(status.success(), "open: {status}; stderr:\n{stderr}");
+    let d = dumps(&dir);
+    assert_eq!(d.len(), 1, "dumps {d:?}; the pin's stderr:\n{stderr}");
+    check_dump(&d[0]);
+    assert!(screen(&d[0]).starts_with(&format!("stub pinned {unique}|")), "{}", screen(&d[0]));
+    assert_eq!(num(&d[0], "font_size"), 17.0, "the pin's own settings were used");
+}
+
 /// Themes: one named in the config but not there yet is a notice, and is
 /// used once its file is created (theme files are watched too); a
 /// light/dark pair follows the system's appearance.

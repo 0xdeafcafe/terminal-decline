@@ -148,6 +148,11 @@ pub fn run(role: Role, args: Vec<String>) -> i32 {
     };
     let (config, mut errors) = from.load();
     errors.splice(0..0, moved);
+    // Clone pins from before stubs: said in the app's first window
+    // (pins.md §5.4), never rebuilt without being asked.
+    if role == Role::App {
+        errors.extend(pin::migration_notice(&paths));
+    }
     for e in &errors {
         eprintln!("terminal-decline: {e}");
     }

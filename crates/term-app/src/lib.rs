@@ -58,7 +58,8 @@ pub const OLD_BUNDLE_ID: &str = "red.forbes.decline";
 pub const USAGE: &str = "\
 usage: terminal-decline [--config FILE] [-e PROGRAM [ARGS...]]
        terminal-decline pin NAME [--icon FILE] [--config FILE] [--cwd DIR] [--dir DIR] [--dock] -- PROGRAM [ARGS...]
-       terminal-decline pin --list | --remove NAME | --update
+       terminal-decline pin --list [--json] | --edit NAME | --remove NAME
+       terminal-decline pin --repair [NAME] [--yes] | --update [--yes]
        terminal-decline import ghostty [PATH] [--write [--force]]
        terminal-decline import iterm FILE.itermcolors [--name NAME] [--write [--force]]
        terminal-decline prefs [--layer FILE]... [--edit N]

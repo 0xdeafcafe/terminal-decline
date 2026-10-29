@@ -177,6 +177,18 @@ impl InfoPlist {
         // SAFETY: a live dictionary and key; Get rule.
         to_string(unsafe { CFDictionaryGetValue(self.0.get(), k.get()) })
     }
+
+    pub fn integer(&self, key: &str) -> Option<i64> {
+        let k = string(key);
+        // SAFETY: a live dictionary and key; Get rule.
+        to_i64(unsafe { CFDictionaryGetValue(self.0.get(), k.get()) })
+    }
+}
+
+/// The value for `key` in a live `CFDictionary`, not owned (Get rule).
+pub(crate) fn dict_value(dict: CFTypeRef, key: CFTypeRef) -> CFTypeRef {
+    // SAFETY: the caller passes a live dictionary and key.
+    unsafe { CFDictionaryGetValue(dict, key) }
 }
 
 /// The elements of a `CFArray`, not owned.

@@ -55,16 +55,20 @@ echo "installed $dest ($version)"
 mkdir -p "$HOME/.config/terminal-decline"
 printf '%s\n' "$(cd "$apps" && pwd -P)/Terminal Decline.app" > "$HOME/.config/terminal-decline/pin-app"
 
-# The build from before the rename, the first time only. Its pins keep their
-# old bundle ids for now: the app's launcher can't be copied into clone
-# pins, and `pin --repair` (stub pins, P-5) rebuilds them. The old bundle
-# goes: a running copy saves its windows and restarts
+# Pins (pins.md §5.3): registered again, followed if moved, and clone pins
+# from older builds (before or after the rename) rebuilt as stub pins. Each
+# rebuild resets that pin's permissions, so it asks first; without a
+# terminal the answer is no. Stub pins are never rewritten.
+"$dest/Contents/MacOS/terminal-decline" pin --repair || echo "pin --repair failed; run it again by hand" >&2
+
+# The build from before the rename, the first time only. Its pins were
+# rebuilt with the current ids by `pin --repair` above, if you said yes.
+# The old bundle goes: a running copy saves its windows and restarts
 # into Terminal Decline.app beside it, which reopens them. A copy too old to
 # know about the rename can only fail to restart; it is quit here and the new
 # app is opened on the windows it saved.
 restore=""
 if [[ -d "$old_app" ]]; then
-  echo "pins made before the rename keep their old ids until \`terminal-decline pin --repair\`" >&2
   old_exe="$old_app/Contents/MacOS/decline"
   old_restore="$HOME/Library/Caches/decline/restore.json"
   "$lsregister" -u "$old_app" || true

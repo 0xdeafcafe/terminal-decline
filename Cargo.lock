@@ -1071,6 +1071,8 @@ dependencies = [
  "serde_json",
  "term-core",
  "term-font",
+ "term-icon",
+ "term-pin",
  "term-prefs",
  "term-pty",
  "term-render",

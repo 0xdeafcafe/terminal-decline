@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Every pin (docs/design/pins.md §3.1): signed ad-hoc with the hardened
+     runtime and these, once, when it is made. The resource entitlements of
+     entitlements.plist (§2.3), plus disable-library-validation, so the
+     ad-hoc pin may load Terminal Decline's library (ad-hoc or Developer
+     ID); the stub's own signature check replaces library validation.
+     Frozen with each pin: changing this file changes only pins made
+     afterwards. Built into the library (crates/term-app/src/pin/bundle.rs). -->
+<plist version="1.0">
+<dict>
+  <key>com.apple.security.device.audio-input</key>
+  <true/>
+  <key>com.apple.security.device.camera</key>
+  <true/>
+  <key>com.apple.security.automation.apple-events</key>
+  <true/>
+  <key>com.apple.security.personal-information.location</key>
+  <true/>
+  <key>com.apple.security.personal-information.addressbook</key>
+  <true/>
+  <key>com.apple.security.personal-information.calendars</key>
+  <true/>
+  <key>com.apple.security.personal-information.photos-library</key>
+  <true/>
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+</dict>
+</plist>

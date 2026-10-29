@@ -1059,6 +1059,10 @@ mod tests {
         let json = serde_json::to_string(&saved).unwrap();
         let back: SavedPanes = serde_json::from_str(&json).unwrap();
         assert_eq!(back, saved);
+        // The fixture's hand-picked ids 1–4 didn't come from the counter;
+        // move it past them, as it would be in the app (and when this test
+        // runs alone in its own process).
+        NEXT_ID.fetch_max(5, Ordering::Relaxed);
         let (r, cwds) = Panes::restore(&back);
         let dirs: Vec<&str> = cwds.iter().map(|(_, c)| c.as_deref().unwrap()).collect();
         assert_eq!(dirs, ["/p1", "/p3", "/p2", "/p4"]);

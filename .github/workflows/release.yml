@@ -395,6 +395,12 @@ jobs:
       SHA256: ${{ needs.build.outputs.sha256 }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # git-cliff reads the history between this tag and the last.
+          fetch-depth: 0
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: git-cliff
       - uses: actions/download-artifact@v4
         with:
           name: terminal-decline-macos-arm64
@@ -410,12 +416,20 @@ jobs:
       - name: Check the appcast is there
         if: needs.sign.outputs.publish == 'true'
         run: test -s dist/appcast.xml
+      - name: Write the release notes
+        run: |
+          # The commits of this tag since the previous one, grouped by
+          # type and module (cliff.toml).
+          git cliff --latest --strip header --output notes.md
+          {
+            echo
+            echo "SHA-256 of the zip: \`$SHA256\`"
+          } >> notes.md
       - name: Create GitHub release
         run: |
           gh release create "$GITHUB_REF_NAME" dist/* \
             --title "Terminal Decline $VERSION" \
-            --generate-notes \
-            --notes "SHA-256 of the zip: \`$SHA256\`"
+            --notes-file notes.md
 
       - name: Update Homebrew cask
         if: env.HOMEBREW_TAP_DEPLOY_KEY != ''

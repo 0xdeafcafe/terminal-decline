@@ -11,7 +11,8 @@
 //!
 //! Each shape has a [`SpriteId`], independent of the character, so the
 //! glyph cache can key code-drawn glyphs by (sprite font, sprite id) later
-//! and non-character shapes (curly underlines) can join them.
+//! and shapes that are not characters join them: the curly, dotted and
+//! dashed underline patterns.
 
 use crate::{Metrics, RasterGlyph};
 
@@ -23,13 +24,18 @@ use crate::{Metrics, RasterGlyph};
 /// | 0x100–0x1FF | U+2800–28FF braille |
 /// | 0x200–0x21F | U+E0A0–E0BF Powerline (only E0A0–E0A3 and E0B0–E0BF are drawn) |
 /// | 0x300–0x38B | U+1FB00–1FB8B legacy computing |
-///
-/// Ids from 0x1000 up are kept for shapes that aren't characters
-/// (underline patterns).
+/// | 0x1000–0x1002 | curly, dotted and dashed underlines (no character) |
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct SpriteId(pub u16);
 
 impl SpriteId {
+    /// A curly underline (undercurl, SGR 4:3): one wave per cell.
+    pub const UNDERLINE_CURLY: SpriteId = SpriteId(0x1000);
+    /// A dotted underline (SGR 4:4).
+    pub const UNDERLINE_DOTTED: SpriteId = SpriteId(0x1001);
+    /// A dashed underline (SGR 4:5): one dash per cell.
+    pub const UNDERLINE_DASHED: SpriteId = SpriteId(0x1002);
+
     /// The sprite that draws `ch`, if it is code-drawn.
     pub fn for_char(ch: char) -> Option<SpriteId> {
         let cp = ch as u32;
@@ -65,8 +71,16 @@ pub fn is_code_drawn(ch: char) -> bool {
 /// Draw `id` for a glyph `cells` cells wide: a coverage bitmap exactly the
 /// size of those cells, placed at the cell's top-left corner (`left` 0,
 /// `top` the baseline). `None` for shapes with no ink (U+2800, blank
-/// braille).
+/// braille) and ids that name nothing.
+///
+/// Underline patterns are the exception: their bitmap is the cells' width
+/// but only as tall as the pattern, a band below the baseline (`top` is
+/// negative) that stays inside the cell. The pattern repeats every cell, so
+/// one sprite per cell, or one across several, tiles without a seam.
 pub fn rasterize(id: SpriteId, m: &Metrics, cells: u32) -> Option<RasterGlyph> {
+    if let Some(g) = underline(id, m, cells) {
+        return Some(g);
+    }
     let ch = id.char()?;
     let w = (m.cell_width * cells.max(1)).max(1) as i32;
     let h = m.cell_height.max(1) as i32;
@@ -256,6 +270,135 @@ fn draw(c: &mut Canvas, cp: u32) {
         0x1FB70..=0x1FB8B => eighths(c, cp),
         _ => {}
     }
+}
+
+// ---- underline patterns ----------------------------------------------------
+
+/// The rows of a cell an underline pattern's bitmap covers.
+struct Band {
+    /// First row, from the cell's top.
+    y0: i32,
+    /// Rows in the bitmap.
+    h: i32,
+}
+
+/// The curly, dotted or dashed underline `id`, if it is one. Drawn for one
+/// cell and repeated, so every cell of a multi-cell sprite is the same.
+fn underline(id: SpriteId, m: &Metrics, cells: u32) -> Option<RasterGlyph> {
+    if !matches!(
+        id,
+        SpriteId::UNDERLINE_CURLY | SpriteId::UNDERLINE_DOTTED | SpriteId::UNDERLINE_DASHED
+    ) {
+        return None;
+    }
+    let w = m.cell_width.max(1) as i32;
+    let h = m.cell_height.max(1) as i32;
+    let base = (m.baseline as i32).min(h - 1);
+    // Thick enough to see, thin enough that a curl still fits under the
+    // baseline.
+    let t = (m.underline_thickness as i32).clamp(1, (h / 4).max(1));
+    // The top of the single underline, as the renderer draws it.
+    let top = base + m.underline_offset as i32;
+    let (band, cell) = if id == SpriteId::UNDERLINE_CURLY {
+        curly(w, h, base, top, t)
+    } else {
+        // Where the single underline is, moved up if it would leave the
+        // cell.
+        let band = Band {
+            y0: top.min(h - t).max(0),
+            h: t.min(h),
+        };
+        let mut px = vec![0u8; (w * band.h) as usize];
+        let spans = if id == SpriteId::UNDERLINE_DOTTED { dots(w, t) } else { dash(w) };
+        for y in 0..band.h {
+            for &(x0, x1) in &spans {
+                px[(y * w + x0) as usize..(y * w + x1) as usize].fill(255);
+            }
+        }
+        (band, px)
+    };
+    // Repeat the cell across `cells`.
+    let n = cells.max(1) as usize;
+    let mut data = Vec::with_capacity(cell.len() * n);
+    for row in cell.chunks_exact(w as usize) {
+        for _ in 0..n {
+            data.extend_from_slice(row);
+        }
+    }
+    Some(RasterGlyph {
+        width: w as u32 * n as u32,
+        height: band.h as u32,
+        left: 0,
+        top: m.baseline as i32 - band.y0,
+        color: false,
+        data,
+    })
+}
+
+/// Dots `t` × `t`: as many as fit with a gap at least a dot wide, each
+/// centred in an equal share of the cell, so the gap across a cell edge is
+/// the same as inside (within a pixel).
+fn dots(w: i32, t: i32) -> Vec<(i32, i32)> {
+    let d = t.min((w / 2).max(1));
+    let n = (w / (2 * d)).max(1);
+    (0..n)
+        .map(|i| {
+            let (b0, b1) = (i * w / n, (i + 1) * w / n);
+            let x0 = b0 + (b1 - b0 - d) / 2;
+            (x0, x0 + d)
+        })
+        .collect()
+}
+
+/// One dash per cell, two thirds of it, with half the gap on each side so
+/// neighbouring cells' gaps add up to one.
+fn dash(w: i32) -> Vec<(i32, i32)> {
+    let gap = (w + 1) / 3;
+    vec![(gap / 2, w - (gap - gap / 2))]
+}
+
+/// One period of a wave per cell, `t` thick, as far below the baseline as
+/// the cell allows: centred on the single underline when there is room,
+/// otherwise moved up and flattened. The wave is a cosine, lowest at the
+/// cell edges and highest in the middle, so its slope is zero where cells
+/// meet and the two sides of an edge mirror each other.
+fn curly(w: i32, h: i32, base: i32, top: i32, t: i32) -> (Band, Vec<u8>) {
+    let sw = t as f64;
+    // Room from the baseline to the bottom of the cell.
+    let room = (h - base) as f64;
+    // Peak to peak about a third of the cell width, so the curve reads as a
+    // wave at every size, but never taller than the room below the baseline.
+    let a = (w as f64 / 6.0).max(sw * 0.75).min(((room - sw) / 2.0).max(0.5));
+    let half = a + sw / 2.0;
+    // Inside the cell first, then below the baseline.
+    let cy = (top as f64 + sw / 2.0).max(base as f64 + half).min(h as f64 - half);
+    let y0 = ((cy - half).floor() as i32).max(0);
+    let y1 = ((cy + half).ceil() as i32).min(h);
+    let rows = (y1 - y0).max(1);
+    let k = std::f64::consts::TAU / w as f64;
+    let r = sw / 2.0;
+    let mut px = vec![0u8; (w * rows) as usize];
+    let step = 1.0 / SS as f64;
+    for y in 0..rows {
+        for x in 0..w {
+            let mut n = 0;
+            for sx in 0..SS {
+                let fx = x as f64 + (sx as f64 + 0.5) * step;
+                let (c, s) = ((k * fx).cos(), (k * fx).sin());
+                // Distance to the curve, to first order: the vertical gap
+                // over the slope's secant. Exact enough for this gentle a
+                // curve and much cheaper than a true nearest point.
+                let f = cy + a * c;
+                let scale = (1.0 + (a * k * s).powi(2)).sqrt();
+                for sy in 0..SS {
+                    let fy = (y0 + y) as f64 + (sy as f64 + 0.5) * step;
+                    n += ((fy - f).abs() <= r * scale) as i32;
+                }
+            }
+            px[(y * w + x) as usize] = ((n * 255 + SS * SS / 2) / (SS * SS)) as u8;
+        }
+    }
+    (Band { y0, h: rows }, px)
 }
 
 // ---- box drawing -----------------------------------------------------------

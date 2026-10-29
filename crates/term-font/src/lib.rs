@@ -1,12 +1,15 @@
-//! Fonts through Core Text: cell metrics and glyph rasterising. Box
-//! drawing, blocks, braille and Powerline are drawn in code ([`sprite`]).
+//! Fonts through Core Text: cell metrics, shaping ([`Fonts::shape`]) and
+//! glyph rasterising. Box drawing, blocks, braille and Powerline are drawn
+//! in code ([`sprite`]).
 
 #[cfg(test)]
 mod legacy_tests;
 mod registry;
+mod shape;
 pub mod sprite;
 
 pub use registry::{FontId, GlyphKey, SPRITE_FONT};
+pub use shape::{Features, RunText, ShapedGlyph};
 pub use sprite::{SpriteId, is_code_drawn};
 
 use std::cell::RefCell;
@@ -65,6 +68,8 @@ pub struct RasterGlyph {
 pub struct Fonts {
     /// The four configured faces (ids 0–3) and every fallback since.
     registry: RefCell<registry::Registry>,
+    /// Shaped grapheme clusters, by face and text (§10.2).
+    clusters: RefCell<shape::ClusterCache>,
     pub metrics: Metrics,
     rgb: CFRetained<CGColorSpace>,
 }
@@ -94,6 +99,7 @@ impl Fonts {
         let metrics = metrics(&regular);
         Fonts {
             registry: RefCell::new(registry::Registry::new([regular, bold, italic, bold_italic])),
+            clusters: RefCell::new(shape::ClusterCache::new(shape::ClusterCache::CAP)),
             metrics,
             rgb: CGColorSpace::new_device_rgb().expect("rgb colour space"),
         }

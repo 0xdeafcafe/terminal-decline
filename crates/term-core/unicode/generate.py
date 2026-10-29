@@ -22,6 +22,10 @@ The width rules are the per-character rules of unicode-width 0.2's
 scripts/unicode.py (`load_east_asian_widths`, `load_zero_widths`), with
 one change: U+17D8 KHMER SIGN BEYYAL is 1, not 3 (a cell is 1 or 2 wide,
 and `string-width` says 1).
+
+It also writes the test data the table is checked against, with the
+comments removed: tests/data/GraphemeBreakTest.txt and
+tests/data/emoji-test.txt.
 """
 
 import argparse
@@ -34,6 +38,8 @@ import urllib.request
 UNICODE_VERSION = (18, 0, 0)
 NUM = 0x110000
 BASE_URL = "https://www.unicode.org/Public/{}.{}.{}/ucd/".format(*UNICODE_VERSION)
+# emoji-test.txt isn't in the UCD directory but next to it.
+EMOJI_TEST_URL = "https://www.unicode.org/Public/{}.{}.{}/emoji/emoji-test.txt".format(*UNICODE_VERSION)
 
 FILES = [
     "UnicodeData.txt",
@@ -86,12 +92,12 @@ SHIFT_VS_BASE = 13
 SHIFT = 7
 
 
-def fetch(ucd, name):
+def fetch(ucd, name, url=None):
     path = os.path.join(ucd, os.path.basename(name))
     if not os.path.exists(path):
         os.makedirs(ucd, exist_ok=True)
         print("fetching", name, file=sys.stderr)
-        urllib.request.urlretrieve(BASE_URL + name, path)
+        urllib.request.urlretrieve(url or BASE_URL + name, path)
     return path
 
 
@@ -288,6 +294,24 @@ def emit_break_test(ucd, out_path):
                 out.write(data + "\n")
 
 
+def emit_emoji_test(ucd, out_path):
+    """Every sequence in emoji-test.txt with its status, comments removed,
+    one per line: `1F600;fq` (fq, mq, uq, c: fully-qualified,
+    minimally-qualified, unqualified, component)."""
+    short = {"fully-qualified": "fq", "minimally-qualified": "mq", "unqualified": "uq", "component": "c"}
+    with open(fetch(ucd, "emoji-test.txt", EMOJI_TEST_URL), encoding="utf-8") as f:
+        lines = f.readlines()
+    with open(out_path, "w", encoding="utf-8") as out:
+        for line in lines[:5]:
+            out.write(line)
+        out.write("# Sequences and statuses only; comments removed by crates/term-core/unicode/generate.py.\n")
+        for line in lines:
+            data = line.split("#", 1)[0].strip()
+            if data:
+                points, status = (p.strip() for p in data.split(";"))
+                out.write(f"{points};{short[status]}\n")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--ucd", default=os.path.join(HERE, ".ucd-cache"), help="directory for the UCD files")
@@ -295,6 +319,7 @@ def main():
     props = build(args.ucd)
     emit(props, os.path.join(CRATE, "src", "unicode", "table.rs"))
     emit_break_test(args.ucd, os.path.join(CRATE, "tests", "data", "GraphemeBreakTest.txt"))
+    emit_emoji_test(args.ucd, os.path.join(CRATE, "tests", "data", "emoji-test.txt"))
 
 
 if __name__ == "__main__":

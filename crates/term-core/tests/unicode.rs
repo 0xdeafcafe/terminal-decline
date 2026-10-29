@@ -471,3 +471,64 @@ fn emoji_sequences_are_two_cells_at_both_settings() {
         }
     }
 }
+
+/// The sequences of emoji-test.txt (Unicode 18.0.0, the table's version)
+/// with their statuses: `fq`, `mq`, `uq` (fully, minimally or not
+/// qualified) and `c` (component).
+fn emoji_test() -> Vec<(String, &'static str)> {
+    include_str!("data/emoji-test.txt")
+        .lines()
+        .filter(|l| !l.starts_with('#'))
+        .map(|line| {
+            let (points, status) = line.split_once(';').expect("`points;status`");
+            let s = points
+                .split(' ')
+                .map(|h| char::from_u32(u32::from_str_radix(h, 16).expect("hex")).expect("a scalar"))
+                .collect();
+            (s, status)
+        })
+        .collect()
+}
+
+/// Every sequence in emoji-test.txt, printed alone at both ambiguous-width
+/// settings, is one cell holding the whole sequence. Fully-qualified ones
+/// and components are two cells wide; the others (a pictograph without its
+/// VS16, say, which is text presentation) follow the width rule.
+#[test]
+fn every_emoji_test_sequence_is_one_cell() {
+    let all = emoji_test();
+    assert!(all.len() > 5000, "{} sequences", all.len());
+    for (s, status) in &all {
+        for ambiguous in [1, 2] {
+            let want = match *status {
+                "fq" | "c" => 2,
+                _ => cluster_width(s, ambiguous),
+            };
+            assert_eq!(
+                printed_cells(s, ambiguous, false, false, true),
+                vec![(s.clone(), want)],
+                "{s:?} ({status}) at {ambiguous}"
+            );
+        }
+    }
+}
+
+/// The same sequences one after another, between letters and spaces, fed
+/// whole and one byte at a time: the cells hold the clusters.
+#[test]
+fn emoji_test_sequences_in_a_stream() {
+    let all = emoji_test();
+    for chunk in all.chunks(60) {
+        let s: String = chunk.iter().map(|(s, _)| format!("{s}a ")).collect();
+        for ambiguous in [1, 2] {
+            let expected = expected_cells(&s, ambiguous, false);
+            for (byte_at_a_time, bulk) in [(false, true), (true, true), (false, false)] {
+                assert_eq!(
+                    printed_cells(&s, ambiguous, false, byte_at_a_time, bulk),
+                    expected,
+                    "{s:?} at {ambiguous}, bytes {byte_at_a_time} bulk {bulk}"
+                );
+            }
+        }
+    }
+}

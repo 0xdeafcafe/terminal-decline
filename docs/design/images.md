@@ -1148,7 +1148,10 @@ ready, bytes, placements_in_view, budget): `images::apply_config` runs at start 
 `TD_IMAGES=1` still turns images on whatever `images` says. Sessions
 always install the app's host, so `images` can be turned on in a running
 window; turning it off stops new images and queries, and what is held
-leaves as the budget needs it.
+leaves as the budget needs it. Installing the host costs nothing: its
+Metal device is made on the first image (made with the host, it took
+70 ms to seconds at every session start and made quick failures look
+slow, closing their windows).
 
 **Landed (I.6).** Fuzzing and pressure, ahead of the image code being
 complete (the seeds and dictionary entries simply find nothing to do until

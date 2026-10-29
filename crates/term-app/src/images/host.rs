@@ -28,8 +28,8 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use term_core::ImagePool;
 use term_core::image::{ImageError, ImageHost, Medium, MediumRequest, OpenMedium, PixelBuffer};
@@ -45,7 +45,10 @@ const TEMP_MARKER: &[u8] = b"tty-graphics-protocol";
 
 /// See the module documentation.
 pub struct AppHost {
-    alloc: Option<PixelAlloc>,
+    /// Made on the first image, not with the host: creating the system's
+    /// Metal device can take seconds in a fresh process, and every
+    /// session installs this host, images on or not.
+    alloc: OnceLock<Option<PixelAlloc>>,
     pool: Arc<ImagePool>,
     /// `image_file_transfer`: off, only direct transmissions work.
     media: AtomicBool,
@@ -80,12 +83,17 @@ impl Drop for Mapping {
 impl AppHost {
     /// On the system's Metal device (the one the renderers use), with the
     /// process's pool. Without a Metal device nothing can be allocated,
-    /// so every image is refused.
+    /// so every image is refused. The device is looked up on the first
+    /// allocation, so making the host costs next to nothing.
     pub fn new(pool: Arc<ImagePool>, media: bool) -> AppHost {
-        AppHost::with_alloc(PixelAlloc::system_default(), pool, media)
+        AppHost::with_lock(OnceLock::new(), pool, media)
     }
 
     pub fn with_alloc(alloc: Option<PixelAlloc>, pool: Arc<ImagePool>, media: bool) -> AppHost {
+        AppHost::with_lock(OnceLock::from(alloc), pool, media)
+    }
+
+    fn with_lock(alloc: OnceLock<Option<PixelAlloc>>, pool: Arc<ImagePool>, media: bool) -> AppHost {
         let mut temp_dirs = Vec::new();
         for dir in [PathBuf::from("/tmp"), std::env::temp_dir()] {
             if let Ok(real) = dir.canonicalize()
@@ -239,7 +247,7 @@ fn fstat(fd: &impl AsRawFd) -> Result<libc::stat, ImageError> {
 
 impl ImageHost for AppHost {
     fn alloc(&self, width: u32, height: u32) -> Option<Box<dyn PixelBuffer>> {
-        self.alloc.as_ref()?.alloc(width, height)
+        self.alloc.get_or_init(PixelAlloc::system_default).as_ref()?.alloc(width, height)
     }
 
     fn open_medium(&self, req: &MediumRequest) -> Result<OpenMedium, ImageError> {
@@ -297,6 +305,15 @@ mod tests {
 
     fn host() -> AppHost {
         AppHost::with_alloc(None, ImagePool::new(32 << 20), true)
+    }
+
+    /// Every session installs the host, images on or not: making it must
+    /// not create the Metal device (seconds in a fresh process, which made
+    /// quick failures look slow and close their windows).
+    #[test]
+    fn making_the_host_leaves_the_device_for_the_first_image() {
+        let h = AppHost::new(ImagePool::new(32 << 20), true);
+        assert!(h.alloc.get().is_none());
     }
 
     fn req(medium: Medium, name: &[u8]) -> MediumRequest {

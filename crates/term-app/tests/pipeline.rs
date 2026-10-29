@@ -623,6 +623,29 @@ fn failure_after_a_second_closes() {
     assert!(!screen.contains("[process exited"), "{screen}");
 }
 
+/// Starting a session, images off, is quick: [`QUICK_EXIT`] is measured
+/// from the start, so time spent there (the image host once made the
+/// Metal device here) makes a quick failure look slow.
+///
+/// [`QUICK_EXIT`]: terminal_decline_app::session::QUICK_EXIT
+#[test]
+fn session_start_is_quick() {
+    let home = TempDir::new("start-time");
+    let cmd = command(&["/bin/sh", "-c", "exit 0"], home.path());
+    let signal = Arc::new(Signal::default());
+    let t0 = Instant::now();
+    let session = Session::spawn(
+        &cmd,
+        size(80, 24),
+        Term::new(80, 24, 100, term_core::ImagePool::process()),
+        signal.hooks(),
+    )
+    .expect("spawn");
+    let took = t0.elapsed();
+    assert!(took < Duration::from_millis(50), "Session::spawn took {took:?}");
+    drop(session);
+}
+
 /// `terminal-decline -e /nonexistent`: the shell says why and exits with 127.
 #[test]
 fn missing_program_keeps_the_window() {

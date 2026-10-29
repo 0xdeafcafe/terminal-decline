@@ -1193,13 +1193,44 @@ box drawing and blocks, 0x100–0x1FF braille, 0x200–0x21F Powerline,
 0x300–0x38B legacy computing). Ids from 0x1000 up are kept for shapes that
 aren't characters. Still to come for this design:
 
-- the curly, dotted and dashed underline patterns as sprites from 0x1000
-  (F2.3);
 - caching sprites under `GlyphKey { font: SPRITE_FONT, glyph: id, cells }`
   in the same mask texture as text (F3.2). The key exists since F2.1
   (`GlyphKey::sprite(id, cells)`, and `glyph_key` returns it for code-drawn
   characters); today the renderer still reaches sprites through the
   per-character path.
+
+**Landed in F2.3:** the underline patterns, `SpriteId::UNDERLINE_CURLY`
+(0x1000), `UNDERLINE_DOTTED` (0x1001) and `UNDERLINE_DASHED` (0x1002),
+drawn through the same `rasterize(id, metrics, cells)`:
+
+- Unlike the character sprites, their bitmap is not the whole cell: it is
+  the cells' width and only as tall as the pattern, a band under the
+  baseline (`top` negative, so the renderer places it like any glyph). That
+  keeps a row of underlined text from filling the glyph texture with empty
+  cells.
+- The pattern repeats every cell: a sprite across `cells` cells is exactly
+  the one-cell sprite repeated, so the renderer can use one quad per cell or
+  one per wide cell and the result is the same.
+- Dotted and dashed sit exactly where the single underline's rectangle
+  does (`baseline + underline_offset`, `underline_thickness` rows) and are
+  whole pixels. Dots are thickness-wide squares, as many as fit with a gap
+  at least a dot wide, each centred in an equal share of the cell, so the
+  gap across a cell edge is within a pixel of the gaps inside. Dashed is one
+  dash per cell, two thirds of it, with half the gap at each side.
+- Curly is one cosine period per cell, `underline_thickness` thick,
+  anti-aliased. Peak to peak it is a third of the cell width (at least 1.5
+  thicknesses), lowest at the cell edges and highest in the middle, so the
+  slope is zero where cells meet. It is centred on the single underline,
+  moved up and flattened when the room below the baseline is short, and
+  only crosses the baseline when even a flat wave doesn't fit beneath it.
+- No sprite for double underline: §10.5 keeps it as two rectangles.
+- Tests (`term-font/tests/underline.rs`), at 8 cell sizes from 6×13 to
+  24×50: every pattern stays inside the cell and below the baseline;
+  dotted and dashed are on the single underline's rows; multi-cell sprites
+  are the one-cell sprite repeated; and across three tiled cells the dots
+  are all alike with even gaps, the dashes and gaps are all alike, and the
+  wave has ink in every column, and the step in its height between the two
+  columns either side of a cell edge is no bigger than anywhere inside.
 
 ### 10.5 Decorations
 
@@ -2348,7 +2379,7 @@ go in order, and the font and render agents run alongside.
 | 15 | app | settings: `ambiguous_width` (and later `image_memory` with B.3), read by config and passed to term-core; main session | S | 7 |
 | F2.1 | font | font registry, `GlyphKey`, rasterise by (font, glyph); `rasterize(char, style)` kept as a wrapper. **Landed** (§10.2) | M | 1 |
 | F2.2 | font | CTLine shaping of runs (`shape()`) and the shaped-cluster cache; clusters now, ligatures in B.1 | M | F2.1 |
-| F2.3 | font | underline pattern sprites (curly, dotted, dashed) from id 0x1000; box/block/Powerline/braille shapes are done (F.6, `c4033dd`) | S | F2.1 |
+| F2.3 | font | underline pattern sprites (curly, dotted, dashed) from id 0x1000; box/block/Powerline/braille shapes are done (F.6, `c4033dd`). **Landed** (§10.4) | S | F2.1 |
 | F3.1 | render | resolve through `Style`: underline colour, double underline, overline, strike | S | 1 |
 | F3.2 | render | glyph cache keyed by `GlyphKey` (sprites included); runs (§10.1); cluster cells via F2.2; curly/dotted/dashed via F2.3; ambiguous characters at two cells | M | 6, F2.2, F2.3 |
 | F3.3 | render | build frames from the snapshot with overlays (§9.3), still under the lock (R.1 moves it out) | M | 8 |

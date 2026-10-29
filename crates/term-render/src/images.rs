@@ -357,7 +357,7 @@ fn piece_instance(v: &SnapVirtual, run: &PieceRun, line: usize, g: &Grid, grid: 
     }
     let (bw, bh) = (v.cols as f32 * g.cw, v.rows as f32 * g.ch);
     let (sx, sy) = match v.fit {
-        Fit::Contain => {
+        Fit::Contain | Fit::ContainTopLeft => {
             let s = (bw / iw).min(bh / ih);
             (s, s)
         }

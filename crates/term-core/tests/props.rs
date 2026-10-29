@@ -8,9 +8,11 @@
 use proptest::prelude::*;
 use proptest::sample::select;
 use proptest::test_runner::{Config, RngSeed};
+use std::collections::HashMap;
 use term_core::scrollback::Scrollback;
 use term_core::term::GraphemeState;
-use term_core::{Attrs, Cell, Color, Content, Row, RowRef, Selection, Style, Term, Underline, Width};
+
+use term_core::{Attrs, Cell, Color, Content, Row, RowFlags, RowKey, RowRef, ScreenId, Selection, Snapshot, Style, Term, Underline, Width};
 
 fn config() -> Config {
     Config {
@@ -600,6 +602,7 @@ fn row() -> impl Strategy<Value = (Row, Vec<Style>)> {
                 Row {
                     cells: cells.concat(),
                     wrapped,
+                    ..Row::default()
                 },
                 styles,
             )
@@ -762,8 +765,10 @@ enum StyleStep {
     Resize(usize, usize),
     /// Sweep now and check exactly the used ids are left.
     Sweep,
-    /// Take the style updates into the mirror, as a snapshot would.
+    /// Take a snapshot into the renderer's mirrors and row cache.
     Snapshot,
+    /// Scroll the view (into history and back).
+    View(isize),
 }
 
 fn style_step() -> impl Strategy<Value = StyleStep> {
@@ -771,34 +776,61 @@ fn style_step() -> impl Strategy<Value = StyleStep> {
         14 => prop::collection::vec(style_piece(), 1..12).prop_map(|ps| StyleStep::Output(ps.concat())),
         2 => (1usize..=40, 1usize..=12).prop_map(|(c, l)| StyleStep::Resize(c, l)),
         1 => Just(StyleStep::Sweep),
-        2 => Just(StyleStep::Snapshot),
+        4 => Just(StyleStep::Snapshot),
+        1 => (-6isize..=6).prop_map(StyleStep::View),
     ]
 }
 
-/// The renderer's mirrors of the two tables (§9.2), and the epochs seen.
+/// What a renderer keeps between frames (§9): a mirror of each screen's
+/// style table, the epochs seen, and a row cache keyed by `RowKey`, filled
+/// only from snapshots.
 #[derive(Default)]
 struct Mirrors {
     tables: [Vec<Option<Style>>; 2],
     epochs: [Option<u64>; 2],
     seen: Vec<u64>,
+    snap: Snapshot,
+    rows: HashMap<RowKey, Vec<CellState>>,
+    /// The terminal, history epoch and width the cached rows belong to.
+    terminal: Option<u64>,
+    history_epoch: u64,
+    cols: u16,
+    /// Snapshots taken, and rows copied in them.
+    snapshots: usize,
+    copied: usize,
 }
 
 impl Mirrors {
+    /// Take a snapshot, as a renderer would, and check that the frame it
+    /// gives (cached rows plus copied ones, styles from the mirror) is
+    /// what the terminal shows.
     fn take(&mut self, t: &mut Term) -> Result<(), TestCaseError> {
-        let (alt, u) = t.state.take_style_updates();
-        let i = alt as usize;
-        if self.epochs[i] != Some(u.epoch) {
+        let rows = &self.rows;
+        t.state.snapshot(&mut self.snap, |k| rows.contains_key(&k));
+        let snap = &self.snap;
+        self.snapshots += 1;
+
+        // The cache rules of §9.1.
+        let new_terminal = self.terminal != Some(snap.terminal_id);
+        if new_terminal || self.history_epoch != snap.history_epoch || self.cols != snap.cols {
+            self.rows.retain(|k, _| !new_terminal && matches!(k, RowKey::Screen(_)));
+        }
+        if let Some(from) = snap.popped_from {
+            self.rows.retain(|k, _| !matches!(k, RowKey::History { line, .. } if *line >= from));
+        }
+        (self.terminal, self.history_epoch, self.cols) = (Some(snap.terminal_id), snap.history_epoch, snap.cols);
+
+        let i = (snap.screen == ScreenId::Alternate) as usize;
+        prop_assert_eq!(i == 1, t.state.alt_screen_active());
+        if self.epochs[i] != Some(snap.styles_epoch) {
             // A new table (renumbered, the alternate one made again, RIS):
             // its epoch was never seen before, and it comes whole.
-            prop_assert!(!self.seen.contains(&u.epoch), "epoch {} repeats", u.epoch);
-            prop_assert!(u.all, "a new epoch {} without the whole table", u.epoch);
-            self.seen.push(u.epoch);
-            self.epochs[i] = Some(u.epoch);
-        }
-        if u.all {
+            prop_assert!(!self.seen.contains(&snap.styles_epoch), "epoch {} repeats", snap.styles_epoch);
+            self.seen.push(snap.styles_epoch);
+            self.epochs[i] = Some(snap.styles_epoch);
             self.tables[i].clear();
         }
-        for (id, s) in u.styles {
+        for &(id, s) in &snap.style_updates {
             let id = id as usize;
             if self.tables[i].len() <= id {
                 self.tables[i].resize(id + 1, None);
@@ -809,6 +841,31 @@ impl Mirrors {
         for (id, s) in t.state.live_styles().into_iter().enumerate() {
             if let Some(s) = s {
                 prop_assert_eq!(self.tables[i].get(id).copied().flatten(), Some(s), "id {}", id);
+            }
+        }
+
+        prop_assert_eq!(snap.rows.len(), t.state.lines());
+        for (line, row) in snap.rows.iter().enumerate() {
+            if let Some(cells) = snap.row_cells(row) {
+                let styles: Vec<Style> = if row.flags.contains(RowFlags::HISTORY) {
+                    snap.history_styles.clone()
+                } else {
+                    self.tables[i].iter().map(|s| s.unwrap_or_default()).collect()
+                };
+                let state = cells
+                    .iter()
+                    .map(|c| (c.codepoint() == 0, c.ch(), c.width(), styles[c.style_id() as usize]))
+                    .collect();
+                self.copied += 1;
+                prop_assert!(self.rows.insert(row.key, state).is_none(), "{:?} copied though cached", row.key);
+            }
+            let shown = row_state(&t.state.visible_row(line));
+            let cached = self.rows.get(&row.key);
+            prop_assert!(cached.is_some(), "row {} ({:?}) neither cached nor copied", line, row.key);
+            prop_assert_eq!(cached.unwrap(), &shown.0, "row {} ({:?})", line, row.key);
+            prop_assert_eq!(row.flags.contains(RowFlags::WRAPPED), shown.1, "row {}", line);
+            if let RowKey::Screen(seq) = row.key {
+                prop_assert!(seq <= snap.counter);
             }
         }
         Ok(())
@@ -847,6 +904,10 @@ proptest! {
                 }
                 StyleStep::Sweep => swept.state.sweep_styles_now().map_err(TestCaseError::fail)?,
                 StyleStep::Snapshot => mirrors.take(&mut swept)?,
+                StyleStep::View(d) => {
+                    swept.state.scroll_view(*d);
+                    plain.state.scroll_view(*d);
+                }
             }
             swept.state.check_invariants().map_err(TestCaseError::fail)?;
             prop_assert_eq!(screen_state(&swept), screen_state(&plain), "after {:?}", step);

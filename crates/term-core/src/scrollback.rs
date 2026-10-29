@@ -124,6 +124,26 @@ impl Scrollback {
     /// Line `i` counting from the oldest visible line (0..len), and the
     /// styles its cells' ids index.
     pub fn get(&self, i: usize) -> Option<(Row, Vec<Style>)> {
+        let mut row = Row::default();
+        let mut styles = Vec::new();
+        self.get_into(i, &mut row, &mut styles).then_some((row, styles))
+    }
+
+    /// [`Scrollback::get`] into buffers the caller reuses (the snapshot,
+    /// §9.2). Returns false, leaving them alone, if there is no line `i`.
+    pub fn get_into(&self, i: usize, row: &mut Row, styles: &mut Vec<Style>) -> bool {
+        let Some(data) = self.line_data(i) else { return false };
+        row.cells.clear();
+        decode(data, row, styles);
+        true
+    }
+
+    /// Whether line `i` soft-wraps onto the next, without decoding it.
+    pub fn wrapped(&self, i: usize) -> bool {
+        self.line_data(i).is_some_and(|d| d.first().is_some_and(|f| f & WRAPPED != 0))
+    }
+
+    fn line_data(&self, i: usize) -> Option<&[u8]> {
         if i >= self.len() {
             return None;
         }
@@ -132,11 +152,7 @@ impl Scrollback {
         let idx = self.blocks.partition_point(|b| b.first <= line) - 1;
         let block = &self.blocks[idx];
         let n = (line - block.first) as usize;
-        let from = block.starts[n] as usize;
-        let mut row = Row::default();
-        let mut styles = Vec::new();
-        decode(&block.data[from..], &mut row, &mut styles);
-        Some((row, styles))
+        Some(&block.data[block.starts[n] as usize..])
     }
 }
 
@@ -579,6 +595,7 @@ mod tests {
         Row {
             cells,
             wrapped: r.below(2) == 0,
+            ..Row::default()
         }
     }
 
@@ -662,7 +679,11 @@ mod tests {
     }
 
     fn row_of(cells: Vec<Cell>, wrapped: bool) -> Row {
-        Row { cells, wrapped }
+        Row {
+            cells,
+            wrapped,
+            ..Row::default()
+        }
     }
 
     #[test]

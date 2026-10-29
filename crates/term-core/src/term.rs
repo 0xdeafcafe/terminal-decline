@@ -10,8 +10,11 @@ use crate::cell::{Cell, Color, Row, Width};
 use crate::rows::{Content, RowRef};
 use crate::scrollback::Scrollback;
 use crate::style::{Attrs, Style, Underline};
-use crate::style_table::{StyleStats, StyleTable, StyleUpdates};
+use crate::style_table::{StyleStats, StyleTable};
 use crate::unicode::{self, Segmenter};
+
+mod snapshot;
+pub use snapshot::{Highlight, HighlightKind, RowFlags, RowKey, ScreenId, SnapCursor, SnapRow, Snapshot};
 
 /// A style table holding more ids than this gives its memory back when
 /// the screen is cleared.
@@ -320,6 +323,20 @@ pub struct Terminal {
     replies: Vec<u8>,
     /// Bumped on any change that needs a redraw.
     generation: u64,
+    /// Row change counters (§9.1 of the cells design): the last `seq`
+    /// given to a row, and the first one given since the last snapshot.
+    /// Neither goes back, even across a reset.
+    counter: u64,
+    batch_start: u64,
+    /// Unique in the process: a new terminal (after a caught parser panic,
+    /// say) never repeats an old one's counters or line numbers.
+    terminal_id: u64,
+    /// Bumped when history is cleared (ED 3, RIS).
+    history_epoch: u64,
+    /// The lowest line number pulled back from history since the last
+    /// snapshot. Nothing pulls lines back yet (pull-back comes with
+    /// reflow); the snapshot already carries it.
+    popped_from: Option<u64>,
     /// Write printable ASCII runs in bulk ([`Terminal::write_ascii`]); off
     /// only in tests, as the reference the bulk path is compared against.
     bulk_ascii: bool,
@@ -375,8 +392,14 @@ impl Terminal {
             cell_pixels: (8, 16),
             replies: Vec::new(),
             generation: 1,
+            counter: 0,
+            batch_start: 1,
+            terminal_id: snapshot::next_terminal_id(),
+            history_epoch: 0,
+            popped_from: None,
             bulk_ascii: true,
         }
+        .with_rows_touched()
     }
 
     pub fn cols(&self) -> usize {
@@ -862,6 +885,8 @@ impl Terminal {
                 false,
             );
         }
+        // Resizing changes every row (§9.1).
+        self.touch_all_rows();
         self.touch();
     }
 
@@ -957,8 +982,8 @@ impl Terminal {
             give_back,
         );
         if renumbered {
-            // Every row's cells changed bits (row change counters come
-            // with the snapshot, §9.1).
+            // Every row's cells changed bits.
+            self.touch_screen_rows();
             self.touch();
         }
     }
@@ -1017,6 +1042,7 @@ impl Terminal {
                     self.push_scrollback(&row);
                 }
                 row.reset(self.cols, blank);
+                snapshot::touch(&mut row, &mut self.counter, self.batch_start);
                 self.screen.push_back(row);
             }
             return;
@@ -1030,6 +1056,7 @@ impl Terminal {
             self.screen[top + i].reset(self.cols, blank);
         }
         self.screen.make_contiguous()[top..=bottom].rotate_left(n);
+        self.touch_rows(bottom + 1 - n..bottom + 1);
     }
 
     fn scroll_down(&mut self, n: usize) {
@@ -1040,6 +1067,7 @@ impl Terminal {
         for row in self.screen.range_mut(top..top + n) {
             row.reset(self.cols, blank);
         }
+        self.touch_rows(top..top + n);
     }
 
     fn linefeed(&mut self) {
@@ -1091,6 +1119,7 @@ impl Terminal {
 
     fn erase_cells(&mut self, row: usize, range: std::ops::Range<usize>) {
         let blank = self.blank();
+        self.touch_row(row);
         let cells = &mut self.screen[row].cells;
         let end = range.end.min(cells.len());
         let start = range.start.min(end);
@@ -1144,6 +1173,7 @@ impl Terminal {
     /// that lost its other half.
     fn repair_wide(&mut self, row: usize) {
         let blank = self.blank();
+        self.touch_row(row);
         let cells = &mut self.screen[row].cells;
         for i in 0..cells.len() {
             let c = cells[i];
@@ -1191,6 +1221,7 @@ impl Terminal {
         for row in &mut self.screen {
             row.reset(self.cols, blank);
         }
+        self.touch_screen_rows();
     }
 
     fn reset(&mut self) {
@@ -1214,7 +1245,15 @@ impl Terminal {
         let primary_top = if self.alt_active { self.other_top_line } else { self.top_line };
         fresh.top_line = primary_top;
         fresh.other_top_line = primary_top;
+        // The same terminal to the renderer: counters carry on, and the
+        // cleared history gets a new epoch (§9.1).
+        fresh.terminal_id = self.terminal_id;
+        fresh.counter = self.counter;
+        fresh.batch_start = self.batch_start;
+        fresh.history_epoch = self.history_epoch + 1;
+        fresh.popped_from = self.popped_from;
         *self = fresh;
+        self.touch_all_rows();
     }
 
     fn write_char(&mut self, c: char) {
@@ -1307,7 +1346,10 @@ impl Terminal {
         }
         // After the erase: interning the erase style may renumber ids.
         let pen = self.pen_template();
-        let cells = &mut self.screen[row].cells;
+        // The erase and repair above touch the row themselves.
+        let line = &mut self.screen[row];
+        snapshot::touch(line, &mut self.counter, self.batch_start);
+        let cells = &mut line.cells;
         if width == 2 {
             cells[col] = pen.with_char(c).with_width(Width::Wide);
             cells[col + 1] = pen.with_width(Width::Spacer);
@@ -1354,7 +1396,11 @@ impl Terminal {
             // Taken per segment: a linefeed's scroll may have interned the
             // erase style, and that may have renumbered the ids.
             let pen = self.pen_template().bits();
-            let cells = &mut self.screen[row].cells[col..col + n];
+            // Touched through the borrow the cells are written through:
+            // a separate `touch_row` call here made `seq` 30% slower.
+            let line = &mut self.screen[row];
+            snapshot::touch(line, &mut self.counter, self.batch_start);
+            let cells = &mut line.cells[col..col + n];
             if cells.iter().fold(0, |a, c| a | c.bits()) & (Cell::WIDTH | Cell::KIND) != 0 {
                 // Overwriting part of a wide character: put_char cleans up.
                 for &b in segment {
@@ -1486,6 +1532,7 @@ impl Terminal {
             self.erase_cells(row, col + 1..col + 2);
         }
         // Read again: the erase may have renumbered the ids.
+        self.touch_row(row);
         let cells = &mut self.screen[row].cells;
         let cell = cells[col];
         cells[col] = cell.with_width(Width::Wide);
@@ -1989,6 +2036,7 @@ impl Perform for Terminal {
                     }
                     3 => {
                         self.scrollback.clear();
+                        self.history_epoch += 1;
                         self.display_offset = 0;
                         self.selection = None;
                     }
@@ -2187,6 +2235,7 @@ impl Perform for Terminal {
                 for row in &mut self.screen {
                     row.cells.fill(Cell::BLANK.with_char('E'));
                 }
+                self.touch_screen_rows();
             }
             _ => return,
         }
@@ -2282,14 +2331,6 @@ impl Terminal {
         (self.styles.stats(), self.other_styles.stats())
     }
 
-    /// Test aid: the styles the active screen's table took since the last
-    /// call, as a snapshot will take them (§9.2), and whether that is the
-    /// alternate screen's table.
-    #[doc(hidden)]
-    pub fn take_style_updates(&mut self) -> (bool, StyleUpdates) {
-        (self.alt_active, self.styles.take_updates())
-    }
-
     /// Test aid: the active screen's table by id, `None` for free ids.
     #[doc(hidden)]
     pub fn live_styles(&self) -> Vec<Option<Style>> {
@@ -2335,6 +2376,7 @@ impl Terminal {
     #[doc(hidden)]
     pub fn check_invariants(&self) -> Result<(), String> {
         let (cols, lines) = (self.cols, self.lines);
+        self.check_counters()?;
         if self.cursor.row >= lines || self.cursor.col >= cols {
             return Err(format!("cursor ({}, {}) outside {cols}x{lines}", self.cursor.row, self.cursor.col));
         }
@@ -2461,6 +2503,7 @@ impl Terminal {
         for row in self.screen.range_mut(bottom + 1 - n..=bottom) {
             row.reset(self.cols, blank);
         }
+        self.touch_rows(bottom + 1 - n..bottom + 1);
     }
 }
 

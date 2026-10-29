@@ -188,6 +188,9 @@ impl Cell {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Row {
+    /// The row's change counter (§9.1): changes whenever its content does,
+    /// and only then. 0 for rows not on a screen.
+    pub seq: u64,
     pub cells: Vec<Cell>,
     /// The line continues onto the next row (soft wrap).
     pub wrapped: bool,
@@ -196,6 +199,7 @@ pub struct Row {
 impl Row {
     pub fn new(cols: usize, fill: Cell) -> Row {
         Row {
+            seq: 0,
             cells: vec![fill; cols],
             wrapped: false,
         }

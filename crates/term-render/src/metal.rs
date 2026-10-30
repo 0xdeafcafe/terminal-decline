@@ -1246,9 +1246,15 @@ pub struct Renderer {
     /// The full-window pane [`prepare`](Self::prepare) builds and
     /// [`present`](Self::present) draws, until windows hold panes (B2.3).
     pub pane: PaneRender,
-    /// The surface last shown on screen, so it can be marked purgeable while
-    /// the window is hidden.
-    last_surface: Option<Retained<objc2_io_surface::IOSurfaceRef>>,
+    /// The surfaces of the last two frames presented, so they can be
+    /// marked purgeable while the window is hidden: the last one, and the
+    /// one before, which is the one on screen when the window was put
+    /// away before its last frame was shown (a tab switch that drew once
+    /// more). The window server keeps the surface it showed last, counted
+    /// in this process's footprint, for as long as the window lives. The
+    /// one before is let go with the spare drawable
+    /// ([`forget_spare`](Self::forget_spare)).
+    surfaces: [Option<Retained<objc2_io_surface::IOSurfaceRef>>; 2],
     hidden: bool,
     /// The time each pane's build may spend on new glyphs; `None`: no limit.
     glyph_budget: Option<Duration>,
@@ -1298,7 +1304,7 @@ impl Renderer {
                 completed: Arc::new(AtomicU64::new(0)),
             },
             pane: PaneRender::default(),
-            last_surface: None,
+            surfaces: [None, None],
             hidden: false,
             glyph_budget: None,
             blend: None,
@@ -1323,10 +1329,30 @@ impl Renderer {
                 cache.make_purgeable();
             }
         }
-        if !keep_surface && let Some(s) = &self.last_surface {
-            // kIOSurfacePurgeableVolatile
-            unsafe { s.set_purgeable(1, std::ptr::null_mut()) };
+        if !keep_surface {
+            for s in self.surfaces.iter().flatten() {
+                // kIOSurfacePurgeableVolatile
+                unsafe { s.set_purgeable(1, std::ptr::null_mut()) };
+            }
         }
+    }
+
+    /// The layer let its spare drawable go: so does this renderer, keeping
+    /// only the surface on screen.
+    pub fn forget_spare(&mut self) {
+        self.surfaces[1] = None;
+    }
+
+    /// Note the surface of a frame about to be presented.
+    fn presenting(&mut self, texture: &Texture) {
+        let Some(s) = texture.iosurface() else { return };
+        if self.surfaces[0]
+            .as_ref()
+            .is_some_and(|last| std::ptr::eq::<objc2_io_surface::IOSurfaceRef>(&**last, &*s))
+        {
+            return;
+        }
+        self.surfaces[1] = self.surfaces[0].replace(s);
     }
 
     /// Undo `hide`. Must run before the next frame is built or drawn.
@@ -1340,7 +1366,7 @@ impl Renderer {
             cache.hidden -= 1;
             cache.make_resident();
         }
-        if let Some(s) = &self.last_surface {
+        for s in self.surfaces.iter().flatten() {
             // kIOSurfacePurgeableNonVolatile
             unsafe { s.set_purgeable(0, std::ptr::null_mut()) };
         }
@@ -1555,7 +1581,7 @@ impl Renderer {
             return;
         };
         let texture = drawable.texture();
-        self.last_surface = texture.iosurface();
+        self.presenting(&texture);
         let cmd = self.encode(&texture);
         cmd.presentDrawable(ProtocolObject::from_ref(&*drawable));
         cmd.commit();
@@ -1567,7 +1593,7 @@ impl Renderer {
             return;
         };
         let texture = drawable.texture();
-        self.last_surface = texture.iosurface();
+        self.presenting(&texture);
         let cmd = self.encode_panes(&texture, clear, panes, dividers);
         cmd.presentDrawable(ProtocolObject::from_ref(&*drawable));
         cmd.commit();

@@ -207,6 +207,15 @@ impl Theme {
         }
     }
 
+    /// A new background (0xRRGGBB), with the colours made from it: the
+    /// text under a block cursor and the search hits'.
+    pub fn set_background(&mut self, bg: u32) {
+        self.background = rgb(bg);
+        self.cursor_text = rgb(bg);
+        self.search_hit = rgb(mix(bg, 0xe5c07b, 0.45));
+        self.search_current = rgb(mix(bg, 0xff9f43, 0.85));
+    }
+
     #[inline]
     fn resolve(&self, c: term_core::Color, default: Rgba) -> Rgba {
         match c.kind() {

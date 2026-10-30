@@ -693,7 +693,13 @@ pub fn program_theme(base: &Theme, t: &term_core::Terminal) -> Option<Theme> {
     }
     let mut theme = base.clone();
     theme.palette = palette.map(term_render::rgb);
-    [theme.foreground, theme.background, theme.cursor] = dynamic.map(term_render::rgb);
+    let [fg, bg, cursor] = dynamic;
+    [theme.foreground, theme.cursor] = [fg, cursor].map(term_render::rgb);
+    // The search hits and the text under the cursor follow the
+    // program's background, so they stay readable on it.
+    if term_render::rgb(bg) != base.background {
+        theme.set_background(bg);
+    }
     Some(theme)
 }
 
@@ -1439,9 +1445,21 @@ mod tests {
         assert_eq!(drawn.palette[2], theme.palette[2]);
         assert_eq!(drawn.foreground, theme.foreground);
         assert_eq!(drawn.selection, theme.selection);
+        assert_ne!(drawn.search_hit, theme.search_hit, "hits follow the program's background");
+        // A new theme (a config reload, the appearance switching): the
+        // program's colours stay on top of it.
+        let mut other = theme.clone();
+        other.palette[2] = term_render::rgb(0x00ff00);
+        other.set_background(0x000000);
+        set_term_colors(&mut t.state, &other);
+        assert!(t.state.take_colors_changed());
+        let drawn = program_theme(&other, &t.state).expect("program colours");
+        assert_eq!(rgb_of(drawn.background), 0x102030);
+        assert_eq!(rgb_of(drawn.palette[1]), 0xff0000);
+        assert_eq!(rgb_of(drawn.palette[2]), 0x00ff00);
         // Resets go back to the theme.
         t.advance(b"\x1b]111\x1b\\\x1b]104\x1b\\");
         assert!(t.state.take_colors_changed());
-        assert_eq!(program_theme(&theme, &t.state), None);
+        assert_eq!(program_theme(&other, &t.state), None);
     }
 }

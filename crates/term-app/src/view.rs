@@ -1276,9 +1276,10 @@ impl WindowView {
         // stays in its pane.
         for (id, padding, cursor_on, focused) in snapped {
             let p = panes.get_mut(&id).expect("shown pane");
-            // The input the snapshot was taken with.
+            // The input the snapshot was taken with: the colours a
+            // program set included.
             let input = FrameInput {
-                theme: &win.theme,
+                theme: p.theme.as_ref().unwrap_or(&win.theme),
                 metrics: win.renderer.metrics(),
                 padding,
                 cursor_on,

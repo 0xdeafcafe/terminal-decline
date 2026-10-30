@@ -35,7 +35,6 @@ pub enum Effect {
 #[derive(Clone, Debug)]
 enum RowKind {
     Setting(&'static Setting),
-    ThemePair,
     ThemeSide(&'static str),
     Palette(usize),
     Bind(Bind),
@@ -60,7 +59,6 @@ struct Row {
 #[derive(Clone, Debug)]
 enum Then {
     Set(KeyPath),
-    Theme,
     ThemeSide(&'static str),
     Palette(usize),
     Font(KeyPath),
@@ -464,6 +462,68 @@ impl<'h> App<'h> {
         Some((side("light"), side("dark")))
     }
 
+    /// The light and dark themes: a pair's sides, or one theme twice.
+    fn theme_sides(&self) -> Option<(String, String)> {
+        if let Some(pair) = self.theme_pair() {
+            return Some(pair);
+        }
+        let one = self.layers.lookup(&path_of("theme")).0?.as_str()?.to_string();
+        Some((one.clone(), one))
+    }
+
+    /// The edit that makes `side`'s theme `value` ("" for none). A single
+    /// theme becomes a pair with the old one on the other side; with none
+    /// before, the other side is the theme's own partner (Rosé Pine for
+    /// Rosé Pine Dawn) if it has one.
+    fn theme_side_edit(&self, side: &str, value: &str) -> Edit {
+        let theme = path_of("theme");
+        let here_table = self.layers.here(&theme).is_some_and(|i| i.as_table_like().is_some());
+        let sides = self.theme_sides();
+        let other = |(l, d): &(String, String)| if side == "light" { d.clone() } else { l.clone() };
+        if value.is_empty() {
+            return match sides.filter(|(l, d)| l != d) {
+                // The other side's theme for both.
+                Some(pair) => Edit::Set {
+                    path: theme,
+                    value: Value::from(other(&pair)),
+                },
+                None => Edit::Remove { path: theme },
+            };
+        }
+        if here_table {
+            return Edit::Set {
+                path: vec!["theme".into(), side.into()],
+                value: Value::from(value),
+            };
+        }
+        let other = match &sides {
+            Some(pair) => other(pair),
+            None => self
+                .host
+                .theme_info(value)
+                .and_then(|i| i.partner)
+                .unwrap_or_else(|| value.to_string()),
+        };
+        if other == value {
+            return Edit::Set {
+                path: theme,
+                value: Value::from(value),
+            };
+        }
+        let (l, d) = if side == "light" {
+            (value.to_string(), other)
+        } else {
+            (other, value.to_string())
+        };
+        let mut t = toml_edit::InlineTable::new();
+        t.insert("light", Value::from(l));
+        t.insert("dark", Value::from(d));
+        Edit::Set {
+            path: theme,
+            value: Value::InlineTable(t),
+        }
+    }
+
     fn rows_for(&self, section: Section) -> Vec<Row> {
         let mut rows = Vec::new();
         if section == Section::Pins {
@@ -496,37 +556,42 @@ impl<'h> App<'h> {
             }
             match s.editor {
                 Editor::Theme => {
+                    // One row for each side of the pair: a single theme is
+                    // both.
                     let (item, origin) = self.layers.lookup(&s.path());
-                    let pair = self.theme_pair();
-                    let mut row = self.setting_row(s);
-                    if let Some((l, d)) = &pair {
-                        row.value = format!("{l} / {d}");
-                    }
-                    rows.push(row);
-                    let on = pair.is_some();
-                    rows.push(Row {
-                        kind: RowKind::ThemePair,
-                        label: "Light/dark pair".into(),
-                        value: if on { "on" } else { "off" }.into(),
-                        note: if item.is_some() {
+                    let sides = self.theme_sides();
+                    let mode = self
+                        .layers
+                        .lookup(&path_of("appearance"))
+                        .0
+                        .and_then(Item::as_str)
+                        .unwrap_or("system")
+                        .to_string();
+                    for side in ["light", "dark"] {
+                        let name = sides.as_ref().map(|(l, d)| if side == "light" { l } else { d }.clone());
+                        let info = name.as_deref().and_then(|n| self.host.theme_info(n));
+                        let mut note = if item.is_some() {
                             self.note(&origin, s.applies)
                         } else {
                             String::new()
-                        },
-                        swatch: None,
-                        description: "Use one theme in light mode and another in dark mode".into(),
-                    });
-                    if let Some((l, d)) = pair {
-                        for (side, name) in [("light", l), ("dark", d)] {
-                            rows.push(Row {
-                                kind: RowKind::ThemeSide(side),
-                                label: format!("  {} theme", if side == "light" { "Light" } else { "Dark" }),
-                                value: name,
-                                note: String::new(),
-                                swatch: None,
-                                description: format!("The theme while macOS is in {side} mode"),
-                            });
+                        };
+                        if mode != "system" && mode != side {
+                            note = format!("not used: always {mode}");
                         }
+                        rows.push(Row {
+                            kind: RowKind::ThemeSide(side),
+                            label: format!("{} theme", if side == "light" { "Light" } else { "Dark" }),
+                            value: match (&name, &info) {
+                                (_, Some(i)) => i.title.clone(),
+                                (Some(n), None) => n.clone(),
+                                (None, _) => s.unset.to_string(),
+                            },
+                            note,
+                            swatch: info.as_ref().map(|i| i.background),
+                            description: format!(
+                                "The theme while windows are {side}: moving through the list previews it, Esc puts back the old one"
+                            ),
+                        });
                     }
                 }
                 Editor::Palette => {
@@ -916,11 +981,7 @@ impl<'h> App<'h> {
                         let items = choices.iter().map(|c| (c.to_string(), c.to_string())).collect();
                         self.choose(s.label, items, &current, Then::Set(path), false);
                     }
-                    Editor::Theme => {
-                        let mut items = vec![("".to_string(), "none (the built-in colours)".to_string())];
-                        items.extend(self.host.themes().into_iter().map(|t| (t.clone(), t)));
-                        self.choose("Theme", items, &current, Then::Theme, false);
-                    }
+                    Editor::Theme => {}
                     Editor::Font => {
                         let items = self.font_items(self.show_all_fonts);
                         self.choose("Font family", items, &current, Then::Font(path), true);
@@ -959,29 +1020,18 @@ impl<'h> App<'h> {
                     Editor::Palette | Editor::Map | Editor::Keybinds => {}
                 }
             }
-            RowKind::ThemePair => {
-                let edit = match self.theme_pair() {
-                    Some((light, _)) => Edit::Set {
-                        path: path_of("theme"),
-                        value: Value::from(light),
-                    },
-                    None => {
-                        let cur = self.layers.lookup(&path_of("theme")).0.and_then(Item::as_str).map(str::to_string);
-                        let cur = cur.or_else(|| self.host.themes().into_iter().next()).unwrap_or_default();
-                        let mut t = toml_edit::InlineTable::new();
-                        t.insert("light", Value::from(cur.clone()));
-                        t.insert("dark", Value::from(cur));
-                        Edit::Set {
-                            path: path_of("theme"),
-                            value: Value::InlineTable(t),
-                        }
-                    }
-                };
-                self.commit(edit, now);
-            }
             RowKind::ThemeSide(side) => {
-                let items = self.host.themes().into_iter().map(|t| (t.clone(), t)).collect();
-                self.choose(&format!("{side} theme"), items, &row.value, Then::ThemeSide(side), false);
+                let current = self
+                    .theme_sides()
+                    .map(|(l, d)| if side == "light" { l } else { d })
+                    .unwrap_or_default();
+                let mut items = vec![("".to_string(), "none (the built-in colours)".to_string())];
+                items.extend(self.host.themes().into_iter().map(|t| {
+                    let title = self.host.theme_info(&t).map_or_else(|| t.clone(), |i| i.title);
+                    (t, title)
+                }));
+                let title = if side == "light" { "Light theme" } else { "Dark theme" };
+                self.choose(title, items, &current, Then::ThemeSide(side), false);
             }
             RowKind::Palette(i) => {
                 let v = if row.swatch.is_some() { row.value } else { String::new() };
@@ -1044,7 +1094,7 @@ impl<'h> App<'h> {
                 }
                 (Edit::Remove { path: s.path() }, s.key.to_string())
             }
-            RowKind::ThemePair | RowKind::ThemeSide(_) => (Edit::Remove { path: path_of("theme") }, "theme".into()),
+            RowKind::ThemeSide(_) => (Edit::Remove { path: path_of("theme") }, "theme".into()),
             RowKind::Palette(i) => (self.palette_edit(*i, ""), format!("colors.palette[{i}]")),
             RowKind::Bind(b) => (
                 Edit::Keybind {
@@ -1196,39 +1246,7 @@ impl<'h> App<'h> {
                     }
                 }
             }
-            Then::Theme => {
-                if value.is_empty() {
-                    Edit::Remove { path: path_of("theme") }
-                } else {
-                    Edit::Set {
-                        path: path_of("theme"),
-                        value: Value::from(value),
-                    }
-                }
-            }
-            Then::ThemeSide(side) => {
-                let here_table = self.layers.here(&path_of("theme")).is_some_and(|i| i.as_table_like().is_some());
-                if here_table {
-                    Edit::Set {
-                        path: vec!["theme".into(), side.into()],
-                        value: Value::from(value),
-                    }
-                } else {
-                    let (mut l, mut d) = self.theme_pair().unwrap_or_default();
-                    if side == "light" {
-                        l = value;
-                    } else {
-                        d = value;
-                    }
-                    let mut t = toml_edit::InlineTable::new();
-                    t.insert("light", Value::from(l));
-                    t.insert("dark", Value::from(d));
-                    Edit::Set {
-                        path: path_of("theme"),
-                        value: Value::InlineTable(t),
-                    }
-                }
-            }
+            Then::ThemeSide(side) => self.theme_side_edit(side, &value),
             Then::Palette(i) => self.palette_edit(i, &value),
             Then::Font(path) => {
                 let fonts = self.fonts.get_or_insert_with(|| self.host.fonts());

@@ -308,6 +308,11 @@ pub(crate) fn with_view(id: usize, f: impl FnOnce(&WindowView)) {
     }
 }
 
+/// Every open window's view (main thread).
+pub(crate) fn all_views() -> Vec<Retained<WindowView>> {
+    VIEWS.with(|v| v.borrow().values().filter_map(|w| w.load()).collect())
+}
+
 /// On the next turn of the main queue, hide or show every window as it
 /// can now be seen: a tab switch changes the key window, but the group's
 /// selected tab may change after the key notifications are sent.
@@ -1292,9 +1297,10 @@ impl WindowView {
         // stays in its pane.
         for (id, padding, cursor_on, focused) in snapped {
             let p = panes.get_mut(&id).expect("shown pane");
-            // The input the snapshot was taken with.
+            // The input the snapshot was taken with: the colours a
+            // program set included.
             let input = FrameInput {
-                theme: &win.theme,
+                theme: p.theme.as_ref().unwrap_or(&win.theme),
                 metrics: win.renderer.metrics(),
                 padding,
                 cursor_on,
@@ -1454,6 +1460,27 @@ impl WindowView {
                 });
             })
         });
+    }
+
+    /// Under memory pressure (roadmap R.5, see [`crate::memory`]): give
+    /// back the spare drawable, the renderer's textures and buffers, and
+    /// what each pane's history can, then draw every pane again.
+    pub(crate) fn give_back_memory(&self) -> crate::memory::Freed {
+        self.trim_drawables();
+        let mut freed = crate::memory::Freed {
+            windows: 1,
+            ..Default::default()
+        };
+        self.with_state(|st| {
+            freed.render += st.win.renderer.purge();
+            for p in st.panes.values() {
+                let (before, after) = p.session.lock_term().state.shrink_history();
+                freed.history += before.saturating_sub(after);
+                freed.panes += 1;
+            }
+        });
+        self.redraw_all();
+        freed
     }
 
     fn trim_drawables(&self) {
@@ -1646,7 +1673,10 @@ impl WindowView {
             win.divider = divider_colour(&config, win.appearance);
             for p in st.panes.values() {
                 let mut t = p.session.lock_term();
-                crate::config::set_term_colors(&mut t.state, &win.theme);
+                let report = crate::config::set_term_colors(&mut t.state, &win.theme);
+                if report {
+                    p.session.report(t.state.take_replies());
+                }
                 if t.state.ambiguous_width() != config.ambiguous_width {
                     // For output from now on; what is on screen stays.
                     t.state.set_ambiguous_width(config.ambiguous_width);
@@ -1681,9 +1711,10 @@ impl WindowView {
         }
     }
 
-    /// The system switched between light and dark: a light/dark theme pair
-    /// changes colours. (Colour-scheme reports to programs, mode 2031,
-    /// wait for term-core to support them.)
+    /// The window's appearance switched between light and dark (macOS, or
+    /// the `appearance` setting): a light/dark theme pair changes colours,
+    /// and programs that set mode 2031 are told if they went from dark to
+    /// light or back.
     fn appearance_changed(&self) {
         let appearance = self.appearance();
         let changed = self.with_state(|st| {
@@ -1703,7 +1734,11 @@ impl WindowView {
             win.theme = theme;
             win.divider = divider;
             for p in st.panes.values() {
-                crate::config::set_term_colors(&mut p.session.lock_term().state, &win.theme);
+                let mut t = p.session.lock_term();
+                if crate::config::set_term_colors(&mut t.state, &win.theme) {
+                    // Programs that asked (mode 2031) hear of it.
+                    p.session.report(t.state.take_replies());
+                }
             }
             recolour
         });
@@ -2516,6 +2551,7 @@ fn spawn_pane(window: usize, config: &Config, theme: &Theme, m: term_font::Metri
     let (cols, lines) = n.grid;
     let mut t = Term::new(cols, lines, config.scrollback, term_core::ImagePool::process());
     t.state.set_ambiguous_width(config.ambiguous_width);
+    // Before the program starts: nothing to report yet.
     crate::config::set_term_colors(&mut t.state, theme);
     for notice in n.notices {
         crate::session::write_notice(&mut t, notice);
@@ -2772,6 +2808,9 @@ impl WindowView {
                 }
                 Some(Control::Settings) => crate::app::show_settings_now(),
                 Some(Control::UpdateCheck) => crate::update::sparkle::check_in_background(),
+                Some(Control::MemoryPressure) => {
+                    crate::memory::relieve("memory pressure (test control)");
+                }
                 Some(Control::TypeSettings(bytes)) => crate::app::type_into_settings(bytes),
                 Some(Control::Key { keycode, flags }) => post_key(MainThreadMarker::from(self), keycode, flags),
                 Some(Control::Menu(action)) => {
@@ -3031,6 +3070,7 @@ fn write_dump(st: &mut State, window: Window) {
                 shown: zoomed.is_none_or(|z| z == id),
                 builds: p.builds,
                 crashes: p.crash.map_or(0, |c| c.count),
+                history_bytes: t.state.scrollback_bytes(),
                 screen: t.state.dump(),
             })
         })
@@ -3120,6 +3160,7 @@ fn write_dump(st: &mut State, window: Window) {
         foreground: format!("#{:06x}", crate::config::rgb_of(theme.foreground)),
         background: format!("#{:06x}", crate::config::rgb_of(theme.background)),
         phys_footprint: control::phys_footprint(),
+        memory_reliefs: crate::memory::reliefs(),
         images,
     };
     let line = serde_json::to_string(&dump).expect("dump serialises");

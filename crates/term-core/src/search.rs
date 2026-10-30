@@ -16,13 +16,13 @@
 //! The terminal's side (start the search, add the worker's hits, keep up
 //! with output, find next and previous, highlight) is in `term/search.rs`.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use memchr::memmem;
 
 use crate::cell::Row;
-use crate::scrollback::{BlockData, SEARCH_SLOW_FLAGS, text_end};
+use crate::scrollback::{BlockData, Body, SEARCH_SLOW_FLAGS, text_end};
 use crate::term::Point;
 use crate::unicode::{self, Gcb};
 
@@ -460,7 +460,10 @@ impl Cells {
 /// the search started (§11.2), and the text window to search (lines
 /// hidden by the limit skipped), worked out off the lock.
 pub(crate) struct Seg {
-    pub data: Arc<BlockData>,
+    /// The block as history stored it when the search started.
+    src: Body,
+    /// Its data, decompressed off the lock the first time it is read.
+    data: OnceLock<Arc<BlockData>>,
     pub len: usize,
     /// Lines at the start hidden by the limit.
     pub hidden: usize,
@@ -471,10 +474,11 @@ pub(crate) struct Seg {
 }
 
 impl Seg {
-    pub fn new(data: Arc<BlockData>, len: usize, first_visible: u64) -> Seg {
-        let hidden = first_visible.saturating_sub(data.first()).min(len as u64) as usize;
+    pub fn new(src: Body, len: usize, first_visible: u64) -> Seg {
+        let hidden = first_visible.saturating_sub(src.first()).min(len as u64) as usize;
         Seg {
-            data,
+            src,
+            data: OnceLock::new(),
             len,
             hidden,
             starts: None,
@@ -483,8 +487,20 @@ impl Seg {
         }
     }
 
+    /// The block's data (a compressed block's decompressed, the first
+    /// time: §13.5).
+    pub fn data(&self) -> &Arc<BlockData> {
+        self.data.get_or_init(|| self.src.unpack())
+    }
+
+    /// Stable line number of its first line, without decompressing it.
+    pub fn first(&self) -> u64 {
+        self.src.first()
+    }
+
     fn starts(&mut self) -> &[u32] {
-        let (data, len) = (&self.data, self.len);
+        let len = self.len;
+        let data = self.data.get_or_init(|| self.src.unpack());
         self.starts.get_or_insert_with(|| data.line_starts(len))
     }
 
@@ -494,8 +510,8 @@ impl Seg {
         if let Some(w) = self.window {
             return w;
         }
-        let w = if self.hidden == 0 && self.len == self.data.lines() {
-            (0, self.data.text().len())
+        let w = if self.hidden == 0 && self.len == self.src.lines() {
+            (0, self.data().text().len())
         } else {
             let (h, len) = (self.hidden, self.len);
             let s = self.starts();
@@ -538,12 +554,12 @@ impl Mapper {
         let (n, start) = segs[seg].line_of(off);
         let s = &segs[seg];
         let end = segs[seg].starts.as_ref().map_or(0, |v| v[n + 1] as usize);
-        let s_text = &s.data.text()[start..end];
-        let fast = s.data.line_flags(n) & SEARCH_SLOW_FLAGS == 0 && s_text.is_ascii();
+        let s_text = &s.data().text()[start..end];
+        let fast = s.data().line_flags(n) & SEARCH_SLOW_FLAGS == 0 && s_text.is_ascii();
         if !fast && self.cached != Some((seg, n, start)) {
             self.cells.clear();
-            s.data.decode_line(n, start, &mut self.row);
-            self.cells.push_row(&self.row, s.data.first() + n as u64);
+            s.data().decode_line(n, start, &mut self.row);
+            self.cells.push_row(&self.row, s.first() + n as u64);
             debug_assert_eq!(self.cells.text, s_text, "search text of line {n}");
             self.cached = Some((seg, n, start));
         }
@@ -553,7 +569,7 @@ impl Mapper {
     fn start(&mut self, segs: &mut [Seg], (seg, off): Pos) -> Option<(u64, u16)> {
         let (n, start, fast) = self.line(segs, seg, off);
         if fast {
-            return Some((segs[seg].data.first() + n as u64, (off - start) as u16));
+            return Some((segs[seg].first() + n as u64, (off - start) as u16));
         }
         self.cells.start_at(off - start)
     }
@@ -561,7 +577,7 @@ impl Mapper {
     fn end(&mut self, segs: &mut [Seg], (seg, off): Pos) -> Option<(u64, u16)> {
         let (n, start, fast) = self.line(segs, seg, off - 1);
         if fast {
-            return Some((segs[seg].data.first() + n as u64, (off - start) as u16));
+            return Some((segs[seg].first() + n as u64, (off - start) as u16));
         }
         self.cells.end_at(off - start)
     }
@@ -580,7 +596,7 @@ fn last_char_before(segs: &mut [Seg], i: usize) -> Option<char> {
     for j in (0..i).rev() {
         let (a, b) = segs[j].window();
         if b > a {
-            return char_before(&segs[j].data.text()[a..b], b - a);
+            return char_before(&segs[j].data().text()[a..b], b - a);
         }
     }
     None
@@ -591,7 +607,7 @@ fn first_char_from(segs: &mut [Seg], after: Option<char>) -> Option<char> {
     for g in segs {
         let (a, b) = g.window();
         if b > a {
-            return Some(char_at(g.data.text(), a).0);
+            return Some(char_at(g.data().text(), a).0);
         }
     }
     after
@@ -613,12 +629,12 @@ pub(crate) fn scan_seg(
     out: &mut Vec<(Pos, Pos)>,
 ) {
     let (wa, wb) = segs[i].window();
-    let from = from.map_or(wa, |f| align(segs[i].data.text(), f.clamp(wa, wb)));
+    let from = from.map_or(wa, |f| align(segs[i].data().text(), f.clamp(wa, wb)));
     if from >= wb && !boundary_only {
         return;
     }
     let before = if from > wa {
-        char_before(segs[i].data.text(), from)
+        char_before(segs[i].data().text(), from)
     } else {
         last_char_before(segs, i)
     };
@@ -626,7 +642,7 @@ pub(crate) fn scan_seg(
     let next_first = first_char_from(&mut segs[i + 1..], after);
     if !boundary_only {
         raw.clear();
-        m.find(&segs[i].data.text()[from..wb], before, next_first, scratch, raw);
+        m.find(&segs[i].data().text()[from..wb], before, next_first, scratch, raw);
         out.extend(raw.iter().map(|&(s, e)| ((i, from + s), (i, from + e))));
     }
     let from = if boundary_only { wa } else { from };
@@ -635,8 +651,8 @@ pub(crate) fn scan_seg(
     // the start of the next ones, searched together; only matches that
     // cross it are kept (the others are found in their own windows).
     let reach = m.reach();
-    let tail_at = align(segs[i].data.text(), wb.saturating_sub(reach).max(from));
-    let mut buf: Vec<u8> = segs[i].data.text()[tail_at..wb].to_vec();
+    let tail_at = align(segs[i].data().text(), wb.saturating_sub(reach).max(from));
+    let mut buf: Vec<u8> = segs[i].data().text()[tail_at..wb].to_vec();
     let tail = buf.len();
     // (segment, its window start, where its piece starts in buf)
     let mut pieces = Vec::new();
@@ -645,7 +661,7 @@ pub(crate) fn scan_seg(
     while j < segs.len() && buf.len() - tail < reach {
         let (a, b) = segs[j].window();
         let want = reach - (buf.len() - tail);
-        let text = segs[j].data.text();
+        let text = segs[j].data().text();
         let end = align(text, (a + want).min(b));
         pieces.push((j, a, buf.len()));
         buf.extend_from_slice(&text[a..end]);
@@ -666,7 +682,7 @@ pub(crate) fn scan_seg(
         }
     };
     let before = if tail_at > wa {
-        char_before(segs[i].data.text(), tail_at)
+        char_before(segs[i].data().text(), tail_at)
     } else {
         last_char_before(segs, i)
     };
@@ -819,7 +835,7 @@ impl SearchJob {
             }
         }
         hits.sort_unstable();
-        let block = self.segs[i].data.first();
+        let block = self.segs[i].first();
         Some(self.batch(block, hits, false))
     }
 

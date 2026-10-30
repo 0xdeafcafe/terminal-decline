@@ -1,0 +1,15 @@
+# Everforest Dark, by sainnhe: https://github.com/sainnhe/everforest
+# Copyright (c) 2019 sainnhe. MIT licence. Colours (medium contrast) from
+# the author's own Vim terminal palette,
+# https://raw.githubusercontent.com/sainnhe/everforest/master/autoload/everforest.vim
+# and
+# https://raw.githubusercontent.com/sainnhe/everforest/master/colors/everforest.vim
+# (MIT).
+foreground = "#d3c6aa"
+background = "#2d353b"
+cursor = "#d3c6aa"
+selection = "#543a48"
+palette = [
+    "#475258", "#e67e80", "#a7c080", "#dbbc7f", "#7fbbb3", "#d699b6", "#83c092", "#d3c6aa",
+    "#475258", "#e67e80", "#a7c080", "#dbbc7f", "#7fbbb3", "#d699b6", "#83c092", "#d3c6aa",
+]

@@ -1706,6 +1706,85 @@ changed from the design, and what is left:
   15 µs before it moved into `is_color`. Every other frame is 4–5×
   cheaper, and a frame where nothing changed is the copy alone.
 
+**Landed (R.2, R.3).** Rows' instances stay where they were put, on
+the CPU and on the GPU; rows' blank ends are skipped; history rows kept
+while scrolled back aren't laid out again (`term-render/src/frame.rs`,
+`row_cache.rs`, `metal.rs`; term-core's `snapshot.rs`). What it is, and
+what is left:
+
+- **In place:** each row cache entry has a version, bumped when it is
+  built or moved. Assembling walks the visible rows with where each
+  went last frame: a row already at its place (same entry and version,
+  same offset) isn't copied, a changed row as long as its old one is
+  written over it, and from the first row whose length changed the rest
+  is written out (a dense layout, no gaps, so the instances and their
+  order are exactly what they were). The overlays between the rows'
+  backgrounds and decorations (highlights, the block cursor, hovered
+  links) and after them (other cursors, input-method text) are pieces
+  of the same layout. Rows recoloured under the block cursor or with
+  glyphs hidden under input-method text are marked and written again
+  the next frame. `build_live` writes the vectors whole and the next
+  frame lays them out from scratch.
+- **On the GPU:** each `PaneRender` owns two rect and two glyph buffers,
+  used by turns, each holding the frame as of a version (unique in the
+  process). A frame logs the instance ranges it wrote (the last four);
+  drawing copies the hull of what changed since the buffer's version,
+  or everything when that is too old or the buffer grew. Each pane
+  counts its own frames in flight, so a buffer is written only once the
+  GPU is done with it, whichever window drew it. The window's buffers
+  keep the fills, dividers and images. Not done: per-row draws or a
+  layout with gaps, so a row whose length changes still writes out the
+  rows below it (a typed character on the prompt line writes the rows
+  under it; at a shell prompt there are few).
+- **Blank ends:** a copied row is built up to its last cell that is not
+  `Cell::is_blank` (checked eight cells at a time from the end); the
+  rest shows the default background, which a row ends with anyway. Rows
+  shaped with substitutions keep every cell.
+- **History (R.3):** a history row the renderer has is no longer emitted
+  from its reflowed unit each frame only to read its flags
+  (`Unit::row_flags`, checked against the emitted row in debug builds),
+  and each history row looks its unit up once rather than twice. Rows
+  at the width written were already not decoded when kept. What's left
+  is the per-row unit lookup for rows at their width (a mutex and an
+  `Arc` per row, ~3 µs of the 10 µs at 300×100).
+- **Tests:** the frame tests and property test are unchanged (the same
+  instances, now kept); `kept_instances_draw_like_fresh_frames` (GPU)
+  draws sixteen changing frames with one renderer and checks each pixel
+  for pixel against the same frame built and copied afresh.
+- **Measured** in thread CPU time (`cargo run --release -p term-render
+  --example framebench`, the `frame` and `renderer` benches' cases
+  timed with `CLOCK_THREAD_CPUTIME_ID`, which other load counts less in):
+  before I.4 (`4cb08ca^`), main (`0266c75`) and this branch turn about,
+  5 rounds (the scrolled and renderer cases 6 more), median of each
+  round's best of 9, load 10–33 (other projects, and another agent
+  measuring terminals):
+
+  | case | before I.4 | main | R.2/R.3 |
+  |---|---|---|---|
+  | 80×24 plain, every row changed | 9.05 µs | 9.26 µs | 9.63 µs |
+  | 80×24 plain, nothing changed | 2.01 µs | 1.92 µs | 1.63 µs |
+  | 300×100 plain, every row changed | 127.5 µs | 132.9 µs | 133.2 µs |
+  | 300×100 plain, nothing changed | 23.0 µs | 21.0 µs | 5.6 µs |
+  | 300×100 plain, one row | 22.7 µs | 22.6 µs | 7.2 µs |
+  | 300×100 coloured, every row changed | 142.0 µs | 147.4 µs | 151.8 µs |
+  | 300×100 coloured, nothing changed | 24.6 µs | 25.3 µs | 5.7 µs |
+  | 300×100 coloured, one row | 27.8 µs | 27.5 µs | 7.2 µs |
+  | 300×100 plain / coloured, scrolled a line | 39.3 / 47.6 µs | 39.4 / 46.9 µs | 40.5 / 47.2 µs |
+  | 203×50 sparse (a shell), every row changed | 26.1 µs | 30.3 µs | 14.6 µs |
+  | 203×50 sparse, nothing changed / one row | 3.10 / 3.67 µs | 2.98 / 3.67 µs | 2.74 / 3.19 µs |
+  | 300×100 history, still (plain / coloured) | 29.0 / 31.4 µs | 28.8 / 32.1 µs | 9.9 / 10.0 µs |
+  | 300×100 history reflowed, still | 32.3 / 33.1 µs | 31.8 / 33.3 µs | 7.2 / 7.2 µs |
+  | renderer 160×48, encode | 18.5 µs | 19.5 µs | 14.7 µs |
+  | renderer 160×48, encode after one row changed | 21.3 µs | 19.3 µs | 17.3 µs |
+
+  R.2's goal, a sparse frame ≤ 15 µs at 203×50, is met with every row
+  changed (14.6 µs); a frame where every row changed or moved costs
+  about what it did (0–6% more, the bookkeeping), and every other frame
+  is 3–4× cheaper. R.10, against before I.4: the plain cases are within
+  3% except 300×100 plain with every row changed (+4%) and the sparse
+  screen (+16% on main, which R.2 takes back); the renderer's encode is
+  within noise (±10% between rounds).
+
 ---
 
 ## 10. Shaping runs, ligatures, glyph keys (term-font and term-render)
@@ -2373,6 +2452,46 @@ decompresses a block only when its filter lets it through (§13.6). R.7's
 target, 100k lines of `ls`/log output ≤ 3 MB, starts from 5.9 MB instead of
 9.3.
 
+**Landed (R.7).** What was built (`scrollback/packed.rs`, with hooks in
+`scrollback.rs`, `search.rs`, `search/filter.rs` and `term/compress.rs`),
+and where it differs from the plan above:
+- **The entry** holds a `Body`: the `Arc<BlockData>` as written, or an
+  `Arc<Packed>`. `Terminal::compress_job` takes uncompressed sealed
+  blocks under the lock, oldest first; `CompressJob::run` compresses
+  them off it (`lz4_flex`, pure Rust, safe code only); `add_compressed`
+  swaps them in under the lock if the entry still holds the same data.
+  The app runs it from the idle filters thread once every block has its
+  filter. Nothing on the output path compresses. `shrink_history` (R.5)
+  compresses every sealed block at once, drops the cache and the
+  filters, and gives back the open block's spare room.
+- **What stays outside** is less than planned: the first line, width,
+  ambiguous setting, `head_continues`, `has_marks`, the image list, the
+  links (shared `Arc`s) and each line's flags byte, kept as runs (most
+  lines of a block share theirs). `starts`, `checkpoints` and
+  `style_starts` are compressed too, as deltas with low bytes then high
+  bytes (they shrink 2.3 KB to under 0.9 KB a block): nothing reads them
+  without the text yet. Meta, text, the dictionary and the offsets are
+  each compressed on their own, about 4% smaller than as one stream.
+- **The cache** keeps the last two blocks decompressed (`Cache`, behind
+  a `Mutex` so history stays `Sync`). Every reader that needs more than
+  flags (`read`/`get_at_width`, marks, `text`, `shapes`, `pop_into`)
+  goes through it; `wrapped`, `fill` and `has_marks` don't decompress.
+  `memory_bytes` counts it.
+- **Search** takes `Body`s; each segment decompresses its block the
+  first time it is read, off the lock, and keeps it until the search
+  ends. Filter jobs decompress compressed blocks off the lock too, and
+  a filter is stored by the identity of the `Body` it was built from.
+- **Measured** (`scrollback_mem compressed` / `file <path>`, 160
+  columns, 100k lines, after `shrink_history`): synthetic `ls --color`
+  5.93 → 0.54 MB, `ls -l --color` 6.21 → 2.67 MB, a service log with
+  random ids 9.09 → 3.00 MB, plain 4.33 → 0.53 MB; real `ls -lR` of
+  `/usr` 6.31 → 1.21 MB and `/var/log/install.log` 11.19 → 1.58 MB.
+  Decoding a block takes 13–30 µs. Filters, when built, add 4 KB a
+  block on top (0.2–0.6 MB per 100k lines).
+- **Not done:** a block its filter rules out is still decompressed for
+  its boundary with the next block, and a search holds every block it
+  decompressed until it ends.
+
 **Landed (PR 7).** What was built (`scrollback.rs` and its tests in
 `scrollback/tests.rs`, with hooks in `term.rs`, `snapshot.rs` and
 `style_table.rs`), and where it differs from §11.1–§11.7:
@@ -2506,6 +2625,25 @@ target, 100k lines of `ls`/log output ≤ 3 MB, starts from 5.9 MB instead of
   - the snapshot with 100 history rows at 300×100 69 → 136 µs, frames
     built from history rows 300×100 plain 171 → 154 µs, coloured 205
     → 305 µs, unicode 242 → 508 µs (first run).
+- **Perf round 2 (R.4, R.9 in part).** vte takes a CSI's parameters
+  and final byte in one loop and term-core dispatches SGR first;
+  styled rows of narrow ASCII (`ls --color`) are stored by byte copy
+  like plain ones; storing a row reports where its all-`BLANK` tail
+  starts, so the recycled row is cleared only up to there; the
+  scrollback sits behind a `Box` (its open block's 2 KB slot cache had
+  made the terminal 5 KB). Measured with the `cpubench` example
+  (thread CPU time, so less skewed by other load; best / median of 6
+  interleaved runs, load average 17–25), against the commit before
+  scrollback v2 (21c1e89): `parse` plain 0.99 / 0.98, `seq` 0.95 /
+  0.96, unicode 1.08 / 1.09, clusters 1.06 / 1.06 (`parse_1k` within
+  two points of these); coloured 0.74 / 0.75 and `tui` 0.75 / 0.76 of
+  main before R.4 (1.35× and 1.33×, short of R.4's 1.5×). With no
+  history kept unicode is still 1.07 and clusters 1.08 of 21c1e89
+  (load average 70–100): the code
+  that writes the screen is the same, so this is code generation, not
+  the history encoder. Decoding (10k lines, against 05c198b, the last
+  commit with the v1 store and the `history` bench): plain 1.07, `ls`
+  1.14, CJK 1.23, emoji 2.37, background 0.50.
 
 ---
 

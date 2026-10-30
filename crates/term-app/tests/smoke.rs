@@ -2351,3 +2351,44 @@ fn smoke_iterm2_and_sixel_images_are_listed_in_the_images_dump() {
     assert_eq!(images["ready"], 2, "{}", d[0]);
     assert!(num(images, "bytes") > 0.0, "{}", d[0]);
 }
+
+/// A memory-pressure warning (simulated with the control's
+/// `memory-pressure`, which runs the same handler) gives memory back:
+/// history shrinks (its blocks compressed), and the window draws the
+/// same screen again afterwards (roadmap R.5).
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_memory_pressure_gives_memory_back_and_redraws() {
+    if !have_metal() {
+        return;
+    }
+    let dir = TempDir::new("pressure");
+    let script = format!(
+        "seq 1 100000 | sed 's/^/2026-10-30T09:00:00Z INFO request served path=\\/api\\/v1\\/items id=/'; echo done; {}{}{}{}sleep 20",
+        osc("dump"),
+        osc("memory-pressure"),
+        osc("dump"),
+        osc("quit")
+    );
+    let (status, _) = decline(&dir, &script, true);
+    assert!(status.success(), "{status}");
+    let d = dumps(&dir);
+    assert_eq!(d.len(), 2, "{d:?}");
+    for x in &d {
+        check_dump(x);
+    }
+    assert_eq!(num(&d[1], "memory_reliefs"), num(&d[0], "memory_reliefs") + 1.0);
+    let history = |x: &Value| num(&x["panes"][0], "history_bytes");
+    assert!(history(&d[1]) < history(&d[0]), "history {} -> {}", history(&d[0]), history(&d[1]));
+    // Drawn again, the same.
+    assert!(num(&d[1], "frames") > num(&d[0], "frames"));
+    assert_eq!(screen(&d[1]), screen(&d[0]));
+    assert_eq!(num(&d[1], "glyphs"), num(&d[0], "glyphs"));
+    eprintln!(
+        "footprint {:.1} -> {:.1} MB, history {:.2} -> {:.2} MB",
+        num(&d[0], "phys_footprint") / 1e6,
+        num(&d[1], "phys_footprint") / 1e6,
+        history(&d[0]) / 1e6,
+        history(&d[1]) / 1e6
+    );
+}

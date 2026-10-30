@@ -218,7 +218,7 @@ impl Terminal {
                 })
                 .collect();
             let top = self.point_at(0, 0).line;
-            start = segs.partition_point(|s| s.data.first() <= top).saturating_sub(1);
+            start = segs.partition_point(|s| s.first() <= top).saturating_sub(1);
             after = self.screen_first_char();
         }
         if segs.is_empty() {
@@ -508,10 +508,10 @@ impl Terminal {
         let (blocks, visible) = self.scrollback.search_blocks(from_line.saturating_sub(1));
         let mut segs: Vec<Seg> = blocks.into_iter().map(|(d, len, _)| Seg::new(d, len, visible)).collect();
         let from_line = from_line.max(visible);
-        let Some(j) = segs.iter().position(|g| g.data.first() + g.len as u64 > from_line) else {
+        let Some(j) = segs.iter().position(|g| g.first() + g.len as u64 > from_line) else {
             return;
         };
-        let n = (from_line - segs[j].data.first()) as usize;
+        let n = (from_line - segs[j].first()) as usize;
         let off = segs[j].line_start(n);
         let after = self.screen_first_char();
         let reach = m.reach();
@@ -553,7 +553,7 @@ impl Terminal {
         let mut per: Vec<(u64, Vec<Hit>)> = Vec::new();
         for (a, b) in found {
             if let Some(h) = mapper.hit(&mut segs, a, b) {
-                let block = segs[a.0].data.first();
+                let block = segs[a.0].first();
                 match per.last_mut() {
                     Some(p) if p.0 == block => p.1.push(h),
                     _ => per.push((block, vec![h])),
@@ -607,7 +607,7 @@ impl Terminal {
         // The scalar after these lines: the next one's first (its line end
         // if it is empty), or the screen's.
         let after = match self.scrollback.text(k) {
-            Some(t) => Some(if t.is_empty() { '\n' } else { char_at(t, 0).0 }),
+            Some(t) => Some(if t.is_empty() { '\n' } else { char_at(&t, 0).0 }),
             None => self.screen_first_char(),
         };
         let (mut scratch, mut raw) = (Vec::new(), Vec::new());

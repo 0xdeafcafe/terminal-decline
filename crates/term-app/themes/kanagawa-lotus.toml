@@ -1,0 +1,13 @@
+# Kanagawa Lotus, by rebelot: https://github.com/rebelot/kanagawa.nvim
+# Copyright (c) 2021 Tommaso Laurenzi. MIT licence. Colours from the
+# official Ghostty port,
+# https://raw.githubusercontent.com/rebelot/kanagawa.nvim/master/extras/ghostty/kanagawa-lotus
+# (MIT).
+foreground = "#545464"
+background = "#f2ecbc"
+cursor = "#43436c"
+selection = "#c9cbd1"
+palette = [
+    "#1f1f28", "#c84053", "#6f894e", "#77713f", "#4d699b", "#b35b79", "#597b75", "#545464",
+    "#8a8980", "#d7474b", "#6e915f", "#836f4a", "#6693bf", "#624c83", "#5e857a", "#43436c",
+]

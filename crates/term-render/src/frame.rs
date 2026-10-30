@@ -207,6 +207,15 @@ impl Theme {
         }
     }
 
+    /// A new background (0xRRGGBB), with the colours made from it: the
+    /// text under a block cursor and the search hits'.
+    pub fn set_background(&mut self, bg: u32) {
+        self.background = rgb(bg);
+        self.cursor_text = rgb(bg);
+        self.search_hit = rgb(mix(bg, 0xe5c07b, 0.45));
+        self.search_current = rgb(mix(bg, 0xff9f43, 0.85));
+    }
+
     #[inline]
     fn resolve(&self, c: term_core::Color, default: Rgba) -> Rgba {
         match c.kind() {
@@ -514,6 +523,172 @@ pub struct Frame {
     pub images: Images,
     /// Where `rects` splits for the image layers.
     pub split: RectSplit,
+    /// Where each visible row's instances are in `rects` and `glyphs`,
+    /// as the last frame laid them out.
+    laid: Vec<Laid>,
+    /// This frame's, while building.
+    laid_spare: Vec<Laid>,
+    /// `laid` says where the rows are (false after `build_live`, which
+    /// writes them whole).
+    laid_valid: bool,
+    /// The overlays between and after the rows, as last laid out.
+    kept: Kept,
+    spare_glyphs: Vec<GlyphInstance>,
+    /// What each of the last frames wrote, for the GPU's copies.
+    changes: Changes,
+}
+
+/// Where one visible row's instances were laid out: (start, len) in
+/// each region.
+#[derive(Clone, Copy)]
+struct Laid {
+    slot: u32,
+    /// The row cache entry's version laid out.
+    version: u64,
+    bg: (u32, u32),
+    deco: (u32, u32),
+    glyphs: (u32, u32),
+    /// What was laid out is the entry's instances as they are, not
+    /// recoloured under the block cursor or hidden under input-method
+    /// text.
+    clean: bool,
+}
+
+impl Laid {
+    fn missing(at: usize) -> Laid {
+        Laid {
+            slot: MISSING,
+            version: 0,
+            bg: (at as u32, 0),
+            deco: (0, 0),
+            glyphs: (0, 0),
+            clean: false,
+        }
+    }
+}
+
+/// The overlays as last laid out, and where.
+#[derive(Default)]
+struct Kept {
+    /// Highlights, the block cursor and hovered links' underlines,
+    /// between the rows' backgrounds and decorations.
+    over_rects: Vec<RectInstance>,
+    over: (u32, u32),
+    /// Other cursors and input-method text, after the rows.
+    tail_rects: Vec<RectInstance>,
+    tail: (u32, u32),
+    tail_glyphs: Vec<GlyphInstance>,
+    tail_g: (u32, u32),
+    /// This frame's, while building.
+    tail_rects_new: Vec<RectInstance>,
+    tail_glyphs_new: Vec<GlyphInstance>,
+}
+
+/// Lays instances out in a vector kept from the last frame: each piece
+/// is left alone when it is already there, written over its old place
+/// when it is as long, and otherwise the vector is cut there and the
+/// rest appended.
+struct Lay<'a, T> {
+    out: &'a mut Vec<T>,
+    at: usize,
+    append: bool,
+    /// The first instance written.
+    dirty: usize,
+}
+
+impl<'a, T: Copy> Lay<'a, T> {
+    /// `valid`: `out` holds the last frame's layout.
+    fn new(out: &'a mut Vec<T>, valid: bool) -> Self {
+        if !valid {
+            out.clear();
+        }
+        Lay {
+            out,
+            at: 0,
+            append: !valid,
+            dirty: usize::MAX,
+        }
+    }
+
+    /// Put `data` next. `same`: it is what was laid out at `prev`
+    /// (start, len) last frame. Returns where it went.
+    #[inline]
+    fn put(&mut self, same: bool, prev: Option<(u32, u32)>, data: &[T]) -> (u32, u32) {
+        let (start, n) = (self.at, data.len());
+        let here = !self.append && prev == Some((start as u32, n as u32));
+        if !(here && same) {
+            if here {
+                self.out[start..start + n].copy_from_slice(data);
+            } else {
+                if !self.append {
+                    self.out.truncate(start);
+                    self.append = true;
+                }
+                self.out.extend_from_slice(data);
+            }
+            if n > 0 {
+                self.dirty = self.dirty.min(start);
+            }
+        }
+        self.at += n;
+        (start as u32, n as u32)
+    }
+
+    /// Drop what is left of the last frame's; returns the instances
+    /// written.
+    fn finish(self) -> std::ops::Range<usize> {
+        self.out.truncate(self.at);
+        let len = self.out.len();
+        self.dirty.min(len)..len
+    }
+}
+
+type Ranges = (std::ops::Range<usize>, std::ops::Range<usize>);
+
+/// The instances each of the last few frames wrote, by version.
+#[derive(Default)]
+struct Changes {
+    log: Vec<(u64, Ranges)>,
+}
+
+/// Versions of frames' instances: unique in the process, so a buffer
+/// can't take another frame's for its own.
+static VERSIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+impl Changes {
+    const KEPT: usize = 4;
+
+    fn push(&mut self, rects: std::ops::Range<usize>, glyphs: std::ops::Range<usize>) {
+        if self.log.len() == Self::KEPT {
+            self.log.remove(0);
+        }
+        let v = VERSIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.log.push((v, (rects, glyphs)));
+    }
+
+    fn version(&self) -> u64 {
+        self.log.last().map_or(0, |e| e.0)
+    }
+
+    /// The hull of what was written after `version`, within the lengths
+    /// now.
+    fn since(&self, version: u64, rects: usize, glyphs: usize) -> Option<Ranges> {
+        let i = self.log.iter().position(|e| e.0 == version)?;
+        let (mut r, mut g) = ((rects, 0), (glyphs, 0));
+        for (_, (a, b)) in &self.log[i + 1..] {
+            if !a.is_empty() {
+                r = (r.0.min(a.start), r.1.max(a.end));
+            }
+            if !b.is_empty() {
+                g = (g.0.min(b.start), g.1.max(b.end));
+            }
+        }
+        let clip = |(s, e): (usize, usize), len: usize| {
+            let e = e.min(len);
+            if s < e { s..e } else { 0..0 }
+        };
+        Some((clip(r, rects), clip(g, glyphs)))
+    }
 }
 
 /// How a frame's `rects` interleave with its image layers (images.md
@@ -692,7 +867,11 @@ impl Frame {
             let row = &self.rows.snap.rows[i];
             let styles = self.rows.styles_for(row.flags.contains(RowFlags::HISTORY));
             let snap = &self.rows.snap;
-            let cells = snap.row_cells(row).unwrap_or(&[]);
+            let all = snap.row_cells(row).unwrap_or(&[]);
+            // A row's blank end draws nothing (roadmap R.2): its cells
+            // are skipped. Not with substitutions, whose pieces may reach
+            // into blank cells (shaped as spaces).
+            let cells = if subs.is_empty() { trim_blank_end(all) } else { all };
             let clusters = SnapClusters { snap, row };
             let cells = cells.iter().map(|&cell| SnapCell {
                 cell,
@@ -716,10 +895,14 @@ impl Frame {
     /// The frame from the cached rows, with the overlays on top: rows'
     /// backgrounds, highlights, the block cursor, rows' decorations, rows'
     /// glyphs, other cursors and input-method text.
-    fn assemble(&mut self, input: &FrameInput, glyphs: &mut impl GlyphSource) {
-        self.rects.clear();
-        self.glyphs.clear();
-        self.decorations.clear();
+    ///
+    /// The instances stay where they were (roadmap R.2): a row whose
+    /// instances are already at their place in `rects` and `glyphs`
+    /// (the same row, not moved, at the same offset) isn't copied again,
+    /// a changed row of the same length is written over its old one, and
+    /// only from a row whose length changed on is the rest written out.
+    /// What was written is logged for the GPU buffers ([`Frame::changes_since`]).
+    fn assemble(&mut self, input: &FrameInput, source: &mut impl GlyphSource) {
         let FrameInput {
             theme,
             metrics: m,
@@ -731,7 +914,20 @@ impl Frame {
         let (cw, ch) = (m.cell_width as i32, m.cell_height as i32);
         let (px, py) = (padding.0 as i32, padding.1 as i32);
         self.clear = with_alpha(theme.background, theme.background_opacity);
-        let rows = &self.rows;
+        let Frame {
+            rects,
+            glyphs,
+            decorations: over,
+            rows,
+            images,
+            split,
+            laid: laid_prev,
+            laid_spare: laid,
+            laid_valid,
+            kept,
+            spare_glyphs,
+            ..
+        } = self;
         let snap = &rows.snap;
         let cols = snap.cols as usize;
         let row_y = |line: usize| py + line as i32 * ch;
@@ -766,10 +962,27 @@ impl Frame {
         };
 
         // Backgrounds.
-        for &slot in rows.order.iter().filter(|&&s| s != MISSING) {
-            self.rects.extend_from_slice(&rows.entry(slot).backgrounds);
+        laid.clear();
+        let mut out = Lay::new(rects, *laid_valid);
+        for (line, &slot) in rows.order.iter().enumerate() {
+            if slot == MISSING {
+                laid.push(Laid::missing(out.at));
+                continue;
+            }
+            let e = rows.entry(slot);
+            let p = laid_prev.get(line).filter(|p| p.slot == slot);
+            let same = p.is_some_and(|p| p.version == e.version && p.clean);
+            let bg = out.put(same, p.map(|p| p.bg), &e.backgrounds);
+            laid.push(Laid {
+                slot,
+                version: e.version,
+                bg,
+                deco: (0, 0),
+                glyphs: (0, 0),
+                clean: true,
+            });
         }
-        self.split.backgrounds = self.rects.len();
+        split.backgrounds = out.at;
 
         // Images: direct placements, and the pieces placeholder cells show.
         let pieces = rows
@@ -790,11 +1003,11 @@ impl Frame {
             lines: snap.lines,
         };
         if snap.placements.is_empty() && snap.virtual_placements.is_empty() {
-            self.images.clear();
+            images.clear();
         } else {
-            self.images.build(snap, pieces, grid);
+            images.build(snap, pieces, grid);
         }
-        let images = &self.images;
+        let images = &*images;
         // A highlight over image cells is a tint, so the image shows.
         let highlight = |rects: &mut Vec<RectInstance>, line: usize, a: usize, b: usize, color: Rgba| {
             let mut at = a;
@@ -814,13 +1027,14 @@ impl Frame {
             }
         };
         // Highlights (search hits under the selection), then the block
-        // cursor over them.
+        // cursor over them, then hovered links' underlines.
+        over.clear();
         for (line, row) in snap.rows.iter().enumerate() {
             for h in snap.row_highlights(row) {
                 let (a, b) = (h.cols.start as usize, (h.cols.end as usize).min(cols));
                 match h.kind {
-                    HighlightKind::SearchHit if a < b => highlight(&mut self.rects, line, a, b, theme.search_hit),
-                    HighlightKind::CurrentSearchHit if a < b => highlight(&mut self.rects, line, a, b, theme.search_current),
+                    HighlightKind::SearchHit if a < b => highlight(over, line, a, b, theme.search_hit),
+                    HighlightKind::CurrentSearchHit if a < b => highlight(over, line, a, b, theme.search_current),
                     _ => {}
                 }
             }
@@ -828,90 +1042,140 @@ impl Frame {
         for (line, row) in snap.rows.iter().enumerate() {
             for h in snap.row_highlights(row) {
                 let (a, b) = (h.cols.start as usize, (h.cols.end as usize).min(cols));
-                match h.kind {
-                    _ if a >= b => {}
-                    HighlightKind::Selection => highlight(&mut self.rects, line, a, b, theme.selection),
-                    // Underlined in the text colour, over the backgrounds.
-                    HighlightKind::HoveredLink => self.decorations.push(RectInstance {
-                        y: s16(row_y(line) + (m.baseline + m.underline_offset) as i32),
-                        h: m.underline_thickness.max(1) as u16,
-                        ..full(line, a..b, theme.foreground)
-                    }),
-                    HighlightKind::SearchHit | HighlightKind::CurrentSearchHit => {}
+                if a < b && h.kind == HighlightKind::Selection {
+                    highlight(over, line, a, b, theme.selection);
                 }
             }
         }
         if let Some((line, cells)) = &block
             && cells.start < cols
         {
-            self.rects.push(full(*line, cells.start..cells.end.min(cols), theme.cursor));
+            over.push(full(*line, cells.start..cells.end.min(cols), theme.cursor));
         }
+        for (line, row) in snap.rows.iter().enumerate() {
+            for h in snap.row_highlights(row) {
+                let (a, b) = (h.cols.start as usize, (h.cols.end as usize).min(cols));
+                // Underlined in the text colour, over the backgrounds.
+                if a < b && h.kind == HighlightKind::HoveredLink {
+                    over.push(RectInstance {
+                        y: s16(row_y(line) + (m.baseline + m.underline_offset) as i32),
+                        h: m.underline_thickness.max(1) as u16,
+                        ..full(line, a..b, theme.foreground)
+                    });
+                }
+            }
+        }
+        kept.over = out.put(*over == kept.over_rects, Some(kept.over), over);
+        std::mem::swap(over, &mut kept.over_rects);
 
         // Decorations and glyphs, recoloured under the block cursor and
         // hidden under input-method text.
-        let under_cursor = |mark: Mark| {
-            if mark.flags & Mark::DIM != 0 {
+        let under_cursor = |dim: bool| {
+            if dim {
                 with_alpha(theme.cursor_text, 160)
             } else {
                 theme.cursor_text
             }
         };
-        for (line, &slot) in rows.order.iter().enumerate() {
-            if slot == MISSING {
+        for (line, l) in laid.iter_mut().enumerate() {
+            if l.slot == MISSING {
+                l.deco = (out.at as u32, 0);
                 continue;
             }
-            let e = rows.entry(slot);
+            let e = rows.entry(l.slot);
+            let p = laid_prev.get(line).filter(|p| p.slot == l.slot);
+            let same = p.is_some_and(|p| p.version == l.version && p.clean);
             let on = cells_on(&block, line);
             if on.is_empty() {
-                self.decorations.extend_from_slice(&e.decorations);
+                l.deco = out.put(same, p.map(|p| p.deco), &e.decorations);
             } else {
-                self.decorations
-                    .extend(e.decorations.iter().zip(&e.decoration_marks).map(|(r, mark)| {
-                        let recolour = mark.flags & Mark::TEXT_COLOUR != 0 && on.contains(&(mark.col as usize));
-                        RectInstance {
-                            color: if recolour { under_cursor(*mark) } else { r.color },
-                            ..*r
-                        }
-                    }));
-            }
-        }
-        for (line, &slot) in rows.order.iter().enumerate() {
-            if slot == MISSING {
-                continue;
-            }
-            let e = rows.entry(slot);
-            let on = cells_on(&block, line);
-            let hidden = cells_on(&covered, line);
-            if on.is_empty() && hidden.is_empty() {
-                self.glyphs.extend_from_slice(&e.glyphs);
-            } else {
-                for g in &e.glyphs {
-                    let col = g.col();
-                    if hidden.contains(&col) {
-                        continue;
+                l.deco = out.put(false, p.map(|p| p.deco), &e.decorations);
+                l.clean = false;
+                let at = l.deco.0 as usize;
+                let placed = &mut out.out[at..at + e.decorations.len()];
+                for (r, mark) in placed.iter_mut().zip(&e.decoration_marks) {
+                    if mark.flags & Mark::TEXT_COLOUR != 0 && on.contains(&(mark.col as usize)) {
+                        r.color = under_cursor(mark.flags & Mark::DIM != 0);
                     }
-                    let color = match () {
-                        _ if !on.contains(&col) || g.is_color & GlyphInstance::FIXED != 0 => g.color,
-                        _ if g.is_color & GlyphInstance::DIM != 0 => with_alpha(theme.cursor_text, 160),
-                        _ => theme.cursor_text,
-                    };
-                    self.glyphs.push(GlyphInstance { color, ..*g });
                 }
             }
         }
 
-        let before = self.decorations.len();
+        // Other cursors and input-method text, over everything.
+        let tail = &mut kept.tail_rects_new;
+        let gtail = &mut kept.tail_glyphs_new;
+        tail.clear();
+        gtail.clear();
         if let Some(c) = &cursor
             && block.is_none()
         {
-            self.cursor_rects(c, input);
+            cursor_rects(tail, c, input);
         }
-        let base = self.rects.len();
-        self.split.cursor = base + before..base + self.decorations.len();
+        split.cursor = out.at..out.at + tail.len();
         if let Some((text, at)) = preedit {
-            self.draw_preedit(text, at, cols, input, glyphs);
+            draw_preedit(tail, gtail, text, at, cols, input, source);
         }
-        self.rects.extend_from_slice(&self.decorations);
+        kept.tail = out.put(*tail == kept.tail_rects, Some(kept.tail), tail);
+        std::mem::swap(tail, &mut kept.tail_rects);
+        let rects_dirty = out.finish();
+
+        let mut out = Lay::new(glyphs, *laid_valid);
+        for (line, l) in laid.iter_mut().enumerate() {
+            if l.slot == MISSING {
+                l.glyphs = (out.at as u32, 0);
+                continue;
+            }
+            let e = rows.entry(l.slot);
+            let p = laid_prev.get(line).filter(|p| p.slot == l.slot);
+            let same = p.is_some_and(|p| p.version == l.version && p.clean);
+            let on = cells_on(&block, line);
+            let hidden = cells_on(&covered, line);
+            if on.is_empty() && hidden.is_empty() {
+                l.glyphs = out.put(same, p.map(|p| p.glyphs), &e.glyphs);
+                continue;
+            }
+            l.clean = false;
+            spare_glyphs.clear();
+            for g in &e.glyphs {
+                let col = g.col();
+                if hidden.contains(&col) {
+                    continue;
+                }
+                let color = match () {
+                    _ if !on.contains(&col) || g.is_color & GlyphInstance::FIXED != 0 => g.color,
+                    _ => under_cursor(g.is_color & GlyphInstance::DIM != 0),
+                };
+                spare_glyphs.push(GlyphInstance { color, ..*g });
+            }
+            l.glyphs = out.put(false, p.map(|p| p.glyphs), spare_glyphs);
+        }
+        kept.tail_g = out.put(*gtail == kept.tail_glyphs, Some(kept.tail_g), gtail);
+        std::mem::swap(gtail, &mut kept.tail_glyphs);
+        let glyphs_dirty = out.finish();
+
+        std::mem::swap(laid, laid_prev);
+        *laid_valid = true;
+        self.changes.push(rects_dirty, glyphs_dirty);
+    }
+
+    /// The version of `rects` and `glyphs` now: changes with every
+    /// frame built, unique in the process.
+    pub(crate) fn version(&self) -> u64 {
+        self.changes.version()
+    }
+
+    /// The parts of `rects` and `glyphs` (instance ranges) that may
+    /// differ from what they were at `version`; `None` when that is too
+    /// long ago, or wasn't this frame's: copy them whole.
+    pub(crate) fn changes_since(&self, version: u64) -> Option<(std::ops::Range<usize>, std::ops::Range<usize>)> {
+        self.changes.since(version, self.rects.len(), self.glyphs.len())
+    }
+
+    /// `rects` and `glyphs` were written whole, not laid out row by row.
+    fn written_whole(&mut self) {
+        self.laid_valid = false;
+        let (r, g) = (self.rects.len(), self.glyphs.len());
+        self.changes.push(0..r, 0..g);
     }
 
     /// The reference path: the frame read straight from the live terminal,
@@ -995,10 +1259,10 @@ impl Frame {
         if let Some(c) = &cursor
             && !block_cursor
         {
-            self.cursor_rects(c, input);
+            cursor_rects(&mut self.decorations, c, input);
         }
         if let Some((text, at)) = preedit {
-            self.draw_preedit(text, at, cols, input, glyphs);
+            draw_preedit(&mut self.decorations, &mut self.glyphs, text, at, cols, input, glyphs);
         }
         self.rects.extend_from_slice(&self.decorations);
         // The reference path draws no images.
@@ -1007,82 +1271,107 @@ impl Frame {
             backgrounds: self.rects.len(),
             cursor: 0..0,
         };
+        self.written_whole();
     }
+}
 
-    /// A cursor other than a focused block: a bar, an underline or (when
-    /// unfocused) a hollow box.
-    fn cursor_rects(&mut self, c: &CursorDraw, input: &FrameInput) {
-        let m = input.metrics;
-        let (cw, ch) = (m.cell_width as i32, m.cell_height as i32);
-        let (line, col) = c.at;
+/// A cursor other than a focused block: a bar, an underline or (when
+/// unfocused) a hollow box.
+fn cursor_rects(out: &mut Vec<RectInstance>, c: &CursorDraw, input: &FrameInput) {
+    let m = input.metrics;
+    let (cw, ch) = (m.cell_width as i32, m.cell_height as i32);
+    let (line, col) = c.at;
+    let x = input.padding.0 as i32 + col as i32 * cw;
+    let y = input.padding.1 as i32 + line as i32 * ch;
+    let w = cw * if c.wide { 2 } else { 1 };
+    let h = ch;
+    let color = input.theme.cursor;
+    let t = (m.cell_width as i32 / 8).max(2);
+    let r = |x: i32, y: i32, w: i32, h: i32| RectInstance {
+        x: s16(x),
+        y: s16(y),
+        w: w as u16,
+        h: h as u16,
+        color,
+    };
+    let rects: &[RectInstance] = match (input.focused, c.shape) {
+        (true, CursorShape::Bar) => &[r(x, y, t, h)],
+        (true, CursorShape::Underline) => &[r(x, y + h - t, w, t)],
+        // Unfocused: a hollow box.
+        _ => &[r(x, y, w, 1), r(x, y + h - 1, w, 1), r(x, y, 1, h), r(x + w - 1, y, 1, h)],
+    };
+    out.extend_from_slice(rects);
+}
+
+/// Input-method text at view row and column `at`.
+fn draw_preedit(
+    rects: &mut Vec<RectInstance>,
+    out: &mut Vec<GlyphInstance>,
+    text: &str,
+    at: (usize, usize),
+    cols: usize,
+    input: &FrameInput,
+    glyphs: &mut impl GlyphSource,
+) {
+    let m = input.metrics;
+    let (cw, ch) = (m.cell_width as i32, m.cell_height as i32);
+    let (line, mut col) = at;
+    let y = input.padding.1 as i32 + line as i32 * ch;
+    for c in text.chars() {
+        let width = char_cells(c);
+        if width == 0 {
+            continue;
+        }
+        if col + width > cols {
+            break;
+        }
         let x = input.padding.0 as i32 + col as i32 * cw;
-        let y = input.padding.1 as i32 + line as i32 * ch;
-        let w = cw * if c.wide { 2 } else { 1 };
-        let h = ch;
-        let color = input.theme.cursor;
-        let t = (m.cell_width as i32 / 8).max(2);
-        let r = |x: i32, y: i32, w: i32, h: i32| RectInstance {
+        let w = (cw * width as i32) as u16;
+        rects.push(RectInstance {
             x: s16(x),
             y: s16(y),
-            w: w as u16,
-            h: h as u16,
-            color,
-        };
-        let rects: &[RectInstance] = match (input.focused, c.shape) {
-            (true, CursorShape::Bar) => &[r(x, y, t, h)],
-            (true, CursorShape::Underline) => &[r(x, y + h - t, w, t)],
-            // Unfocused: a hollow box.
-            _ => &[r(x, y, w, 1), r(x, y + h - 1, w, 1), r(x, y, 1, h), r(x + w - 1, y, 1, h)],
-        };
-        self.decorations.extend_from_slice(rects);
-    }
-
-    /// Input-method text at view row and column `at`.
-    fn draw_preedit(&mut self, text: &str, at: (usize, usize), cols: usize, input: &FrameInput, glyphs: &mut impl GlyphSource) {
-        let m = input.metrics;
-        let (cw, ch) = (m.cell_width as i32, m.cell_height as i32);
-        let (line, mut col) = at;
-        let y = input.padding.1 as i32 + line as i32 * ch;
-        for c in text.chars() {
-            let width = char_cells(c);
-            if width == 0 {
-                continue;
-            }
-            if col + width > cols {
-                break;
-            }
-            let x = input.padding.0 as i32 + col as i32 * cw;
-            let w = (cw * width as i32) as u16;
-            self.decorations.push(RectInstance {
-                x: s16(x),
-                y: s16(y),
-                w,
-                h: ch as u16,
-                color: input.theme.background,
-            });
-            let uy = y + (m.baseline + m.underline_offset) as i32;
-            self.decorations.push(RectInstance {
-                x: s16(x),
-                y: s16(uy),
-                w,
-                h: m.underline_thickness as u16,
+            w,
+            h: ch as u16,
+            color: input.theme.background,
+        });
+        let uy = y + (m.baseline + m.underline_offset) as i32;
+        rects.push(RectInstance {
+            x: s16(x),
+            y: s16(uy),
+            w,
+            h: m.underline_thickness as u16,
+            color: input.theme.foreground,
+        });
+        if let Some(g) = glyphs.glyph(c as u32, FontStyle::Regular) {
+            out.push(GlyphInstance {
+                x: s16(x + g.left as i32),
+                y: s16(y + m.baseline as i32 - g.top as i32),
+                w: g.w,
+                h: g.h,
+                u: g.u,
+                v: g.v,
                 color: input.theme.foreground,
+                is_color: g.color as u32,
             });
-            if let Some(g) = glyphs.glyph(c as u32, FontStyle::Regular) {
-                self.glyphs.push(GlyphInstance {
-                    x: s16(x + g.left as i32),
-                    y: s16(y + m.baseline as i32 - g.top as i32),
-                    w: g.w,
-                    h: g.h,
-                    u: g.u,
-                    v: g.v,
-                    color: input.theme.foreground,
-                    is_color: g.color as u32,
-                });
-            }
-            col += width;
         }
+        col += width;
     }
+}
+
+/// `cells` up to and with its last cell that draws something if the row
+/// ended there ([`Cell::is_blank`]): past it, only the default background
+/// shows, which `pad_row` leaves out.
+#[inline]
+fn trim_blank_end(cells: &[Cell]) -> &[Cell] {
+    // Eight cells at a time: a blank end is usually most of a row.
+    let mut n = cells.len();
+    while n >= 8 && cells[n - 8..n].iter().fold(0, |a, c| a | c.bits()) & Cell::NOT_BLANK == 0 {
+        n -= 8;
+    }
+    while n > 0 && cells[n - 1].is_blank() {
+        n -= 1;
+    }
+    &cells[..n]
 }
 
 /// Whether any face of `fonts` shapes runs (ligatures design §1).

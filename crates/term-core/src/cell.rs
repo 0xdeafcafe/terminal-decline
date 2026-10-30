@@ -308,6 +308,23 @@ impl Row {
         }
     }
 
+    /// [`Row::reset`], for a row whose cells from `zero_from` on are known
+    /// to be [`Cell::BLANK`] already: with that fill, only the cells
+    /// before it are cleared.
+    #[inline]
+    pub fn reset_before(&mut self, cols: usize, fill: Cell, zero_from: usize) {
+        if self.cells.len() == cols && fill == Cell::BLANK && zero_from <= cols {
+            debug_assert!(self.cells[zero_from..].iter().all(|&c| c == Cell::BLANK));
+            self.cells[..zero_from].fill(Cell::BLANK);
+            self.wrapped = false;
+            if self.extra.is_some() {
+                self.clear_extra();
+            }
+        } else {
+            self.reset(cols, fill);
+        }
+    }
+
     /// Free every cluster and drop every mark.
     #[cold]
     fn clear_extra(&mut self) {

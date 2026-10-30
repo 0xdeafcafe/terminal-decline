@@ -1,0 +1,13 @@
+# Light Owl, by Sarah Drasner: https://github.com/sdras/night-owl-vscode-theme
+# Copyright (c) 2018 Sarah Drasner. MIT licence. Colours from the terminal.*
+# and editor.* entries of
+# https://raw.githubusercontent.com/sdras/night-owl-vscode-theme/main/themes/Night%20Owl-Light-color-theme.json
+# (MIT).
+foreground = "#403f53"
+background = "#f6f6f6"
+cursor = "#90a7b2"
+selection = "#e0e0e0"
+palette = [
+    "#403f53", "#de3d3b", "#08916a", "#e0af02", "#288ed7", "#d6438a", "#2aa298", "#93a1a1",
+    "#403f53", "#de3d3b", "#08916a", "#daaa01", "#288ed7", "#d6438a", "#2aa298", "#93a1a1",
+]

@@ -87,6 +87,8 @@ define_class!(
     unsafe impl NSApplicationDelegate for AppDelegate {
         #[unsafe(method(applicationDidFinishLaunching:))]
         fn did_finish_launching(&self, _n: &NSNotification) {
+            // Before any window opens, so each starts in its appearance.
+            apply_appearance(MainThreadMarker::from(self), self.ivars().config.borrow().appearance);
             let restore = std::mem::take(&mut *self.ivars().restore.borrow_mut());
             let folders = std::mem::take(&mut *self.ivars().opened_at_launch.borrow_mut());
             self.ivars().launched.set(true);
@@ -101,6 +103,7 @@ define_class!(
             unsafe { NSApplication::sharedApplication(mtm).setServicesProvider(Some(self)) };
             self.watch_for_new_build();
             self.watch_config();
+            crate::memory::listen();
             // The updater (docs/design/updater.md): off in pins, dogfood,
             // nightly and ad-hoc builds; on, the app menu gains Check for
             // Updates….
@@ -398,6 +401,10 @@ impl AppDelegate {
         let settings_open = self.ivars().settings.borrow().is_some();
         shown.retain(|n| !settings_open && !before.contains(n));
         crate::update::sparkle::set_setting(config.update);
+        if old.appearance != config.appearance {
+            // Each window's view hears of it (viewDidChangeEffectiveAppearance).
+            apply_appearance(MainThreadMarker::from(self), config.appearance);
+        }
         crate::images::apply_config(config.images, config.image_memory, config.image_file_transfer);
         if old.keybind != config.keybind || old.update != config.update {
             let mtm = MainThreadMarker::from(self);
@@ -880,6 +887,21 @@ fn prefs_binary() -> std::path::PathBuf {
 }
 
 /// A window lets the desktop show through when `opacity` is below 1.
+/// The `appearance` setting for the whole app: AppKit draws every window
+/// (title bars included) light or dark, or as macOS is, and each view's
+/// effective appearance picks its side of a light/dark theme pair.
+fn apply_appearance(mtm: MainThreadMarker, mode: crate::theme::AppearanceMode) {
+    use crate::theme::AppearanceMode;
+    use objc2_app_kit::{NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua};
+    let name = match mode {
+        AppearanceMode::System => None,
+        AppearanceMode::Light => Some(unsafe { NSAppearanceNameAqua }),
+        AppearanceMode::Dark => Some(unsafe { NSAppearanceNameDarkAqua }),
+    };
+    let appearance = name.and_then(NSAppearance::appearanceNamed);
+    NSApplication::sharedApplication(mtm).setAppearance(appearance.as_deref());
+}
+
 fn apply_opacity(window: &NSWindow, config: &Config) {
     let opaque = config.opacity >= 1.0;
     if window.isOpaque() != opaque {

@@ -620,3 +620,31 @@ fn closing_a_window_gives_its_glyph_space_back() {
     r1.build_pane(&mut a, &mut ta.state, &input);
     assert!(alone(&mut r1, &a, size) == before);
 }
+
+/// Under memory pressure the glyph textures start again, empty, at their
+/// starting sizes: panes built before are stale, and built again they
+/// draw as before. A second purge with nothing drawn in between gives
+/// nothing more back.
+#[test]
+fn a_purge_gives_glyph_space_back_and_redraws_the_same() {
+    if !have_gpu() {
+        return;
+    }
+    term_render::set_glyph_texture_sizes((256, 4096), (64, 2048));
+    let theme = theme();
+    let mut r1 = Renderer::new(Fonts::new("Menlo", 64.0));
+    let m = r1.metrics();
+    let text: String = (0x21u8..0x7F).map(|c| c as char).collect();
+    let size = (94 * m.cell_width as usize, m.cell_height as usize);
+    let (mut a, mut ta) = built(&mut r1, &theme, 94, 1, &format!("\x1b[1m{text}"));
+    let before = alone(&mut r1, &a, size);
+    assert!(r1.glyph_texture_sizes().0 > 256, "the coverage texture grew");
+
+    assert!(r1.purge() > 0);
+    assert_eq!(r1.glyph_texture_sizes(), (256, 64));
+    assert!(!r1.is_current(&a));
+    assert_eq!(r1.purge(), 0, "already given back");
+    let input = input(&r1, &theme);
+    r1.build_pane(&mut a, &mut ta.state, &input);
+    assert!(alone(&mut r1, &a, size) == before);
+}

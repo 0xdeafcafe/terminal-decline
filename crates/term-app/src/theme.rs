@@ -13,17 +13,69 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::config::Colors;
 
-/// The built-in themes, by name.
-pub const BUILT_IN: [(&str, &str); 8] = [
+/// The built-in themes, by name, each family's dark ones first.
+pub const BUILT_IN: &[(&str, &str)] = &[
     ("slope-dark", include_str!("../themes/slope-dark.toml")),
     ("slope-light", include_str!("../themes/slope-light.toml")),
     ("solarized-dark", include_str!("../themes/solarized-dark.toml")),
     ("solarized-light", include_str!("../themes/solarized-light.toml")),
     ("gruvbox-dark", include_str!("../themes/gruvbox-dark.toml")),
+    ("gruvbox-light", include_str!("../themes/gruvbox-light.toml")),
     ("catppuccin-mocha", include_str!("../themes/catppuccin-mocha.toml")),
+    ("catppuccin-macchiato", include_str!("../themes/catppuccin-macchiato.toml")),
+    ("catppuccin-frappe", include_str!("../themes/catppuccin-frappe.toml")),
     ("catppuccin-latte", include_str!("../themes/catppuccin-latte.toml")),
     ("tokyo-night", include_str!("../themes/tokyo-night.toml")),
+    ("tokyo-night-storm", include_str!("../themes/tokyo-night-storm.toml")),
+    ("tokyo-night-day", include_str!("../themes/tokyo-night-day.toml")),
+    ("rose-pine", include_str!("../themes/rose-pine.toml")),
+    ("rose-pine-moon", include_str!("../themes/rose-pine-moon.toml")),
+    ("rose-pine-dawn", include_str!("../themes/rose-pine-dawn.toml")),
+    ("kanagawa-wave", include_str!("../themes/kanagawa-wave.toml")),
+    ("kanagawa-lotus", include_str!("../themes/kanagawa-lotus.toml")),
+    ("everforest-dark", include_str!("../themes/everforest-dark.toml")),
+    ("everforest-light", include_str!("../themes/everforest-light.toml")),
+    ("one-dark", include_str!("../themes/one-dark.toml")),
+    ("one-light", include_str!("../themes/one-light.toml")),
+    ("github-dark", include_str!("../themes/github-dark.toml")),
+    ("github-light", include_str!("../themes/github-light.toml")),
+    ("ayu-dark", include_str!("../themes/ayu-dark.toml")),
+    ("ayu-mirage", include_str!("../themes/ayu-mirage.toml")),
+    ("ayu-light", include_str!("../themes/ayu-light.toml")),
+    ("night-owl", include_str!("../themes/night-owl.toml")),
+    ("light-owl", include_str!("../themes/light-owl.toml")),
+    ("dracula", include_str!("../themes/dracula.toml")),
+    ("nord", include_str!("../themes/nord.toml")),
 ];
+
+/// The built-in light and dark themes made as a pair: the light one, then
+/// the dark one.
+pub const PAIRS: &[(&str, &str)] = &[
+    ("slope-light", "slope-dark"),
+    ("solarized-light", "solarized-dark"),
+    ("gruvbox-light", "gruvbox-dark"),
+    ("catppuccin-latte", "catppuccin-mocha"),
+    ("tokyo-night-day", "tokyo-night"),
+    ("rose-pine-dawn", "rose-pine"),
+    ("kanagawa-lotus", "kanagawa-wave"),
+    ("everforest-light", "everforest-dark"),
+    ("one-light", "one-dark"),
+    ("github-light", "github-dark"),
+    ("ayu-light", "ayu-dark"),
+    ("light-owl", "night-owl"),
+];
+
+/// The theme's name for people, from its file's first line
+/// (`# Rosé Pine Dawn, by …`); else `name` itself.
+pub fn title(name: &str, text: &str) -> String {
+    let first = text.lines().next().unwrap_or("");
+    let Some(rest) = first.strip_prefix("# ") else {
+        return name.to_string();
+    };
+    let end = rest.find([',', ':']).unwrap_or(rest.len());
+    let t = rest[..end].trim();
+    if t.is_empty() { name.to_string() } else { t.to_string() }
+}
 
 /// The macOS appearance a window has.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -31,6 +83,29 @@ pub enum Appearance {
     Light,
     #[default]
     Dark,
+}
+
+/// The `appearance` setting: windows follow macOS (`"system"`, the
+/// default) or are always light or always dark, which picks the side of a
+/// light/dark theme pair and how AppKit draws the window's title bar.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum AppearanceMode {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl AppearanceMode {
+    /// The appearance windows get while macOS is in `system`.
+    pub fn resolve(self, system: Appearance) -> Appearance {
+        match self {
+            AppearanceMode::System => system,
+            AppearanceMode::Light => Appearance::Light,
+            AppearanceMode::Dark => Appearance::Dark,
+        }
+    }
 }
 
 /// The `theme` setting.
@@ -133,7 +208,7 @@ pub fn load(themes_dir: &Path, name: &str) -> Result<Colors, String> {
         None => Err(format!(
             "no theme named {name:?}: not in {} nor built in ({})",
             themes_dir.display(),
-            BUILT_IN.map(|(n, _)| n).join(", ")
+            BUILT_IN.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", ")
         )),
     }
 }
@@ -157,7 +232,49 @@ mod tests {
             assert_eq!(c.palette.len(), 16, "{name}");
             assert!(text.lines().next().unwrap().starts_with("# "), "{name}: names its source");
             assert!(text.contains("licence") || text.contains("License"), "{name}: states its licence");
+            for c in c
+                .palette
+                .iter()
+                .chain([&c.foreground, &c.background, &c.cursor, &c.selection].into_iter().flatten())
+            {
+                assert!(crate::config::parse_hex(c).is_some(), "{name}: {c:?}");
+            }
+            assert_ne!(c.foreground, c.background, "{name}");
+            assert_ne!(title(name, text), *name, "{name}: has a title");
         }
+        let mut names: Vec<_> = BUILT_IN.iter().map(|(n, _)| *n).collect();
+        names.sort();
+        names.dedup();
+        assert_eq!(names.len(), BUILT_IN.len(), "each name once");
+        assert!(BUILT_IN.len() >= 30, "{}", BUILT_IN.len());
+    }
+
+    /// Each theme loads through [`load`] and is as light or dark as its
+    /// name says; each pair is one light and one dark theme.
+    #[test]
+    fn every_built_in_theme_loads_and_pairs_are_light_and_dark() {
+        let dir = TempDir::new("themes-all");
+        let luma = |c: &Colors| {
+            let rgb = crate::config::parse_hex(c.background.as_deref().unwrap()).unwrap();
+            let ch = |s: u32| ((rgb >> s) & 0xff) as f64 / 255.0;
+            0.2126 * ch(16) + 0.7152 * ch(8) + 0.0722 * ch(0)
+        };
+        let light_words = ["light", "latte", "day", "dawn", "lotus"];
+        for (name, _) in BUILT_IN {
+            let c = load(dir.path(), name).unwrap_or_else(|e| panic!("{e}"));
+            let light = light_words.iter().any(|w| name.contains(w));
+            assert_eq!(luma(&c) > 0.5, light, "{name}: background {:?}", c.background);
+        }
+        for (light, dark) in PAIRS {
+            assert!(luma(&load(dir.path(), light).unwrap()) > 0.5, "{light}");
+            assert!(luma(&load(dir.path(), dark).unwrap()) < 0.5, "{dark}");
+        }
+        assert_eq!(
+            title("rose-pine-dawn", BUILT_IN.iter().find(|t| t.0 == "rose-pine-dawn").unwrap().1),
+            "Rosé Pine Dawn"
+        );
+        assert_eq!(title("slope-dark", BUILT_IN[0].1), "Slope Dark");
+        assert_eq!(title("mine", "foreground = '#000000'"), "mine");
     }
 
     #[test]
@@ -205,6 +322,31 @@ mod tests {
             dark: "x".into(),
         };
         assert_eq!(same.names(), ["x"]);
+    }
+
+    #[test]
+    fn appearance_modes_pick_the_side_of_a_pair() {
+        #[derive(Deserialize, Debug)]
+        struct A {
+            appearance: AppearanceMode,
+        }
+        let pair = ThemeChoice::ByAppearance {
+            light: "rose-pine-dawn".into(),
+            dark: "rose-pine".into(),
+        };
+        let mode = |s: &str| toml::from_str::<A>(&format!("appearance = '{s}'")).map(|a| a.appearance);
+        assert_eq!(mode("system").unwrap(), AppearanceMode::System);
+        assert!(mode("auto").is_err());
+        for (m, system, want) in [
+            ("system", Appearance::Light, "rose-pine-dawn"),
+            ("system", Appearance::Dark, "rose-pine"),
+            ("light", Appearance::Dark, "rose-pine-dawn"),
+            ("light", Appearance::Light, "rose-pine-dawn"),
+            ("dark", Appearance::Light, "rose-pine"),
+            ("dark", Appearance::Dark, "rose-pine"),
+        ] {
+            assert_eq!(pair.pick(mode(m).unwrap().resolve(system)), want, "{m} in {system:?}");
+        }
     }
 
     #[test]

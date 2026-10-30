@@ -288,3 +288,26 @@ fn encoded_bytes_grow_in_pieces() {
     assert_eq!(v.len(), Encoded::PIECE + 1);
     assert_eq!(&v[Encoded::PIECE - 1..], &[2, 3]);
 }
+
+#[test]
+fn trim_drops_pixels_that_can_come_back_and_are_not_drawn() {
+    let pool = ImagePool::new(20 * PAGE);
+    let drawn = image(&pool, 1, 2);
+    pool.set_encoded(drawn, Some(encoded(100)));
+    let undrawn = image(&pool, 1, 3);
+    pool.set_encoded(undrawn, Some(encoded(100)));
+    let only_pixels = image(&pool, 1, 4);
+    pool.drawn(1, &[drawn]);
+    let used = pool.used();
+    assert_eq!(pool.trim(), 3 * PAGE);
+    assert_eq!(pool.used(), used - 3 * PAGE);
+    assert!(pool.pixels(drawn).is_some(), "drawn in the latest frame");
+    assert!(
+        pool.pixels(undrawn).is_none() && pool.encoded(undrawn).is_some(),
+        "decoded again when drawn"
+    );
+    assert!(pool.pixels(only_pixels).is_some(), "it couldn't come back");
+    assert_eq!(evicted(&pool, 1), vec![undrawn]);
+    assert_eq!(pool.trim(), 0);
+    pool.check().unwrap();
+}

@@ -1,0 +1,13 @@
+# Rosé Pine Moon, by Rosé Pine: https://github.com/rose-pine/rose-pine-theme
+# Copyright (c) Rosé Pine. MIT licence. Colours from the official Ghostty
+# port,
+# https://raw.githubusercontent.com/rose-pine/ghostty/main/dist/rose-pine-moon
+# (MIT).
+foreground = "#e0def4"
+background = "#232136"
+cursor = "#e0def4"
+selection = "#44415a"
+palette = [
+    "#393552", "#eb6f92", "#3e8fb0", "#f6c177", "#9ccfd8", "#c4a7e7", "#ea9a97", "#e0def4",
+    "#6e6a86", "#eb6f92", "#3e8fb0", "#f6c177", "#9ccfd8", "#c4a7e7", "#ea9a97", "#e0def4",
+]

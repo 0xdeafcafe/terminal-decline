@@ -241,6 +241,45 @@ fn filters_skip_blocks_but_not_their_boundaries() {
 }
 
 #[test]
+fn filters_and_search_work_on_compressed_blocks() {
+    let mut t = Term::new(40, 3, 10_000, crate::ImagePool::process());
+    for i in 0..400 {
+        let word = if i == 123 { "needle" } else { "thread" };
+        t.advance(format!("line {i} {word}\r\n").as_bytes());
+        if i % 50 == 49 {
+            t.state.seal_history_for_test();
+        }
+    }
+    t.advance(b"xx nee");
+    t.state.seal_history_for_test();
+    t.advance(b"dle yy\r\n\r\n\r\n\r\n");
+    let query = q("NEEDLE", true, WordMatch::Contains);
+    let plain = search(&mut t, query.clone());
+    // Filters built first, then the blocks compressed (as the idle job
+    // does): the filters stay.
+    build_filters(&mut t);
+    while let Some(mut job) = t.state.compress_job(3) {
+        job.run();
+        t.state.add_compressed(job);
+    }
+    let sb = t.state.history_for_test();
+    assert_eq!(sb.packed_blocks(), sb.sealed().count());
+    assert_eq!(sb.filtered_blocks(), sb.packed_blocks(), "filters kept");
+    let (hits, skipped) = search_counting_skips(&mut t, query.clone());
+    assert_eq!(hits, plain);
+    assert!(skipped >= 6, "{skipped} blocks skipped");
+    // Under pressure the filters go; they are built again from the
+    // compressed blocks.
+    t.state.shrink_history();
+    assert_eq!(t.state.history_for_test().filtered_blocks(), 0);
+    build_filters(&mut t);
+    let (hits, skipped) = search_counting_skips(&mut t, query.clone());
+    assert_eq!(hits, plain);
+    assert_eq!(hits, naive(&t, &query));
+    assert!(skipped >= 6, "{skipped} blocks skipped");
+}
+
+#[test]
 fn filters_go_with_their_blocks() {
     let mut t = Term::new(20, 3, 60, crate::ImagePool::process());
     for i in 0..50 {

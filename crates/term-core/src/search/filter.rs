@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use crate::scrollback::BlockData;
+use crate::scrollback::Body;
 
 /// Bits in a filter: 4 KB.
 const BITS: usize = 32_768;
@@ -84,7 +84,7 @@ pub(crate) fn grams(bytes: &[u8], ascii_only: bool) -> Vec<u32> {
 /// between are left out then.
 #[derive(Debug, Default)]
 pub struct FilterJob {
-    pub(crate) blocks: Vec<Arc<BlockData>>,
+    pub(crate) blocks: Vec<Body>,
     pub(crate) built: Vec<Arc<Filter>>,
 }
 
@@ -100,6 +100,7 @@ impl FilterJob {
 
     /// Build the filters (off the lock).
     pub fn run(&mut self) {
-        self.built = self.blocks.iter().map(|b| Arc::new(Filter::build(b.text()))).collect();
+        // A compressed block is decompressed here, off the lock.
+        self.built = self.blocks.iter().map(|b| Arc::new(Filter::build(b.unpack().text()))).collect();
     }
 }

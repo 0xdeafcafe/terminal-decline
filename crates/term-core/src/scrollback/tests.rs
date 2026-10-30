@@ -239,7 +239,7 @@ fn wrapped_line_keeps_its_cells_and_length() {
     put(&mut row, &[Style::DEFAULT], 0, 0, "ab");
     row.wrapped = true;
     sb.push(&row, &[Style::DEFAULT]);
-    assert_eq!(sb.text(1).unwrap(), b"ab        ");
+    assert_eq!(&*sb.text(1).unwrap(), b"ab        ");
     assert!(sb.wrapped(1));
 }
 
@@ -288,7 +288,9 @@ fn long_lines_record_their_text_length() {
             ],
         );
     }
-    let heads: Vec<_> = (0..6).map(|i| sb.locate(i).map(|(v, n)| head(v.meta_of(n)).1).unwrap()).collect();
+    let heads: Vec<_> = (0..6)
+        .map(|i| sb.locate(i).map(|(v, n)| head(v.view().meta_of(n)).1).unwrap())
+        .collect();
     assert_eq!(heads, [None, None, Some(LONG_TEXT), Some(LONG_TEXT), Some(300), Some(300)]);
     assert_eq!(
         &sb.open.meta[sb.open.starts[4] as usize..][..4],
@@ -792,7 +794,7 @@ fn blank_rows_and_empty_rows() {
     assert_eq!(sb.len(), 2);
     assert_eq!(sb.get(0).unwrap().0.cells.len(), 0);
     assert_eq!(sb.get(1).unwrap().0.cells.len(), 0);
-    assert_eq!(sb.text(0), Some(&b""[..]));
+    assert_eq!(sb.text(0).as_deref(), Some(&b""[..]));
     sb.check_all().unwrap();
 }
 
@@ -1022,7 +1024,7 @@ fn ambiguous_setting_is_kept_per_block() {
     sb.set_ambiguous(1);
     sb.set_ambiguous(2);
     assert_eq!(sb.stats().sealed_blocks, 2, "an empty block just takes the setting");
-    let flags = |sb: &Scrollback, i| sb.locate(i).map(|(v, n)| v.flags(n)).unwrap();
+    let flags = |sb: &Scrollback, i| sb.locate(i).map(|(v, n)| v.view().flags(n)).unwrap();
     assert_eq!(flags(&sb, 1) & flag::WIDTHS, 0, "± is two wide at 2");
     assert_ne!(flags(&sb, 2) & flag::WIDTHS, 0);
     for (i, row) in [&narrow, &wide, &narrow].into_iter().enumerate() {
@@ -1177,4 +1179,39 @@ fn placeholders_round_trip_among_other_cells() {
         let n = if wrapped { 30 } else { col + 1 };
         assert_eq!(&back.cells[..n], &row.cells[..n], "wrapped {wrapped}");
     }
+}
+
+#[test]
+fn compressed_blocks_read_back_the_same() {
+    let styles = ls_styles();
+    let mut sb = Scrollback::new(100_000);
+    let mut rng = Rng(7);
+    let mut rows = Vec::new();
+    for i in 0..5000 {
+        let mut row = Row::new(80, Cell::BLANK);
+        let mut c = put(&mut row, &styles, 0, 1, &format!("dir{i}"));
+        c = put(&mut row, &styles, c, 0, "  ");
+        put(&mut row, &styles, c, 2, &format!("{:x}.rs", rng.next()));
+        row.wrapped = i % 7 == 3;
+        sb.push(&row, &styles);
+        rows.push(sb.get(i).unwrap());
+    }
+    let sealed = sb.sealed().count();
+    assert!(sealed >= 2, "{sealed} sealed blocks");
+    let before = sb.memory_bytes();
+    let (b, after) = sb.shrink();
+    assert_eq!(b, before);
+    assert_eq!(sb.packed_blocks(), sealed);
+    assert!(after < before, "{before} -> {after} bytes");
+    sb.check_all().unwrap();
+    for (i, want) in rows.iter().enumerate() {
+        assert_eq!(&sb.get(i).unwrap(), want, "line {i}");
+        assert_eq!(sb.wrapped(i), i % 7 == 3);
+    }
+    // Shrinking again finds nothing to do; popping reads through the cache.
+    assert_eq!(sb.compress_job(10).len(), 0);
+    for i in (4000..5000).rev() {
+        assert_eq!(&sb.pop().unwrap(), &rows[i], "popped line {i}");
+    }
+    sb.check_all().unwrap();
 }

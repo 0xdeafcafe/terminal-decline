@@ -540,6 +540,33 @@ impl GlyphCache {
         self.by_key.retain(|_, slot| !drop(*slot));
     }
 
+    /// Under memory pressure: empty both textures into new ones at their
+    /// starting sizes, so the old ones (and the pages written in them) go
+    /// once the GPU lets them go, and forget every glyph; they are
+    /// rasterised again as frames need them. Returns the bytes the old
+    /// textures held, 0 if they were already empty at their starting
+    /// sizes (another window purged them this turn), or purgeable
+    /// already (every window hidden: macOS may take them as it is).
+    fn purge(&mut self, device: &Device) -> usize {
+        if self.volatile {
+            return 0;
+        }
+        let mut freed = 0;
+        for atlas in [&mut self.mask, &mut self.color] {
+            if atlas.packer.size() == atlas.start && atlas.packer.is_empty() {
+                continue;
+            }
+            let size = atlas.packer.size() as usize;
+            freed += size * size * atlas.bpp;
+            atlas.packer = ShelfPacker::new(atlas.start, atlas.packer.max());
+            atlas.texture = new_texture(device, atlas.format, atlas.start);
+        }
+        if freed > 0 {
+            self.forget(|_| true);
+        }
+        freed
+    }
+
     /// Let macOS reclaim both textures (every window is hidden).
     fn make_purgeable(&mut self) {
         if self.volatile {
@@ -715,6 +742,65 @@ pub struct PaneRender {
     built_with: Option<(u64, FontsId)>,
     /// Its last build left new glyphs for later (see [`Budget`]).
     deferred: bool,
+    /// Its instances on the GPU (roadmap R.2).
+    gpu: RefCell<PaneBuffers>,
+}
+
+/// A pane's instance buffers, in use by turns, each holding the frame's
+/// instances as of a version ([`Frame::changes_since`]): a frame is
+/// drawn by copying only what changed since the buffer's version.
+#[derive(Default)]
+struct PaneBuffers {
+    rects: [InstanceBuffer; FRAMES_IN_FLIGHT],
+    glyphs: [InstanceBuffer; FRAMES_IN_FLIGHT],
+    /// The frame version each holds; 0 for none.
+    held: [(u64, u64); FRAMES_IN_FLIGHT],
+    next: usize,
+    /// Command buffers drawing this pane on the GPU: a buffer is written
+    /// only once the frames before that used it are done, whichever
+    /// window drew them.
+    in_flight: Arc<InFlight>,
+}
+
+impl PaneBuffers {
+    /// Bring the next buffers up to date with `frame` (its glyphs only
+    /// when `glyphs`), and hand them out.
+    fn upload(&mut self, device: &Device, frame: &Frame, glyphs: bool) -> (Option<Retained<Buffer>>, Option<Retained<Buffer>>) {
+        self.in_flight.begin_below(FRAMES_IN_FLIGHT);
+        let k = self.next;
+        self.next = (k + 1) % FRAMES_IN_FLIGHT;
+        let version = frame.version();
+        let (rects, grown) = self.rects[k].reserve_kept(device, frame.rects.len() * size_of::<RectInstance>());
+        if grown {
+            self.held[k].0 = 0;
+        }
+        if let Some(buf) = &rects {
+            let range = match frame.changes_since(self.held[k].0) {
+                Some((r, _)) => r,
+                None => 0..frame.rects.len(),
+            };
+            // SAFETY: the buffer holds every rect.
+            unsafe { write(buf, range.start, &frame.rects[range]) };
+            self.held[k].0 = version;
+        }
+        if !glyphs {
+            return (rects, None);
+        }
+        let (glyph_buf, grown) = self.glyphs[k].reserve_kept(device, frame.glyphs.len() * size_of::<GlyphInstance>());
+        if grown {
+            self.held[k].1 = 0;
+        }
+        if let Some(buf) = &glyph_buf {
+            let range = match frame.changes_since(self.held[k].1) {
+                Some((_, g)) => g,
+                None => 0..frame.glyphs.len(),
+            };
+            // SAFETY: the buffer holds every glyph.
+            unsafe { write(buf, range.start, &frame.glyphs[range]) };
+            self.held[k].1 = version;
+        }
+        (rects, glyph_buf)
+    }
 }
 
 impl PaneRender {
@@ -773,12 +859,20 @@ pub struct PaneDraw<'a> {
     pub scissor: PxRect,
 }
 
+#[derive(Default)]
 struct InstanceBuffer {
     buffer: Option<Retained<Buffer>>,
     capacity: usize,
 }
 
 impl InstanceBuffer {
+    /// [`reserve`](Self::reserve), and whether the buffer is new (what
+    /// was in the old one is gone).
+    fn reserve_kept(&mut self, device: &Device, bytes: usize) -> (Option<Retained<Buffer>>, bool) {
+        let grown = bytes > self.capacity;
+        (self.reserve(device, bytes), grown)
+    }
+
     /// A buffer of at least `bytes`, grown to the next power of two if
     /// needed; `None` for nothing.
     fn reserve(&mut self, device: &Device, bytes: usize) -> Option<Retained<Buffer>> {
@@ -814,8 +908,13 @@ struct Span {
     fill: Option<RectInstance>,
     scissor: MTLScissorRect,
     origin: [f32; 2],
-    rects: Range<usize>,
-    glyphs: Range<usize>,
+    /// The fill's place in the window's rect buffer.
+    fill_at: usize,
+    /// The pane's own buffers, and how many of their instances to draw.
+    rect_buf: Option<Retained<Buffer>>,
+    glyph_buf: Option<Retained<Buffer>>,
+    rects: usize,
+    glyphs: usize,
     /// The pane's image instances in the frame's image buffer.
     images: Range<usize>,
 }
@@ -824,7 +923,6 @@ struct Span {
 /// and the count of its frames on the GPU.
 struct Window {
     rect_buffers: [InstanceBuffer; FRAMES_IN_FLIGHT],
-    glyph_buffers: [InstanceBuffer; FRAMES_IN_FLIGHT],
     image_buffers: [InstanceBuffer; FRAMES_IN_FLIGHT],
     /// Textures over the images drawn last frame, by pool entry and
     /// generation (images.md §6.2): rebuilt each frame with only the
@@ -862,11 +960,13 @@ impl Window {
         let (width, height) = (target.width() as u32, target.height() as u32);
         let viewport = [width as f32, height as f32];
 
-        // Lay the panes out back to back in the two buffers: each pane's
-        // fill (when its background isn't the pass's clear colour) and
-        // rects, then the dividers; each pane's glyphs.
+        // Each pane's rects and glyphs are in its own buffers, brought up
+        // to date; the window's hold the fills (when a pane's background
+        // isn't the pass's clear colour), then the dividers, and the
+        // images back to back.
         self.spans.clear();
-        let (mut rects, mut glyphs, mut images) = (0, 0, 0);
+        let mut pane_flights = Vec::new();
+        let (mut rects, mut images) = (0, 0);
         for (pane, p) in panes.iter().enumerate() {
             let Some(s) = p.scissor.clamped(width, height) else {
                 continue;
@@ -879,10 +979,12 @@ impl Window {
                 h: s.h.min(u16::MAX as i32) as u16,
                 color: frame.clear,
             });
-            let n_rects = fill.is_some() as usize + frame.rects.len();
             // Glyphs placed in textures since emptied would draw other
             // glyphs: such a pane draws its backgrounds until rebuilt.
-            let n_glyphs = if p.pane.built_with == current { frame.glyphs.len() } else { 0 };
+            let with_glyphs = p.pane.built_with == current;
+            let mut bufs = p.pane.gpu.borrow_mut();
+            let (rect_buf, glyph_buf) = bufs.upload(&gpu.device, frame, with_glyphs);
+            pane_flights.push(bufs.in_flight.clone());
             let n_images = frame.images.instances.len();
             self.spans.push(Span {
                 pane,
@@ -894,12 +996,14 @@ impl Window {
                     height: s.h as usize,
                 },
                 origin: [p.origin.0 as f32, p.origin.1 as f32],
-                rects: rects..rects + n_rects,
-                glyphs: glyphs..glyphs + n_glyphs,
+                fill_at: rects,
+                rects: if rect_buf.is_some() { frame.rects.len() } else { 0 },
+                glyphs: if glyph_buf.is_some() { frame.glyphs.len() } else { 0 },
+                rect_buf,
+                glyph_buf,
                 images: images..images + n_images,
             });
-            rects += n_rects;
-            glyphs += n_glyphs;
+            rects += fill.is_some() as usize;
             images += n_images;
         }
         let divider_rects = rects..rects + dividers.len();
@@ -908,7 +1012,6 @@ impl Window {
         let i = self.frame_index;
         self.frame_index = (i + 1) % FRAMES_IN_FLIGHT;
         let rect_buf = self.rect_buffers[i].reserve(&gpu.device, rects * size_of::<RectInstance>());
-        let glyph_buf = self.glyph_buffers[i].reserve(&gpu.device, glyphs * size_of::<GlyphInstance>());
         let image_buf = self.image_buffers[i].reserve(&gpu.device, images * size_of::<ImageInstance>());
         // This frame's textures: kept from the last frame, or made over
         // the image's buffer. Pixels from elsewhere (tests' `Vec`s) can't
@@ -938,18 +1041,10 @@ impl Window {
         unsafe {
             for span in &self.spans {
                 let frame = &panes[span.pane].pane.frame;
-                if let Some(buf) = &rect_buf {
-                    let mut at = span.rects.start;
-                    if let Some(fill) = span.fill {
-                        write(buf, at, &[fill]);
-                        at += 1;
-                    }
-                    write(buf, at, &frame.rects);
-                }
-                if let Some(buf) = &glyph_buf
-                    && !span.glyphs.is_empty()
+                if let Some(buf) = &rect_buf
+                    && let Some(fill) = span.fill
                 {
-                    write(buf, span.glyphs.start, &frame.glyphs);
+                    write(buf, span.fill_at, &[fill]);
                 }
                 if let Some(buf) = &image_buf
                     && !span.images.is_empty()
@@ -990,14 +1085,15 @@ impl Window {
                 range.start,
             );
         };
-        if glyph_buf.is_some() {
+        let any_glyphs = self.spans.iter().any(|s| s.glyph_buf.is_some());
+        if any_glyphs {
             unsafe {
                 enc.setFragmentTexture_atIndex(Some(&cache.mask.texture), 0);
                 enc.setFragmentTexture_atIndex(Some(&cache.color.texture), 1);
             }
         }
         let set_glyph_textures = || {
-            if glyph_buf.is_some() {
+            if any_glyphs {
                 unsafe {
                     enc.setFragmentTexture_atIndex(Some(&cache.mask.texture), 0);
                     enc.setFragmentTexture_atIndex(Some(&cache.color.texture), 1);
@@ -1030,17 +1126,22 @@ impl Window {
                 any
             };
             images_in(Layer::BelowBackground);
+            // The fill comes before the frame's rects.
             if let Some(buf) = &rect_buf
-                && !span.rects.is_empty()
+                && span.fill.is_some()
             {
-                // The fill comes before the frame's rects.
-                let split = span.rects.start + span.fill.is_some() as usize + frame.split.backgrounds.min(frame.rects.len());
+                draw(&gpu.rect_pipeline, buf, &uniforms, &(span.fill_at..span.fill_at + 1));
+            }
+            if let Some(buf) = &span.rect_buf
+                && span.rects > 0
+            {
+                let split = frame.split.backgrounds.min(span.rects);
                 if draws.iter().any(|d| d.layer == Layer::BelowText) {
-                    draw(&gpu.rect_pipeline, buf, &uniforms, &(span.rects.start..split));
+                    draw(&gpu.rect_pipeline, buf, &uniforms, &(0..split));
                     images_in(Layer::BelowText);
-                    draw(&gpu.rect_pipeline, buf, &uniforms, &(split..span.rects.end));
+                    draw(&gpu.rect_pipeline, buf, &uniforms, &(split..span.rects));
                 } else {
-                    draw(&gpu.rect_pipeline, buf, &uniforms, &span.rects);
+                    draw(&gpu.rect_pipeline, buf, &uniforms, &(0..span.rects));
                 }
             } else {
                 images_in(Layer::BelowText);
@@ -1049,20 +1150,18 @@ impl Window {
             if draws.iter().any(|d| d.layer != Layer::AboveText) {
                 set_glyph_textures();
             }
-            if let Some(buf) = &glyph_buf
-                && !span.glyphs.is_empty()
+            if let Some(buf) = &span.glyph_buf
+                && span.glyphs > 0
             {
-                draw(&gpu.glyph_pipeline, buf, &uniforms, &span.glyphs);
+                draw(&gpu.glyph_pipeline, buf, &uniforms, &(0..span.glyphs));
             }
             if above && images_in(Layer::AboveText) {
                 set_glyph_textures();
-                if let Some(buf) = &rect_buf
+                if let Some(buf) = &span.rect_buf
                     && !frame.split.cursor.is_empty()
-                    && frame.split.cursor.end <= frame.rects.len()
+                    && frame.split.cursor.end <= span.rects
                 {
-                    let at = span.rects.start + span.fill.is_some() as usize;
-                    let cursor = at + frame.split.cursor.start..at + frame.split.cursor.end;
-                    draw(&gpu.rect_pipeline, buf, &uniforms, &cursor);
+                    draw(&gpu.rect_pipeline, buf, &uniforms, &frame.split.cursor);
                 }
             }
         }
@@ -1086,6 +1185,9 @@ impl Window {
         let completed = self.completed.clone();
         let done = RcBlock::new(move |_: NonNull<CommandBuffer>| {
             completed.fetch_add(1, Ordering::AcqRel);
+            for p in &pane_flights {
+                p.end();
+            }
             textures.end();
             window.end();
         });
@@ -1148,7 +1250,6 @@ impl Renderer {
             fonts,
             window: Window {
                 rect_buffers: std::array::from_fn(|_| InstanceBuffer { buffer: None, capacity: 0 }),
-                glyph_buffers: std::array::from_fn(|_| InstanceBuffer { buffer: None, capacity: 0 }),
                 image_buffers: std::array::from_fn(|_| InstanceBuffer { buffer: None, capacity: 0 }),
                 textures: HashMap::new(),
                 old_textures: HashMap::new(),
@@ -1277,6 +1378,37 @@ impl Renderer {
     pub fn forget_glyphs(&mut self) {
         self.shared.glyphs.borrow_mut().clear();
         self.fonts.clear_shaped_clusters();
+    }
+
+    /// Under memory pressure (roadmap R.5): give back what the next
+    /// frames can make again. The glyph textures, shared by every window,
+    /// start again empty at their starting sizes (every pane of every
+    /// window is built again before its glyphs are drawn), and this
+    /// window's instance buffers and image textures go. Waits for the
+    /// GPU to finish this window's frames first. Returns the bytes given
+    /// back, roughly: what the textures and buffers held.
+    pub fn purge(&mut self) -> usize {
+        self.window.in_flight.wait_idle();
+        let mut freed = 0;
+        let w = &mut self.window;
+        for b in w.rect_buffers.iter_mut().chain(w.image_buffers.iter_mut()) {
+            freed += b.capacity;
+            *b = InstanceBuffer { buffer: None, capacity: 0 };
+        }
+        freed += w
+            .textures
+            .values()
+            .chain(w.old_textures.values())
+            .map(|t| t.width() * t.height() * 4)
+            .sum::<usize>();
+        w.textures.clear();
+        w.old_textures.clear();
+        w.span_textures.clear();
+        let mut cache = self.shared.glyphs.borrow_mut();
+        // Other windows' frames may still sample the textures.
+        cache.in_flight.wait_idle();
+        freed += cache.purge(&self.shared.gpu.device);
+        freed
     }
 
     /// Whether `pane` was built against the glyph textures as they are and

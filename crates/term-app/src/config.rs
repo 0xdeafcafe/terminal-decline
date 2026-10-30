@@ -9,7 +9,7 @@ use term_font::{CellWidth, FontConfig};
 use term_render::Theme;
 
 use crate::keybind::{self, KeybindConfig, Keybinds};
-use crate::theme::{self as themes, Appearance, ThemeChoice};
+use crate::theme::{self as themes, Appearance, AppearanceMode, ThemeChoice};
 
 /// Which Option key acts as Meta (sends ESC + key). Off by default, like
 /// Terminal.app and Ghostty, so Option still types @ [ ] { } | \\ ~ on
@@ -214,6 +214,9 @@ pub struct Config {
     /// Let programs send images by file path or shared memory (kitty's
     /// `t=f`, `t=t` and `t=s`) as well as inline.
     pub image_file_transfer: bool,
+    /// Follow macOS (`"system"`), or always `"light"` or `"dark"`: picks
+    /// the side of a light/dark theme pair.
+    pub appearance: AppearanceMode,
     /// `theme = "name"` or `{ light = "…", dark = "…" }`; see [`crate::theme`].
     pub theme: Option<ThemeChoice>,
     pub colors: Colors,
@@ -262,6 +265,7 @@ impl Default for Config {
             images: true,
             image_memory: 0,
             image_file_transfer: true,
+            appearance: AppearanceMode::System,
             theme: None,
             colors: Colors::default(),
             palettes: Palettes::default(),
@@ -677,9 +681,21 @@ pub fn query_palette(theme: &Theme) -> [u32; 256] {
 
 /// The theme's colours as the terminal's defaults: what colour queries
 /// answer and resets go back to.
-pub fn set_term_colors(t: &mut term_core::Terminal, theme: &Theme) {
+/// Programs are told whether the colours are dark or light (DSR 996, mode
+/// 2031) from the theme's background, so a light theme in dark mode is
+/// reported light. Returns whether a report waits in the terminal's
+/// replies, to be sent to the program.
+pub fn set_term_colors(t: &mut term_core::Terminal, theme: &Theme) -> bool {
     t.set_default_colors(query_colors(theme));
     t.set_default_palette(&query_palette(theme));
+    t.set_dark(is_dark(rgb_of(theme.background)))
+}
+
+/// Whether a background (0xRRGGBB) is dark: its relative luminance under
+/// a half.
+pub fn is_dark(rgb: u32) -> bool {
+    let c = |s: u32| ((rgb >> s) & 0xff) as f64 / 255.0;
+    0.2126 * c(16) + 0.7152 * c(8) + 0.0722 * c(0) < 0.5
 }
 
 /// What a pane draws with: `base` with the colours its program set (OSC
@@ -693,7 +709,13 @@ pub fn program_theme(base: &Theme, t: &term_core::Terminal) -> Option<Theme> {
     }
     let mut theme = base.clone();
     theme.palette = palette.map(term_render::rgb);
-    [theme.foreground, theme.background, theme.cursor] = dynamic.map(term_render::rgb);
+    let [fg, bg, cursor] = dynamic;
+    [theme.foreground, theme.cursor] = [fg, cursor].map(term_render::rgb);
+    // The search hits and the text under the cursor follow the
+    // program's background, so they stay readable on it.
+    if term_render::rgb(bg) != base.background {
+        theme.set_background(bg);
+    }
     Some(theme)
 }
 
@@ -1439,9 +1461,21 @@ mod tests {
         assert_eq!(drawn.palette[2], theme.palette[2]);
         assert_eq!(drawn.foreground, theme.foreground);
         assert_eq!(drawn.selection, theme.selection);
+        assert_ne!(drawn.search_hit, theme.search_hit, "hits follow the program's background");
+        // A new theme (a config reload, the appearance switching): the
+        // program's colours stay on top of it.
+        let mut other = theme.clone();
+        other.palette[2] = term_render::rgb(0x00ff00);
+        other.set_background(0x000000);
+        set_term_colors(&mut t.state, &other);
+        assert!(t.state.take_colors_changed());
+        let drawn = program_theme(&other, &t.state).expect("program colours");
+        assert_eq!(rgb_of(drawn.background), 0x102030);
+        assert_eq!(rgb_of(drawn.palette[1]), 0xff0000);
+        assert_eq!(rgb_of(drawn.palette[2]), 0x00ff00);
         // Resets go back to the theme.
         t.advance(b"\x1b]111\x1b\\\x1b]104\x1b\\");
         assert!(t.state.take_colors_changed());
-        assert_eq!(program_theme(&theme, &t.state), None);
+        assert_eq!(program_theme(&other, &t.state), None);
     }
 }

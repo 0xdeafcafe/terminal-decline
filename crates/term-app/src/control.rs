@@ -57,6 +57,8 @@
 //!   order), as the mouse does;
 //! - `update-check`: a background update check now, as the daily one is
 //!   (nothing while the updater is off; see [`crate::update`]);
+//! - `memory-pressure`: give memory back as a memory-pressure warning
+//!   from macOS does, in every window (see [`crate::memory`]);
 //! - `quit`: quit the app, without asking.
 //!
 //! While this is on, the window draws even when covered by other windows,
@@ -254,6 +256,8 @@ pub enum Control {
     Find(String),
     /// A background update check.
     UpdateCheck,
+    /// Give memory back as a memory-pressure warning does.
+    MemoryPressure,
     Quit,
 }
 
@@ -303,6 +307,7 @@ impl Control {
             "dump" => Control::Dump,
             "quit" => Control::Quit,
             "update-check" => Control::UpdateCheck,
+            "memory-pressure" => Control::MemoryPressure,
             "tab" => Control::Tab,
             "front" => Control::Front,
             "close" => Control::Close,
@@ -466,6 +471,9 @@ pub struct Dump {
     pub background: String,
     /// `phys_footprint` from `task_info`, bytes.
     pub phys_footprint: u64,
+    /// Times memory was given back (memory-pressure warnings and the
+    /// `memory-pressure` command), for the whole app.
+    pub memory_reliefs: u64,
     pub images: ImagesDump,
 }
 
@@ -500,6 +508,8 @@ pub struct PaneDump {
     /// Times its frame was built, and times building it panicked.
     pub builds: u64,
     pub crashes: u32,
+    /// Bytes its history holds (`Terminal::scrollback_bytes`).
+    pub history_bytes: usize,
     /// As [`Dump::screen`].
     pub screen: String,
 }
@@ -591,6 +601,7 @@ mod tests {
         for (text, want) in [
             ("dump", Some(Control::Dump)),
             ("quit", Some(Control::Quit)),
+            ("memory-pressure", Some(Control::MemoryPressure)),
             (" quit ", Some(Control::Quit)),
             ("resize 80 24", Some(Control::Resize { cols: 80, lines: 24 })),
             ("resize 80", None),

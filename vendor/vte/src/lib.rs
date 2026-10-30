@@ -125,6 +125,15 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
                 State::ApcString | State::DcsPassthrough | State::OscString => {
                     i += self.advance_string(performer, &bytes[i..])
                 },
+                State::Escape if bytes[i] == b'[' => {
+                    self.reset_params();
+                    self.state = State::CsiEntry;
+                    i += 1;
+                    i += self.advance_csi_run(performer, &bytes[i..]);
+                },
+                State::CsiEntry | State::CsiParam if Self::csi_run_byte(bytes[i]) => {
+                    i += self.advance_csi_run(performer, &bytes[i..]);
+                },
                 _ => {
                     // Inlining it results in worse codegen.
                     let byte = bytes[i];
@@ -133,6 +142,61 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
                 },
             }
         }
+    }
+
+    /// [`Self::advance`] without the CSI fast path, for tests to compare
+    /// against.
+    #[cfg(test)]
+    fn advance_reference<P: Perform>(&mut self, performer: &mut P, bytes: &[u8]) {
+        let mut i = 0;
+        if self.partial_utf8_len != 0 {
+            i += self.advance_partial_utf8(performer, bytes);
+        }
+        while i != bytes.len() {
+            match self.state {
+                State::Ground => i += self.advance_ground(performer, &bytes[i..]),
+                State::ApcString | State::DcsPassthrough | State::OscString => {
+                    i += self.advance_string(performer, &bytes[i..])
+                },
+                _ => {
+                    self.change_state(performer, bytes[i]);
+                    i += 1;
+                },
+            }
+        }
+    }
+
+    /// Whether [`Self::advance_csi_run`] takes `byte` in CSI entry or
+    /// parameter state: digits, `;`, `:` and final bytes.
+    #[inline(always)]
+    fn csi_run_byte(byte: u8) -> bool {
+        matches!(byte, b'0'..=b';' | 0x40..=0x7E)
+    }
+
+    /// The CSI fast path: in CSI entry or parameter state, take digits,
+    /// `;`, `:` and a final byte in a tight loop, with the same actions the
+    /// state machine would run for them, and stop at the first other byte
+    /// (a private marker, an intermediate, a control) for the state
+    /// machine to handle. Returns the bytes used; the state is left as the
+    /// state machine would leave it.
+    #[inline(always)]
+    fn advance_csi_run<P: Perform>(&mut self, performer: &mut P, bytes: &[u8]) -> usize {
+        let mut i = 0;
+        while let Some(&byte) = bytes.get(i) {
+            match byte {
+                b'0'..=b'9' => self.action_paramnext(byte),
+                b':' => self.action_subparam(),
+                b';' => self.action_param(),
+                0x40..=0x7E => {
+                    self.action_csi_dispatch(performer, byte);
+                    return i + 1;
+                },
+                _ => return i,
+            }
+            self.state = State::CsiParam;
+            i += 1;
+        }
+        i
     }
 
     /// Partially advance the parser state.
@@ -162,6 +226,15 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
                 State::Ground => i += self.advance_ground(performer, &bytes[i..]),
                 State::ApcString | State::DcsPassthrough | State::OscString => {
                     i += self.advance_string(performer, &bytes[i..])
+                },
+                State::Escape if bytes[i] == b'[' => {
+                    self.reset_params();
+                    self.state = State::CsiEntry;
+                    i += 1;
+                    i += self.advance_csi_run(performer, &bytes[i..]);
+                },
+                State::CsiEntry | State::CsiParam if Self::csi_run_byte(bytes[i]) => {
+                    i += self.advance_csi_run(performer, &bytes[i..]);
                 },
                 _ => {
                     // Inlining it results in worse codegen.
@@ -1951,6 +2024,51 @@ mod tests {
                 parser.advance(&mut split, &[*b]);
             }
             assert_eq!(whole.dispatched, split.dispatched, "{input:?}");
+        }
+    }
+
+    /// The CSI fast path gives the actions the state machine alone gives,
+    /// whole or one byte at a time: private markers, intermediates,
+    /// controls, ESC, CAN and too many parameters inside a CSI included.
+    #[test]
+    fn csi_fast_path_matches_the_state_machine() {
+        let mut inputs: Vec<Vec<u8>> = [
+            &b"\x1b[38;5;123mab\x1b[0m \x1b[48:2::1:2:3m\x1b[m\x1b[;m\x1b[1;;2H"[..],
+            b"\x1b[?25h\x1b[?1049;2004l\x1b[>4;1m\x1b[1?2m\x1b[1 q\x1b[ 2q",
+            b"\x1b[3\n1m\x1b[2\x1b[3m\x1b[4\x18m\x1b[5\x1am\x1b[\x7f6m\x1b[7\x7fm",
+            b"\x1b[1;2;3;4;5;6;7;8;9;10;11;12;13;14;15;16;17;18;19;20;21;22;23;24;25;26;27;28;29;30;31;32;33m",
+            b"\x1b[1:2:3:4:5:6:7:8:9:10:11:12:13:14:15:16:17:18:19:20:21:22:23:24:25:26:27:28:29:30:31:32:33m",
+            b"\x1b[99999999999m\x1b[0\x9bm\x1b[1\xc3\xa9m\x1b[",
+        ]
+        .iter()
+        .map(|s| s.to_vec())
+        .collect();
+        // Random strings over the bytes that matter in a CSI.
+        let alphabet = b"\x1b[0123456789;:m?> !\x07\n\x18\x7fHJ\\]";
+        let mut x = 0x2545_f491_4f6c_dd1du64;
+        for _ in 0..2000 {
+            let mut s = Vec::new();
+            for _ in 0..(x % 40) {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                s.push(alphabet[(x % alphabet.len() as u64) as usize]);
+            }
+            inputs.push(s);
+        }
+        for input in &inputs {
+            let mut reference = Dispatcher::default();
+            let mut parser = Parser::new();
+            parser.advance_reference(&mut reference, input);
+            let mut whole = Dispatcher::default();
+            Parser::new().advance(&mut whole, input);
+            assert_eq!(reference.dispatched, whole.dispatched, "{input:?}");
+            let mut split = Dispatcher::default();
+            let mut parser = Parser::new();
+            for b in input.iter() {
+                parser.advance(&mut split, &[*b]);
+            }
+            assert_eq!(reference.dispatched, split.dispatched, "{input:?}");
         }
     }
 

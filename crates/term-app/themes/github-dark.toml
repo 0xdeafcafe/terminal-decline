@@ -1,0 +1,15 @@
+# GitHub Dark, by GitHub (Primer): https://github.com/primer/github-vscode-theme
+# Copyright (c) 2018 GitHub Inc. MIT licence. ANSI colours from
+# @primer/primitives 7.16.0 (MIT),
+# https://cdn.jsdelivr.net/npm/@primer/primitives@7.16.0/dist/json/colors/dark.json,
+# as used by
+# https://raw.githubusercontent.com/primer/github-vscode-theme/main/src/theme.js;
+# selection is accent.fg at 20% over the background, as in that file.
+foreground = "#e6edf3"
+background = "#0d1117"
+cursor = "#e6edf3"
+selection = "#142744"
+palette = [
+    "#484f58", "#ff7b72", "#3fb950", "#d29922", "#58a6ff", "#bc8cff", "#39c5cf", "#b1bac4",
+    "#6e7681", "#ffa198", "#56d364", "#e3b341", "#79c0ff", "#d2a8ff", "#56d4dd", "#ffffff",
+]

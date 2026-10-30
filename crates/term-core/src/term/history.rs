@@ -227,6 +227,13 @@ impl Unit {
         }
     }
 
+    /// Row `r`'s `wrapped` and fill flag, as [`row`](Self::row) gives
+    /// them, without emitting it.
+    pub(super) fn row_flags(&self, r: usize) -> (bool, bool) {
+        let last = r + 1 == self.starts.len();
+        (!last || self.continues, self.fill && last)
+    }
+
     /// Row `r`, laid out `cols` wide.
     pub(super) fn row(&self, r: usize, cols: usize) -> (Row, bool) {
         let mut row = emit_row(&self.flat, self.len, &self.starts, cols, r);

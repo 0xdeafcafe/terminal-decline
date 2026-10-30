@@ -1,0 +1,14 @@
+# Ayu Mirage, by Ike Kurghinyan: https://github.com/ayu-theme/ayu-colors
+# Copyright (c) 2016 Ike Kurghinyan. MIT licence. Colours from the
+# terminal.* and editor.* entries of
+# https://raw.githubusercontent.com/ayu-theme/vscode-ayu/master/ayu-mirage.json
+# (MIT); selection is editor.selectionBackground blended over the
+# background.
+foreground = "#cccac2"
+background = "#1f2430"
+cursor = "#ffcc66"
+selection = "#274364"
+palette = [
+    "#171b24", "#f28273", "#87d96c", "#fcca60", "#6acdff", "#ddbbff", "#93e2c8", "#c7c7c7",
+    "#686868", "#f28779", "#d5ff80", "#ffcd66", "#73d0ff", "#dfbfff", "#95e6cb", "#ffffff",
+]

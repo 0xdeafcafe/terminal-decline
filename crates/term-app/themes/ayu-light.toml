@@ -1,0 +1,14 @@
+# Ayu Light, by Ike Kurghinyan: https://github.com/ayu-theme/ayu-colors
+# Copyright (c) 2016 Ike Kurghinyan. MIT licence. Colours from the
+# terminal.* and editor.* entries of
+# https://raw.githubusercontent.com/ayu-theme/vscode-ayu/master/ayu-light.json
+# (MIT); selection is editor.selectionBackground blended over the
+# background.
+foreground = "#5c6166"
+background = "#f8f9fa"
+cursor = "#f29718"
+selection = "#d3e1f5"
+palette = [
+    "#000000", "#f06b6c", "#6cbf43", "#e7a100", "#21a1e2", "#a176cb", "#4abc96", "#c7c7c7",
+    "#686868", "#f07171", "#86b300", "#eba400", "#22a4e6", "#a37acc", "#4cbf99", "#d1d1d1",
+]

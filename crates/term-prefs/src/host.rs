@@ -15,6 +15,30 @@ pub struct Checked {
     /// TUI can pick colours that stay readable on them.
     pub foreground: Option<u32>,
     pub background: Option<u32>,
+    /// The 16 ANSI colours in effect, for the TUI's accent and the preview.
+    pub palette: Vec<u32>,
+}
+
+/// A theme, for showing in the list: its name for people and its colours.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ThemeInfo {
+    /// `Rosé Pine Dawn` for `rose-pine-dawn`.
+    pub title: String,
+    pub foreground: u32,
+    pub background: u32,
+    /// The 16 ANSI colours (fewer if the theme sets fewer).
+    pub palette: Vec<u32>,
+    /// The theme made as its other half: the dark one for a light theme
+    /// and the other way round (`rose-pine` for `rose-pine-dawn`).
+    pub partner: Option<String>,
+}
+
+impl ThemeInfo {
+    /// Whether the background is dark (relative luminance under a half).
+    pub fn is_dark(&self) -> bool {
+        let c = |s: u32| ((self.background >> s) & 0xff) as f64 / 255.0;
+        0.2126 * c(16) + 0.7152 * c(8) + 0.0722 * c(0) < 0.5
+    }
 }
 
 /// An installed font family.
@@ -70,6 +94,12 @@ pub trait Host {
 
     /// The theme names: built-in and in the themes folder.
     fn themes(&self) -> Vec<String>;
+
+    /// Theme `name`'s title and colours, if it loads.
+    fn theme_info(&self, name: &str) -> Option<ThemeInfo> {
+        let _ = name;
+        None
+    }
 
     /// A chord in its canonical spelling (`ctrl+alt+shift+cmd+k`), or why
     /// it isn't one.
@@ -146,7 +176,14 @@ impl Fake {
     }
 }
 
-pub const FAKE_DEFAULTS: &str = r#"font_family = "Menlo"
+/// The fake's colours: Terminal Decline's defaults.
+pub const FAKE_PALETTE: [u32; 16] = [
+    0x1d1f21, 0xcc6666, 0xb5bd68, 0xf0c674, 0x81a2be, 0xb294bb, 0x8abeb7, 0xc5c8c6, //
+    0x666666, 0xd54e53, 0xb9ca4a, 0xe7c547, 0x7aa6da, 0xc397d8, 0x70c0b1, 0xeaeaea,
+];
+
+pub const FAKE_DEFAULTS: &str = r#"appearance = "system"
+font_family = "Menlo"
 font_size = 13.0
 font_fallback = []
 line_height = 1.0
@@ -227,6 +264,7 @@ impl Host for Fake {
             notices,
             foreground: Some(0xd8dee9),
             background: Some(background.unwrap_or(0x16181c)),
+            palette: FAKE_PALETTE.to_vec(),
         }
     }
 
@@ -241,6 +279,24 @@ impl Host for Fake {
 
     fn themes(&self) -> Vec<String> {
         self.themes.clone()
+    }
+
+    fn theme_info(&self, name: &str) -> Option<ThemeInfo> {
+        let (title, bg, partner) = match name {
+            "slope-dark" => ("Slope Dark", 0x092d2b, Some("slope-light")),
+            "slope-light" => ("Slope Light", 0xf3f3eb, Some("slope-dark")),
+            "solarized-dark" => ("Solarized Dark", 0x002b36, None),
+            "tokyo-night" => ("Tokyo Night", 0x1a1b26, None),
+            _ => return None,
+        };
+        let fg = if bg > 0x808080 { 0x1a1a1a } else { 0xe8e8e8 };
+        Some(ThemeInfo {
+            title: title.into(),
+            foreground: fg,
+            background: bg,
+            palette: FAKE_PALETTE.to_vec(),
+            partner: partner.map(String::from),
+        })
     }
 
     fn parse_chord(&self, text: &str) -> Result<String, String> {

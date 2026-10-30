@@ -15,9 +15,33 @@ signing, notarization and the in-app updater need the Apple and Sparkle
 secrets, which are not set up yet, so builds are ad-hoc signed for now.
 What `0.1.0` needs is in [docs/release-checklist.md](docs/release-checklist.md);
 the road to 1.0 (performance work, the measured comparison with
-Ghostty) is in [docs/roadmap.md](docs/roadmap.md). The
-speed and memory goals are goals: published numbers will come with the
-beta, not before.
+Ghostty) is in [docs/roadmap.md](docs/roadmap.md). The first measured
+comparison is below; the roadmap's targets against Ghostty are not all met
+yet.
+
+## Benchmarks
+
+30 October 2026, Apple M1 Max, macOS 27.0. Terminal Decline at 6a38c0b
+(release build), Ghostty 1.4.0, kitty 0.49.2, Warp 0.2026.10.21.08.25.02,
+Terminal.app 2.15. Menlo 13, 100×30 cells, 10k lines of scrollback, one
+window; memory is macOS physical footprint summed over all the terminal's
+processes; medians of 3–4 interleaved runs on a Mac with other builds
+running (load 1.7–10). Details, spreads and caveats:
+[docs/comparison-2026-10-30.md](docs/comparison-2026-10-30.md); script:
+[scripts/compare/run.py](scripts/compare/run.py).
+
+| | idle memory | after 10k lines | 4 tabs | idle CPU | idle wakeups/s | `cat` 100 MB time | `cat` CPU (incl. WindowServer) |
+|---|---|---|---|---|---|---|---|
+| Terminal Decline | 31.5 MB | 39 MB | 63 MB | 0.02% | 0.4 | 0.61 s | 0.62 s |
+| Ghostty | 67 MB | 68 MB | 98 MB | 0.64% | 16 | **0.53 s** | 1.68 s |
+| kitty | 109 MB | 140 MB | 115 MB | 0.13% | 23 | 0.95 s | 1.31 s |
+| Warp | 333 MB | 310 MB | 332 MB | 1.11% | 62 | 3.59 s | 4.38 s |
+| Terminal.app | 48 MB | 64 MB | 139 MB | 0.03% | 0.7 | 3.97 s | 4.62 s |
+
+Ghostty finishes the `cat` a little sooner. Idle CPU and wakeups are low
+but not yet zero, and memory is 47–64% of Ghostty's, short of the 35%
+target. Input latency was not measured (the probe needs Accessibility and
+Screen Recording).
 
 ## Install
 
@@ -29,22 +53,35 @@ beta, not before.
 brew install --cask 0xdeafcafe/tap/terminal-decline
 ```
 
-**From source**, as the bare command, with no app bundle (so no Dock pins
-made from the app, and no updater):
+**From source, as a macOS app.** You need Rust (`rustup`, stable) and
+the Xcode command line tools (`xcode-select --install`; the full Xcode
+adds the Metal compiler, otherwise shaders compile at start). Then:
+
+```sh
+git clone https://github.com/0xdeafcafe/terminal-decline
+cd terminal-decline
+scripts/dogfood.sh --open
+```
+
+This builds a release, makes the app bundle (launcher, library and pin
+stub), signs it and installs it as `~/Applications/Terminal Decline.app`,
+then opens it. Drag it to the Dock to keep it there.
+
+- To install somewhere else: `DECLINE_DOGFOOD_DIR=/Applications scripts/dogfood.sh --open`.
+- To update: `git pull`, then `scripts/dogfood.sh` again. A running copy
+  restarts into the new build and reopens its windows in the same folders
+  and places.
+- It is signed ad-hoc, so macOS asks again for permissions (files,
+  notifications) after each rebuild. To keep them, sign with your own
+  certificate: `DECLINE_DOGFOOD_IDENTITY="Developer ID Application: …" scripts/dogfood.sh`.
+- The in-app updater stays off in these builds: updating is `git pull`.
+
+**From source, as the bare command** (no app bundle, so no Dock pins made
+from the app and no updater):
 
 ```sh
 cargo install --locked --git https://github.com/0xdeafcafe/terminal-decline terminal-decline
 ```
-
-**For development**, build the app bundle and install it as
-`~/Applications/Terminal Decline.app`:
-
-```sh
-scripts/dogfood.sh --open
-```
-
-Run it again after a change: a running copy restarts into the new build
-and reopens its windows in the same folders and places.
 
 macOS 14 (Sonoma) or later. Releases are Apple Silicon only; source builds
 are tested on Apple Silicon. MIT licensed.

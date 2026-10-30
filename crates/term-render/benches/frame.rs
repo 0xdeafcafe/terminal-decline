@@ -367,6 +367,83 @@ fn bench(c: &mut Criterion) {
             })
         });
     }
+    // Scrolled back and still (roadmap R.3): every row is history, kept
+    // from the frame before. At the width it was written and, after the
+    // window narrowed, reflowed.
+    for (name, cols, lines, colours) in [cases[1], cases[2]] {
+        for narrowed in [false, true] {
+            let mut t = Term::new(cols, lines, 10_000, term_core::ImagePool::process());
+            let mut s = String::new();
+            for l in 0..lines * 3 {
+                line(l, cols, colours, &mut s);
+                s.push_str("\x1b[0m\r\n");
+            }
+            t.advance(s.as_bytes());
+            if narrowed {
+                t.state.resize(cols - 7, lines);
+            }
+            t.state.scroll_view(lines as isize * 2);
+            let mut frame = Frame::default();
+            frame.build(&mut t.state, &input, &mut Cached);
+            let what = if narrowed {
+                "history reflowed unchanged"
+            } else {
+                "history unchanged"
+            };
+            c.bench_function(&format!("frame {name} {what}"), |b| {
+                b.iter(|| {
+                    frame.build(&mut t.state, black_box(&input), &mut Cached);
+                    black_box(frame.glyphs.len())
+                })
+            });
+        }
+    }
+    // A sparse screen (roadmap R.2): a shell at 203×50, short coloured
+    // lines with blank ends. Every row changed, nothing changed, and the
+    // prompt line typed into.
+    {
+        let (cols, lines) = (203, 50);
+        let mut t = Term::new(cols, lines, 1000, term_core::ImagePool::process());
+        let mut s = String::new();
+        for l in 0..lines - 1 {
+            match l % 3 {
+                0 => s.push_str(&format!("\x1b[1;32m~/src/project\x1b[0m \x1b[34mmain\x1b[0m $ ls -la {l}")),
+                1 => s.push_str("drwxr-xr-x  12 alex  staff   384 Oct 30 09:12 crates"),
+                _ => s.push_str(&"-rw-r--r--   1 alex  staff  1078 Oct 30 09:12 Cargo.toml"[..(20 + l % 37)]),
+            }
+            s.push_str("\r\n");
+        }
+        s.push_str("\x1b[1;32m~/src/project\x1b[0m $ ");
+        t.advance(s.as_bytes());
+        let mut frame = Frame::default();
+        c.bench_function("frame 203x50 sparse", |b| {
+            b.iter(|| {
+                frame.forget_rows();
+                frame.build(&mut t.state, black_box(&input), &mut Cached);
+                black_box(frame.glyphs.len())
+            })
+        });
+        c.bench_function("frame 203x50 sparse unchanged", |b| {
+            b.iter(|| {
+                frame.build(&mut t.state, black_box(&input), &mut Cached);
+                black_box(frame.glyphs.len())
+            })
+        });
+        let mut i = 0usize;
+        c.bench_function("frame 203x50 sparse one row", |b| {
+            b.iter(|| {
+                i += 1;
+                // Typing, then clearing the line now and then.
+                if i.is_multiple_of(40) {
+                    t.advance(b"\r\x1b[K\x1b[1;32m~/src/project\x1b[0m $ ");
+                } else {
+                    t.advance(&[b'a' + (i % 26) as u8]);
+                }
+                frame.build(&mut t.state, black_box(&input), &mut Cached);
+                black_box(frame.glyphs.len())
+            })
+        });
+    }
     // One window, one 160×48 pane or four 80×24 panes (splits design
     // §3.4): the same cells, four terminals and frames.
     let mut t = screen(160, 48, Colours::Coloured);

@@ -3,15 +3,17 @@
 #
 # Marks each prompt, command line, command output and exit status with
 # OSC 133 (A, B, C, D;status), so Cmd+Up / Cmd+Down jump between prompts
-# and Shift+Cmd+A selects a command's output. Other terminals that know
-# OSC 133 use the same marks; those that don't ignore them.
+# and Shift+Cmd+A selects a command's output, and reports the folder
+# with OSC 7. Other terminals that know OSC 133 use the same marks;
+# those that don't ignore them.
 #
-# Source it at the end of ~/.bashrc (or ~/.bash_profile), after anything
-# that sets PS1 or PROMPT_COMMAND:
+# The app loads it by itself (shell_integration = true), after the
+# startup files bash reads. Otherwise source it at the end of ~/.bashrc
+# (or ~/.bash_profile), after anything that sets PS1 or PROMPT_COMMAND:
 #
 #     source /path/to/decline.bash
 #
-# Bash 4.4 and later mark a command's start from PS0. Before 4.4 there is
+# Loading it twice does nothing the second time. Bash 4.4 and later mark a command's start from PS0. Before 4.4 there is
 # no PS0, so the DEBUG trap does it, replacing any DEBUG trap already
 # set. See docs/shell-integration.md.
 
@@ -37,9 +39,25 @@ _decline_status() {
   return $ret
 }
 
-# Last in PROMPT_COMMAND: the prompt marks, put back each time in case
-# something rebuilt PS1.
+# The folder, as a file:// URL with everything but letters, digits and
+# /._~- percent-encoded byte by byte.
+_decline_cwd() {
+  local LC_ALL=C LC_CTYPE=C i ch hex url=
+  for (( i = 0; i < ${#PWD}; i++ )); do
+    ch=${PWD:i:1}
+    case $ch in
+      [/._~A-Za-z0-9-]) url+=$ch ;;
+      # Bash 3.2 sign-extends bytes over 127: the last two digits.
+      *) printf -v hex '%02X' "'$ch"; url+=%${hex:${#hex}-2} ;;
+    esac
+  done
+  printf '\e]7;file://%s%s\a' "$HOSTNAME" "$url"
+}
+
+# Last in PROMPT_COMMAND: the folder, and the prompt marks, put back
+# each time in case something rebuilt PS1.
 _decline_prompt() {
+  _decline_cwd
   PS1=${PS1//"$_decline_a"/}
   PS1=${PS1//"$_decline_b"/}
   PS1=$_decline_a$PS1$_decline_b

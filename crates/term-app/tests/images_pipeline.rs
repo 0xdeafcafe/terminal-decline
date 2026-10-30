@@ -56,6 +56,7 @@ fn show(dir: &std::path::Path, stream: &[u8], want: usize) -> (Session, Snapshot
         env: vec![("HOME".into(), dir.to_str().unwrap().into())],
         shell: Some("/bin/sh".into()),
         direct: false,
+        integration: None,
     };
     let woken = Arc::new(AtomicBool::new(false));
     let w = woken.clone();

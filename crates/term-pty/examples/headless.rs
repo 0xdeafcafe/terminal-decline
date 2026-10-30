@@ -180,6 +180,7 @@ fn main() {
         env: vec![("ENV".into(), String::new())],
         shell: Some("/bin/sh".into()),
         direct: false,
+        integration: None,
     };
     let pty = Pty::spawn(&cmd, size).expect("spawn");
     let child = pty.child();

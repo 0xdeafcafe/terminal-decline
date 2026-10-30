@@ -920,6 +920,7 @@ impl AppDelegate {
                 env: config.env.clone().into_iter().collect(),
                 shell: None,
                 direct: false,
+                integration: None,
             },
         };
         if let Some(dir) = &command.cwd {

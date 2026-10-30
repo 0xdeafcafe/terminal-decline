@@ -2,14 +2,17 @@
 #
 # Marks each prompt, command line, command output and exit status with
 # OSC 133 (A, B, C, D;status), so Cmd+Up / Cmd+Down jump between prompts
-# and Shift+Cmd+A selects a command's output. Other terminals that know
-# OSC 133 use the same marks; those that don't ignore them.
+# and Shift+Cmd+A selects a command's output, and reports the folder
+# with OSC 7. Other terminals that know OSC 133 use the same marks;
+# those that don't ignore them.
 #
-# Source it from ~/.config/fish/config.fish:
+# The app loads it by itself (shell_integration = true), before
+# config.fish. Otherwise source it from ~/.config/fish/config.fish:
 #
 #     source /path/to/decline.fish
 #
-# See docs/shell-integration.md.
+# Loading it twice does nothing the second time. See
+# docs/shell-integration.md.
 
 status is-interactive; or exit 0
 set -q __decline_integration; and exit 0
@@ -21,6 +24,11 @@ end
 
 function __decline_postexec --on-event fish_postexec
     printf '\e]133;D;%s\a' $status
+end
+
+# The folder, before each prompt.
+function __decline_cwd --on-event fish_prompt
+    printf '\e]7;file://%s%s\a' (prompt_hostname) (string escape --style=url -- $PWD)
 end
 
 # A before the prompt and B after it. fish_prompt is wrapped when the

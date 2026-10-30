@@ -2806,6 +2806,7 @@ fn shell_command(config: &Config) -> Command {
         env: config.env.clone().into_iter().collect(),
         shell: None,
         direct: false,
+        integration: None,
     }
 }
 

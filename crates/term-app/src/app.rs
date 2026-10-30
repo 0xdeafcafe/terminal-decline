@@ -121,7 +121,19 @@ define_class!(
             // The updater (docs/design/updater.md): off in pins, dogfood,
             // nightly and ad-hoc builds; on, the app menu gains Check for
             // Updates….
-            if crate::update::sparkle::start(&self.ivars().role, self.ivars().config.borrow().update) {
+            let mode = self.ivars().config.borrow().update;
+            let sparkle = crate::update::sparkle::start(&self.ivars().role, mode.on());
+            let source = crate::update::dogfood::start(&self.ivars().role, mode);
+            // "Updated to …" after an update of either kind.
+            if sparkle {
+                crate::update::announce::at_launch(
+                    crate::update::announce::Build::Release(crate::update::sparkle::own_version()),
+                    None,
+                );
+            } else if let Some(src) = crate::update::dogfood::source() {
+                crate::update::announce::at_launch(crate::update::announce::Build::Source(src.commit), Some(src.repo));
+            }
+            if sparkle || source {
                 let menus = build_menus(mtm, &self.ivars().app_name, &self.ivars().config.borrow().keybinds());
                 NSApplication::sharedApplication(mtm).setMainMenu(Some(&menus));
             }
@@ -191,6 +203,9 @@ define_class!(
         #[unsafe(method(applicationDidBecomeActive:))]
         fn did_become_active(&self, _n: &NSNotification) {
             secure_input::apply(self.ivars().secure.borrow_mut().set_active(true));
+            if let Some(v) = self.key_view() {
+                crate::notify::seen(MainThreadMarker::from(self), v.id());
+            }
             let views: Vec<_> = self.ivars().windows.borrow().iter().map(|(_, v)| v.clone()).collect();
             for v in views {
                 v.refresh_shared_find();
@@ -242,7 +257,17 @@ define_class!(
         /// Terminal Decline > Check for Updates….
         #[unsafe(method(checkForUpdates:))]
         fn check_for_updates(&self, _sender: Option<&AnyObject>) {
-            crate::update::sparkle::check_now();
+            if crate::update::sparkle::menu_shown() {
+                crate::update::sparkle::check_now();
+            } else {
+                crate::update::dogfood::check_now();
+            }
+        }
+
+        /// Terminal Decline > Update to Latest (builds from source).
+        #[unsafe(method(updateToLatest:))]
+        fn update_to_latest(&self, _sender: Option<&AnyObject>) {
+            crate::update::dogfood::update_now();
         }
 
         /// Terminal Decline > Settings… (Cmd+,).
@@ -405,7 +430,8 @@ impl AppDelegate {
         }
         let settings_open = self.ivars().settings.borrow().is_some();
         shown.retain(|n| !settings_open && !before.contains(n));
-        crate::update::sparkle::set_setting(config.update);
+        crate::update::sparkle::set_setting(config.update.on());
+        crate::update::dogfood::set_mode(config.update);
         if old.appearance != config.appearance {
             // Each window's view hears of it (viewDidChangeEffectiveAppearance).
             apply_appearance(MainThreadMarker::from(self), config.appearance);
@@ -1245,14 +1271,22 @@ pub fn build_menus(mtm: MainThreadMarker, app_name: &str, binds: &Keybinds) -> R
         &bar,
         app_name,
         &[
-            // Only while the updater runs (docs/design/updater.md §3.4).
-            match crate::update::sparkle::menu_shown() {
-                true => [
+            // Only while an updater runs (docs/design/updater.md §3.4, §11).
+            match (crate::update::sparkle::menu_shown(), crate::update::dogfood::shown()) {
+                (true, _) => [
                     b(MenuAction::CheckForUpdates.label(), MenuAction::CheckForUpdates),
                     vec![NSMenuItem::separatorItem(mtm)],
                 ]
                 .concat(),
-                false => Vec::new(),
+                (false, true) => [
+                    b(MenuAction::CheckForUpdates.label(), MenuAction::CheckForUpdates),
+                    vec![
+                        item(mtm, "Update to Latest", Some(sel!(updateToLatest:)), ""),
+                        NSMenuItem::separatorItem(mtm),
+                    ],
+                ]
+                .concat(),
+                (false, false) => Vec::new(),
             },
             b(MenuAction::Settings.label(), MenuAction::Settings),
             vec![
@@ -1374,7 +1408,10 @@ pub fn run(
     let mtm = MainThreadMarker::new().expect("must run on the main thread");
     // Under the test control, in the background (see `crate::background`).
     let app = crate::background::shared_application(mtm);
-    crate::notify::on_click(crate::view::bring_to_front);
+    crate::notify::on_click(crate::view::show_pane);
+    crate::notify::on_button(|b| match b {
+        crate::notify::Button::Update => crate::update::dogfood::update_now(),
+    });
     let menus = build_menus(mtm, app_name, &config.keybinds());
     let delegate = AppDelegate::new(mtm, config, notices, restore, origin, app_name, role);
     app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));

@@ -421,8 +421,10 @@ pub struct Dump {
     pub notifications: crate::notify::Stats,
     /// Whether a sheet (the question `confirm_close` asks) is showing.
     pub sheet: bool,
-    /// The Dock icon's badge (progress).
+    /// The Dock icon's badge (progress, else unseen notifications).
     pub badge: Option<String>,
+    /// The window's (tab's) title.
+    pub title: String,
     /// Whether the app is active, and whether it holds Secure Keyboard
     /// Entry (only while active, when turned on).
     pub active: bool,

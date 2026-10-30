@@ -46,6 +46,26 @@ pub struct Notification {
     pub body: String,
 }
 
+/// A command's start or end, as the shell's OSC 133 marks say.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Command {
+    /// `133;A`: the shell shows its prompt.
+    Prompt,
+    /// `133;C`: the command line was run. Its text, from the B mark to
+    /// the cursor (its first line, trimmed), if the B mark was seen and
+    /// is still on the screen.
+    Started(Option<String>),
+    /// `133;D`: the command finished, with its exit status if the shell
+    /// gave one.
+    Finished(Option<u32>),
+}
+
+/// The most [`Command`]s kept until taken; older ones are dropped.
+const COMMANDS_KEPT: usize = 16;
+
+/// The longest command text kept, in characters.
+const COMMAND_TEXT_MAX: usize = 200;
+
 /// Progress a program reported with OSC 9;4 (ConEmu's form): a percentage
 /// from 0 to 100 where the state has one.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -398,6 +418,12 @@ pub struct Terminal {
     /// A notification (OSC 9 / OSC 777) and progress (OSC 9;4) not yet taken.
     notification: Option<Notification>,
     progress: Option<Progress>,
+    /// What the shell's OSC 133 C and D marks said about its commands
+    /// since the last [`Terminal::take_commands`], oldest first.
+    commands: Vec<Command>,
+    /// Where the last OSC 133 B mark put the command line: its buffer
+    /// line and column, for the command's text at the C mark.
+    input_at: Option<(u64, usize)>,
     /// The program's working directory, if it reports it (OSC 7).
     cwd: Option<String>,
     /// The palette and foreground, background and cursor colours: the
@@ -546,6 +572,8 @@ impl Terminal {
             clipboard: None,
             notification: None,
             progress: None,
+            commands: Vec::new(),
+            input_at: None,
             cwd: None,
             colors: Box::new(replies::ColorTable::new([0xd8dee9, 0x16181c, 0xd8dee9])),
             colors_changed: false,
@@ -765,6 +793,12 @@ impl Terminal {
     /// The last progress a program reported (OSC 9;4).
     pub fn take_progress(&mut self) -> Option<Progress> {
         self.progress.take()
+    }
+
+    /// The commands the shell started and finished (OSC 133 C and D)
+    /// since the last call, oldest first.
+    pub fn take_commands(&mut self) -> Vec<Command> {
+        std::mem::take(&mut self.commands)
     }
 
     /// The program's working directory, if it reports it (OSC 7).
@@ -1679,6 +1713,51 @@ impl Terminal {
         };
         let col = self.cursor.col.min(u16::MAX as usize) as u16;
         self.screen[self.cursor.row].set_mark(Mark { kind, col, status });
+        let here = (self.top_line + self.cursor.row as u64, self.cursor.col);
+        let command = match kind {
+            MarkKind::Input => {
+                self.input_at = Some(here);
+                None
+            }
+            MarkKind::Output => Some(Command::Started(
+                self.input_at.take().and_then(|from| self.command_text(from, here)),
+            )),
+            MarkKind::End => Some(Command::Finished(status)),
+            MarkKind::Prompt => Some(Command::Prompt),
+        };
+        if let Some(c) = command {
+            if self.commands.len() == COMMANDS_KEPT {
+                self.commands.remove(0);
+            }
+            self.commands.push(c);
+        }
+    }
+
+    /// The command line typed between `from` (the B mark) and `to` (the
+    /// C mark), both buffer lines and columns on the screen: its first
+    /// line, trimmed, at most [`COMMAND_TEXT_MAX`] characters.
+    fn command_text(&self, from: (u64, usize), to: (u64, usize)) -> Option<String> {
+        if to.0 < from.0 || self.screen_line(from.0).is_none() {
+            return None;
+        }
+        let mut out = String::new();
+        for line in from.0..=to.0 {
+            let Some(row) = self.screen_line(line) else { break };
+            let start = if line == from.0 { from.1 } else { 0 };
+            let end = if line == to.0 { to.1 } else { row.cells.len() };
+            for col in start..end.min(row.cells.len()) {
+                let before = out.len();
+                row.text_at(col, &mut out);
+                if out.len() == before && !row.get(col).is_spacer() {
+                    out.push(' ');
+                }
+            }
+            if line != to.0 && !row.wrapped {
+                out.push('\n');
+            }
+        }
+        let first = out.trim_start().lines().next().unwrap_or("").trim_end();
+        (!first.is_empty()).then(|| first.chars().take(COMMAND_TEXT_MAX).collect())
     }
 
     fn save_cursor(&mut self) {

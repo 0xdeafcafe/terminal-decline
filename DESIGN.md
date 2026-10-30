@@ -10,7 +10,9 @@ any command as its own Dock app.
   changes. Cursor blink (when an app asks for it) is the only timer of our
   own, and it stops when the window is hidden or unfocused. Sparkle keeps
   one daily wall-clock timer for the update check (docs/design/updater.md
-  §4).
+  §4); a build from source checks its checkout every four hours with a
+  one-shot timer (§11). The title's clock (below, Notifications) ticks
+  only while a command runs in a window that can be seen.
 - **Small memory.** Measured as macOS *physical footprint* (what Activity
   Monitor shows; RSS misses GPU surfaces), compared at the same window pixel
   size. The two window drawables are unavoidable (~6.6 MB each at
@@ -445,15 +447,42 @@ The product's name in these strings is `PRODUCT_NAME` in the code and
 
 ## Notifications and progress
 
-- `ESC ] 9 ; body BEL` (iTerm2's form; the title is the window's) and
-  `ESC ] 777 ; notify ; title ; body BEL` (rxvt's) post a macOS
-  notification through `UNUserNotificationCenter` when their window or tab
-  isn't the one in front (app inactive, or another window or tab key). In
-  front, nothing is shown. term-core keeps the latest one not yet taken, so
-  several in one parse slice give one notification (a flood can't bury the
-  screen in banners). Permission is asked once, on the first notification;
-  notifications wait for the answer. A click brings that window or tab to
-  the front (the request's identifier names the view).
+- `ESC ] 9 ; body BEL` (iTerm2's form; the title is the pane's) and
+  `ESC ] 777 ; notify ; title ; body BEL` (rxvt's), a bell, and a long
+  command finishing post a macOS notification through
+  `UNUserNotificationCenter` when you aren't looking at their pane: the
+  app inactive, another window or tab key, or another pane focused. While
+  you look at it, nothing is shown. term-core keeps the latest one not yet
+  taken, so several in one parse slice give one notification.
+  Permission is asked once, on the first notification; notifications wait
+  for the answer. Focus and the app's notification settings apply as for
+  any app. A click brings that window, tab and pane to the front.
+- **Commands finishing** (`crate::activity`): term-core reports the
+  shell's OSC 133 A, C and D marks as they are parsed (`take_commands`:
+  a prompt, a command started with the text typed after B, a command
+  finished with its exit status). A command that ran at least
+  `notify_after` seconds (10) finishing where you aren't looking is
+  "✓ cargo build — 1m 12s" or "✗ cargo build — exit 101", with its
+  folder (`notify_on_finish = true`). Shells without the marks get none:
+  watching the PTY's foreground process group instead would mean
+  checking it on every read, and silent commands would still be missed.
+- **No spam**: notifications from one window within 10 s of each other
+  (for at most a minute) are one burst, shown as one notification that
+  later ones replace ("…· and 2 more"). A bell joining a burst shows
+  nothing new, and a program's message after its own bell (Claude Code
+  rings, then says it waits for input) takes the bell's place. No timers:
+  a burst ends when the next notification comes too late for it.
+- **The title** (`title_status = true`): with the marks, each tab's title
+  says what its focused pane does: "cargo build · 12s — Terminal
+  Decline" while it runs, "✓ cargo build · 1m 12s" for 5 s after a long
+  one, "waiting · ~/src/project" at the prompt. A program that sets its
+  own title while it runs keeps it, without a clock. The clock is a
+  one-shot timer to the next second (then minute) boundary, armed only
+  while a command runs and the window can be seen; showing a hidden tab
+  brings its title up to date.
+- Under the test control nothing reaches the notification center: each
+  notification is listed in the dump (`notifications.sent`), unless
+  `DECLINE_TEST_REAL_NOTIFY=1`.
 - `UNUserNotificationCenter` throws outside an app bundle, so a bare
   `cargo install` binary checks for a bundle (`NSBundle.mainBundle` with
   an identifier, at a `.app` path) and, without one or without
@@ -462,8 +491,10 @@ The product's name in these strings is `PRODUCT_NAME` in the code and
 - `ESC ] 9 ; 4 ; state ; percent BEL` (ConEmu's progress) shows on the
   Dock icon's badge: the lowest percentage of the windows reporting one,
   "!" while one reports an error, "…" while they are only busy; state 0
-  or closing the window clears it. Pins have their own Dock icon, so their
-  own badge.
+  or closing the window clears it. Without progress the badge counts the
+  notifications for windows not looked at since; a window becoming key in
+  the active app takes its count off. Pins have their own Dock icon, so
+  their own badge.
 - Like the title, these are taken by the reader thread as they are parsed,
   so a background tab (never drawn) still notifies.
 

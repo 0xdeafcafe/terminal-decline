@@ -123,6 +123,8 @@ pub struct Events {
     pub notification: Option<term_core::Notification>,
     /// OSC 9;4.
     pub progress: Option<term_core::Progress>,
+    /// Commands started and finished (OSC 133 C and D), oldest first.
+    pub commands: Vec<term_core::Command>,
 }
 
 impl Events {
@@ -132,6 +134,7 @@ impl Events {
             bell: t.state.take_bell(),
             notification: t.state.take_notification(),
             progress: t.state.take_progress(),
+            commands: t.state.take_commands(),
         }
     }
 

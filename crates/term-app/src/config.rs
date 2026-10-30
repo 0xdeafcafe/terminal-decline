@@ -24,6 +24,51 @@ pub enum OptionAsMeta {
     None,
 }
 
+/// `update`: what the app does about updates (docs/design/updater.md).
+/// `true` and `false`, from before, mean `"notify"` and `"off"`.
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum UpdateMode {
+    /// Builds from source update themselves once the Mac has been idle a
+    /// while, on AC power; release builds install on quit.
+    Auto,
+    /// Builds from source say an update is there and wait to be told;
+    /// release builds install on quit (nothing is interrupted).
+    #[default]
+    Notify,
+    /// No checks.
+    Off,
+}
+
+impl UpdateMode {
+    /// Whether anything is checked at all.
+    pub fn on(self) -> bool {
+        self != UpdateMode::Off
+    }
+}
+
+impl<'de> Deserialize<'de> for UpdateMode {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<UpdateMode, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Bool(bool),
+            Text(String),
+        }
+        let bad = || serde::de::Error::custom("use \"auto\", \"notify\" or \"off\"");
+        match Raw::deserialize(d).map_err(|_| bad())? {
+            Raw::Bool(true) => Ok(UpdateMode::Notify),
+            Raw::Bool(false) => Ok(UpdateMode::Off),
+            Raw::Text(t) => match t.as_str() {
+                "auto" => Ok(UpdateMode::Auto),
+                "notify" => Ok(UpdateMode::Notify),
+                "off" => Ok(UpdateMode::Off),
+                _ => Err(bad()),
+            },
+        }
+    }
+}
+
 /// `[colors]`, and a theme file: only what is set. Unset colours (and
 /// palette entries left out or `""`) come from the theme, else the
 /// defaults ([`Palette::DEFAULT`]).
@@ -233,10 +278,24 @@ pub struct Config {
     /// `[keybind]`: shortcuts remapped, unbound, or sending text; see
     /// [`crate::keybind`].
     pub keybind: KeybindConfig,
-    /// Check for updates once a day and install them when the app quits
-    /// (docs/design/updater.md). Only Terminal Decline.app's own process
-    /// reads it; pins never update themselves.
-    pub update: bool,
+    /// The window and tab title says what the focused pane does: the
+    /// command running and for how long, or waiting at the prompt in which
+    /// folder (needs the shell's OSC 133 marks; see
+    /// [`crate::activity::status_title`]).
+    pub title_status: bool,
+    /// Notify when a command that ran at least `notify_after` seconds
+    /// finishes in a tab or pane you aren't looking at (needs the shell's
+    /// OSC 133 marks; see [`crate::activity`]).
+    pub notify_on_finish: bool,
+    /// How long a command must run, in seconds, for `notify_on_finish`.
+    #[serde(deserialize_with = "notify_after")]
+    pub notify_after: u32,
+    /// Updates (docs/design/updater.md): `"notify"` (the default),
+    /// `"auto"` or `"off"`. Release builds check once a day and install on
+    /// quit unless off; builds from source say when `main` is ahead, and
+    /// with `"auto"` update themselves when the Mac is idle. Only Terminal
+    /// Decline.app's own process reads it; pins never update themselves.
+    pub update: UpdateMode,
     /// The program that opens config.toml (Edit config.toml, and `e` in
     /// Settings), with its arguments; unset, `$VISUAL` or `$EDITOR`, else
     /// nano, vim or vi.
@@ -283,7 +342,10 @@ impl Default for Config {
             colors: Colors::default(),
             palettes: Palettes::default(),
             keybind: KeybindConfig::default(),
-            update: true,
+            title_status: true,
+            notify_on_finish: true,
+            notify_after: 10,
+            update: UpdateMode::Notify,
             editor: None,
             pin_app: None,
         }
@@ -329,6 +391,19 @@ fn image_memory<'de, D: Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
         Err(serde::de::Error::custom(format!(
             "{v} is not a number of MB from 0 to {IMAGE_MEMORY_MAX} (0 is the default)"
         )))
+    }
+}
+
+/// The longest `notify_after`: a day.
+pub const NOTIFY_AFTER_MAX: u32 = 86_400;
+
+fn notify_after<'de, D: Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
+    let v = i64::deserialize(d)?;
+    match u32::try_from(v) {
+        Ok(v) if v <= NOTIFY_AFTER_MAX => Ok(v),
+        _ => Err(serde::de::Error::custom(format!(
+            "{v} is not a number of seconds from 0 to {NOTIFY_AFTER_MAX}"
+        ))),
     }
 }
 
@@ -1119,11 +1194,32 @@ mod tests {
 
     #[test]
     fn update_is_on_unless_turned_off() {
-        assert!(Config::default().update);
-        assert!(!parse("update = false").0.update);
+        assert_eq!(Config::default().update, UpdateMode::Notify);
+        assert_eq!(parse("update = false").0.update, UpdateMode::Off);
+        assert_eq!(parse("update = true").0.update, UpdateMode::Notify);
+        assert_eq!(parse("update = 'auto'").0.update, UpdateMode::Auto);
+        assert_eq!(parse("update = 'off'").0.update, UpdateMode::Off);
         let (c, errors) = parse("update = 'no'");
-        assert!(c.update);
+        assert_eq!(c.update, UpdateMode::Notify);
         assert!(errors[0].starts_with("config: update: "), "{errors:?}");
+    }
+
+    #[test]
+    fn finish_notifications_are_on_after_ten_seconds() {
+        let c = Config::default();
+        assert!(c.title_status);
+        assert!(!parse("title_status = false").0.title_status);
+        assert!(c.notify_on_finish);
+        assert_eq!(c.notify_after, 10);
+        let (c, errors) = parse("notify_on_finish = false\nnotify_after = 30");
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(!c.notify_on_finish);
+        assert_eq!(c.notify_after, 30);
+        for bad in ["notify_after = -1", "notify_after = 86401", "notify_after = 'ten'"] {
+            let (c, errors) = parse(bad);
+            assert_eq!(c.notify_after, 10, "{bad}");
+            assert!(errors[0].starts_with("config: notify_after: "), "{errors:?}");
+        }
     }
 
     #[test]

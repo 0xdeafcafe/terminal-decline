@@ -98,6 +98,9 @@ pub(crate) struct Win {
     shown: bool,
     /// The image pool was told this window is hidden (images.md §5.5).
     images_hidden: bool,
+    /// Bumped each time the title is set: a title clock armed before
+    /// does nothing.
+    title_clock: u64,
     /// This is the Settings tab, which the app started itself: a fixed
     /// title, always opaque, not a running program for `confirm_close`,
     /// and the only session whose chord recording is honoured.
@@ -196,6 +199,8 @@ pub(crate) struct Pane {
     pub(crate) find: Option<crate::find_bar::Find>,
     /// What it last searched for, shown again when the bar reopens.
     pub(crate) find_query: crate::search::Query,
+    /// What its shell is doing, from the OSC 133 marks.
+    activity: crate::activity::Activity,
 }
 
 /// Building a pane's frame panicked: when last, how many times, and
@@ -305,6 +310,8 @@ const LAYOUT_RECT: &str = "contentLayoutRect";
 
 thread_local! {
     static VIEWS: RefCell<HashMap<usize, Weak<WindowView>>> = RefCell::new(HashMap::new());
+    /// Merges bursts of notifications per window.
+    static BURSTS: RefCell<crate::activity::Coalescer> = RefCell::new(crate::activity::Coalescer::default());
     static NEXT_ID: StdCell<usize> = const { StdCell::new(1) };
 }
 
@@ -332,8 +339,7 @@ pub(crate) fn sync_visibility_soon() {
     });
 }
 
-/// Bring view `id`'s window or tab to the front (a click on its
-/// notification).
+/// Bring view `id`'s window or tab to the front.
 pub(crate) fn bring_to_front(id: usize) {
     with_view(id, |v| {
         if let Some(window) = v.window() {
@@ -342,6 +348,18 @@ pub(crate) fn bring_to_front(id: usize) {
             // An inactive app gets no key notifications to notice the switch.
             sync_visibility_soon();
         }
+    });
+}
+
+/// Bring view `id`'s window or tab to the front and focus pane `pane` in
+/// it (a click on a notification for it).
+pub(crate) fn show_pane(id: usize, pane: usize) {
+    bring_to_front(id);
+    with_view(id, |v| {
+        if let Ok(pane) = PaneId::try_from(pane) {
+            v.focus_pane(pane);
+        }
+        crate::notify::seen(MainThreadMarker::from(v), id);
     });
 }
 
@@ -589,6 +607,10 @@ define_class!(
             self.sync_visibility();
             self.set_focus(true);
             sync_visibility_soon();
+            let mtm = MainThreadMarker::from(self);
+            if objc2_app_kit::NSApplication::sharedApplication(mtm).isActive() {
+                crate::notify::seen(mtm, self.ivars().id);
+            }
         }
 
         #[unsafe(method(windowDidResignKey:))]
@@ -819,6 +841,7 @@ impl WindowView {
                 hidden: 0,
                 shown: true,
                 images_hidden: false,
+                title_clock: 0,
                 settings,
                 recording: None,
                 recordings: 0,
@@ -849,53 +872,173 @@ impl WindowView {
 
     /// What pane `pane`'s program asked for, taken as it was parsed (see
     /// [`crate::session::Events`]): drawn or not, a tab's title is shown
-    /// in the tab bar, a bell bounces the Dock icon, a notification is
-    /// shown if this window or tab isn't the one in front, and progress
+    /// in the tab bar; a bell, a program's notification or a long command
+    /// finishing is a notification unless you are looking at this pane
+    /// (the app in front, this tab key, the pane focused); and progress
     /// goes on the Dock icon.
     fn events(&self, pane: PaneId, events: Events) {
         let mtm = MainThreadMarker::from(self);
-        let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
-        // Every pane keeps its title; only the focused pane's is the window's.
-        let Some(Some((fixed_title, focused))) = self.with_state(|st| {
+        // Every pane keeps its title; only the focused pane's is the
+        // window's. A title set with a command's start counts as the
+        // shell's, not the command's: it is taken in first.
+        let Some(Some(focused)) = self.with_state(|st| {
             let focused = st.tree.focused() == pane;
-            let fixed = st.win.config.title.is_some();
             let p = st.panes.get_mut(&pane)?;
             if let Some(title) = &events.title {
                 p.title = Some(title.clone());
+                p.activity.titled();
             }
-            Some((fixed || p.settings, focused))
+            Some(focused)
         }) else {
             return;
         };
-        let window = self.window();
-        if let Some(window) = &window
-            && !fixed_title
-            && focused
-            && let Some(title) = &events.title
-        {
-            window.setTitle(&NSString::from_str(title));
+        let looking = self.looking(pane);
+        let now = Instant::now();
+        let finished = self
+            .with_state(|st| {
+                let (on, after) = (
+                    st.win.config.notify_on_finish,
+                    Duration::from_secs(st.win.config.notify_after.into()),
+                );
+                let p = st.panes.get_mut(&pane)?;
+                let done: Vec<_> = events.commands.iter().filter_map(|c| p.activity.apply(c.clone(), now)).collect();
+                Some((on, after, done, p.settings))
+            })
+            .flatten();
+        let Some((on, after, finished, settings)) = finished else { return };
+        if focused && (events.title.is_some() || !events.commands.is_empty()) {
+            self.refresh_title();
         }
-        if events.bell {
-            // Bounce the Dock icon if the app isn't in front.
-            if !app.isActive() {
-                app.requestUserAttention(objc2_app_kit::NSRequestUserAttentionType::InformationalRequest);
+        if settings {
+            // The Settings tab's own program.
+        } else if !looking.at_pane() {
+            // Something wants you where you aren't looking: a notification
+            // (merged with others from this window), else the Dock icon
+            // bounces.
+            let (name, folder) = self.pane_names(pane);
+            for f in finished.iter().filter(|f| crate::activity::should_notify(f, on, after, looking)) {
+                let title = crate::activity::finish_title(f);
+                let body = crate::activity::finish_body(f, folder.as_deref());
+                self.notify_pane(pane, crate::activity::Kind::Finished, &title, &body, looking);
             }
-        }
-        if let Some(n) = events.notification {
-            let in_front = app.isActive() && window.as_ref().is_some_and(|w| crate::background::is_key(w));
-            if !in_front {
-                // OSC 9 has no title: use the window's (programs set it).
-                let title = n
-                    .title
-                    .filter(|t| !t.is_empty())
-                    .or_else(|| window.as_ref().map(|w| w.title().to_string()))
-                    .unwrap_or_else(|| "Terminal Decline".into());
-                crate::notify::post(mtm, self.ivars().id, &title, &n.body);
+            if let Some(n) = events.notification {
+                // OSC 9 has no title: use the pane's (programs set it).
+                let title = n.title.filter(|t| !t.is_empty()).unwrap_or_else(|| name.clone());
+                self.notify_pane(pane, crate::activity::Kind::Message, &title, &n.body, looking);
+            }
+            if events.bell {
+                let body = match &folder {
+                    Some(f) => format!("Bell · {f}"),
+                    None => "Bell".into(),
+                };
+                self.notify_pane(pane, crate::activity::Kind::Bell, &name, &body, looking);
             }
         }
         if let Some(p) = events.progress {
             crate::notify::set_progress(mtm, self.ivars().id, p);
         }
+    }
+
+    /// The window's (tab's) title: the Settings tab's, a pin's fixed one,
+    /// else what the focused pane does with `title_status` on and its
+    /// shell's marks ([`crate::activity::status_title`]), else its
+    /// program's title. The clock is armed again for the next change.
+    pub(crate) fn refresh_title(&self) {
+        let now = Instant::now();
+        let home = std::env::var("HOME").ok();
+        let got = self.with_state(|st| {
+            let fixed = st.win.config.title.clone();
+            let pinned = fixed.is_some();
+            let status = st.win.config.title_status;
+            let after = Duration::from_secs(st.win.config.notify_after.into());
+            let shown = st.win.shown;
+            let p = st.focused()?;
+            let title = match (p.settings, fixed) {
+                (true, _) => "Settings".to_string(),
+                (false, Some(t)) => t,
+                (false, None) => status
+                    .then(|| {
+                        let folder = p.activity.marks.then(|| pane_cwd(p)).flatten();
+                        let folder = folder.map(|f| crate::activity::tilde(&f, home.as_deref()));
+                        crate::activity::status_title(&p.activity, p.title.as_deref(), folder.as_deref(), after, now)
+                    })
+                    .flatten()
+                    .unwrap_or_else(|| p.title.clone().unwrap_or_else(|| crate::PRODUCT_NAME.into())),
+            };
+            let tick = (status && shown && !p.settings && !pinned)
+                .then(|| crate::activity::next_change(&p.activity, after, now))
+                .flatten();
+            st.win.title_clock += 1;
+            Some((title, tick, st.win.title_clock))
+        });
+        let Some(Some((title, tick, clock))) = got else { return };
+        if let Some(window) = self.window()
+            && window.title().to_string() != title
+        {
+            window.setTitle(&NSString::from_str(&title));
+        }
+        // One shot, to the next change of the title: none at the prompt,
+        // none while hidden (showing the window refreshes it).
+        if let Some(after) = tick {
+            let id = self.ivars().id;
+            let at = DispatchTime::NOW.time(after.as_nanos().min(i64::MAX as u128) as i64 + 1_000_000);
+            let _ = DispatchQueue::main().after(at, move || {
+                with_view(id, |v| {
+                    if v.with_state(|st| st.win.title_clock == clock) == Some(true) {
+                        v.refresh_title();
+                    }
+                })
+            });
+        }
+    }
+
+    /// Where you are looking, for pane `pane`: the app in front, this
+    /// window (tab) key, and the pane focused.
+    fn looking(&self, pane: PaneId) -> crate::activity::Looking {
+        let app = objc2_app_kit::NSApplication::sharedApplication(MainThreadMarker::from(self));
+        crate::activity::Looking {
+            app_active: app.isActive(),
+            window_key: self.window().is_some_and(|w| crate::background::is_key(&w)),
+            pane_focused: self.with_state(|st| st.tree.focused() == pane).unwrap_or(false),
+        }
+    }
+
+    /// Pane `pane`'s name for a notification (its program's title, else
+    /// the window's, else the app's) and its folder, with `~` for home.
+    fn pane_names(&self, pane: PaneId) -> (String, Option<String>) {
+        let window_title = self.window().map(|w| w.title().to_string()).filter(|t| !t.is_empty());
+        let (title, cwd) = self
+            .with_state(|st| st.panes.get(&pane).map(|p| (p.title.clone(), pane_cwd(p))))
+            .flatten()
+            .unwrap_or_default();
+        let home = std::env::var("HOME").ok();
+        let folder = cwd.map(|c| crate::activity::tilde(&c, home.as_deref()));
+        let name = title
+            .filter(|t| !t.is_empty())
+            .or(window_title)
+            .unwrap_or_else(|| crate::PRODUCT_NAME.into());
+        (name, folder)
+    }
+
+    /// A notification for pane `pane`, merged with the window's burst
+    /// (see [`crate::activity::Coalescer`]), counted on the Dock icon
+    /// unless you are looking at this window.
+    fn notify_pane(&self, pane: PaneId, kind: crate::activity::Kind, title: &str, body: &str, looking: crate::activity::Looking) {
+        let id = self.ivars().id;
+        let post = BURSTS.with(|b| b.borrow_mut().add(id, pane as usize, kind, title, body, Instant::now()));
+        let Some(post) = post else { return };
+        let mut note = crate::notify::Note::new(
+            post.title,
+            post.body,
+            crate::notify::Target::Pane {
+                view: id,
+                pane: pane as usize,
+            },
+        );
+        note.group = Some(format!("window.{id}"));
+        note.key = Some(format!("burst.{id}.{}", post.id));
+        note.unseen = (!looking.at_window()).then_some(id);
+        crate::notify::show(MainThreadMarker::from(self), note);
     }
 
     pub(crate) fn with_state<R>(&self, f: impl FnOnce(&mut State) -> R) -> Option<R> {
@@ -1051,6 +1194,8 @@ impl WindowView {
             changed
         });
         if changed == Some(true) {
+            // The title's clock runs only while the window can be seen.
+            self.refresh_title();
             let layer = &self.ivars().layer;
             if visible {
                 // Its drawables back at full size, then drawn at once.
@@ -1739,6 +1884,8 @@ impl WindowView {
             // Padding or cell size may have changed the grid.
             self.resize();
             self.redraw_all();
+            // `title_status` may have changed.
+            self.refresh_title();
         }
     }
 
@@ -1825,7 +1972,8 @@ impl WindowView {
         if let Some(st) = st {
             st.win.link.invalidate();
             drop(st); // hangs up on the programs
-            crate::notify::set_progress(MainThreadMarker::from(self), self.ivars().id, term_core::Progress::Clear);
+            crate::notify::closed(MainThreadMarker::from(self), self.ivars().id);
+            BURSTS.with(|b| b.borrow_mut().forget(self.ivars().id));
         }
         VIEWS.with(|v| v.borrow_mut().remove(&self.ivars().id));
         crate::images::window_size(&term_core::ImagePool::process(), self.ivars().id, 0, 0);
@@ -2046,19 +2194,13 @@ impl WindowView {
             st.tree.focus(pane);
             unzoomed = zoomed != st.tree.zoomed();
             let key = st.win.focused;
-            let fixed = st.win.config.title.clone();
             let p = st.panes.get_mut(&pane)?;
             p.swallow_click = clicked;
             p.cursor_on = true;
             let report = key && p.session.lock_term().state.modes().focus_events;
-            let title = match (p.settings, fixed) {
-                (true, _) => "Settings".to_string(),
-                (false, Some(t)) => t,
-                (false, None) => p.title.clone().unwrap_or_else(|| "Terminal Decline".into()),
-            };
-            Some((report, p.view.clone(), title))
+            Some((report, p.view.clone()))
         });
-        let Some(Some((report, view, title))) = got else { return };
+        let Some(Some((report, view))) = got else { return };
         if unzoomed {
             // Focusing a pane hidden by a zoom ended it.
             self.resize();
@@ -2067,9 +2209,7 @@ impl WindowView {
         if report {
             view.send_raw(b"\x1b[I".to_vec());
         }
-        if let Some(window) = self.window() {
-            window.setTitle(&NSString::from_str(&title));
-        }
+        self.refresh_title();
         self.request_redraw(pane);
     }
 
@@ -2653,6 +2793,7 @@ fn spawn_pane(window: usize, config: &Config, theme: &Theme, m: term_font::Metri
         panic_next: None,
         find: None,
         find_query: crate::search::Query::default(),
+        activity: crate::activity::Activity::default(),
     })
 }
 
@@ -3041,6 +3182,7 @@ impl WindowView {
                     visible: self.visible(),
                     sheet: self.window().is_some_and(|w| w.attachedSheet().is_some()),
                     top_inset: self.titlebar_height(),
+                    title: self.window().map(|w| w.title().to_string()).unwrap_or_default(),
                     badge: objc2_app_kit::NSApplication::sharedApplication(MainThreadMarker::from(self))
                         .dockTile()
                         .badgeLabel()
@@ -3115,6 +3257,7 @@ struct Window {
     visible: bool,
     sheet: bool,
     top_inset: f64,
+    title: String,
     badge: Option<String>,
     active: bool,
     secure_input: bool,
@@ -3216,6 +3359,7 @@ fn write_dump(st: &mut State, window: Window) {
         pad_top,
         notifications: crate::notify::stats(),
         badge: window.badge,
+        title: window.title,
         active: window.active,
         secure_input: window.secure_input,
         settings_ready: window.settings.0,

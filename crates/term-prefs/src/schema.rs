@@ -401,6 +401,27 @@ pub const SETTINGS: &[Setting] = &[
         Editor::Toggle,
         "Ask before closing a window or quitting while a program other than the shell runs",
     ),
+    setting(
+        "title_status",
+        "Status in the title",
+        Window,
+        Editor::Toggle,
+        "The title says what the shell does: the command running and for how long, or waiting in which folder",
+    ),
+    setting(
+        "notify_on_finish",
+        "Notify when commands finish",
+        Window,
+        Editor::Toggle,
+        "Notify when a long command finishes in a tab or pane you aren't looking at (needs shell integration)",
+    ),
+    setting(
+        "notify_after",
+        "Notify after",
+        Window,
+        integer(0.0, 86_400.0, 5.0),
+        "How many seconds a command must run before its finish is notified",
+    ),
     // Advanced
     new_windows(Setting {
         keep_in_pin: true,
@@ -462,10 +483,10 @@ pub const SETTINGS: &[Setting] = &[
     ),
     setting(
         "update",
-        "Check for updates",
+        "Updates",
         Advanced,
-        Editor::Toggle,
-        "Check for updates once a day and install them when the app quits (the app only, never pins)",
+        Editor::Choice(&["notify", "auto", "off"]),
+        "notify: say when there is one; auto: builds from source also update when idle; release builds install on quit",
     ),
     unset(
         setting(
@@ -614,6 +635,9 @@ mod tests {
                 "scrollback",
                 "copy_on_select",
                 "confirm_close",
+                "title_status",
+                "notify_on_finish",
+                "notify_after",
                 "command",
                 "cwd",
                 "env",

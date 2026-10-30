@@ -692,7 +692,11 @@ impl Frame {
             let row = &self.rows.snap.rows[i];
             let styles = self.rows.styles_for(row.flags.contains(RowFlags::HISTORY));
             let snap = &self.rows.snap;
-            let cells = snap.row_cells(row).unwrap_or(&[]);
+            let all = snap.row_cells(row).unwrap_or(&[]);
+            // A row's blank end draws nothing (roadmap R.2): its cells
+            // are skipped. Not with substitutions, whose pieces may reach
+            // into blank cells (shaped as spaces).
+            let cells = if subs.is_empty() { trim_blank_end(all) } else { all };
             let clusters = SnapClusters { snap, row };
             let cells = cells.iter().map(|&cell| SnapCell {
                 cell,
@@ -1083,6 +1087,22 @@ impl Frame {
             col += width;
         }
     }
+}
+
+/// `cells` up to and with its last cell that draws something if the row
+/// ended there ([`Cell::is_blank`]): past it, only the default background
+/// shows, which `pad_row` leaves out.
+#[inline]
+fn trim_blank_end(cells: &[Cell]) -> &[Cell] {
+    // Eight cells at a time: a blank end is usually most of a row.
+    let mut n = cells.len();
+    while n >= 8 && cells[n - 8..n].iter().fold(0, |a, c| a | c.bits()) & Cell::NOT_BLANK == 0 {
+        n -= 8;
+    }
+    while n > 0 && cells[n - 1].is_blank() {
+        n -= 1;
+    }
+    &cells[..n]
 }
 
 /// Whether any face of `fonts` shapes runs (ligatures design §1).

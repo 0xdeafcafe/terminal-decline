@@ -2920,6 +2920,13 @@ impl Perform for Terminal {
         if ignore {
             return;
         }
+        // SGR, the most common sequence by far, needs none of the argument
+        // handling below.
+        if action == 'm' && intermediates.is_empty() {
+            self.sgr(params);
+            self.touch();
+            return;
+        }
         let mut args = [0u16; 16];
         let mut n = 0;
         for p in params.iter() {

@@ -11,6 +11,11 @@ vte
 >   default implementation calls `print` once per byte, so other `Perform`
 >   implementations behave as before. The end of a run is found 8 bytes at
 >   a time (`printable_ascii_len`).
+> - CSI fast path: `ESC [` and the digits, `;`, `:` and final byte after it
+>   are taken in one tight loop (`advance_csi_run`), with the same actions
+>   the state machine runs for them; any other byte (a private marker, an
+>   intermediate, a control) goes back to the state machine where it is.
+>   The actions are the same as before, byte for byte, whole or split.
 > - Fix: completing a UTF-8 character split across `advance` calls consumed
 >   up to three bytes after it when an invalid byte followed (`"é"` sent as
 >   `[0xC3]`, `[0xA9, b'a', 0xFF]` lost the `a`). A C1 control completed

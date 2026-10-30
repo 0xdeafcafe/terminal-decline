@@ -237,6 +237,10 @@ pub struct Config {
     /// (docs/design/updater.md). Only Terminal Decline.app's own process
     /// reads it; pins never update themselves.
     pub update: bool,
+    /// The program that opens config.toml (Edit config.toml, and `e` in
+    /// Settings), with its arguments; unset, `$VISUAL` or `$EDITOR`, else
+    /// nano, vim or vi.
+    pub editor: Option<String>,
     /// Set in a pin's config: the app bundle it belongs to.
     #[allow(dead_code)]
     pub pin_app: Option<String>,
@@ -280,6 +284,7 @@ impl Default for Config {
             palettes: Palettes::default(),
             keybind: KeybindConfig::default(),
             update: true,
+            editor: None,
             pin_app: None,
         }
     }
@@ -1259,6 +1264,15 @@ mod tests {
     }
 
     #[test]
+    fn editor_setting() {
+        assert_eq!(parse("").0.editor, None);
+        let (c, errors) = parse("editor = 'code -w'");
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(c.editor.as_deref(), Some("code -w"));
+        assert!(!parse("editor = 3").1.is_empty());
+    }
+
+    #[test]
     fn pane_settings() {
         let (c, errors) = parse("unfocused_pane_opacity = 0.7\n[colors]\nsplit_divider = '#123456'\n");
         assert!(errors.is_empty(), "{errors:?}");
@@ -1358,7 +1372,7 @@ mod tests {
         ] {
             assert!(table.contains_key(key), "{key} missing from:\n{defaults}");
         }
-        for key in ["theme", "cwd", "title", "pin_app", "font_bold"] {
+        for key in ["theme", "cwd", "title", "editor", "pin_app", "font_bold"] {
             assert!(!table.contains_key(key), "{key} has no default:\n{defaults}");
         }
         assert_eq!(table["cell_width"].as_str(), Some("0"));

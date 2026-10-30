@@ -11,6 +11,7 @@
 //!   terminal.
 
 pub mod app;
+pub mod editor;
 pub mod file;
 pub mod host;
 pub mod layers;

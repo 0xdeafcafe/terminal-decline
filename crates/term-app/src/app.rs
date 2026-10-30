@@ -251,24 +251,12 @@ define_class!(
             self.show_settings();
         }
 
-        /// Terminal Decline > Edit config.toml: the file in the default
-        /// text editor, for anyone who prefers it to Settings….
+        /// Terminal Decline > Edit config.toml: the file in your
+        /// editor (the `editor` setting, else `$VISUAL`/`$EDITOR`, else nano,
+        /// vim or vi) in a new tab, for anyone who prefers it to Settings….
         #[unsafe(method(editConfig:))]
         fn edit_config(&self, _sender: Option<&AnyObject>) {
-            let Some(file) = self.ivars().origin.edited().map(std::path::Path::to_path_buf) else { return };
-            if !file.exists() {
-                // `open` needs a file to open.
-                let made = file
-                    .parent()
-                    .map_or(Ok(()), std::fs::create_dir_all)
-                    .and_then(|()| std::fs::OpenOptions::new().create_new(true).write(true).open(&file).map(drop));
-                if let Err(e) = made {
-                    eprintln!("terminal-decline: {}: {e}", file.display());
-                }
-            }
-            if let Err(e) = std::process::Command::new("/usr/bin/open").arg("-t").arg(&file).spawn() {
-                eprintln!("terminal-decline: open -t {}: {e}", file.display());
-            }
+            self.edit_config_file();
         }
 
         /// Terminal Decline > Secure Keyboard Entry: on or off, kept in user
@@ -617,6 +605,38 @@ impl AppDelegate {
             Some(window) => self.open_tab(&window),
             None => {
                 self.open_window(None, Place::Cascade, None);
+            }
+        }
+    }
+
+    fn edit_config_file(&self) {
+        let Some(file) = self.ivars().origin.edited().map(std::path::Path::to_path_buf) else {
+            return;
+        };
+        if !file.exists() {
+            // The editor opens an existing file.
+            let made = file
+                .parent()
+                .map_or(Ok(()), std::fs::create_dir_all)
+                .and_then(|()| std::fs::OpenOptions::new().create_new(true).write(true).open(&file).map(drop));
+            if let Err(e) = made {
+                eprintln!("terminal-decline: {}: {e}", file.display());
+            }
+        }
+        let setting = self.ivars().config.borrow().editor.clone().unwrap_or_default();
+        let argv = term_prefs::editor::tab_argv(&term_pty::login_shell(), &setting, &file);
+        self.open_command_in_front(argv);
+    }
+
+    /// A tab of the window in front (a window if there is none) running
+    /// `argv`; it closes when the program exits.
+    fn open_command_in_front(&self, argv: Vec<String>) {
+        match self.front_window() {
+            Some(window) => {
+                self.open_window(None, Place::TabOf(window), Some(argv));
+            }
+            None => {
+                self.open_window(None, Place::Cascade, Some(argv));
             }
         }
     }
@@ -1090,6 +1110,15 @@ pub(crate) fn settings_status() -> (bool, bool) {
     window
         .and_then(|w| delegate.view_of(&w))
         .map_or((false, false), |v| v.settings_status())
+}
+
+/// Terminal Decline > Edit config.toml (the test-only `edit-config`
+/// command).
+pub(crate) fn edit_config_now() {
+    let delegate = DELEGATE.with(|d| d.borrow().as_ref().and_then(|w| w.load()));
+    if let Some(delegate) = delegate {
+        delegate.edit_config_file();
+    }
 }
 
 /// Type into the Settings tab (the test-only `type-settings` command).

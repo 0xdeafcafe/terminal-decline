@@ -248,7 +248,10 @@ Oct 2026, 1.90 → 2.16 MB) and no measurable parse speed.
   foreground while the text keeps 3:1 on it, so one selected character
   shows; the text under a block cursor is the background colour where
   that has 4.5:1 on the cursor, else the foreground, black or white,
-  whichever reads best.
+  whichever reads best. The cursor is drawn over the selection, and a
+  cursor with less than 1.4:1 against the selection is moved towards
+  black or white until it has it, so a cursor inside a selection shows;
+  an unfocused window's or pane's cursor is a hollow box.
 - Background blur/transparency: `NSVisualEffectView` behind a non-opaque
   Metal layer, opt-in by config.
 - sRGB colours (no Display P3 tagging, which would over-saturate app colours).

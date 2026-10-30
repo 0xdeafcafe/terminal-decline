@@ -491,6 +491,58 @@ fn a_faint_selection_and_cursor_are_drawn_legible() {
     );
 }
 
+/// A cursor inside a selection, in a theme whose cursor is the
+/// selection's own colour: focused, the block is drawn over the
+/// selection in a colour that stands out from it, with its character
+/// readable; unfocused, a hollow box outlines the cell over the
+/// selection, whose text reads as the rest of the selection's does.
+#[test]
+fn a_cursor_inside_a_selection_stands_out_from_it() {
+    use term_render::{CURSOR_ON_SELECTION_CONTRAST, CURSOR_TEXT_CONTRAST, SELECTED_TEXT_CONTRAST, contrast};
+    let ansi = [0; 16];
+    let theme = Theme::new(ansi, 0xd0d0d0, 0x202020, 0x505050, 0x505050);
+    assert!(contrast(theme.cursor, theme.selection) >= CURSOR_ON_SELECTION_CONTRAST);
+    let mut t = term(10, 1, "abcdef\x1b[3G");
+    let line = t.state.point_at(0, 0).line;
+    t.state
+        .set_selection(Some(Selection::new(Point { line, col: 1 }, Point { line, col: 4 })));
+    let w = 10 * M.cell_width as usize;
+    let rgba = |b: [u8; 4]| u32::from_le_bytes(b);
+    for focused in [true, false] {
+        let o = Opts {
+            focused,
+            ..Opts::default()
+        };
+        let f = build_with(
+            &mut t.state,
+            &theme,
+            Opts {
+                focused,
+                ..Opts::default()
+            },
+        );
+        let px = picture(&f, (10, 1), &o);
+        // The middle of a cell, and its top-left corner.
+        let mid = |col: usize| px[(CH as usize / 2) * w + col * CW as usize + CW as usize / 2];
+        let corner = |col: usize| px[col * CW as usize];
+        let sel = rgba(mid(1).bg);
+        assert_eq!(sel, theme.selection);
+        let text = mid(1).glyph.expect("the b").2;
+        assert!(contrast(text, sel) >= SELECTED_TEXT_CONTRAST);
+        if focused {
+            let (cursor, c_text) = (rgba(mid(2).bg), mid(2).glyph.expect("the c").2);
+            assert_eq!(cursor, theme.cursor, "the block is over the selection");
+            assert!(contrast(cursor, sel) >= CURSOR_ON_SELECTION_CONTRAST, "{cursor:08x} on {sel:08x}");
+            assert!(contrast(c_text, cursor) >= CURSOR_TEXT_CONTRAST, "{c_text:08x} on {cursor:08x}");
+        } else {
+            assert_eq!(rgba(corner(2).bg), theme.cursor, "the hollow box's edge");
+            assert_eq!(rgba(mid(2).bg), sel, "inside the box, the selection");
+            assert_eq!(mid(2).glyph.expect("the c").2, text);
+            assert!(contrast(rgba(corner(2).bg), sel) >= CURSOR_ON_SELECTION_CONTRAST);
+        }
+    }
+}
+
 #[test]
 fn selection_covers_short_history_rows_to_the_edge() {
     // "ab" scrolls into history, which may store it shorter than the

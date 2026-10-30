@@ -66,6 +66,29 @@ pub const SELECTED_TEXT_CONTRAST: f32 = 3.0;
 /// The contrast the text under a block cursor gets when the background
 /// colour (its usual colour) can't give it.
 pub const CURSOR_TEXT_CONTRAST: f32 = 4.5;
+/// The least contrast the cursor has against the selection, so a cursor
+/// inside a selection (drawn over it) is still seen. Built-in themes'
+/// light orange cursors on light selections stand out by hue from about
+/// 1.4.
+pub const CURSOR_ON_SELECTION_CONTRAST: f32 = 1.4;
+
+/// `cursor` made visible on `selection`: moved towards black or white
+/// (whichever is further from the selection) until it has
+/// [`CURSOR_ON_SELECTION_CONTRAST`]; unchanged if it has it already.
+fn visible_cursor(cursor: Rgba, selection: Rgba) -> Rgba {
+    if contrast(cursor, selection) >= CURSOR_ON_SELECTION_CONTRAST {
+        return cursor;
+    }
+    let far = if luminance(selection) > 0.18 {
+        rgb(0x000000)
+    } else {
+        rgb(0xffffff)
+    };
+    (1..=20)
+        .map(|step| rgb_mix(cursor, far, step as f32 / 20.0))
+        .find(|c| contrast(*c, selection) >= CURSOR_ON_SELECTION_CONTRAST)
+        .unwrap_or(far)
+}
 
 /// `selection` made visible on `bg`: moved towards `fg` until it has
 /// [`SELECTION_CONTRAST`] against `bg`, as far as `fg` keeps
@@ -292,10 +315,13 @@ impl Theme {
     /// gets at least [`SELECTION_CONTRAST`] against the background, moved
     /// towards the foreground, so even one selected character shows; the
     /// text under the cursor is the background colour where that reads,
-    /// else the colour that reads best. Run again after changing the
-    /// foreground, background or cursor colour.
+    /// else the colour that reads best; a cursor of (nearly) the
+    /// selection's colour is moved away from it, so it shows inside a
+    /// selection. Run again after changing the foreground, background or
+    /// cursor colour.
     pub fn keep_legible(&mut self) {
         self.selection = visible_selection(self.selection, self.background, self.foreground);
+        self.cursor = visible_cursor(self.cursor, self.selection);
         self.cursor_text = cursor_text_on(self.cursor, self.background, self.foreground);
     }
 

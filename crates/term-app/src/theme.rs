@@ -312,7 +312,7 @@ mod tests {
     /// lost in the selection it sits in.
     #[test]
     fn every_built_in_theme_draws_a_visible_selection_and_cursor() {
-        use term_render::{CURSOR_TEXT_CONTRAST, SELECTED_TEXT_CONTRAST, SELECTION_CONTRAST, contrast};
+        use term_render::{CURSOR_ON_SELECTION_CONTRAST, CURSOR_TEXT_CONTRAST, SELECTED_TEXT_CONTRAST, SELECTION_CONTRAST, contrast};
         let dir = TempDir::new("themes-legible");
         let base = crate::config::Config::default();
         for (name, _) in BUILT_IN {
@@ -335,9 +335,9 @@ mod tests {
             );
             // Light themes' orange cursors are as light as their
             // selections and stand out by hue (Ayu Light's is 1.43), so
-            // only a cursor of the selection's own colour fails.
+            // only a cursor of the selection's own colour is moved.
             assert!(
-                contrast(theme.cursor, sel) >= 1.4,
+                contrast(theme.cursor, sel) >= CURSOR_ON_SELECTION_CONTRAST,
                 "{name}: cursor {:.2} on the selection",
                 contrast(theme.cursor, sel)
             );

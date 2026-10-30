@@ -105,6 +105,12 @@ watch a run.
   and column to a Point), `cursor_in_view`, `view_top`/`set_view_top`, the
   selection gestures (`select_word`, `select_line`, `select_all`,
   `extend_selection`) and the word rule (`term_core::word`).
+- Output that changes the text under the selection clears it (as xterm
+  and Alacritty do): before a parse the selection's text on the screen is
+  kept (read again only for a new selection), and after it compared
+  (`SelectionWatch`). Text drawn again unchanged, writes beside it and
+  scrolling into history keep it; with no selection it costs a branch
+  per parse call.
 - Parsing: `vte` is vendored (`vendor/vte`, through `[patch.crates-io]`)
   with `Perform::print_ascii`, which hands over each run of printable ASCII
   whole; the end of a run is found 8 bytes at a time. `Terminal::write_ascii`

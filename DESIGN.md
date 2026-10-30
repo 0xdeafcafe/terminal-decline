@@ -242,6 +242,13 @@ Oct 2026, 1.90 → 2.16 MB) and no measurable parse speed.
   compilation if the Metal toolchain is missing).
 - Cursor, selection and underline/strikethrough are drawn in the shader from
   flags; no extra geometry.
+- Selection and cursor colours stay legible whatever the theme or a
+  program sets (`Theme::keep_legible`): the selection gets at least 1.5:1
+  contrast against the background (WCAG ratio), moved towards the
+  foreground while the text keeps 3:1 on it, so one selected character
+  shows; the text under a block cursor is the background colour where
+  that has 4.5:1 on the cursor, else the foreground, black or white,
+  whichever reads best.
 - Background blur/transparency: `NSVisualEffectView` behind a non-opaque
   Metal layer, opt-in by config.
 - sRGB colours (no Display P3 tagging, which would over-saturate app colours).

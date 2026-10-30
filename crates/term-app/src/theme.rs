@@ -306,6 +306,44 @@ mod tests {
         assert_eq!(title("mine", "foreground = '#000000'"), "mine");
     }
 
+    /// Alex's "u" was hard to see: in every built-in theme, as drawn, a
+    /// selection shows against the background, the theme's text reads on
+    /// it, the text under a block cursor reads, and the cursor isn't
+    /// lost in the selection it sits in.
+    #[test]
+    fn every_built_in_theme_draws_a_visible_selection_and_cursor() {
+        use term_render::{CURSOR_TEXT_CONTRAST, SELECTED_TEXT_CONTRAST, SELECTION_CONTRAST, contrast};
+        let dir = TempDir::new("themes-legible");
+        let base = crate::config::Config::default();
+        for (name, _) in BUILT_IN {
+            let theme = base.previewing(name, dir.path()).theme(Appearance::Dark);
+            let (bg, fg, sel) = (theme.background, theme.foreground, theme.selection);
+            // Solarized Light's text is too close to its selection to go
+            // all the way: it gets as far as the text allows.
+            let shows = contrast(sel, bg) >= SELECTION_CONTRAST || contrast(fg, sel) < SELECTED_TEXT_CONTRAST + 0.1;
+            assert!(shows, "{name}: selection {:.2} on the background", contrast(sel, bg));
+            assert!(contrast(sel, bg) >= 1.35, "{name}: selection {:.2}", contrast(sel, bg));
+            assert!(
+                contrast(fg, sel) >= SELECTED_TEXT_CONTRAST,
+                "{name}: text {:.2} on the selection",
+                contrast(fg, sel)
+            );
+            assert!(
+                contrast(theme.cursor_text, theme.cursor) >= CURSOR_TEXT_CONTRAST,
+                "{name}: text {:.2} under the cursor",
+                contrast(theme.cursor_text, theme.cursor)
+            );
+            // Light themes' orange cursors are as light as their
+            // selections and stand out by hue (Ayu Light's is 1.43), so
+            // only a cursor of the selection's own colour fails.
+            assert!(
+                contrast(theme.cursor, sel) >= 1.4,
+                "{name}: cursor {:.2} on the selection",
+                contrast(theme.cursor, sel)
+            );
+        }
+    }
+
     #[test]
     fn user_files_come_before_built_in_ones() {
         let dir = TempDir::new("themes");

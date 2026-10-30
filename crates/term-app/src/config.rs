@@ -745,6 +745,8 @@ pub fn program_theme(base: &Theme, t: &term_core::Terminal) -> Option<Theme> {
     // program's background, so they stay readable on it.
     if term_render::rgb(bg) != base.background {
         theme.set_background(bg);
+    } else {
+        theme.keep_legible();
     }
     Some(theme)
 }
@@ -1507,7 +1509,10 @@ mod tests {
         assert_eq!(rgb_of(drawn.palette[1]), 0xff0000);
         assert_eq!(drawn.palette[2], theme.palette[2]);
         assert_eq!(drawn.foreground, theme.foreground);
-        assert_eq!(drawn.selection, theme.selection);
+        assert!(
+            term_render::contrast(drawn.selection, drawn.background) >= term_render::SELECTION_CONTRAST,
+            "the selection shows on the program's background"
+        );
         assert_ne!(drawn.search_hit, theme.search_hit, "hits follow the program's background");
         // A new theme (a config reload, the appearance switching): the
         // program's colours stay on top of it.

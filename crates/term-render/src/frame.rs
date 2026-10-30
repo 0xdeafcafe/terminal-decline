@@ -328,7 +328,11 @@ impl Theme {
             slot::SELECTION => self.selection,
             slot::SEARCH_HIT => self.search_hit,
             slot::SEARCH_CURRENT => self.search_current,
-            _ => unreachable!("not a theme colour: {slot}"),
+            // The divider is the window's, not the theme's.
+            _ => {
+                debug_assert!(false, "not a theme colour: {slot}");
+                0
+            }
         };
         Paint { rgba, tag: self.tag(slot) }
     }
@@ -586,8 +590,12 @@ impl Pen {
     #[inline]
     fn new(style: &term_core::Style, theme: &Theme) -> Pen {
         let a = style.attrs;
-        let mut fg = theme.resolve(style.fg, theme.paint(slot::FOREGROUND));
-        let mut bg = theme.resolve(style.bg, theme.paint(slot::BACKGROUND));
+        let default = |rgba, slot| Paint {
+            rgba,
+            tag: theme.tag(slot),
+        };
+        let mut fg = theme.resolve(style.fg, default(theme.foreground, slot::FOREGROUND));
+        let mut bg = theme.resolve(style.bg, default(theme.background, slot::BACKGROUND));
         if a.contains(Attrs::INVERSE) {
             std::mem::swap(&mut fg, &mut bg);
         }

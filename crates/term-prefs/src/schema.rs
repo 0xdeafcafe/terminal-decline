@@ -183,6 +183,20 @@ pub const SETTINGS: &[Setting] = &[
         ),
         "none (the built-in colours)",
     ),
+    setting(
+        "theme_transition",
+        "Theme transition",
+        Appearance,
+        Editor::Choice(&["fade", "wave", "pulse", "glimmer", "none"]),
+        "How a new theme comes in: a fade, a diagonal wave, a pulse, a glimmer, or at once (Reduce Motion makes it a fade)",
+    ),
+    setting(
+        "theme_transition_ms",
+        "Transition time",
+        Appearance,
+        integer(0.0, 2000.0, 50.0),
+        "How long a theme transition takes, in milliseconds; 0 is at once",
+    ),
     unset(
         setting(
             "colors.foreground",
@@ -566,6 +580,8 @@ mod tests {
             [
                 "appearance",
                 "theme",
+                "theme_transition",
+                "theme_transition_ms",
                 "colors",
                 "opacity",
                 "unfocused_pane_opacity",

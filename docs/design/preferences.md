@@ -229,6 +229,44 @@ New windows open with the config's theme. The program follows the preview
 in its own colours too, since it draws in the terminal's default and
 palette colours.
 
+### Theme transitions
+
+Landed (30 Oct 2026). A new theme comes in with an animation in every
+window that can be seen: a theme switch, an appearance flip (macOS or the
+`appearance` setting) and the Settings tab's preview all go through the
+window's theme changing (`apply_config`, `appearance_changed`).
+
+- `theme_transition = "fade" | "wave" | "pulse" | "glimmer" | "none"`,
+  live. Fade is the default: it has no motion, so it suits any two themes,
+  Reduce Motion, and stepping through the theme list in Settings, where
+  the theme changes at every key. Wave is a soft diagonal sweep from the
+  top left; pulse a cross-fade with a brief lift in brightness half way;
+  glimmer 8-pixel blocks turning at random times under a light sheen.
+- `theme_transition_ms` (0–2000, default 300; 0 is at once), live.
+- macOS's Reduce Motion turns wave, pulse and glimmer into a fade (Apple's
+  guidance offers a dissolve in place of motion).
+- On the GPU (`term_render::transition`, mirrored in `shaders.metal`):
+  rows are built once with the new theme, as for any theme change, and
+  each frame of the transition draws those same instances with new
+  uniforms: the old and new theme's 24 configurable colours (the 16 ANSI
+  colours, foreground, background, cursor, the text under it, selection,
+  the two search-hit colours, the divider) and the progress. An instance
+  whose colour (RGB, alpha aside) equals a slot of the new theme is drawn
+  blended from that slot's old colour, per pixel (by position for the
+  wave and glimmer); anything else stays. So palette-indexed and default
+  colours animate, and truecolour, images, emoji, the 240 fixed colours
+  of the 256-colour cube and colours programs set (OSC 4, 10, 11) stay as
+  they are. It is a match, not a tag: a truecolour equal to a theme colour
+  animates with it, and when two of the new theme's slots are the same
+  colour the first wins. While one plays, the pass is cleared to nothing
+  and the window's background drawn as a rect, so it blends per pixel too.
+- A change while one plays starts from the colours on screen (the
+  cross-fade part of the blend at that moment), not from the old theme.
+- The display link ticks only while a transition plays (each tick draws
+  without building); when it ends the window is idle again, 0 wakeups. A
+  window that can't be seen (a background tab) takes the new theme at
+  once.
+
 ## Keybinds
 
 - `[keybind]` holds changes against `keybind::DEFAULTS`: removing a

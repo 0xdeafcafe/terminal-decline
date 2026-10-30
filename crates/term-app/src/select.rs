@@ -90,6 +90,18 @@ impl Pending {
     }
 }
 
+/// A mouse button event went to the program (it takes the mouse): a
+/// press clears the terminal's own selection, as typing does, so Cmd+C
+/// can't copy an old selection while the program draws its own. Whether
+/// there was one to clear (the pane needs drawing).
+pub fn reported(t: &mut Terminal, press: bool) -> bool {
+    if !press || t.selection().is_none() {
+        return false;
+    }
+    t.set_selection(None);
+    true
+}
+
 /// Auto-scroll speed per cell height past the edge, in lines a second.
 pub const SPEED_PER_LINE: f64 = 10.0;
 /// Slowest auto-scroll, just past the edge (lines a second).
@@ -287,6 +299,24 @@ mod tests {
         let b = Pending { block: true, ..p }.start(&mut t.state);
         assert_eq!(b, Some(Block::at(anchor)));
         assert_eq!(t.state.selection(), Some(Block::at(anchor).stream()));
+    }
+
+    /// The other half of Alex's report: with a program taking the mouse,
+    /// drags go to the program, which highlights on its own; the
+    /// terminal's old selection must not stay behind for Cmd+C.
+    #[test]
+    fn a_click_sent_to_the_program_clears_the_selection() {
+        let mut t = Term::new(20, 5, 100, term_core::ImagePool::process());
+        t.advance(b"\x1b[?1000h\x1b[?1006hsome u text");
+        let u = t.state.point_at(0, 5);
+        t.state.set_selection(Some(Selection::new(u, u)));
+        assert_eq!(t.state.selection_text().as_deref(), Some("u"));
+        // A release (or motion) alone leaves it.
+        assert!(!reported(&mut t.state, false));
+        assert_eq!(t.state.selection_text().as_deref(), Some("u"));
+        assert!(reported(&mut t.state, true));
+        assert_eq!(t.state.selection(), None);
+        assert!(!reported(&mut t.state, true), "nothing left to clear");
     }
 
     #[test]

@@ -297,7 +297,10 @@ Oct 2026, 1.90 → 2.16 MB) and no measurable parse speed.
   A plain click clears the selection and selects nothing: a selection
   starts only once the mouse has moved half a cell width (at least 4
   pixels) from where the button went down (`select::Pending`), so a click
-  or a shaky hand doesn't leave one character selected.
+  or a shaky hand doesn't leave one character selected. A click that goes
+  to the program clears the terminal's selection, as typing does
+  (`select::reported`): the program draws its own highlight, and Cmd+C
+  mustn't copy an old selection the user no longer sees as current.
   Which click does what is `select::gesture`: Shift-click extends the
   selection (by words or lines if it was made that way), Option-drag makes
   a rectangle. Dragging past the top or bottom edge scrolls, faster the

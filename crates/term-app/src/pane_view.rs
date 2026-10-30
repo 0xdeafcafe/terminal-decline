@@ -1162,8 +1162,18 @@ impl PaneView {
             return;
         }
         if let Some((_, sgr)) = self.reporting(event) {
-            self.with(|_, p| p.mouse_button = press.then_some(button));
+            let cleared = self.with(|_, p| {
+                p.mouse_button = press.then_some(button);
+                let cleared = select::reported(&mut p.session.lock_term().state, press);
+                if cleared {
+                    p.block = None;
+                }
+                cleared
+            });
             self.send_mouse(button + Self::mods_of(event), line, col, press, sgr);
+            if cleared == Some(true) {
+                self.request_redraw();
+            }
             return;
         }
         // Option-click on the shell's command line moves its cursor there;

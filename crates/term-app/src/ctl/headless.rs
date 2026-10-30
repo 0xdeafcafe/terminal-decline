@@ -241,8 +241,14 @@ impl Headless {
             env,
             shell: None,
             direct,
-            // Agents get exactly what the program prints: no prompt marks.
-            integration: None,
+            // A program run directly gets exactly what it prints; a shell
+            // (`--shell`) gets the integration, as a window's does, so its
+            // commands are marked with where they start and end.
+            integration: if !direct && config.shell_integration {
+                crate::Paths::current().shell_integration_dir()
+            } else {
+                None
+            },
         };
         let scrollback = spawn.scrollback.unwrap_or(config.scrollback);
         let mut t = Term::new(

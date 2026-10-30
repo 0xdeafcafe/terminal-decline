@@ -9,7 +9,7 @@ use term_font::{CellWidth, FontConfig};
 use term_render::Theme;
 
 use crate::keybind::{self, KeybindConfig, Keybinds};
-use crate::theme::{self as themes, Appearance, AppearanceMode, ThemeChoice};
+use crate::theme::{self as themes, Appearance, AppearanceMode, ThemeChoice, ThemeTransition};
 
 /// Which Option key acts as Meta (sends ESC + key). Off by default, like
 /// Terminal.app and Ghostty, so Option still types @ [ ] { } | \\ ~ on
@@ -219,6 +219,13 @@ pub struct Config {
     pub appearance: AppearanceMode,
     /// `theme = "name"` or `{ light = "…", dark = "…" }`; see [`crate::theme`].
     pub theme: Option<ThemeChoice>,
+    /// How a new theme comes in: `"fade"` (the default), `"wave"`,
+    /// `"pulse"`, `"glimmer"` or `"none"`.
+    pub theme_transition: ThemeTransition,
+    /// How long it takes, in milliseconds (at most
+    /// [`THEME_TRANSITION_MS_MAX`]); 0 is at once.
+    #[serde(deserialize_with = "transition_ms")]
+    pub theme_transition_ms: u32,
     pub colors: Colors,
     /// The theme and `[colors]` resolved, by [`load`].
     #[serde(skip)]
@@ -267,6 +274,8 @@ impl Default for Config {
             image_file_transfer: true,
             appearance: AppearanceMode::System,
             theme: None,
+            theme_transition: ThemeTransition::Fade,
+            theme_transition_ms: 300,
             colors: Colors::default(),
             palettes: Palettes::default(),
             keybind: KeybindConfig::default(),
@@ -290,6 +299,17 @@ fn ambiguous_width<'de, D: Deserializer<'de>>(d: D) -> Result<u8, D::Error> {
     match v {
         1 | 2 => Ok(v as u8),
         _ => Err(serde::de::Error::custom(format!("{v} is not 1 or 2"))),
+    }
+}
+
+/// The longest `theme_transition_ms`.
+pub const THEME_TRANSITION_MS_MAX: u32 = 2000;
+
+fn transition_ms<'de, D: Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
+    let v = i64::deserialize(d)?;
+    match u32::try_from(v) {
+        Ok(v) if v <= THEME_TRANSITION_MS_MAX => Ok(v),
+        _ => Err(serde::de::Error::custom(format!("{v} is not 0–{THEME_TRANSITION_MS_MAX}"))),
     }
 }
 
@@ -651,6 +671,16 @@ impl Config {
             Appearance::Light => self.palettes.light,
             Appearance::Dark => self.palettes.dark,
         }
+    }
+
+    /// This config with theme `name` for light and dark alike ("" for
+    /// none), `[colors]` still on top: what windows show while Settings
+    /// previews a theme. A theme that doesn't load gives the defaults.
+    pub fn previewing(&self, name: &str, themes_dir: &Path) -> Config {
+        let mut c = self.clone();
+        c.theme = (!name.is_empty()).then(|| ThemeChoice::One(name.to_string()));
+        c.palettes = resolve(c.theme.as_ref(), &c.colors, themes_dir, &mut Vec::new());
+        c
     }
 
     /// The renderer's theme for a window with `appearance`.
@@ -1439,6 +1469,23 @@ mod tests {
             };
             assert_eq!(c.theme(Appearance::Dark).background_opacity, want, "{opacity}");
         }
+    }
+
+    /// Settings' preview: the theme for light and dark alike, `[colors]`
+    /// still on top, and nothing else changed.
+    #[test]
+    fn a_previewed_theme_replaces_the_configs() {
+        let none = Path::new("/nonexistent");
+        let (c, errors) = parse("theme = { light = 'slope-light', dark = 'slope-dark' }\nfont_size = 15\n[colors]\ncursor = '#ff0000'\n");
+        assert!(errors.is_empty(), "{errors:?}");
+        let p = c.previewing("rose-pine-dawn", none);
+        let dawn = Palette::DEFAULT.with(&themes::load(none, "rose-pine-dawn").unwrap());
+        assert_eq!(p.palette(Appearance::Dark).background, dawn.background);
+        assert_eq!(p.palette(Appearance::Light), p.palette(Appearance::Dark));
+        assert_eq!(p.palette(Appearance::Dark).cursor, 0xff0000, "[colors] stay on top");
+        assert_eq!(p.font_size, 15.0);
+        let p = c.previewing("", none);
+        assert_eq!(p.palette(Appearance::Light).background, Palette::DEFAULT.background);
     }
 
     #[test]

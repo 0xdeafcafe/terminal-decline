@@ -41,6 +41,9 @@ impl Style {
     pub fn underline(self) -> Style {
         Style { underline: true, ..self }
     }
+    pub fn dim(self) -> Style {
+        Style { dim: true, ..self }
+    }
 
     fn sgr(&self, out: &mut String) {
         out.push_str("\x1b[0");
@@ -190,7 +193,7 @@ impl Frame {
         col
     }
 
-    /// A box with a title in its top edge.
+    /// A box with rounded corners and a title in its top edge.
     #[allow(clippy::too_many_arguments)]
     pub fn boxed(&mut self, x: usize, y: usize, w: usize, h: usize, title: &str, style: Style, title_style: Style) {
         if w < 2 || h < 2 || x + w > self.width || y + h > self.height {
@@ -198,10 +201,10 @@ impl Frame {
         }
         let right = x + w - 1;
         let bottom = y + h - 1;
-        self.text(x, y, x + 1, "┌", style);
-        self.text(right, y, right + 1, "┐", style);
-        self.text(x, bottom, x + 1, "└", style);
-        self.text(right, bottom, right + 1, "┘", style);
+        self.text(x, y, x + 1, "╭", style);
+        self.text(right, y, right + 1, "╮", style);
+        self.text(x, bottom, x + 1, "╰", style);
+        self.text(right, bottom, right + 1, "╯", style);
         for col in x + 1..right {
             self.text(col, y, col + 1, "─", style);
             self.text(col, bottom, col + 1, "─", style);
@@ -217,6 +220,13 @@ impl Frame {
                 self.text(end, y, end + 1, " ", style);
             }
             self.text(x + 1, y, x + 2, " ", style);
+        }
+    }
+
+    /// A horizontal rule from `x` to `end`.
+    pub fn rule(&mut self, x: usize, y: usize, end: usize, style: Style) {
+        for col in x..end.min(self.width) {
+            self.text(col, y, col + 1, "─", style);
         }
     }
 

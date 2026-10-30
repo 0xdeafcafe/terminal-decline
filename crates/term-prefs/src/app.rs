@@ -8,11 +8,14 @@ use std::time::{Duration, Instant};
 use toml_edit::{Item, Value};
 
 use crate::file::{self, Edit, KeyPath, ListOp};
-use crate::host::{Checked, Font, Host, Pin};
+use crate::host::{Checked, Font, Host, Pin, ThemeInfo};
 use crate::layers::{Bind, Bound, Layers, Origin};
+use crate::preview::Preview;
 use crate::schema::{self, Applies, Editor, SETTINGS, Section, Setting};
-use crate::ui::frame::{Color, Frame, Style, str_width, truncate};
+use crate::ui::frame::{Frame, str_width};
 use crate::ui::input::{Event, Key, Mods, MouseKind};
+
+mod draw;
 
 /// At most this often while a number steps (key repeat); the last value
 /// is always written.
@@ -176,6 +179,11 @@ pub struct App<'h> {
     height: usize,
     hit: Hit,
     effects: Vec<Effect>,
+    /// The theme every window shows while a theme list is open (the live
+    /// preview), and its colours for drawing this tab.
+    previewed: Option<(String, Option<ThemeInfo>)>,
+    /// Themes' colours for the swatches in theme lists, read once each.
+    theme_infos: std::collections::HashMap<String, Option<ThemeInfo>>,
 }
 
 fn path_of(key: &str) -> KeyPath {
@@ -240,11 +248,6 @@ fn luminance(rgb: u32) -> f64 {
     0.2126 * c(16) + 0.7152 * c(8) + 0.0722 * c(0)
 }
 
-fn blend(a: u32, b: u32) -> u32 {
-    let ch = |s: u32| ((((a >> s) & 0xff) + ((b >> s) & 0xff)) / 2) << s;
-    ch(16) | ch(8) | ch(0)
-}
-
 impl<'h> App<'h> {
     pub fn new(host: &'h dyn Host, layers: Vec<PathBuf>, edit: usize, in_app: bool) -> App<'h> {
         let mut app = App {
@@ -271,6 +274,8 @@ impl<'h> App<'h> {
             height: 24,
             hit: Hit::default(),
             effects: Vec::new(),
+            previewed: None,
+            theme_infos: Default::default(),
         };
         app.open(layers, edit);
         app
@@ -1400,8 +1405,10 @@ impl<'h> App<'h> {
                 .filter(|&i| f.is_empty() || items[i].1.to_lowercase().contains(&f) || items[i].0.to_lowercase().contains(&f))
                 .collect()
         };
+        let theme_list = matches!(then, Then::ThemeSide(_));
         match event {
             Event::Key(Key::Esc, _) => {
+                self.end_preview(false);
                 self.say("cancelled");
                 return;
             }
@@ -1422,7 +1429,10 @@ impl<'h> App<'h> {
                         return;
                     }
                 };
+                let undo = self.undo.len();
                 self.committed(then, value, now);
+                // Kept only if it was written; else back to the old one.
+                self.end_preview(self.undo.len() > undo);
                 return;
             }
             Event::Key(Key::Up, _) => sel = sel.saturating_sub(1),
@@ -1448,8 +1458,12 @@ impl<'h> App<'h> {
             }
             _ => {}
         }
-        let n = shown(&items, &filter).len();
-        sel = sel.min(n.saturating_sub(1));
+        let list = shown(&items, &filter);
+        sel = sel.min(list.len().saturating_sub(1));
+        if theme_list && let Some(&i) = list.get(sel) {
+            let name = items[i].0.clone();
+            self.preview(&name);
+        }
         self.mode = Mode::Choice {
             title,
             items,
@@ -1458,6 +1472,51 @@ impl<'h> App<'h> {
             then,
             fonts,
         };
+    }
+
+    /// In a theme list: previews the theme under the selection.
+    fn preview_choice(&mut self) {
+        let Mode::Choice {
+            items,
+            filter,
+            sel,
+            then: Then::ThemeSide(_),
+            ..
+        } = &self.mode
+        else {
+            return;
+        };
+        let f = filter.to_lowercase();
+        let name = items
+            .iter()
+            .filter(|(v, l)| f.is_empty() || l.to_lowercase().contains(&f) || v.to_lowercase().contains(&f))
+            .nth(*sel)
+            .map(|(v, _)| v.clone());
+        if let Some(name) = name {
+            self.preview(&name);
+        }
+    }
+
+    /// Shows theme `name` in every window (the app's live preview) and in
+    /// this tab, if it isn't already.
+    fn preview(&mut self, name: &str) {
+        if self.previewed.as_ref().is_some_and(|(n, _)| n == name) {
+            return;
+        }
+        if self.in_app {
+            self.effects.push(Effect::Send(Preview::Show(name.to_string()).osc()));
+        }
+        let info = if name.is_empty() { None } else { self.host.theme_info(name) };
+        self.previewed = Some((name.to_string(), info));
+    }
+
+    /// The theme list closed: the theme written is kept (`keep`), else
+    /// the windows go back to the config's.
+    fn end_preview(&mut self, keep: bool) {
+        if self.previewed.take().is_some() && self.in_app {
+            let ask = if keep { Preview::Keep } else { Preview::Cancel };
+            self.effects.push(Effect::Send(ask.osc()));
+        }
     }
 
     fn number(&mut self, mode: Mode, event: Event, now: Instant) {
@@ -1737,6 +1796,8 @@ impl<'h> App<'h> {
                                 *sel = i;
                                 if again {
                                     self.handle(Event::Key(Key::Enter, Mods::NONE), now);
+                                } else {
+                                    self.preview_choice();
                                 }
                             }
                             _ => {}
@@ -1773,318 +1834,6 @@ impl<'h> App<'h> {
             }
             _ => {}
         }
-    }
-
-    /// Draws the frame for the current state at the current size.
-    pub fn draw(&mut self) -> Frame {
-        let (w, h) = (self.width, self.height);
-        let bg = self.checked.background.unwrap_or(0x000000);
-        let fg = if luminance(bg) < 0.5 { 0xe8e8e8 } else { 0x1a1a1a };
-        let base = Style::default().fg(Color::Rgb(fg)).bg(Color::Rgb(bg));
-        let dim = base.fg(Color::Rgb(blend(fg, bg)));
-        let sel = base.reverse();
-        let mut f = Frame::new(w, h, base);
-        self.hit = Hit::default();
-        if w < 12 || h < 4 {
-            f.text(0, 0, w, "too small", base);
-            return f;
-        }
-        let rows = self.rows();
-        self.row = self.row.min(rows.len().saturating_sub(1));
-
-        // Bottom: help line, then status or description, then the preview.
-        let help = match &self.mode {
-            Mode::Browse if self.search.is_some() => "type to filter  ↑↓ move  enter edit  esc done",
-            Mode::Browse => "↑↓ move  ←→ section  enter edit  / search  r reset  u undo  e edit file  ? help  q quit",
-            Mode::Help => "any key closes",
-            Mode::Choice { fonts: true, .. } => "type to filter  ↑↓ move  enter pick  tab all fonts  esc cancel",
-            Mode::Choice { .. } => "type to filter  ↑↓ move  enter pick  esc cancel",
-            Mode::Number { .. } => "←→ step  or type a number  enter done  esc cancel",
-            Mode::Text { .. } => "enter save  esc cancel",
-            Mode::List { .. } => "↑↓ move  a add  enter change  d remove  shift+↑↓ reorder  esc done",
-            Mode::Recording(_) => "press the shortcut  t type it  esc cancel",
-            Mode::Confirm(..) => "y yes  n no",
-        };
-        f.text(1, h - 1, w, &truncate(help, w.saturating_sub(1)), dim);
-        let line = match (&self.mode, &self.status) {
-            (Mode::Confirm(q, _), _) => q.clone(),
-            (_, Some(s)) => s.text.clone(),
-            _ if !self.checked.notices.is_empty() => {
-                let n = &self.checked.notices;
-                let more = if n.len() > 1 {
-                    format!(" (+{} more)", n.len() - 1)
-                } else {
-                    String::new()
-                };
-                format!("error: {}{more}", n[0].strip_prefix("config: ").unwrap_or(&n[0]))
-            }
-            _ => rows.get(self.row).map(|r| r.description.clone()).unwrap_or_default(),
-        };
-        let bold = self.status.as_ref().is_some_and(|s| s.error) || line.starts_with("error:");
-        f.text(
-            1,
-            h - 2,
-            w,
-            &truncate(&line, w.saturating_sub(2)),
-            if bold { base.bold() } else { base },
-        );
-        let mut bottom = h - 2;
-        if h >= 12 && w >= 40 {
-            bottom -= 1;
-            let y = bottom;
-            let end = f.text(1, y, w, "Preview ", dim);
-            let end = f.text(end, y, w, " Sample text ", Style::default());
-            let mut x = end + 1;
-            for i in 0..16u8 {
-                if x + 2 > w {
-                    break;
-                }
-                f.text(x, y, x + 2, "  ", Style::default().bg(Color::Ansi(i)));
-                x += 2;
-            }
-        }
-
-        // The banner for a file that can't be edited.
-        let mut top = 0;
-        let banner = if let Some(e) = &self.layers.error {
-            // toml_edit's first line names the line and column.
-            let at = e.lines().next().unwrap_or("").trim_start_matches("TOML parse error at ");
-            Some(format!(
-                "error: {} doesn't parse ({at}): read-only · e fixes it",
-                self.layers.edited_name()
-            ))
-        } else if self.layers.read_only {
-            Some(format!("{} is read-only: changes can't be saved", self.layers.edited_name()))
-        } else {
-            None
-        };
-        if let Some(b) = banner {
-            f.text(0, 0, w, &truncate(&b, w), base.bold());
-            top = 1;
-        }
-        let box_h = bottom.saturating_sub(top);
-        if box_h < 3 {
-            return f;
-        }
-
-        // Sections pane, when there is room.
-        let sections = self.sections();
-        let wide = w >= 50;
-        let right_x = if wide { 17 } else { 0 };
-        if wide {
-            f.boxed(0, top, 17, box_h, "Sections", dim, base.bold());
-            for (i, s) in sections.iter().enumerate() {
-                let y = top + 1 + i;
-                if y >= top + box_h - 1 {
-                    break;
-                }
-                let current = i == self.section && self.search.is_none();
-                let text = format!("{}{}", if current { " ▸ " } else { "   " }, s.name());
-                f.text(1, y, 16, &format!("{text:<15}"), if current { sel } else { base });
-            }
-            self.hit.sections = Some((1, 16, top + 1));
-        }
-        let rw = w - right_x;
-        let title = match &self.search {
-            Some(s) => format!("Search: {}", s.query),
-            None if wide => self.current_section().name().to_string(),
-            None => format!("{} ({}/{})", self.current_section().name(), self.section + 1, sections.len()),
-        };
-        let title = if self.pin_file {
-            format!("{title} · {}", self.layers.edited_name())
-        } else {
-            title
-        };
-        f.boxed(right_x, top, rw, box_h, &title, dim, base.bold());
-        let inner_x = right_x + 1;
-        let inner_w = rw - 2;
-        let visible = box_h - 2;
-        if self.row < self.scroll {
-            self.scroll = self.row;
-        }
-        if self.row >= self.scroll + visible {
-            self.scroll = self.row + 1 - visible;
-        }
-        self.hit.rows = (
-            inner_x,
-            inner_x + inner_w,
-            top + 1,
-            self.scroll,
-            visible.min(rows.len().saturating_sub(self.scroll)),
-        );
-        let label_w = if self.search.is_some() { 30 } else { 18 }.min(inner_w / 2);
-        let mut cursor = None;
-        for (i, r) in rows.iter().enumerate().skip(self.scroll).take(visible) {
-            let y = top + 1 + i - self.scroll;
-            let selected = i == self.row;
-            let style = if selected { sel } else { base };
-            f.fill(inner_x, y, inner_w, 1, style);
-            let end = inner_x + inner_w;
-            f.text(inner_x, y, end, if selected { " ▸ " } else { "   " }, style);
-            let lx = inner_x + 3;
-            let vx = lx + label_w;
-            f.text(lx, y, vx.min(end), &truncate(&r.label, label_w.saturating_sub(1)), style);
-            let mut value = r.value.clone();
-            let mut caret = None;
-            if selected {
-                match &self.mode {
-                    Mode::Number {
-                        value: v, typed, min, max, ..
-                    } => {
-                        value = match typed {
-                            Some(t) => format!("{t}  ({}–{})", format_number(*min), format_number(*max)),
-                            None => format!("‹ {} ›  ({}–{})", format_number(*v), format_number(*min), format_number(*max)),
-                        };
-                        caret = Some(match typed {
-                            Some(t) => str_width(t),
-                            None => 2,
-                        });
-                    }
-                    Mode::Text { buf, cursor: c, then, .. } if !matches!(then, Then::ListItem(..)) => {
-                        value = buf.clone();
-                        let before: String = buf.chars().take(*c).collect();
-                        caret = Some(str_width(&before));
-                    }
-                    Mode::Recording(_) => value = "press the shortcut…".into(),
-                    _ => {}
-                }
-            }
-            let mut vend = vx;
-            if let Some(rgb) = r.swatch
-                && caret.is_none()
-                && vx + 3 < end
-            {
-                f.text(vx, y, vx + 2, "  ", Style::default().bg(Color::Rgb(rgb)));
-                vend = vx + 3;
-            }
-            let value_room = end.saturating_sub(vend + 1);
-            let after = f.text(vend, y, end, &truncate(&value, value_room), style);
-            let editing_text = caret.is_some();
-            let note_w = str_width(&r.note);
-            if !editing_text && !r.note.is_empty() && after + 2 + note_w < end {
-                f.text(end - note_w - 1, y, end, &r.note, if selected { sel } else { dim });
-            }
-            if selected {
-                cursor = Some((
-                    match caret {
-                        Some(c) => (vend + c).min(end - 1),
-                        None => vend.min(end - 1),
-                    },
-                    y,
-                ));
-            }
-        }
-        f.cursor = cursor;
-
-        // Popups.
-        match &self.mode.clone() {
-            Mode::Help => self.draw_help(&mut f, base, dim),
-            Mode::Choice {
-                title,
-                items,
-                filter,
-                sel: s,
-                ..
-            } => {
-                let fl = filter.to_lowercase();
-                let shown: Vec<&(String, String)> = items
-                    .iter()
-                    .filter(|(v, l)| fl.is_empty() || l.to_lowercase().contains(&fl) || v.to_lowercase().contains(&fl))
-                    .collect();
-                let labels: Vec<String> = shown.iter().map(|(_, l)| l.clone()).collect();
-                let head = format!("filter: {filter}");
-                let (cx, cy) = self.popup(&mut f, title, Some(&head), &labels, *s, base, dim);
-                f.cursor = Some((cx + str_width(&head), cy));
-            }
-            Mode::List { path, sel: s, .. } => {
-                let items = self.list_items(path);
-                let title = schema::get(&path.join(".")).map_or("List", |s| s.label);
-                let labels = if items.is_empty() {
-                    vec!["(empty: a adds)".to_string()]
-                } else {
-                    items
-                };
-                self.popup(&mut f, title, None, &labels, *s, base, dim);
-            }
-            Mode::Text {
-                title,
-                buf,
-                cursor: c,
-                then: Then::ListItem(..),
-                ..
-            } => {
-                let before: String = buf.chars().take(*c).collect();
-                let (cx, cy) = self.popup(&mut f, title, Some(buf), &[], 0, base, dim);
-                f.cursor = Some((cx + str_width(&before), cy));
-            }
-            _ => {}
-        }
-        f
-    }
-
-    /// A box over the right of the screen: an optional input line, then
-    /// the items with `sel` marked. Returns where the input line starts.
-    #[allow(clippy::too_many_arguments)]
-    fn popup(
-        &mut self,
-        f: &mut Frame,
-        title: &str,
-        head: Option<&str>,
-        items: &[String],
-        sel: usize,
-        base: Style,
-        dim: Style,
-    ) -> (usize, usize) {
-        let (w, h) = (self.width, self.height);
-        let pw = (w * 3 / 4).clamp(10.min(w), 60.min(w));
-        let x = w - pw;
-        let extra = usize::from(head.is_some());
-        let ph = (items.len() + extra + 2).min(h.saturating_sub(2)).max(3.min(h));
-        let y = 0;
-        f.fill(x, y, pw, ph, base);
-        f.boxed(x, y, pw, ph, title, dim, base.bold());
-        let inner = pw - 2;
-        if let Some(head) = head {
-            f.text(x + 1, y + 1, x + 1 + inner, &truncate(head, inner), base.underline());
-        }
-        let room = ph.saturating_sub(2 + extra);
-        let first = if sel < items.len() && sel >= room { sel + 1 - room } else { 0 };
-        let iy = y + 1 + extra;
-        for (k, item) in items.iter().enumerate().skip(first).take(room) {
-            let yy = iy + k - first;
-            let selected = k == sel;
-            let style = if selected { base.reverse() } else { base };
-            f.fill(x + 1, yy, inner, 1, style);
-            let t = format!("{}{}", if selected { "▸ " } else { "  " }, item);
-            f.text(x + 1, yy, x + 1 + inner, &truncate(&t, inner), style);
-            if selected && head.is_none() {
-                f.cursor = Some((x + 1, yy));
-            }
-        }
-        self.hit.popup = Some((x + 1, x + 1 + inner, iy, first, room.min(items.len().saturating_sub(first))));
-        (x + 1, y + 1)
-    }
-
-    fn draw_help(&mut self, f: &mut Frame, base: Style, dim: Style) {
-        let lines: Vec<String> = [
-            "↑↓ or j k     move",
-            "←→ or tab     change section",
-            "enter, space  edit the setting",
-            "/             search all settings",
-            "r             reset: remove it from this file",
-            "u             undo the last change",
-            "e             open the file in $EDITOR",
-            "c, a, d       shortcuts: rebind, add, unbind",
-            "ctrl+l        redraw",
-            "q, esc        quit",
-            "",
-            "Each change is saved at once. The file can",
-            "always be edited by hand.",
-        ]
-        .map(String::from)
-        .to_vec();
-        self.popup(f, "Help", None, &lines, usize::MAX, base, dim);
-        self.hit.popup = None;
     }
 }
 

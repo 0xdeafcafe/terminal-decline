@@ -7,9 +7,11 @@ pub mod packer;
 mod pixels;
 mod row_cache;
 mod shape_cache;
+pub mod transition;
 
 pub use frame::{Frame, FrameInput, GlyphInstance, GlyphSlot, GlyphSource, RectInstance, RectSplit, Rgba, Theme, rgb};
 pub use images::{ImageDraw, ImageInstance, Images};
 pub use metal::{CommandBuffer, FontsId, PaneDraw, PaneRender, PxRect, Renderer, Texture, configure_layer, set_glyph_texture_sizes};
 pub use packer::ShelfPacker;
 pub use pixels::{MetalPixels, PixelAlloc};
+pub use transition::{Blend, Kind as TransitionKind, Transition};

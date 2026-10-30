@@ -108,6 +108,35 @@ impl AppearanceMode {
     }
 }
 
+/// `theme_transition`: how a new theme comes in, in every window at once
+/// (a theme switch, an appearance flip, the Settings tab's preview). A
+/// quick fade by default: it has no motion, so it suits every pair of
+/// themes, Reduce Motion and editing in Settings, where the theme changes
+/// at every step through the list. See [`term_render::transition`].
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ThemeTransition {
+    None,
+    #[default]
+    Fade,
+    Wave,
+    Pulse,
+    Glimmer,
+}
+
+impl ThemeTransition {
+    pub fn kind(self) -> term_render::TransitionKind {
+        use term_render::TransitionKind as K;
+        match self {
+            ThemeTransition::None => K::None,
+            ThemeTransition::Fade => K::Fade,
+            ThemeTransition::Wave => K::Wave,
+            ThemeTransition::Pulse => K::Pulse,
+            ThemeTransition::Glimmer => K::Glimmer,
+        }
+    }
+}
+
 /// The `theme` setting.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ThemeChoice {

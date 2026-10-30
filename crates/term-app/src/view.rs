@@ -32,7 +32,8 @@ use objc2_metal::{MTLCommandBuffer, MTLDrawable};
 use objc2_quartz_core::{CADisplayLink, CALayer, CAMetalDrawable, CAMetalLayer};
 use term_core::Term;
 use term_pty::{Command, Size};
-use term_render::{FrameInput, PaneDraw, PaneRender, RectInstance, Renderer, Rgba, Theme};
+use term_render::transition::{self, Slots};
+use term_render::{FrameInput, PaneDraw, PaneRender, RectInstance, Renderer, Rgba, Theme, Transition};
 
 use crate::config::Config;
 use crate::control::{self, Control, Dump, FocusTarget, PaneDump};
@@ -107,6 +108,9 @@ pub(crate) struct Win {
     recordings: u64,
     /// The colour of the dividers between panes.
     divider: Rgba,
+    /// The theme transition playing, if one is (see
+    /// [`term_render::transition`]): the display link runs until it ends.
+    transition: Option<Transition>,
     /// The window's `contentMinSize` before its panes raised it, and the
     /// one last set (points).
     base_min: Option<NSSize>,
@@ -800,6 +804,7 @@ impl WindowView {
                 font_size: config.font_size,
                 binds: config.keybinds(),
                 divider: divider_colour(&config, appearance),
+                transition: None,
                 config,
                 theme,
                 appearance,
@@ -1139,6 +1144,19 @@ impl WindowView {
                 last_input_elapsed: win.last_input.elapsed(),
             },
         );
+        // A theme transition draws every tick until it ends, from the
+        // frames already built: only its uniforms change.
+        let now = Instant::now();
+        let decision = match decision {
+            Decision::Skip | Decision::Pause { .. } if win.transition.is_some() => Decision::Draw {
+                rate: win.rate.max(frame_policy::RATE_STREAMING),
+            },
+            Decision::Hide { .. } => {
+                win.transition = None;
+                decision
+            }
+            d => d,
+        };
         // A pane held in a synchronized update keeps its change for later.
         let keep_held = |panes: &HashMap<PaneId, Pane>, ticks: &[(PaneId, PaneFrame, _)]| {
             for (id, f, _) in ticks {
@@ -1397,6 +1415,12 @@ impl WindowView {
             [one] => one.pane.frame.clear,
             _ => 0,
         };
+        let blend = win.transition.as_ref().map(|t| t.blend(now)).filter(|b| b.progress < 1.0);
+        if blend.is_none() {
+            // Ended: this frame is the new theme's own.
+            win.transition = None;
+        }
+        win.renderer.set_blend(blend);
         match timed {
             Some((lat, keys)) if !keys.is_empty() => {
                 present_timed(&mut win.renderer, &self.ivars().layer, clear, &draws, dividers, lat, keys)
@@ -1673,6 +1697,7 @@ impl WindowView {
     pub fn apply_config(&self, config: Rc<Config>, notices: &[String]) {
         let Some(window) = self.window() else { return };
         let scale = window.backingScaleFactor();
+        let visible = self.visible();
         let changed = self.with_state(|st| {
             let win = &mut st.win;
             let old = std::mem::replace(&mut win.config, config.clone());
@@ -1686,8 +1711,10 @@ impl WindowView {
                 win.renderer.set_font_config(&fonts, scale);
             }
             win.binds = config.keybinds();
+            let shown = transition::slots(&win.theme, win.divider);
             win.theme = window_theme(&config, win.appearance, win.settings);
             win.divider = divider_colour(&config, win.appearance);
+            begin_transition(win, shown, visible);
             for p in st.panes.values() {
                 let mut t = p.session.lock_term();
                 let report = crate::config::set_term_colors(&mut t.state, &win.theme);
@@ -1734,6 +1761,7 @@ impl WindowView {
     /// light or back.
     fn appearance_changed(&self) {
         let appearance = self.appearance();
+        let visible = self.visible();
         let changed = self.with_state(|st| {
             let win = &mut st.win;
             if win.appearance == appearance {
@@ -1748,8 +1776,10 @@ impl WindowView {
                 || theme.palette != win.theme.palette
                 || theme.cursor != win.theme.cursor
                 || theme.selection != win.theme.selection;
+            let shown = transition::slots(&win.theme, win.divider);
             win.theme = theme;
             win.divider = divider;
+            begin_transition(win, shown, visible);
             for p in st.panes.values() {
                 let mut t = p.session.lock_term();
                 if crate::config::set_term_colors(&mut t.state, &win.theme) {
@@ -2311,6 +2341,20 @@ impl WindowView {
         }
     }
 
+    /// Pane `pane`'s preferences sent `OSC 7771 ; <what>`: record a chord,
+    /// or preview a theme in every window. Only heard from the Settings
+    /// pane.
+    fn prefs_asked(&self, pane: PaneId, what: &str) {
+        if self.with_state(|st| st.panes.get(&pane).is_some_and(|p| p.settings)) != Some(true) {
+            return;
+        }
+        if what == "record-chord" {
+            self.start_recording(pane);
+        } else if let Some(preview) = term_prefs::Preview::parse(what) {
+            crate::app::preview_theme(preview);
+        }
+    }
+
     /// Pane `pane`'s preferences asked for a chord (`OSC 7771 ;
     /// record-chord`, only heard in the Settings tab): the next key down
     /// in this window is taken before the menus, the input method and
@@ -2456,8 +2500,8 @@ fn pane_hooks(id: usize, pane: PaneId, test: bool, settings: bool) -> Hooks {
         DispatchQueue::main().exec_async(move || with_view(id, |v| v.events(pane, events)));
     }));
     if settings {
-        hooks.on_record_chord = Some(Box::new(move || {
-            DispatchQueue::main().exec_async(move || with_view(id, |v| v.start_recording(pane)));
+        hooks.on_prefs = Some(Box::new(move |what: String| {
+            DispatchQueue::main().exec_async(move || with_view(id, |v| v.prefs_asked(pane, &what)));
         }));
     }
     hooks
@@ -2629,6 +2673,28 @@ fn shell_command(config: &Config) -> Command {
 fn pane_cwd(p: &Pane) -> Option<String> {
     let reported = p.session.lock_term().state.cwd().map(str::to_owned);
     reported.or_else(|| p.session.foreground_cwd())
+}
+
+/// The window's theme changed from `shown` (the colours on screen, as
+/// [`transition::slots`]): play `theme_transition` to the new ones while
+/// the window can be seen, from where a transition still playing has got
+/// to. Hidden windows (background tabs) just take the new theme. With
+/// Reduce Motion on, a wave, pulse or glimmer is a plain fade.
+fn begin_transition(win: &mut Win, shown: Slots, visible: bool) {
+    let new = transition::slots(&win.theme, win.divider);
+    let config = &win.config;
+    let kind = config.theme_transition.kind().reduced(reduce_motion());
+    let ms = config.theme_transition_ms.min(crate::config::THEME_TRANSITION_MS_MAX);
+    let now = Instant::now();
+    let playing = win.transition.take();
+    if visible {
+        win.transition = Transition::start(playing.as_ref(), shown, new, kind, Duration::from_millis(ms as u64), now);
+    }
+}
+
+/// macOS's Reduce Motion (System Settings > Accessibility > Display).
+fn reduce_motion() -> bool {
+    objc2_app_kit::NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion()
 }
 
 /// The divider colour for `config` in `appearance`.

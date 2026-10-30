@@ -14,6 +14,7 @@ pub mod app;
 pub mod file;
 pub mod host;
 pub mod layers;
+pub mod preview;
 pub mod schema;
 pub mod ui;
 
@@ -23,6 +24,7 @@ use std::time::Instant;
 
 pub use app::{App, Effect};
 pub use host::{Action, Checked, Fake, Font, Host, Pin, ThemeInfo};
+pub use preview::Preview;
 
 use ui::frame::Renderer;
 use ui::input::Decoder;

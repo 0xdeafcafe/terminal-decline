@@ -337,3 +337,46 @@ fn kept_instances_draw_like_fresh_frames() {
         assert_eq!(differ, 0, "step {i}: {differ} pixels differ\n{}", t.state.dump());
     }
 }
+
+/// A theme fade half way: the background and a palette colour are drawn
+/// at the midpoint of the old and new themes', and a truecolour cell stays
+/// exactly as it is. Only the uniforms change: the frame built with the
+/// new theme is drawn again as it is (`draw` doesn't build).
+#[test]
+fn fade_draws_the_midpoint_at_half_way() {
+    use term_render::transition::{Blend, Kind, slots};
+    if MTLCreateSystemDefaultDevice().is_none() {
+        assert!(std::env::var_os("CI").is_none(), "no Metal device on CI");
+        eprintln!("skipping: no Metal device");
+        return;
+    }
+    let mut renderer = Renderer::new(Fonts::new("Menlo", 24.0));
+    let mut old = Theme::new([0; 16], 0xffffff, 0x000000, 0xffffff, 0x444444);
+    old.palette[1] = rgb(0x00ff00);
+    let mut new = Theme::new([0; 16], 0x000000, 0xffffff, 0x000000, 0x444444);
+    new.palette[1] = rgb(0xff0000);
+    let mut t = Term::new(COLS, LINES, 0, term_core::ImagePool::process());
+    // (0,0): ANSI red background; (1,0): truecolour #112233.
+    t.advance(b"\x1b[?25l\x1b[41m \x1b[48;2;17;34;51m \x1b[0m");
+
+    let end = render(&mut renderer, &mut t, &new);
+    assert_eq!(end.centre(3, 1), [0xff, 0xff, 0xff, 0xff], "the new background, with no transition");
+    let blend = |progress| Blend {
+        kind: Kind::Fade,
+        progress,
+        old: slots(&old, rgb(0x333333)),
+        new: slots(&new, rgb(0x333333)),
+    };
+    renderer.set_blend(Some(blend(0.5)));
+    let half = draw(&mut renderer, &t);
+    close(half.centre(3, 1), [0.5, 0.5, 0.5, 1.0], "background half way");
+    // BGRA: green to red half way.
+    close(half.centre(0, 0), [0.0, 0.5, 0.5, 1.0], "ANSI red half way from green");
+    assert_eq!(half.centre(1, 0), [0x33, 0x22, 0x11, 0xFF], "truecolour stays");
+    renderer.set_blend(Some(blend(0.0)));
+    let start = draw(&mut renderer, &t);
+    assert_eq!(start.centre(3, 1), [0, 0, 0, 0xff], "the old background at the start");
+    assert_eq!(start.centre(0, 0), [0, 0xff, 0, 0xff], "the old red at the start");
+    renderer.set_blend(None);
+    assert_eq!(draw(&mut renderer, &t).centre(3, 1), [0xff, 0xff, 0xff, 0xff]);
+}

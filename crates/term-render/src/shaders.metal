@@ -17,9 +17,96 @@ struct Rect {
     uint color; // RGBA8, red in the low byte
 };
 
+// A theme transition (transition.rs, `Uniforms`): the old and new
+// theme's colours, how far along it is and how it moves. `count` is 0
+// while none plays.
+#define SLOTS 24
+struct Blend {
+    float progress;
+    uint kind; // 0 none, 1 fade, 2 wave, 3 pulse, 4 glimmer
+    float2 viewport;
+    uint count;
+    uint pad[3];
+    uint old_slots[SLOTS];
+    uint new_slots[SLOTS];
+};
+
+// An instance colour as the transition draws it: from the old theme's
+// colour in the slot whose new colour it equals (RGB only; the first
+// match), else unchanged. `matched` says whether it moves at all.
+struct Blended {
+    float4 old_colour;
+    float4 new_colour;
+    float matched;
+};
+
+static Blended blended(uint packed, constant Blend &b) {
+    float4 c = unpack_unorm4x8_to_float(packed);
+    Blended o = { c, c, 0.0 };
+    uint rgb = packed & 0x00FFFFFFu;
+    for (uint k = 0; k < b.count; k++) {
+        if ((b.new_slots[k] & 0x00FFFFFFu) == rgb) {
+            float4 old = unpack_unorm4x8_to_float(b.old_slots[k]);
+            o.old_colour = float4(old.rgb, c.a);
+            o.matched = 1.0;
+            break;
+        }
+    }
+    return o;
+}
+
+// Mirrors `ease`, `noise`, `local` and `lift` in transition.rs.
+static float ease(float t) {
+    t = clamp(t, 0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
+}
+
+static float block_noise(uint bx, uint by) {
+    uint h = bx * 374761393u + by * 668265263u;
+    h = (h ^ (h >> 13)) * 1274126177u;
+    h ^= h >> 16;
+    return float(h & 0x00FFFFFFu) / 16777216.0;
+}
+
+static float4 transition_colour(float4 old_colour, float4 new_colour, float matched, float2 pixel, constant Blend &b) {
+    if (b.kind == 0u || matched == 0.0) {
+        return new_colour;
+    }
+    float p = b.progress;
+    float2 at = pixel / max(b.viewport, float2(1.0));
+    float d = (at.x + at.y) * 0.5;
+    float t;
+    float lift = 0.0;
+    if (p >= 1.0) {
+        t = 1.0;
+    } else if (p <= 0.0) {
+        t = 0.0;
+    } else if (b.kind == 2u) {
+        const float soft = 0.35;
+        t = ease((p * (1.0 + soft) - d) / soft);
+    } else if (b.kind == 4u) {
+        const float turn = 0.4;
+        uint2 block = uint2(pixel / 8.0);
+        t = ease((p - block_noise(block.x, block.y) * (1.0 - turn)) / turn);
+    } else {
+        t = ease(p);
+    }
+    if (b.kind == 3u) {
+        float k = (p - 0.5) / 0.18;
+        lift = 0.22 * exp(-k * k);
+    } else if (b.kind == 4u) {
+        lift = 0.16 * sin(M_PI_F * p) * max(1.0 - abs(d - p) * 5.0, 0.0);
+    }
+    float3 rgb = mix(old_colour.rgb, new_colour.rgb, t);
+    rgb += (1.0 - rgb) * lift;
+    return float4(rgb, new_colour.a);
+}
+
 struct RectOut {
     float4 pos [[position]];
-    float4 color;
+    float4 old_colour [[flat]];
+    float4 new_colour [[flat]];
+    float matched [[flat]];
 };
 
 static float4 to_clip(float2 p, float2 viewport) {
@@ -28,18 +115,22 @@ static float4 to_clip(float2 p, float2 viewport) {
 
 vertex RectOut rect_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
                            constant Rect *rects [[buffer(0)]],
-                           constant Uniforms &u [[buffer(1)]]) {
+                           constant Uniforms &u [[buffer(1)]],
+                           constant Blend &b [[buffer(2)]]) {
     Rect r = rects[iid];
     float2 corner = float2(vid & 1, vid >> 1);
     RectOut o;
     o.pos = to_clip(u.origin + float2(r.pos) + corner * float2(r.size), u.viewport);
-    float4 c = unpack_unorm4x8_to_float(r.color);
-    o.color = float4(c.rgb * c.a, c.a);
+    Blended c = blended(r.color, b);
+    o.old_colour = c.old_colour;
+    o.new_colour = c.new_colour;
+    o.matched = c.matched;
     return o;
 }
 
-fragment float4 rect_fragment(RectOut in [[stage_in]]) {
-    return in.color;
+fragment float4 rect_fragment(RectOut in [[stage_in]], constant Blend &b [[buffer(0)]]) {
+    float4 c = transition_colour(in.old_colour, in.new_colour, in.matched, in.pos.xy, b);
+    return float4(c.rgb * c.a, c.a);
 }
 
 struct Glyph {
@@ -53,32 +144,40 @@ struct Glyph {
 struct GlyphOut {
     float4 pos [[position]];
     float2 uv;
-    float4 color;
+    float4 old_colour [[flat]];
+    float4 new_colour [[flat]];
+    float matched [[flat]];
     uint is_color [[flat]];
 };
 
 vertex GlyphOut glyph_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
                              constant Glyph *glyphs [[buffer(0)]],
-                             constant Uniforms &u [[buffer(1)]]) {
+                             constant Uniforms &u [[buffer(1)]],
+                             constant Blend &b [[buffer(2)]]) {
     Glyph g = glyphs[iid];
     float2 corner = float2(vid & 1, vid >> 1);
     GlyphOut o;
     o.pos = to_clip(u.origin + float2(g.pos) + corner * float2(g.size), u.viewport);
     o.uv = float2(g.uv) + corner * float2(g.size);
-    o.color = unpack_unorm4x8_to_float(g.color);
+    Blended c = blended(g.color, b);
+    o.old_colour = c.old_colour;
+    o.new_colour = c.new_colour;
+    o.matched = c.matched;
     o.is_color = g.is_color & 1u;
     return o;
 }
 
 fragment float4 glyph_fragment(GlyphOut in [[stage_in]],
                                texture2d<float> mask [[texture(0)]],
-                               texture2d<float> colour [[texture(1)]]) {
+                               texture2d<float> colour [[texture(1)]],
+                               constant Blend &b [[buffer(0)]]) {
     constexpr sampler s(coord::pixel, filter::nearest, address::clamp_to_zero);
     if (in.is_color) {
-        return colour.sample(s, in.uv) * in.color.a; // already premultiplied
+        return colour.sample(s, in.uv) * in.new_colour.a; // already premultiplied
     }
-    float a = mask.sample(s, in.uv).r * in.color.a;
-    return float4(in.color.rgb * a, a);
+    float4 c = transition_colour(in.old_colour, in.new_colour, in.matched, in.pos.xy, b);
+    float a = mask.sample(s, in.uv).r * c.a;
+    return float4(c.rgb * a, a);
 }
 
 // Pieces of images (images.md §6.3): `ImageInstance` in images.rs.

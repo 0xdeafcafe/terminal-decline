@@ -1381,8 +1381,10 @@ fn prefs(home: TempDir, config: &Path, recorded: Arc<AtomicU64>) -> Harness {
     };
     let signal = Arc::new(Signal::default());
     let mut hooks = signal.hooks();
-    hooks.on_record_chord = Some(Box::new(move || {
-        recorded.fetch_add(1, Ordering::SeqCst);
+    hooks.on_prefs = Some(Box::new(move |what: String| {
+        if what == "record-chord" {
+            recorded.fetch_add(1, Ordering::SeqCst);
+        }
     }));
     let session = Session::spawn(&cmd, size(80, 24), Term::new(80, 24, 100, term_core::ImagePool::process()), hooks).unwrap();
     Harness {
@@ -1414,7 +1416,7 @@ fn prefs_edits_records_chords_and_quits() {
     std::fs::write(&config, "# mine\nfont_size = 13 # big\n[colors]\nbackground = '#000000'\n").unwrap();
     let recorded = Arc::new(AtomicU64::new(0));
     let h = prefs(home, &config, recorded.clone());
-    h.wait_for("the sections", |d| d.contains("Sections") && d.contains("Appearance"));
+    h.wait_for("the sections", |d| d.contains("Settings") && d.contains("▸ Appearance"));
     // As the Settings smoke test types it.
     h.session().send(b"/background\r\x7f\x7f\x7f\x7f\x7f\x7f\x7f102030\r".to_vec());
     wait_file(&config, "the background", |t| t.contains("background = \"#102030\""));
@@ -1444,7 +1446,7 @@ fn prefs_hangup_mid_edit_leaves_a_valid_file() {
     let config = home.path().join("config.toml");
     std::fs::write(&config, "font_size = 14\n").unwrap();
     let mut h = prefs(home, &config, Arc::default());
-    h.wait_for("the sections", |d| d.contains("Sections"));
+    h.wait_for("the sections", |d| d.contains("▸ Appearance"));
     h.session().send(b"/copy on\r".to_vec());
     wait_file(&config, "copy_on_select", |t| t.contains("copy_on_select = true"));
     h.session().send(b"\x1b[27u/bold face\rMenlo Bo".to_vec());

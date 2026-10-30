@@ -37,6 +37,7 @@ use crate::frame::{Frame, FrameInput, GlyphInstance, GlyphSlot, GlyphSource, Rec
 use crate::images::ImageInstance;
 use crate::packer::{NoRoom, ShelfPacker};
 use crate::pixels::{MetalPixels, PixelAlloc};
+use crate::transition::{Blend, Uniforms};
 use term_core::image::{Layer, PoolId};
 
 type Device = ProtocolObject<dyn MTLDevice>;
@@ -943,7 +944,8 @@ struct Window {
 
 impl Window {
     /// Encode `panes` and `dividers` into `target`: see
-    /// [`Renderer::encode_panes`].
+    /// [`Renderer::encode_panes`], partway through `blend` if given.
+    #[allow(clippy::too_many_arguments)]
     fn encode(
         &mut self,
         shared: &Shared,
@@ -952,6 +954,7 @@ impl Window {
         clear: Rgba,
         panes: &[PaneDraw],
         dividers: &[RectInstance],
+        blend: Option<&Blend>,
     ) -> Retained<CommandBuffer> {
         self.in_flight.begin_below(FRAMES_IN_FLIGHT);
         let gpu = &shared.gpu;
@@ -959,6 +962,18 @@ impl Window {
         let current = Some(cache.built_with(fonts));
         let (width, height) = (target.width() as u32, target.height() as u32);
         let viewport = [width as f32, height as f32];
+        let blend = Uniforms::of(blend, viewport);
+        // While a transition plays, the pass is cleared to nothing and the
+        // clear colour drawn as a rect over it all, first, so it blends
+        // per pixel like the rest (a wave sweeps the background too).
+        let backdrop = (blend.kind != 0 && clear >> 24 != 0).then(|| RectInstance {
+            x: 0,
+            y: 0,
+            w: width.min(u16::MAX as u32) as u16,
+            h: height.min(u16::MAX as u32) as u16,
+            color: clear,
+        });
+        let clear = if backdrop.is_some() { 0 } else { clear };
 
         // Each pane's rects and glyphs are in its own buffers, brought up
         // to date; the window's hold the fills (when a pane's background
@@ -966,7 +981,7 @@ impl Window {
         // images back to back.
         self.spans.clear();
         let mut pane_flights = Vec::new();
-        let (mut rects, mut images) = (0, 0);
+        let (mut rects, mut images) = (backdrop.is_some() as usize, 0);
         for (pane, p) in panes.iter().enumerate() {
             let Some(s) = p.scissor.clamped(width, height) else {
                 continue;
@@ -1054,6 +1069,9 @@ impl Window {
             }
             if let Some(buf) = &rect_buf {
                 write(buf, divider_rects.start, dividers);
+                if let Some(b) = backdrop {
+                    write(buf, 0, &[b]);
+                }
             }
         }
 
@@ -1085,6 +1103,23 @@ impl Window {
                 range.start,
             );
         };
+        // SAFETY: `Uniforms` is plain data of the shaders' `Blend` layout.
+        unsafe {
+            let bytes = NonNull::from(&blend).cast::<c_void>();
+            enc.setVertexBytes_length_atIndex(bytes, size_of::<Uniforms>(), 2);
+            enc.setFragmentBytes_length_atIndex(bytes, size_of::<Uniforms>(), 0);
+        }
+        if let Some(buf) = &rect_buf
+            && backdrop.is_some()
+        {
+            enc.setScissorRect(MTLScissorRect {
+                x: 0,
+                y: 0,
+                width: width as usize,
+                height: height as usize,
+            });
+            draw(&gpu.rect_pipeline, buf, &[viewport[0], viewport[1], 0.0, 0.0], &(0..1));
+        }
         let any_glyphs = self.spans.iter().any(|s| s.glyph_buf.is_some());
         if any_glyphs {
             unsafe {
@@ -1217,6 +1252,8 @@ pub struct Renderer {
     hidden: bool,
     /// The time each pane's build may spend on new glyphs; `None`: no limit.
     glyph_budget: Option<Duration>,
+    /// The theme transition the next frames draw, if one plays.
+    blend: Option<Blend>,
 }
 
 impl Renderer {
@@ -1264,6 +1301,7 @@ impl Renderer {
             last_surface: None,
             hidden: false,
             glyph_budget: None,
+            blend: None,
         }
     }
 
@@ -1549,8 +1587,15 @@ impl Renderer {
             origin: (0, 0),
             scissor: all,
         };
-        self.window
-            .encode(&self.shared, self.fonts_id, target, self.pane.frame.clear, &[pane], &[])
+        self.window.encode(
+            &self.shared,
+            self.fonts_id,
+            target,
+            self.pane.frame.clear,
+            &[pane],
+            &[],
+            self.blend.as_ref(),
+        )
     }
 
     /// Encode one frame into `target` (a `BGRA8Unorm` render target),
@@ -1569,7 +1614,15 @@ impl Renderer {
         panes: &[PaneDraw],
         dividers: &[RectInstance],
     ) -> Retained<CommandBuffer> {
-        self.window.encode(&self.shared, self.fonts_id, target, clear, panes, dividers)
+        self.window
+            .encode(&self.shared, self.fonts_id, target, clear, panes, dividers, self.blend.as_ref())
+    }
+
+    /// Draw the next frames partway through a theme transition (see
+    /// [`crate::transition`]), or not (`None`). Only the uniforms change:
+    /// the frames built with the new theme are drawn as they are.
+    pub fn set_blend(&mut self, blend: Option<Blend>) {
+        self.blend = blend;
     }
 }
 

@@ -73,6 +73,20 @@ pub struct AppIvars {
     errors: RefCell<Vec<String>>,
     /// How this process started: only the app runs the updater.
     role: crate::entry::Role,
+    /// The theme Settings is previewing in every window, if any.
+    preview: RefCell<Previewing>,
+}
+
+/// The live theme preview from Settings (see [`term_prefs::Preview`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+enum Previewing {
+    #[default]
+    Off,
+    /// Shown over the config, which is untouched.
+    Showing(String),
+    /// Just written to the config: still shown until the reload that
+    /// follows (or the timer numbered here, if the file didn't change).
+    Kept(String, u64),
 }
 
 define_class!(
@@ -310,6 +324,8 @@ define_class!(
             let mut settings = self.ivars().settings.borrow_mut();
             if settings.as_deref().is_some_and(is_closed) {
                 *settings = None;
+                drop(settings);
+                self.end_preview();
             }
         }
     }
@@ -342,6 +358,7 @@ impl AppDelegate {
             opened_at_launch: RefCell::new(Vec::new()),
             quit_without_asking: Cell::new(false),
             settings: RefCell::new(None),
+            preview: RefCell::new(Previewing::Off),
             errors: RefCell::new(notices.clone()),
             role,
             notices: RefCell::new(notices.into()),
@@ -411,12 +428,18 @@ impl AppDelegate {
             let menus = build_menus(mtm, &self.ivars().app_name, &config.keybinds());
             NSApplication::sharedApplication(mtm).setMainMenu(Some(&menus));
         }
+        // A theme kept from the preview is in the file now.
+        let kept = matches!(*self.ivars().preview.borrow(), Previewing::Kept(..));
+        if kept {
+            *self.ivars().preview.borrow_mut() = Previewing::Off;
+        }
+        let in_windows = self.shown_config();
         let windows: Vec<_> = self.ivars().windows.borrow().clone();
         for (window, view) in windows {
             if !view.is_settings() {
                 apply_opacity(&window, &config);
             }
-            view.apply_config(config.clone(), &shown);
+            view.apply_config(in_windows.clone(), &shown);
         }
         if let Some(w) = self.ivars().watcher.borrow().as_ref() {
             w.set_paths(self.ivars().origin.watched(&config));
@@ -595,6 +618,66 @@ impl AppDelegate {
             None => {
                 self.open_window(None, Place::Cascade, None);
             }
+        }
+    }
+
+    /// The config windows show: the one in effect, with the theme Settings
+    /// previews in place of its own.
+    fn shown_config(&self) -> Rc<Config> {
+        let config = self.ivars().config.borrow().clone();
+        match &*self.ivars().preview.borrow() {
+            Previewing::Off => config,
+            Previewing::Showing(name) | Previewing::Kept(name, _) => Rc::new(config.previewing(name, &self.ivars().origin.themes_dir)),
+        }
+    }
+
+    /// Settings asked to preview a theme, put the config's back, or keep
+    /// the one it just wrote.
+    fn preview_theme(&self, ask: term_prefs::Preview) {
+        let next = match (ask, self.ivars().preview.borrow().clone()) {
+            (term_prefs::Preview::Show(name), _) => Previewing::Showing(name),
+            (term_prefs::Preview::Cancel, _) => Previewing::Off,
+            (term_prefs::Preview::Keep, Previewing::Showing(name)) => {
+                thread_local!(static KEPT: Cell<u64> = const { Cell::new(0) });
+                let n = KEPT.with(|k| {
+                    k.set(k.get() + 1);
+                    k.get()
+                });
+                // The reload normally comes 40 ms after the write; if the
+                // file didn't change there is none, so drop it anyway.
+                let after = dispatch2::DispatchTime::NOW.time(1_000_000_000);
+                let _ = dispatch2::DispatchQueue::main().after(after, move || {
+                    let delegate = DELEGATE.with(|d| d.borrow().as_ref().and_then(|w| w.load()));
+                    if let Some(d) = delegate
+                        && matches!(&*d.ivars().preview.borrow(), Previewing::Kept(_, k) if *k == n)
+                    {
+                        d.end_preview();
+                    }
+                });
+                Previewing::Kept(name, n)
+            }
+            (term_prefs::Preview::Keep, other) => other,
+        };
+        if *self.ivars().preview.borrow() == next {
+            return;
+        }
+        self.ivars().preview.replace(next);
+        self.apply_shown();
+    }
+
+    /// No more preview: windows show the config's theme.
+    fn end_preview(&self) {
+        if self.ivars().preview.replace(Previewing::Off) != Previewing::Off {
+            self.apply_shown();
+        }
+    }
+
+    /// Gives every window [`Self::shown_config`] (only the theme differs).
+    fn apply_shown(&self) {
+        let config = self.shown_config();
+        let views: Vec<_> = self.ivars().windows.borrow().iter().map(|(_, v)| v.clone()).collect();
+        for view in views {
+            view.apply_config(config.clone(), &[]);
         }
     }
 
@@ -932,7 +1015,18 @@ pub(crate) fn settings_closed(window: &NSWindow) {
         let mut settings = delegate.ivars().settings.borrow_mut();
         if settings.as_deref().is_some_and(|s| std::ptr::eq::<NSWindow>(s, window)) {
             *settings = None;
+            drop(settings);
+            delegate.end_preview();
         }
+    }
+}
+
+/// Settings' theme preview (`OSC 7771 ; theme-preview`, from the Settings
+/// pane only).
+pub(crate) fn preview_theme(ask: term_prefs::Preview) {
+    let delegate = DELEGATE.with(|d| d.borrow().as_ref().and_then(|w| w.load()));
+    if let Some(delegate) = delegate {
+        delegate.preview_theme(ask);
     }
 }
 

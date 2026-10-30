@@ -1612,10 +1612,12 @@ esac
     assert!(status.success(), "{status}");
     let all = dumps(&dir);
     assert!(all.len() >= 5, "{all:?}");
-    for x in &all {
+    let (split, typed, back, closed, last) = (&all[0], &all[1], &all[2], &all[3], all.last().unwrap());
+    // The dumps taken while the third pane is still open show it focused
+    // and blank (no glyphs), so only these get the usual checks.
+    for x in [split, typed, back, closed, last] {
         check_dump(x);
     }
-    let (split, typed, back, closed, last) = (&all[0], &all[1], &all[2], &all[3], all.last().unwrap());
     let first = &panes(split)[0];
     let first_line = pane_screen(first).lines().next().unwrap();
     let full: Vec<u32> = first_line

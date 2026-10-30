@@ -1838,12 +1838,19 @@ impl WindowView {
             Outcome::Hold => {
                 // The session wrote why into the terminal. A pane stopped
                 // for a crash while drawing is held already.
+                let mut settings = false;
                 let testing = self.with_pane(pane, |win, p| {
                     let crashed = p.crash.is_some();
                     p.held = true;
                     p.session.mark_dirty();
+                    settings = p.settings;
                     win.test.is_some() && !crashed
                 });
+                if settings {
+                    // Settings stopped (it crashed, or quit) with its tab
+                    // kept open: no one is left to end its preview.
+                    crate::app::preview_theme(term_prefs::Preview::Cancel);
+                }
                 self.request_redraw(pane);
                 if testing == Some(true) {
                     // Smoke tests can't send a dump command once the

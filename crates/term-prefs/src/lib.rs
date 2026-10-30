@@ -108,7 +108,7 @@ pub fn run(args: &[String], host: &dyn Host) -> i32 {
             return 1;
         }
     };
-    install_panic_hook();
+    install_panic_hook(args.in_app);
     let mut app = App::new(host, args.layers, args.edit, args.in_app);
     let (w, h) = tty.size();
     app.resize(w, h);
@@ -176,11 +176,12 @@ pub fn run(args: &[String], host: &dyn Host) -> i32 {
     }
 }
 
-/// On a panic: put the terminal back, show the message, and wait for a
-/// key so the tab doesn't just vanish.
-fn install_panic_hook() {
+/// On a panic: end any theme preview, put the terminal back, show the
+/// message, and wait for a key so the tab doesn't just vanish.
+fn install_panic_hook(in_app: bool) {
     let old = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        let _ = panic_cleanup(in_app, &mut std::io::stdout());
         tty::restore();
         old(info);
         eprintln!("\r\nterminal-decline prefs stopped. Press a key to close.");
@@ -192,12 +193,36 @@ fn install_panic_hook() {
     }));
 }
 
+/// What a panic writes before it waits: in the app, `cancel`, so every
+/// window goes back to the config's theme rather than keep a preview no
+/// one can end while the tab waits for a key. Sent even when nothing is
+/// previewed: the app ignores it then.
+fn panic_cleanup(in_app: bool, out: &mut impl std::io::Write) -> std::io::Result<()> {
+    if in_app {
+        out.write_all(Preview::Cancel.osc().as_bytes())?;
+        out.flush()?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn args(s: &str) -> Result<Args, String> {
         Args::parse(&s.split_whitespace().map(String::from).collect::<Vec<_>>())
+    }
+
+    /// A panic ends the preview before it waits for a key (in the app
+    /// only); quitting and the tab closing are the app's to notice.
+    #[test]
+    fn a_panic_cancels_the_preview_first() {
+        let mut out = Vec::new();
+        panic_cleanup(true, &mut out).unwrap();
+        assert_eq!(out, Preview::Cancel.osc().as_bytes());
+        let mut out = Vec::new();
+        panic_cleanup(false, &mut out).unwrap();
+        assert!(out.is_empty(), "run by hand: nothing to cancel");
     }
 
     #[test]

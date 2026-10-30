@@ -307,3 +307,36 @@ fn decaln_resets_margins_and_homes_the_cursor() {
     t.advance(b"\x1bP$qr\x1b\\");
     assert_eq!(String::from_utf8(t.state.take_replies()).unwrap(), "\x1bP1$r1;10r\x1b\\");
 }
+
+// ------------------------------------------------- Colour scheme (2031)
+
+/// Mode 2031 and DSR 996, as Contour specifies them (its VT extension
+/// "color palette update notifications", which kitty, Ghostty and foot
+/// follow): `CSI ? 996 n` asks, `CSI ? 997 ; 1 n` is dark and `2 n`
+/// light; with 2031 set, every change is reported unasked.
+#[test]
+fn colour_scheme_reports() {
+    let mut t = new(10, 2);
+    assert!(t.state.is_dark(), "dark until the host says otherwise");
+    assert_eq!(ask(&mut t, "\x1b[?996n"), "\x1b[?997;1n");
+    // Off by default: a change says nothing.
+    assert_eq!(ask(&mut t, "\x1b[?2031$p"), "\x1b[?2031;2$y");
+    assert!(!t.state.set_dark(false));
+    assert!(t.state.take_replies().is_empty());
+    assert_eq!(ask(&mut t, "\x1b[?996n"), "\x1b[?997;2n");
+    // On: each change, and only a change, is reported.
+    assert_eq!(ask(&mut t, "\x1b[?2031h"), "");
+    assert_eq!(ask(&mut t, "\x1b[?2031$p"), "\x1b[?2031;1$y");
+    assert!(t.state.set_dark(true));
+    assert_eq!(String::from_utf8(t.state.take_replies()).unwrap(), "\x1b[?997;1n");
+    assert!(!t.state.set_dark(true), "no change, no report");
+    assert!(t.state.take_replies().is_empty());
+    assert!(t.state.set_dark(false));
+    assert_eq!(String::from_utf8(t.state.take_replies()).unwrap(), "\x1b[?997;2n");
+    // Off again; and off after a full reset, which keeps the scheme.
+    ask(&mut t, "\x1b[?2031l");
+    assert!(!t.state.set_dark(true));
+    ask(&mut t, "\x1b[?2031h\x1bc");
+    assert_eq!(ask(&mut t, "\x1b[?2031$p"), "\x1b[?2031;2$y");
+    assert!(t.state.is_dark());
+}

@@ -194,6 +194,9 @@ pub struct Modes {
     pub sixel_private_colors: bool,
     /// 8452: the cursor ends right of a Sixel image rather than below it.
     pub sixel_cursor_right: bool,
+    /// 2031: report the colour scheme (`CSI ? 997 ; 1 n` dark, `2 n`
+    /// light) whenever it changes.
+    pub color_scheme_reports: bool,
 }
 
 impl Default for Modes {
@@ -215,6 +218,7 @@ impl Default for Modes {
             sixel_display: false,
             sixel_private_colors: true,
             sixel_cursor_right: false,
+            color_scheme_reports: false,
         }
     }
 }
@@ -406,6 +410,8 @@ pub struct Terminal {
     title_stack: Vec<Option<String>>,
     /// Cell size in pixels, for answering size queries.
     cell_pixels: (u16, u16),
+    /// Whether the host's colours are dark, for DSR 996 and mode 2031.
+    dark: bool,
     /// Bytes the terminal must send back to the program (replies to queries).
     replies: Vec<u8>,
     /// Bumped on any change that needs a redraw.
@@ -546,6 +552,7 @@ impl Terminal {
             dcs: None,
             title_stack: Vec::new(),
             cell_pixels: (8, 16),
+            dark: true,
             replies: Vec::new(),
             generation: 1,
             counter: 0,
@@ -816,6 +823,31 @@ impl Terminal {
 
     pub fn take_replies(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.replies)
+    }
+
+    /// Whether the host's colours are dark (the default) or light: what
+    /// `CSI ? 996 n` answers.
+    pub fn is_dark(&self) -> bool {
+        self.dark
+    }
+
+    /// The host's colours turned dark or light (the system appearance
+    /// switched, or the theme changed). A program that set mode 2031 is
+    /// told, in [`replies`](Self::replies); returns whether it was.
+    pub fn set_dark(&mut self, dark: bool) -> bool {
+        if self.dark == dark {
+            return false;
+        }
+        self.dark = dark;
+        if self.modes.color_scheme_reports {
+            self.report_color_scheme();
+        }
+        self.modes.color_scheme_reports
+    }
+
+    fn report_color_scheme(&mut self) {
+        let reply: &[u8] = if self.dark { b"\x1b[?997;1n" } else { b"\x1b[?997;2n" };
+        self.replies.extend_from_slice(reply);
     }
 
     /// Bumped on any change that needs a redraw.
@@ -1908,6 +1940,7 @@ impl Terminal {
         fresh.colors = Box::new(self.colors.reset_all());
         fresh.colors_changed = true;
         fresh.cell_pixels = self.cell_pixels;
+        fresh.dark = self.dark;
         fresh.image_scale = self.image_scale;
         fresh.bulk_ascii = self.bulk_ascii;
         fresh.ambiguous = self.ambiguous;
@@ -2477,6 +2510,7 @@ impl Terminal {
             80 => set(self.modes.sixel_display),
             1070 => set(self.modes.sixel_private_colors),
             8452 => set(self.modes.sixel_cursor_right),
+            2031 => set(self.modes.color_scheme_reports),
             _ => 0,
         }
     }
@@ -2554,6 +2588,7 @@ impl Terminal {
             80 => self.modes.sixel_display = on,
             1070 => self.modes.sixel_private_colors = on,
             8452 => self.modes.sixel_cursor_right = on,
+            2031 => self.modes.color_scheme_reports = on,
             _ => {}
         }
     }
@@ -3128,6 +3163,9 @@ impl Perform for Terminal {
             },
             // DECXCPR: the cursor position. A VT400 adds the page (always
             // 1); we answer DA as a VT220, which doesn't, as xterm does then.
+            // The colour scheme, dark (1) or light (2), as mode 2031
+            // reports it.
+            ('n', [b'?']) if arg(0) == 996 => self.report_color_scheme(),
             ('n', [b'?']) if arg(0) == 6 => {
                 let row = if self.modes.origin {
                     self.cursor.row.saturating_sub(self.scroll_top)

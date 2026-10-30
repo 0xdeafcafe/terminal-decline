@@ -338,6 +338,31 @@ impl ImagePool {
         }
     }
 
+    /// Under memory pressure (roadmap R.5): drop the pixels of every
+    /// image that keeps its encoded copy and isn't protected (drawn in
+    /// its window's latest frame while shown, or busy). They are decoded
+    /// again when next drawn, as after an eviction. Images without an
+    /// encoded copy keep their pixels: they couldn't come back. Returns
+    /// the bytes given back.
+    pub fn trim(&self) -> usize {
+        let mut p = self.lock();
+        let before = p.used;
+        let ids: Vec<PoolId> = p.order.iter().map(|k| k.2).collect();
+        for id in ids {
+            let e = &p.entries[&id];
+            if p.protected(e) || e.pixels.is_none() || e.encoded.is_none() {
+                continue;
+            }
+            let owner = e.owner;
+            p.update(id, |e| {
+                e.pixels = None;
+                e.reserved = 0;
+            });
+            p.evicted.entry(owner).or_default().push(id);
+        }
+        before - p.used
+    }
+
     /// Free an entry.
     pub fn release(&self, id: PoolId) {
         self.lock().remove(id);

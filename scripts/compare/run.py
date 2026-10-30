@@ -3,6 +3,7 @@
 
     scripts/compare/run.py [--terminals decline,ghostty,kitty,warp,terminal]
                            [--rounds 5] [--idle 30] [--app target/release/terminal-decline]
+                           [--bundle DIR/Terminal Decline.app]
                            [--out target/compare] [--wait-calm] [--latency]
     scripts/compare/run.py --report [--out target/compare]
 
@@ -261,12 +262,30 @@ class Terminal:
         ended there. `during` is called repeatedly while it runs."""
         ack = self.dir / "ack"
         ack.unlink(missing_ok=True)
-        with open(self.dir / "cmd", "w") as f:
-            f.write(command + "\n")
         deadline = time.monotonic() + timeout
+        # Not a plain open(): that blocks for good if the terminal has quit
+        # (closed by hand, crashed) and the driver no longer reads the FIFO.
+        while True:
+            try:
+                fd = os.open(self.dir / "cmd", os.O_WRONLY | os.O_NONBLOCK)
+                break
+            except OSError:
+                if not self.pids():
+                    raise RuntimeError(f"{self.key}: the terminal quit before {command!r}")
+                if time.monotonic() > deadline:
+                    raise RuntimeError(f"{self.key}: the driver didn't read {command!r}")
+                time.sleep(0.1)
+        os.set_blocking(fd, True)
+        os.write(fd, (command + "\n").encode())
+        os.close(fd)
+        checked = time.monotonic()
         while not ack.exists():
             if time.monotonic() > deadline:
                 raise RuntimeError(f"{self.key}: {command!r} didn't finish in {timeout} s")
+            if time.monotonic() - checked > 2:
+                checked = time.monotonic()
+                if not self.pids():
+                    raise RuntimeError(f"{self.key}: the terminal quit during {command!r}")
             if during:
                 during()
             else:
@@ -770,11 +789,13 @@ class Ctx:
 
 
 def main():
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))  # still restore prefs
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--terminals", default="decline,ghostty,kitty,warp,terminal")
     ap.add_argument("--rounds", type=int, default=5)
     ap.add_argument("--idle", type=int, default=30, help="seconds of idle CPU and wakeups")
     ap.add_argument("--app", default=str(ROOT / "target/release/terminal-decline"))
+    ap.add_argument("--bundle", default="", help="a Terminal Decline.app to run (scripts/bundle.sh) instead of wrapping --app")
     ap.add_argument("--out", default=str(ROOT / "target/compare"))
     ap.add_argument("--big", default="", help="the file to cat (default: made with gen.py big in OUT)")
     ap.add_argument("--wait-calm", action="store_true")
@@ -812,7 +833,10 @@ def main():
     ctx.decline_bundle = None
     if "decline" in terminals:
         latency.BUNDLE_ID = DECLINE_BUNDLE_ID
-        ctx.decline_bundle = latency.make_bundle(Path(args.app), out_dir)
+        if args.bundle:
+            ctx.decline_bundle = Path(args.bundle).resolve()
+        else:
+            ctx.decline_bundle = latency.make_bundle(Path(args.app), out_dir)
 
     backup = out_dir / "com.apple.Terminal.backup.plist"
     ctx.terminal_backup = backup

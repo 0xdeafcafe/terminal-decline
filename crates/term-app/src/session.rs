@@ -169,6 +169,33 @@ pub fn lock(term: &Mutex<Term>) -> MutexGuard<'_, Term> {
     term.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// The longest a frame waits for a terminal's lock (roadmap R.1).
+pub const FRAME_LOCK_WAIT: Duration = Duration::from_micros(500);
+
+/// The terminal's lock for taking a frame's snapshot, on the main thread:
+/// tried, then tried again for up to [`FRAME_LOCK_WAIT`]. The reader
+/// holds it for one read's parse (a macOS PTY read is ~1 KB: microseconds),
+/// so this nearly always gets it at once; on a loaded Mac the reader can
+/// be taken off its core while parsing, and the main thread must not wait
+/// on that. `None`: still busy; the pane draws its last frame and keeps
+/// its change for the next tick.
+pub fn lock_for_frame(term: &Mutex<Term>) -> Option<MutexGuard<'_, Term>> {
+    let mut started = None;
+    loop {
+        match term.try_lock() {
+            Ok(t) => return Some(t),
+            Err(std::sync::TryLockError::Poisoned(p)) => return Some(p.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => {}
+        }
+        if started.get_or_insert_with(Instant::now).elapsed() >= FRAME_LOCK_WAIT {
+            return None;
+        }
+        // Spun, not yielded: on a loaded Mac a yield can give the core
+        // away for a whole time slice (10 ms measured).
+        std::hint::spin_loop();
+    }
+}
+
 /// Terminal Decline hit a bug while parsing.
 struct Bug;
 

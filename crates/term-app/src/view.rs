@@ -1081,8 +1081,12 @@ impl WindowView {
                 // No echo: draw what the input changed (cursor, scroll).
                 p.awaiting_echo = None;
             }
-            // Only a frame that may be drawn needs the terminal's lock.
-            let t = ((dirty || waited_out) && visible).then(|| crate::session::lock(term));
+            // Only a frame that may be drawn needs the terminal's lock,
+            // and never waits long for it (roadmap R.1): a pane whose
+            // reader still holds it is held for a tick, its change kept.
+            let wants = (dirty || waited_out) && visible;
+            let t = wants.then(|| crate::session::lock_for_frame(term)).flatten();
+            let busy = wants && t.is_none();
             let synchronized = t.as_ref().is_some_and(|t| t.state.modes().synchronized);
             let sync_elapsed = if synchronized {
                 p.sync_since.get_or_insert_with(Instant::now).elapsed()
@@ -1093,7 +1097,11 @@ impl WindowView {
                 Duration::ZERO
             };
             // Waited out, it builds like a changed pane (unless held).
-            let frame = frame_policy::pane(dirty || waited_out, synchronized, sync_elapsed, echo.filter(|_| !waited_out));
+            let frame = if busy {
+                PaneFrame::Held
+            } else {
+                frame_policy::pane(dirty || waited_out, synchronized, sync_elapsed, echo.filter(|_| !waited_out))
+            };
             ticks.push((*id, frame, t));
         }
         let frames: Vec<PaneFrame> = ticks.iter().map(|(_, f, _)| *f).collect();
@@ -1183,7 +1191,15 @@ impl WindowView {
             if !build || p.crash.is_some_and(|c| c.stopped) {
                 continue;
             }
-            let t = t.get_or_insert_with(|| crate::session::lock(term));
+            if t.is_none() {
+                *t = crate::session::lock_for_frame(term);
+            }
+            let Some(t) = t.as_mut() else {
+                // Its reader holds the lock: built next tick.
+                p.session.mark_dirty();
+                win.link.setPaused(false);
+                continue;
+            };
             if let Some(text) = t.state.take_clipboard() {
                 clipboard = Some(text);
             }

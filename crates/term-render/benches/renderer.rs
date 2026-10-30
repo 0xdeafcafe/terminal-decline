@@ -88,6 +88,26 @@ fn bench(c: &mut Criterion) {
     c.bench_function("renderer 1 pane 160x48 encode", |b| {
         b.iter_custom(|n| time_encode(n, || r.encode(&target)))
     });
+    // A spinner on the middle row: each frame built (not timed) and
+    // encoded (timed), as when one row changes.
+    let spinner: Vec<String> = "|/-\\".chars().map(|ch| format!("\x1b[{};1H{ch}", lines / 2)).collect();
+    let mut i = 0;
+    c.bench_function("renderer 1 pane 160x48 encode one row", |b| {
+        b.iter_custom(|n| {
+            let mut spent = Duration::ZERO;
+            for _ in 0..n {
+                i = (i + 1) % spinner.len();
+                t.advance(spinner[i].as_bytes());
+                r.prepare(&mut t.state, &input);
+                let start = Instant::now();
+                let cmd = r.encode(&target);
+                spent += start.elapsed();
+                cmd.commit();
+                cmd.waitUntilCompleted();
+            }
+            spent
+        })
+    });
 
     // The same window split in four: 80×24 panes, each with its own
     // terminal, a 2×2 grid with a divider each way.

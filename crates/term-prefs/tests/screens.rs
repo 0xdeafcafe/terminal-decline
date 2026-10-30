@@ -495,7 +495,7 @@ fn a_file_that_does_not_parse_is_read_only() {
     assert!(s.has("error: config.toml can't be edited here"), "{}", s.text());
     assert_eq!(read(&cfg), broken);
     s.send(&mut app, &format!("{ESC}e"));
-    // `e` hands the file to $EDITOR (the runner's part).
+    // `e` hands the file to the editor (the runner's part).
     assert_eq!(s.edited, std::slice::from_ref(&cfg));
     // Fixed by hand meanwhile: reload says so.
     std::fs::write(&cfg, "font_size = 15\n").unwrap();
@@ -503,6 +503,22 @@ fn a_file_that_does_not_parse_is_read_only() {
     s.show(&mut app);
     assert!(s.has("config.toml changed on disk: reloaded"), "{}", s.text());
     assert!(!s.has("doesn't parse"));
+}
+
+#[test]
+fn the_editor_setting_is_read_from_the_layers() {
+    let dir = Dir::new("editor");
+    let low = dir.file("low.toml", "editor = 'nano'\n");
+    let high = dir.file("high.toml", "");
+    let fake = Fake::new(high.clone());
+    let app = App::new(&fake, vec![low.clone(), high.clone()], 1, false);
+    assert_eq!(app.editor_setting(), "nano");
+    std::fs::write(&high, "editor = 'code -w'\n").unwrap();
+    let app = App::new(&fake, vec![low, high], 1, false);
+    assert_eq!(app.editor_setting(), "code -w");
+    let none = dir.file("none.toml", "");
+    let app = App::new(&fake, vec![none], 0, false);
+    assert_eq!(app.editor_setting(), "");
 }
 
 #[test]

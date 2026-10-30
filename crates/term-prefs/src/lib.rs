@@ -126,18 +126,9 @@ pub fn run(args: &[String], host: &dyn Host) -> i32 {
                 }
                 Effect::Watch(files) => host.watch(&files, Arc::new(tty::file_changed)),
                 Effect::EditFile(path) => {
+                    let editor = editor::resolve_here(&app.editor_setting());
                     tty.suspend();
-                    let editor = std::env::var("VISUAL")
-                        .ok()
-                        .or_else(|| std::env::var("EDITOR").ok())
-                        .filter(|e| !e.trim().is_empty())
-                        .unwrap_or_else(|| "vi".into());
-                    let status = std::process::Command::new("/bin/sh")
-                        .arg("-c")
-                        .arg(format!("{editor} \"$1\""))
-                        .arg("sh")
-                        .arg(&path)
-                        .status();
+                    let status = editor::command_line(&editor, &path).status();
                     let _ = tty.resume();
                     renderer.invalidate();
                     app.reload();

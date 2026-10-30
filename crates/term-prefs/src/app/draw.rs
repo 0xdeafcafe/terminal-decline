@@ -615,7 +615,7 @@ impl App<'_> {
             ("/", "search all settings"),
             ("r", "reset: remove it from this file"),
             ("u", "undo the last change"),
-            ("e", "open the file in $EDITOR"),
+            ("e", "open the file in your editor"),
             ("c a d", "shortcuts: rebind, add, unbind"),
             ("ctrl+l", "redraw"),
             ("q esc", "quit"),

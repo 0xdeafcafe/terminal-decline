@@ -873,8 +873,10 @@ fn smoke_config_errors_show_in_the_window() {
     assert_eq!(d.len(), 1, "{d:?}");
     let s = screen(&d[0]);
     assert!(s.starts_with("terminal-decline: config: font_sise: unknown field"), "{s}");
-    // Joined where the long notice wrapped (⏎).
-    assert!(s.replace("⏎\n", "").contains("; ignored|\nprogram output|"), "{s}");
+    // Joined where the long notice wrapped (⏎); spaces are left out, as
+    // a wrap may fall on one (which the dump shows as ·).
+    let joined: String = s.replace("⏎\n", "").chars().filter(|c| !matches!(c, ' ' | '·')).collect();
+    assert!(joined.contains(";ignored|\nprogramoutput|"), "{s}");
 }
 
 /// The first run after the rename moves `~/.config/decline` to

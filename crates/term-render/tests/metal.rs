@@ -277,3 +277,63 @@ fn border_has_no_gaps_between_cells() {
         }
     }
 }
+
+/// Frames drawn one after another by one renderer, which copies only
+/// the instances that changed into its buffers (used by turns), draw
+/// like each frame drawn afresh: rows changing at their length and not,
+/// the cursor moving over them, a selection and input-method text coming
+/// and going, scrolling and clearing.
+#[test]
+fn kept_instances_draw_like_fresh_frames() {
+    if MTLCreateSystemDefaultDevice().is_none() {
+        assert!(std::env::var_os("CI").is_none(), "no Metal device on CI");
+        eprintln!("skipping: no Metal device");
+        return;
+    }
+    let mut kept = Renderer::new(Fonts::new("Menlo", 24.0));
+    let mut fresh = Renderer::new(Fonts::new("Menlo", 24.0));
+    let theme = Theme::default();
+    let mut t = Term::new(16, 5, 100, term_core::ImagePool::process());
+    let steps: [(&str, Option<&str>); 16] = [
+        ("\x1b[41mred\x1b[0m \x1b[4munder\x1b[0m\r\nplain text\r\n\x1b[32mgreen", None),
+        ("|", None),
+        ("\x08/", None),
+        ("\x08-", None),
+        ("\x1b[1;1Hx", None),
+        ("\x1b[2;3H\x1b[44mblue\x1b[0m", None),
+        ("\x1b[5;1Hlonger and longer", None),
+        ("\x1b[2;1H", Some("あ")),
+        ("", None),
+        ("\r\n\r\nscrolled", None),
+        ("\x1b[3;5H", None),
+        ("\x1b[2K", None),
+        ("\x1b[4 q", None),
+        ("\x1b[?1049h\x1b[44mfull screen", None),
+        ("\x1b[?1049l\x1b[2 q", None),
+        ("\x1b[2J\x1b[Hdone", None),
+    ];
+    for (i, (bytes, preedit)) in steps.into_iter().enumerate() {
+        t.advance(bytes.as_bytes());
+        if i == 4 || i == 6 {
+            let line = t.state.point_at(0, 0).line;
+            let sel =
+                (i == 4).then(|| term_core::Selection::new(term_core::Point { line, col: 2 }, term_core::Point { line: line + 1, col: 3 }));
+            t.state.set_selection(sel);
+        }
+        let input = FrameInput {
+            theme: &theme,
+            metrics: kept.metrics(),
+            padding: (0, 0),
+            cursor_on: true,
+            focused: true,
+            preedit,
+        };
+        kept.prepare(&mut t.state, &input);
+        let a = draw(&mut kept, &t);
+        fresh.pane.forget();
+        fresh.prepare(&mut t.state, &input);
+        let b = draw(&mut fresh, &t);
+        let differ = a.data.chunks(4).zip(b.data.chunks(4)).filter(|(a, b)| a != b).count();
+        assert_eq!(differ, 0, "step {i}: {differ} pixels differ\n{}", t.state.dump());
+    }
+}

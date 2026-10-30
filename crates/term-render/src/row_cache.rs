@@ -51,6 +51,9 @@ pub(crate) struct Entry {
     pub pieces: Vec<PieceRun>,
     /// The frame that last showed it.
     used: u64,
+    /// Changes whenever its instances do (built, or moved): unique in the
+    /// cache.
+    pub version: u64,
 }
 
 impl Entry {
@@ -155,6 +158,8 @@ pub(crate) struct RowCache {
     mirrors: [Mirror; 2],
     /// The slot of each visible row, top to bottom.
     pub order: Vec<u32>,
+    /// The last entry version handed out.
+    versions: u64,
 }
 
 /// Rows the renderer has no instances for: shouldn't happen (term-core
@@ -254,9 +259,11 @@ impl RowCache {
                 slot
             }
         };
+        self.versions += 1;
         let e = &mut self.entries[slot as usize];
         e.clear();
         e.used = self.frame;
+        e.version = self.versions;
         slot
     }
 
@@ -282,6 +289,8 @@ impl RowCache {
             if e.y != y {
                 let dy = y - e.y;
                 e.y = y;
+                self.versions += 1;
+                e.version = self.versions;
                 shift(&mut e.backgrounds, dy);
                 shift(&mut e.glyphs, dy);
                 shift(&mut e.decorations, dy);

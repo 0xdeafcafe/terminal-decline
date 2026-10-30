@@ -23,9 +23,14 @@ fzf; lazygit; btop; less/man; delta; yazi with image previews.
 
 **Thresholds** (fixed Mac, same window pixels/font/scrollback bytes as
 Ghostty, footprint not RSS, WindowServer CPU included, interleaved runs):
-idle CPU 0% and 0 wakeups/s; idle footprint ≤ 35% of Ghostty's; after 10k
-lines ≤ 35%; `cat` 100 MB CPU (Terminal Decline + WindowServer) ≤ 45%; 4 tabs and 4
-splits footprint ≤ 35%; input latency p99 ≤ Ghostty's.
+idle CPU 0% and 0 wakeups/s; idle footprint ≤ 30 MB; after 10k lines
+≤ 40 MB; 4 tabs and 4 splits footprint ≤ 55 MB; `cat` 100 MB CPU
+(Terminal Decline + WindowServer) ≤ 45% of Ghostty's; input latency p99 ≤
+Ghostty's. (Memory targets are fixed numbers since 30 Oct 2026, Alex's
+decision: Ghostty 1.4 measured 67 MB idle, far below the version the
+earlier "35% of Ghostty" targets were set against. 30 MB idle and 40 MB
+after 10k lines are his numbers; 55 MB for 4 tabs/4 splits is mine, from
+today's 63 MB.)
 
 **Every change** in M2/M2b carries before/after numbers on this standard
 set, not only perf work: shaping, images and the updater each cost something.

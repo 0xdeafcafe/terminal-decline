@@ -318,7 +318,7 @@ pub struct Terminal {
     primary_stale: bool,
     /// Lines that scrolled off the top (primary screen only). Its total
     /// count of lines ever pushed is the base for [`Point`] line numbers.
-    scrollback: Scrollback,
+    scrollback: Box<Scrollback>,
     /// The first cell the view shows when scrolled back (the start of a
     /// row of history at the current width, §12.3); `None` while following
     /// output.
@@ -503,7 +503,7 @@ impl Terminal {
             sweep_at_test: None,
             alt_active: false,
             primary_stale: false,
-            scrollback: Scrollback::with_widths_as_written(scrollback_limit),
+            scrollback: Box::new(Scrollback::with_widths_as_written(scrollback_limit)),
             view: None,
             layouts: Default::default(),
             top_line: 0,
@@ -1469,10 +1469,12 @@ impl Terminal {
     /// left for the caller to reuse as the new blank line. Callers also
     /// advance the screen's `top_line`; the scrollback counts the row
     /// whether or not it keeps it, so its line numbers stay the screen's.
+    /// Returns the column from which the row's cells are all
+    /// [`Cell::BLANK`] ([`Scrollback::push_keyed`]).
     #[inline]
-    fn push_scrollback(&mut self, row: &Row) {
+    fn push_scrollback(&mut self, row: &Row) -> usize {
         self.scrollback
-            .push_keyed(row, self.styles.styles(), self.styles.links().as_slice(), self.styles.version());
+            .push_keyed(row, self.styles.styles(), self.styles.links().as_slice(), self.styles.version())
         // The view holds a Point in history: output arriving underneath
         // leaves it where it is.
     }
@@ -1495,9 +1497,12 @@ impl Terminal {
             for _ in 0..n {
                 let mut row = self.screen.pop_front().expect("screen has rows");
                 if to_history {
-                    self.push_scrollback(&row);
+                    // Most rows end in blank cells, which need no clearing.
+                    let zero_from = self.push_scrollback(&row);
+                    row.reset_before(self.cols, blank, zero_from);
+                } else {
+                    row.reset(self.cols, blank);
                 }
-                row.reset(self.cols, blank);
                 snapshot::touch(&mut row, &mut self.counter, self.batch_start);
                 self.screen.push_back(row);
             }
@@ -1910,7 +1915,7 @@ impl Terminal {
         // The find bar stays open: its search carries on over the new state.
         fresh.search = self.search.take();
         // Like xterm, a full reset clears scrollback too.
-        fresh.scrollback = std::mem::replace(&mut self.scrollback, Scrollback::new(0));
+        fresh.scrollback = std::mem::replace(&mut self.scrollback, Box::new(Scrollback::new(0)));
         fresh.scrollback.clear();
         // Every cell is new, written at the current setting.
         fresh.scrollback.set_widths_as_written(true);
@@ -2918,6 +2923,13 @@ impl Perform for Terminal {
     fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], ignore: bool, action: char) {
         self.clear_grapheme();
         if ignore {
+            return;
+        }
+        // SGR, the most common sequence by far, needs none of the argument
+        // handling below.
+        if action == 'm' && intermediates.is_empty() {
+            self.sgr(params);
+            self.touch();
             return;
         }
         let mut args = [0u16; 16];

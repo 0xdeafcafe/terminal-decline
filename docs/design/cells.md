@@ -2506,6 +2506,25 @@ target, 100k lines of `ls`/log output ≤ 3 MB, starts from 5.9 MB instead of
   - the snapshot with 100 history rows at 300×100 69 → 136 µs, frames
     built from history rows 300×100 plain 171 → 154 µs, coloured 205
     → 305 µs, unicode 242 → 508 µs (first run).
+- **Perf round 2 (R.4, R.9 in part).** vte takes a CSI's parameters
+  and final byte in one loop and term-core dispatches SGR first;
+  styled rows of narrow ASCII (`ls --color`) are stored by byte copy
+  like plain ones; storing a row reports where its all-`BLANK` tail
+  starts, so the recycled row is cleared only up to there; the
+  scrollback sits behind a `Box` (its open block's 2 KB slot cache had
+  made the terminal 5 KB). Measured with the `cpubench` example
+  (thread CPU time, so less skewed by other load; best / median of 6
+  interleaved runs, load average 17–25), against the commit before
+  scrollback v2 (21c1e89): `parse` plain 0.99 / 0.98, `seq` 0.95 /
+  0.96, unicode 1.08 / 1.09, clusters 1.06 / 1.06 (`parse_1k` within
+  two points of these); coloured 0.74 / 0.75 and `tui` 0.75 / 0.76 of
+  main before R.4 (1.35× and 1.33×, short of R.4's 1.5×). With no
+  history kept unicode is still 1.07 and clusters 1.08 of 21c1e89
+  (load average 70–100): the code
+  that writes the screen is the same, so this is code generation, not
+  the history encoder. Decoding (10k lines, against 05c198b, the last
+  commit with the v1 store and the `history` bench): plain 1.07, `ls`
+  1.14, CJK 1.23, emoji 2.37, background 0.50.
 
 ---
 

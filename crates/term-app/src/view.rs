@@ -1525,6 +1525,7 @@ impl WindowView {
     }
 
     fn trim_drawables(&self) {
+        self.with_state(|st| st.win.renderer.forget_spare());
         let layer = &self.ivars().layer;
         let size = layer.drawableSize();
         layer.setDrawableSize(NSSize::new(1.0, 1.0));

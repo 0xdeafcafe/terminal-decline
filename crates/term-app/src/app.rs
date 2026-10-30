@@ -709,7 +709,8 @@ impl AppDelegate {
         let config = self.ivars().config.borrow().clone();
         let scale = NSScreen::mainScreen(mtm).map(|s| s.backingScaleFactor()).unwrap_or(2.0);
         // Shared with every window whose fonts are the same.
-        let renderer = Renderer::with_font_config(&config.font_config(config.font_size), scale);
+        let mut renderer = Renderer::with_font_config(&config.font_config(config.font_size), scale);
+        renderer.set_glyph_budget(Some(crate::view::GLYPH_BUDGET));
         let metrics = renderer.metrics();
         if !self.ivars().fonts_checked.replace(true) && config.names_fonts() {
             // Fonts the config names but that aren't installed: shown with

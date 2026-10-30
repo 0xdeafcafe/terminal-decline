@@ -497,6 +497,40 @@ fn panes_build_from_a_snapshot_unless_the_textures_were_emptied() {
     );
 }
 
+/// With a glyph budget (roadmap R.1) a build draws without the new glyphs
+/// past it and says so; built again until it has them all (at least one
+/// new glyph a build), it draws as a build without a budget.
+#[test]
+fn a_glyph_budget_leaves_new_glyphs_for_later_builds() {
+    if !have_gpu() {
+        return;
+    }
+    let theme = theme();
+    let text = "αβγδεζ";
+    // Fonts of their own each, so no glyph of `text` is in the textures.
+    let mut r = Renderer::new(Fonts::new("Menlo", 24.0));
+    let mut whole = Renderer::new(Fonts::new("Menlo", 24.0));
+    let m = r.metrics();
+    let size = (6 * m.cell_width as usize, m.cell_height as usize);
+    r.set_glyph_budget(Some(std::time::Duration::ZERO));
+    let (mut pane, mut t) = built(&mut r, &theme, 6, 1, text);
+    let input = input(&r, &theme);
+    let mut builds = 1;
+    while pane.glyphs_deferred() {
+        assert!(builds <= text.chars().count(), "a build that made no progress");
+        r.snapshot_pane(&mut pane, &mut t.state, &input);
+        assert!(r.build_from_snapshot(&mut pane, &input));
+        builds += 1;
+    }
+    assert!(builds > 1, "a zero budget leaves glyphs for later");
+    let (all, _ta) = built(&mut whole, &theme, 6, 1, text);
+    assert!(!all.glyphs_deferred(), "no budget, no glyph left");
+    assert!(
+        alone(&mut r, &pane, size) == alone(&mut whole, &all, size),
+        "every glyph drawn in the end"
+    );
+}
+
 /// Two windows with their own fonts share the glyph textures: each draws
 /// its own text while the other uploads new glyphs between their frames,
 /// and each frame matches the same frame drawn with the GPU idle.

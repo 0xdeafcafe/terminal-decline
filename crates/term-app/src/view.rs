@@ -52,6 +52,14 @@ use crate::theme::Appearance;
 
 pub(crate) const BLINK_INTERVAL: Duration = Duration::from_millis(530);
 
+/// The time a pane's frame may spend on glyphs it hasn't drawn before;
+/// the rest come in the next frames (roadmap R.1). Right after input,
+/// under half a 120 Hz refresh, so a flood of new CJK or emoji doesn't
+/// hold up typing; otherwise a refresh, so a screenful of them still
+/// fills in within a second at 30 Hz (with 3 ms always, it took ~4 s).
+pub(crate) const GLYPH_BUDGET_TYPING: Duration = Duration::from_millis(3);
+pub(crate) const GLYPH_BUDGET: Duration = Duration::from_millis(8);
+
 /// What the window keeps: its layer's renderer and display link, and what
 /// is the same for all its panes (splits design §2.2).
 pub(crate) struct Win {
@@ -1038,10 +1046,21 @@ impl WindowView {
             changed
         });
         if changed == Some(true) {
+            let layer = &self.ivars().layer;
             if visible {
+                // Its drawables back at full size, then drawn at once.
+                if let Some(window) = self.window() {
+                    let (size, scale) = (self.frame().size, window.backingScaleFactor());
+                    layer.setDrawableSize(NSSize::new((size.width * scale).round(), (size.height * scale).round()));
+                }
                 self.redraw_all();
-            } else {
+            } else if minimised {
+                // The Dock shows a minimised window's last frame.
                 self.trim_drawables();
+            } else {
+                // Nothing of it can be seen: let both drawables go, not
+                // only the spare one, until it is shown again.
+                layer.setDrawableSize(NSSize::new(1.0, 1.0));
             }
         }
         visible
@@ -1086,8 +1105,12 @@ impl WindowView {
                 // No echo: draw what the input changed (cursor, scroll).
                 p.awaiting_echo = None;
             }
-            // Only a frame that may be drawn needs the terminal's lock.
-            let t = ((dirty || waited_out) && visible).then(|| crate::session::lock(term));
+            // Only a frame that may be drawn needs the terminal's lock,
+            // and never waits long for it (roadmap R.1): a pane whose
+            // reader still holds it is held for a tick, its change kept.
+            let wants = (dirty || waited_out) && visible;
+            let t = wants.then(|| crate::session::lock_for_frame(term)).flatten();
+            let busy = wants && t.is_none();
             let synchronized = t.as_ref().is_some_and(|t| t.state.modes().synchronized);
             let sync_elapsed = if synchronized {
                 p.sync_since.get_or_insert_with(Instant::now).elapsed()
@@ -1098,7 +1121,11 @@ impl WindowView {
                 Duration::ZERO
             };
             // Waited out, it builds like a changed pane (unless held).
-            let frame = frame_policy::pane(dirty || waited_out, synchronized, sync_elapsed, echo.filter(|_| !waited_out));
+            let frame = if busy {
+                PaneFrame::Held
+            } else {
+                frame_policy::pane(dirty || waited_out, synchronized, sync_elapsed, echo.filter(|_| !waited_out))
+            };
             ticks.push((*id, frame, t));
         }
         let frames: Vec<PaneFrame> = ticks.iter().map(|(_, f, _)| *f).collect();
@@ -1158,6 +1185,9 @@ impl WindowView {
         keep_held(panes, &ticks);
         win.idle_ticks = 0;
         win.renderer.show();
+        let typing = win.last_input.elapsed() < frame_policy::INPUT_BOOST;
+        win.renderer
+            .set_glyph_budget(Some(if typing { GLYPH_BUDGET_TYPING } else { GLYPH_BUDGET }));
         images_shown(win, panes, true);
         if rate != win.rate {
             win.rate = rate;
@@ -1188,7 +1218,15 @@ impl WindowView {
             if !build || p.crash.is_some_and(|c| c.stopped) {
                 continue;
             }
-            let t = t.get_or_insert_with(|| crate::session::lock(term));
+            if t.is_none() {
+                *t = crate::session::lock_for_frame(term);
+            }
+            let Some(t) = t.as_mut() else {
+                // Its reader holds the lock: built next tick.
+                p.session.mark_dirty();
+                win.link.setPaused(false);
+                continue;
+            };
             if let Some(text) = t.state.take_clipboard() {
                 clipboard = Some(text);
             }
@@ -1307,6 +1345,10 @@ impl WindowView {
             if !ok {
                 p.render.forget();
                 crashed.push(id);
+            } else if p.render.glyphs_deferred() {
+                // Drawn without some new glyphs: built again next tick.
+                p.session.mark_dirty();
+                win.link.setPaused(false);
             }
         }
         if !crashed.is_empty() {
@@ -1364,8 +1406,11 @@ impl WindowView {
         drop(draws);
         win.frames += 1;
         let mut poll_dump = false;
+        // A dump shows every glyph: it waits for the frame that has them.
+        let complete = !shown.iter().filter_map(|id| panes.get(id)).any(|p| p.render.glyphs_deferred());
         if let Some(test) = &mut win.test
             && test.dump == DumpState::Requested
+            && complete
         {
             test.dump = DumpState::Drawn(win.renderer.frames_submitted());
             poll_dump = true;

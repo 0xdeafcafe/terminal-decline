@@ -318,7 +318,7 @@ pub struct Terminal {
     primary_stale: bool,
     /// Lines that scrolled off the top (primary screen only). Its total
     /// count of lines ever pushed is the base for [`Point`] line numbers.
-    scrollback: Scrollback,
+    scrollback: Box<Scrollback>,
     /// The first cell the view shows when scrolled back (the start of a
     /// row of history at the current width, §12.3); `None` while following
     /// output.
@@ -503,7 +503,7 @@ impl Terminal {
             sweep_at_test: None,
             alt_active: false,
             primary_stale: false,
-            scrollback: Scrollback::with_widths_as_written(scrollback_limit),
+            scrollback: Box::new(Scrollback::with_widths_as_written(scrollback_limit)),
             view: None,
             layouts: Default::default(),
             top_line: 0,
@@ -1915,7 +1915,7 @@ impl Terminal {
         // The find bar stays open: its search carries on over the new state.
         fresh.search = self.search.take();
         // Like xterm, a full reset clears scrollback too.
-        fresh.scrollback = std::mem::replace(&mut self.scrollback, Scrollback::new(0));
+        fresh.scrollback = std::mem::replace(&mut self.scrollback, Box::new(Scrollback::new(0)));
         fresh.scrollback.clear();
         // Every cell is new, written at the current setting.
         fresh.scrollback.set_widths_as_written(true);

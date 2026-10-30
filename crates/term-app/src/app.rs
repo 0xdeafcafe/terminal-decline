@@ -101,6 +101,7 @@ define_class!(
             unsafe { NSApplication::sharedApplication(mtm).setServicesProvider(Some(self)) };
             self.watch_for_new_build();
             self.watch_config();
+            crate::memory::listen();
             // The updater (docs/design/updater.md): off in pins, dogfood,
             // nightly and ad-hoc builds; on, the app menu gains Check for
             // Updates….

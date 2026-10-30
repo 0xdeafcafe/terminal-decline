@@ -9,7 +9,7 @@ use term_font::{CellWidth, FontConfig};
 use term_render::Theme;
 
 use crate::keybind::{self, KeybindConfig, Keybinds};
-use crate::theme::{self as themes, Appearance, ThemeChoice};
+use crate::theme::{self as themes, Appearance, AppearanceMode, ThemeChoice};
 
 /// Which Option key acts as Meta (sends ESC + key). Off by default, like
 /// Terminal.app and Ghostty, so Option still types @ [ ] { } | \\ ~ on
@@ -214,6 +214,9 @@ pub struct Config {
     /// Let programs send images by file path or shared memory (kitty's
     /// `t=f`, `t=t` and `t=s`) as well as inline.
     pub image_file_transfer: bool,
+    /// Follow macOS (`"system"`), or always `"light"` or `"dark"`: picks
+    /// the side of a light/dark theme pair.
+    pub appearance: AppearanceMode,
     /// `theme = "name"` or `{ light = "…", dark = "…" }`; see [`crate::theme`].
     pub theme: Option<ThemeChoice>,
     pub colors: Colors,
@@ -262,6 +265,7 @@ impl Default for Config {
             images: true,
             image_memory: 0,
             image_file_transfer: true,
+            appearance: AppearanceMode::System,
             theme: None,
             colors: Colors::default(),
             palettes: Palettes::default(),
@@ -677,9 +681,21 @@ pub fn query_palette(theme: &Theme) -> [u32; 256] {
 
 /// The theme's colours as the terminal's defaults: what colour queries
 /// answer and resets go back to.
-pub fn set_term_colors(t: &mut term_core::Terminal, theme: &Theme) {
+/// Programs are told whether the colours are dark or light (DSR 996, mode
+/// 2031) from the theme's background, so a light theme in dark mode is
+/// reported light. Returns whether a report waits in the terminal's
+/// replies, to be sent to the program.
+pub fn set_term_colors(t: &mut term_core::Terminal, theme: &Theme) -> bool {
     t.set_default_colors(query_colors(theme));
     t.set_default_palette(&query_palette(theme));
+    t.set_dark(is_dark(rgb_of(theme.background)))
+}
+
+/// Whether a background (0xRRGGBB) is dark: its relative luminance under
+/// a half.
+pub fn is_dark(rgb: u32) -> bool {
+    let c = |s: u32| ((rgb >> s) & 0xff) as f64 / 255.0;
+    0.2126 * c(16) + 0.7152 * c(8) + 0.0722 * c(0) < 0.5
 }
 
 /// What a pane draws with: `base` with the colours its program set (OSC

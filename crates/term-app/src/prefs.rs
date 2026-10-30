@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use term_prefs::host::Wake;
-use term_prefs::{Action, Checked, Font, Host, Pin};
+use term_prefs::{Action, Checked, Font, Host, Pin, ThemeInfo};
 
 use crate::Paths;
 use crate::config::{self, Config};
@@ -45,16 +45,47 @@ fn system_appearance() -> Appearance {
 }
 
 /// What the app's loader says about `layers` with layer `edit` read from
-/// `text`: its notices, and the default colours the window would get.
+/// `text`: its notices, and the default colours the window would get with
+/// macOS in `appearance` (the `appearance` setting may override it).
 pub fn check(layers: &[PathBuf], themes_dir: &Path, edit: usize, text: &str, appearance: Appearance) -> Checked {
     let refs: Vec<&Path> = layers.iter().map(PathBuf::as_path).collect();
     let (config, notices) = config::load_replacing(&refs, themes_dir, Some((edit, text)));
-    let palette = config.palette(appearance);
+    let palette = config.palette(config.appearance.resolve(appearance));
     Checked {
         notices,
         foreground: Some(palette.foreground),
         background: Some(palette.background),
+        palette: palette.ansi.to_vec(),
     }
+}
+
+/// Theme `name` as the Settings list shows it: its title, its colours and
+/// the theme made as its other half.
+pub fn theme_info(themes_dir: &Path, name: &str) -> Option<ThemeInfo> {
+    let colors = theme::load(themes_dir, name).ok()?;
+    let built_in = theme::BUILT_IN.iter().find(|(n, _)| *n == name);
+    let own = std::fs::read_to_string(theme::file_of(themes_dir, name)).ok();
+    let text = own.as_deref().or(built_in.map(|(_, t)| *t)).unwrap_or("");
+    let defaults = config::Palettes::default().dark;
+    let hex = |c: &Option<String>, or: u32| c.as_deref().and_then(config::parse_hex).unwrap_or(or);
+    let palette = (0..16)
+        .map(|i| match colors.palette.get(i) {
+            Some(c) if !c.is_empty() => config::parse_hex(c).unwrap_or(defaults.ansi[i]),
+            _ => defaults.ansi[i],
+        })
+        .collect();
+    let partner = theme::PAIRS.iter().find_map(|&(l, d)| match name {
+        n if n == l => Some(d.to_string()),
+        n if n == d => Some(l.to_string()),
+        _ => None,
+    });
+    Some(ThemeInfo {
+        title: theme::title(name, text),
+        foreground: hex(&colors.foreground, defaults.foreground),
+        background: hex(&colors.background, defaults.background),
+        palette,
+        partner,
+    })
 }
 
 /// The theme names: the built-in ones, then the themes folder's.
@@ -160,6 +191,10 @@ impl Host for AppHost {
 
     fn themes(&self) -> Vec<String> {
         themes(&self.paths.themes_dir())
+    }
+
+    fn theme_info(&self, name: &str) -> Option<ThemeInfo> {
+        theme_info(&self.paths.themes_dir(), name)
     }
 
     fn parse_chord(&self, text: &str) -> Result<String, String> {
@@ -359,5 +394,34 @@ mod tests {
         assert!(ok.contains("Dock tile stays"), "{ok}");
         assert!(!app.exists() && !cfg.exists());
         assert!(remove_pin(&paths, "Rush", &|_| false).is_err());
+    }
+
+    /// The colours the Settings tab is drawn on follow the `appearance`
+    /// setting over macOS's, as the windows do.
+    #[test]
+    fn check_and_theme_info_follow_the_appearance() {
+        let dir = TempDir::new("prefs-appearance");
+        let user = dir.join("config.toml");
+        let layers = [user];
+        let pair = "theme = { light = 'rose-pine-dawn', dark = 'rose-pine' }\n";
+        let bg = |text: &str, system| check(&layers, &dir.join("themes"), 0, text, system).background;
+        assert_eq!(bg(pair, Appearance::Dark), Some(0x191724));
+        assert_eq!(bg(pair, Appearance::Light), Some(0xfaf4ed));
+        let light = format!("appearance = 'light'\n{pair}");
+        assert_eq!(bg(&light, Appearance::Dark), Some(0xfaf4ed));
+        let dark = format!("appearance = 'dark'\n{pair}");
+        assert_eq!(bg(&dark, Appearance::Light), Some(0x191724));
+        let c = check(&layers, &dir.join("themes"), 0, &dark, Appearance::Light);
+        assert_eq!(c.palette.len(), 16);
+        assert!(c.notices.is_empty(), "{:?}", c.notices);
+
+        let info = theme_info(&dir.join("themes"), "rose-pine-dawn").unwrap();
+        assert_eq!(info.title, "Rosé Pine Dawn");
+        assert_eq!(info.background, 0xfaf4ed);
+        assert_eq!(info.partner.as_deref(), Some("rose-pine"));
+        assert!(!info.is_dark());
+        assert_eq!(info.palette.len(), 16);
+        assert!(theme_info(&dir.join("themes"), "nope").is_none());
+        assert_eq!(theme_info(&dir.join("themes"), "dracula").unwrap().partner, None);
     }
 }

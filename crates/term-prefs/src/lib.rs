@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 pub use app::{App, Effect};
-pub use host::{Action, Checked, Fake, Font, Host, Pin};
+pub use host::{Action, Checked, Fake, Font, Host, Pin, ThemeInfo};
 
 use ui::frame::Renderer;
 use ui::input::Decoder;

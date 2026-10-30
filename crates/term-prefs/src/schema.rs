@@ -166,6 +166,13 @@ use Section::*;
 /// Every key of `config.toml`, in the order the TUI shows them.
 pub const SETTINGS: &[Setting] = &[
     // Appearance
+    setting(
+        "appearance",
+        "Appearance",
+        Appearance,
+        Editor::Choice(&["system", "light", "dark"]),
+        "Follow macOS, or always light or always dark: which of the two themes below windows use",
+    ),
     unset(
         setting(
             "theme",
@@ -557,6 +564,7 @@ mod tests {
         assert_eq!(
             top_level_keys(),
             [
+                "appearance",
                 "theme",
                 "colors",
                 "opacity",

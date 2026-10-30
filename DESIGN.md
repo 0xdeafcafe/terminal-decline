@@ -571,12 +571,23 @@ the config override the theme's, one by one (`""` in `palette` keeps the
 theme's entry). Colours must be `#rrggbb`; a bad one, a bad theme file or a
 missing theme is a notice. The built-in set is embedded TOML
 (`crates/term-app/themes/`, each file naming its source and licence):
-slope-dark and slope-light (Terminal Decline's own, from the Slope brand palette),
-solarized-dark/-light (MIT), gruvbox-dark (MIT), catppuccin-mocha/-latte
-(MIT), tokyo-night (MIT; colours from tokyonight.nvim, Apache-2.0). With
-no theme the colours are Terminal Decline's defaults, as before. Programs aren't
-told about appearance changes yet: colour-scheme reports (mode 2031,
-`CSI ? 997 ; 1|2 n`) need term-core support first.
+31 themes: slope-dark and slope-light (Terminal Decline's own, from the
+Slope brand palette), Solarized, Gruvbox, Catppuccin (4), Tokyo Night (3;
+colours from tokyonight.nvim, Apache-2.0), Rosé Pine (3), Kanagawa wave and
+lotus, Everforest, One Dark/Light, GitHub, Ayu (3), Night Owl/Light Owl,
+Dracula and Nord, all MIT unless said; `theme::PAIRS` lists the light/dark
+pairs. With no theme the colours are Terminal Decline's defaults, as before.
+
+Appearance (`appearance = "system" | "light" | "dark"`, default system):
+the app's `NSApplication` appearance is left to macOS or set to Aqua or
+Dark Aqua, so title bars match and every view's effective appearance picks
+its side of a pair; it applies live. Programs are told whether the colours
+are dark or light: DSR 996 answers and mode 2031 reports
+(`CSI ? 997 ; 1 n` dark, `2 n` light) on every change. Dark means the
+theme's background has relative luminance under ½, so a light theme used
+in dark mode is reported light. Settings shows Appearance, Light theme and
+Dark theme rows; picking a side turns a single theme into a pair (with no
+theme before, the other side is the theme's partner from `PAIRS`).
 
 Importers (`import`): `terminal-decline import ghostty [PATH]` reads Ghostty's config
 (default: the first of `~/.config/ghostty/config.ghostty`, `…/config` and

@@ -573,6 +573,17 @@ impl Session {
         }
     }
 
+    /// Send a report the terminal made unasked (the colour scheme, mode
+    /// 2031) to the program, as query replies are: not typing, so a
+    /// command waiting for the prompt stays.
+    pub fn report(&self, bytes: Vec<u8>) {
+        if let Some(tx) = &self.input
+            && !bytes.is_empty()
+        {
+            let _ = tx.send(bytes);
+        }
+    }
+
     /// Device pixels per point of the window the terminal is in (2 on a
     /// Retina display), so iTerm2 images count their sizes as points.
     pub fn set_image_scale(&self, scale: f32) {

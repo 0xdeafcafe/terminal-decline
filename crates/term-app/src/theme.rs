@@ -85,6 +85,29 @@ pub enum Appearance {
     Dark,
 }
 
+/// The `appearance` setting: windows follow macOS (`"system"`, the
+/// default) or are always light or always dark, which picks the side of a
+/// light/dark theme pair and how AppKit draws the window's title bar.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum AppearanceMode {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl AppearanceMode {
+    /// The appearance windows get while macOS is in `system`.
+    pub fn resolve(self, system: Appearance) -> Appearance {
+        match self {
+            AppearanceMode::System => system,
+            AppearanceMode::Light => Appearance::Light,
+            AppearanceMode::Dark => Appearance::Dark,
+        }
+    }
+}
+
 /// The `theme` setting.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ThemeChoice {
@@ -299,6 +322,31 @@ mod tests {
             dark: "x".into(),
         };
         assert_eq!(same.names(), ["x"]);
+    }
+
+    #[test]
+    fn appearance_modes_pick_the_side_of_a_pair() {
+        #[derive(Deserialize, Debug)]
+        struct A {
+            appearance: AppearanceMode,
+        }
+        let pair = ThemeChoice::ByAppearance {
+            light: "rose-pine-dawn".into(),
+            dark: "rose-pine".into(),
+        };
+        let mode = |s: &str| toml::from_str::<A>(&format!("appearance = '{s}'")).map(|a| a.appearance);
+        assert_eq!(mode("system").unwrap(), AppearanceMode::System);
+        assert!(mode("auto").is_err());
+        for (m, system, want) in [
+            ("system", Appearance::Light, "rose-pine-dawn"),
+            ("system", Appearance::Dark, "rose-pine"),
+            ("light", Appearance::Dark, "rose-pine-dawn"),
+            ("light", Appearance::Light, "rose-pine-dawn"),
+            ("dark", Appearance::Light, "rose-pine"),
+            ("dark", Appearance::Dark, "rose-pine"),
+        ] {
+            assert_eq!(pair.pick(mode(m).unwrap().resolve(system)), want, "{m} in {system:?}");
+        }
     }
 
     #[test]

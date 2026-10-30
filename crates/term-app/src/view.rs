@@ -1645,7 +1645,10 @@ impl WindowView {
             win.divider = divider_colour(&config, win.appearance);
             for p in st.panes.values() {
                 let mut t = p.session.lock_term();
-                crate::config::set_term_colors(&mut t.state, &win.theme);
+                let report = crate::config::set_term_colors(&mut t.state, &win.theme);
+                if report {
+                    p.session.report(t.state.take_replies());
+                }
                 if t.state.ambiguous_width() != config.ambiguous_width {
                     // For output from now on; what is on screen stays.
                     t.state.set_ambiguous_width(config.ambiguous_width);
@@ -1680,9 +1683,10 @@ impl WindowView {
         }
     }
 
-    /// The system switched between light and dark: a light/dark theme pair
-    /// changes colours. (Colour-scheme reports to programs, mode 2031,
-    /// wait for term-core to support them.)
+    /// The window's appearance switched between light and dark (macOS, or
+    /// the `appearance` setting): a light/dark theme pair changes colours,
+    /// and programs that set mode 2031 are told if they went from dark to
+    /// light or back.
     fn appearance_changed(&self) {
         let appearance = self.appearance();
         let changed = self.with_state(|st| {
@@ -1702,7 +1706,11 @@ impl WindowView {
             win.theme = theme;
             win.divider = divider;
             for p in st.panes.values() {
-                crate::config::set_term_colors(&mut p.session.lock_term().state, &win.theme);
+                let mut t = p.session.lock_term();
+                if crate::config::set_term_colors(&mut t.state, &win.theme) {
+                    // Programs that asked (mode 2031) hear of it.
+                    p.session.report(t.state.take_replies());
+                }
             }
             recolour
         });
@@ -2515,6 +2523,7 @@ fn spawn_pane(window: usize, config: &Config, theme: &Theme, m: term_font::Metri
     let (cols, lines) = n.grid;
     let mut t = Term::new(cols, lines, config.scrollback, term_core::ImagePool::process());
     t.state.set_ambiguous_width(config.ambiguous_width);
+    // Before the program starts: nothing to report yet.
     crate::config::set_term_colors(&mut t.state, theme);
     for notice in n.notices {
         crate::session::write_notice(&mut t, notice);

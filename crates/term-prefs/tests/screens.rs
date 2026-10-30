@@ -156,16 +156,16 @@ fn the_layout_at_80_by_24() {
     let t = s.text();
     assert!(s.row(0).starts_with("┌ Sections ─"), "{t}");
     assert!(s.row(0).contains("┐┌ Appearance ─"), "{t}");
-    assert!(s.row(1).starts_with("│ ▸ Appearance  ││ ▸ Theme"), "{t}");
+    assert!(s.row(1).starts_with("│ ▸ Appearance  ││ ▸ Appearance"), "{t}");
     assert!(t.contains("│   Font"), "{t}");
-    assert!(t.contains("Light/dark pair   off"), "{t}");
+    assert!(t.contains("Light theme       none"), "{t}");
     assert!(t.contains("Blur") || t.contains("Colour"), "{t}");
     assert!(s.row(23).contains("↑↓ move  ←→ section  enter edit  / search"), "{t}");
     // The description of the selected row, and the preview strip.
-    assert!(s.row(22).contains("A built-in theme"), "{t}");
+    assert!(s.row(22).contains("Follow macOS"), "{t}");
     assert!(s.row(21).contains("Preview  Sample text"), "{t}");
     // The real cursor is on the selected row; nothing was written.
-    assert!(s.cursor_row().contains("▸ Theme"));
+    assert!(s.cursor_row().contains("▸ Appearance"));
     assert!(!cfg.exists());
 }
 
@@ -292,15 +292,18 @@ fn toggles_choices_text_and_colours() {
     assert!(read(&cfg).contains("[colors]\nforeground = \"#ff0000\""), "{}", read(&cfg));
     // Theme.
     s.send(&mut app, ESC);
-    s.send(&mut app, &format!("/theme{ENTER}tokyo{ENTER}"));
+    // A theme with no partner on one side is both; then a pair.
+    s.send(&mut app, &format!("/dark theme{ENTER}tokyo{ENTER}"));
     assert!(read(&cfg).contains("theme = \"tokyo-night\""), "{}", read(&cfg));
-    s.send(&mut app, &format!("{DOWN}{ENTER}"));
+    s.send(&mut app, ESC);
+    s.send(&mut app, &format!("/light theme{ENTER}slope light{ENTER}"));
     assert!(
-        read(&cfg).contains("theme = { light = \"tokyo-night\", dark = \"tokyo-night\" }"),
+        read(&cfg).contains("theme = { light = \"slope-light\", dark = \"tokyo-night\" }"),
         "{}",
         read(&cfg)
     );
-    assert!(s.has("Light theme") && s.has("Dark theme"), "{}", s.text());
+    s.send(&mut app, ESC);
+    assert!(s.has("Slope Light") && s.has("Tokyo Night"), "{}", s.text());
     let cfg_text = read(&cfg);
     assert_eq!(fake_notices(&fake, &cfg, &cfg_text), Vec::<String>::new());
 }
@@ -501,10 +504,10 @@ fn small_screens_and_resizes() {
     let mut s = Screen::new(&mut app, 20, 5);
     let t = s.text();
     assert!(s.row(0).starts_with("┌ Appearance (1/6)"), "{t}");
-    assert!(s.row(1).starts_with("│ ▸ Theme"), "{t}");
+    assert!(s.row(1).starts_with("│ ▸ Appeara"), "{t}");
     assert!(s.cursor_row().contains("▸"));
     s.send(&mut app, DOWN);
-    assert!(s.row(1).contains("▸ Light/d"), "{}", s.text());
+    assert!(s.row(1).contains("▸ Light"), "{}", s.text());
     s.send(&mut app, RIGHT);
     assert!(s.row(0).starts_with("┌ Font (2/6)"), "{}", s.text());
     s.resize(&mut app, 80, 24);

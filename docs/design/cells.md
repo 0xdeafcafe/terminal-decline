@@ -1706,6 +1706,85 @@ changed from the design, and what is left:
   15 µs before it moved into `is_color`. Every other frame is 4–5×
   cheaper, and a frame where nothing changed is the copy alone.
 
+**Landed (R.2, R.3).** Rows' instances stay where they were put, on
+the CPU and on the GPU; rows' blank ends are skipped; history rows kept
+while scrolled back aren't laid out again (`term-render/src/frame.rs`,
+`row_cache.rs`, `metal.rs`; term-core's `snapshot.rs`). What it is, and
+what is left:
+
+- **In place:** each row cache entry has a version, bumped when it is
+  built or moved. Assembling walks the visible rows with where each
+  went last frame: a row already at its place (same entry and version,
+  same offset) isn't copied, a changed row as long as its old one is
+  written over it, and from the first row whose length changed the rest
+  is written out (a dense layout, no gaps, so the instances and their
+  order are exactly what they were). The overlays between the rows'
+  backgrounds and decorations (highlights, the block cursor, hovered
+  links) and after them (other cursors, input-method text) are pieces
+  of the same layout. Rows recoloured under the block cursor or with
+  glyphs hidden under input-method text are marked and written again
+  the next frame. `build_live` writes the vectors whole and the next
+  frame lays them out from scratch.
+- **On the GPU:** each `PaneRender` owns two rect and two glyph buffers,
+  used by turns, each holding the frame as of a version (unique in the
+  process). A frame logs the instance ranges it wrote (the last four);
+  drawing copies the hull of what changed since the buffer's version,
+  or everything when that is too old or the buffer grew. Each pane
+  counts its own frames in flight, so a buffer is written only once the
+  GPU is done with it, whichever window drew it. The window's buffers
+  keep the fills, dividers and images. Not done: per-row draws or a
+  layout with gaps, so a row whose length changes still writes out the
+  rows below it (a typed character on the prompt line writes the rows
+  under it; at a shell prompt there are few).
+- **Blank ends:** a copied row is built up to its last cell that is not
+  `Cell::is_blank` (checked eight cells at a time from the end); the
+  rest shows the default background, which a row ends with anyway. Rows
+  shaped with substitutions keep every cell.
+- **History (R.3):** a history row the renderer has is no longer emitted
+  from its reflowed unit each frame only to read its flags
+  (`Unit::row_flags`, checked against the emitted row in debug builds),
+  and each history row looks its unit up once rather than twice. Rows
+  at the width written were already not decoded when kept. What's left
+  is the per-row unit lookup for rows at their width (a mutex and an
+  `Arc` per row, ~3 µs of the 10 µs at 300×100).
+- **Tests:** the frame tests and property test are unchanged (the same
+  instances, now kept); `kept_instances_draw_like_fresh_frames` (GPU)
+  draws sixteen changing frames with one renderer and checks each pixel
+  for pixel against the same frame built and copied afresh.
+- **Measured** in thread CPU time (`cargo run --release -p term-render
+  --example framebench`, the `frame` and `renderer` benches' cases
+  timed with `CLOCK_THREAD_CPUTIME_ID`, which other load counts less in):
+  before I.4 (`4cb08ca^`), main (`0266c75`) and this branch turn about,
+  5 rounds (the scrolled and renderer cases 6 more), median of each
+  round's best of 9, load 10–33 (other projects, and another agent
+  measuring terminals):
+
+  | case | before I.4 | main | R.2/R.3 |
+  |---|---|---|---|
+  | 80×24 plain, every row changed | 9.05 µs | 9.26 µs | 9.63 µs |
+  | 80×24 plain, nothing changed | 2.01 µs | 1.92 µs | 1.63 µs |
+  | 300×100 plain, every row changed | 127.5 µs | 132.9 µs | 133.2 µs |
+  | 300×100 plain, nothing changed | 23.0 µs | 21.0 µs | 5.6 µs |
+  | 300×100 plain, one row | 22.7 µs | 22.6 µs | 7.2 µs |
+  | 300×100 coloured, every row changed | 142.0 µs | 147.4 µs | 151.8 µs |
+  | 300×100 coloured, nothing changed | 24.6 µs | 25.3 µs | 5.7 µs |
+  | 300×100 coloured, one row | 27.8 µs | 27.5 µs | 7.2 µs |
+  | 300×100 plain / coloured, scrolled a line | 39.3 / 47.6 µs | 39.4 / 46.9 µs | 40.5 / 47.2 µs |
+  | 203×50 sparse (a shell), every row changed | 26.1 µs | 30.3 µs | 14.6 µs |
+  | 203×50 sparse, nothing changed / one row | 3.10 / 3.67 µs | 2.98 / 3.67 µs | 2.74 / 3.19 µs |
+  | 300×100 history, still (plain / coloured) | 29.0 / 31.4 µs | 28.8 / 32.1 µs | 9.9 / 10.0 µs |
+  | 300×100 history reflowed, still | 32.3 / 33.1 µs | 31.8 / 33.3 µs | 7.2 / 7.2 µs |
+  | renderer 160×48, encode | 18.5 µs | 19.5 µs | 14.7 µs |
+  | renderer 160×48, encode after one row changed | 21.3 µs | 19.3 µs | 17.3 µs |
+
+  R.2's goal, a sparse frame ≤ 15 µs at 203×50, is met with every row
+  changed (14.6 µs); a frame where every row changed or moved costs
+  about what it did (0–6% more, the bookkeeping), and every other frame
+  is 3–4× cheaper. R.10, against before I.4: the plain cases are within
+  3% except 300×100 plain with every row changed (+4%) and the sparse
+  screen (+16% on main, which R.2 takes back); the renderer's encode is
+  within noise (±10% between rounds).
+
 ---
 
 ## 10. Shaping runs, ligatures, glyph keys (term-font and term-render)

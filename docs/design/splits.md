@@ -295,7 +295,10 @@ what B2.3 needs to know:
   dump read the glyph texture sizes and instance counts.
 - **`PaneRender`** holds the `Frame` (instances, pane-relative, and the
   row cache) and what it was built against: the textures' generation and
-  the `FontsId`. B.1's shaping cache goes in it.
+  the `FontsId`. B.1's shaping cache goes in it. Since R.2 it also owns
+  the pane's rect and glyph buffers on the GPU, brought up to date with
+  only what changed (cells.md §9.3); the window's buffers keep the
+  fills, dividers and images.
 - **Per process** means per thread in a thread-local, kept while any
   renderer is alive: the last window closing frees the device and
   textures, as before. `FontsId`s are never reused.

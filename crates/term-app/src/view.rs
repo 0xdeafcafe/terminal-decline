@@ -53,9 +53,12 @@ use crate::theme::Appearance;
 pub(crate) const BLINK_INTERVAL: Duration = Duration::from_millis(530);
 
 /// The time a pane's frame may spend on glyphs it hasn't drawn before;
-/// the rest come in the next frames (roadmap R.1). Under half a 120 Hz
-/// refresh, so a flood of new CJK or emoji doesn't hold up typing.
-pub(crate) const GLYPH_BUDGET: Duration = Duration::from_millis(3);
+/// the rest come in the next frames (roadmap R.1). Right after input,
+/// under half a 120 Hz refresh, so a flood of new CJK or emoji doesn't
+/// hold up typing; otherwise a refresh, so a screenful of them still
+/// fills in within a second at 30 Hz (with 3 ms always, it took ~4 s).
+pub(crate) const GLYPH_BUDGET_TYPING: Duration = Duration::from_millis(3);
+pub(crate) const GLYPH_BUDGET: Duration = Duration::from_millis(8);
 
 /// What the window keeps: its layer's renderer and display link, and what
 /// is the same for all its panes (splits design §2.2).
@@ -1182,6 +1185,9 @@ impl WindowView {
         keep_held(panes, &ticks);
         win.idle_ticks = 0;
         win.renderer.show();
+        let typing = win.last_input.elapsed() < frame_policy::INPUT_BOOST;
+        win.renderer
+            .set_glyph_budget(Some(if typing { GLYPH_BUDGET_TYPING } else { GLYPH_BUDGET }));
         images_shown(win, panes, true);
         if rate != win.rate {
             win.rate = rate;

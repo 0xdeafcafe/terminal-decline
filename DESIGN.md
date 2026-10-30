@@ -294,6 +294,10 @@ Oct 2026, 1.90 → 2.16 MB) and no measurable parse speed.
   and dragging after a double- or triple-click grows by words or lines), wheel
   scrolls scrollback, or when the program asks for mouse reporting (1000/1002/
   1003 + SGR 1006) events go to the program; Shift overrides to select.
+  A plain click clears the selection and selects nothing: a selection
+  starts only once the mouse has moved half a cell width (at least 4
+  pixels) from where the button went down (`select::Pending`), so a click
+  or a shaky hand doesn't leave one character selected.
   Which click does what is `select::gesture`: Shift-click extends the
   selection (by words or lines if it was made that way), Option-drag makes
   a rectangle. Dragging past the top or bottom edge scrolls, faster the

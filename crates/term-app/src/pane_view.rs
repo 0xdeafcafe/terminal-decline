@@ -19,7 +19,7 @@ use objc2_app_kit::{
 use objc2_foundation::{
     NSArray, NSAttributedString, NSAttributedStringKey, NSNotFound, NSObjectProtocol, NSPoint, NSRange, NSRect, NSSize, NSString, NSURL,
 };
-use term_core::{Point, Selection};
+use term_core::Point;
 
 use crate::find_bar::{Find, FindBar};
 use crate::keybind;
@@ -29,7 +29,7 @@ use crate::layout;
 use crate::mouse;
 use crate::panes::PaneId;
 use crate::search::Query;
-use crate::select::{self, Block, Gesture};
+use crate::select::{self, Gesture};
 use crate::view::{AutoScroll, Pane, Win, WindowView, pane_padding, with_view};
 
 pub struct Ivars {
@@ -1191,24 +1191,27 @@ impl PaneView {
             flags.contains(NSEventModifierFlags::Shift),
             flags.contains(NSEventModifierFlags::Option),
         );
+        let at = self.px_at(event);
         self.with(|_, p| {
             p.selecting = Some(gesture);
             p.dragged = false;
             p.autoscroll = None;
+            p.pending = None;
             let block = p.block.take();
             let mut t = p.session.lock_term();
             let s = &mut t.state;
             let point = s.point_at(line, col);
             match gesture {
-                Gesture::Start => {
-                    // Remember the anchor in an empty selection; dragging extends it.
-                    s.set_selection(Some(Selection::new(point, point)));
+                // A click clears the selection; one starts at the cell
+                // only once the mouse is dragged far enough from it.
+                Gesture::Start | Gesture::Block => {
+                    s.set_selection(None);
+                    p.pending = Some(select::Pending {
+                        anchor: point,
+                        at,
+                        block: gesture == Gesture::Block,
+                    });
                     p.scroll_accum = 0.0;
-                }
-                Gesture::Block => {
-                    let b = Block::at(point);
-                    s.set_selection(Some(b.stream()));
-                    p.block = Some(b);
                 }
                 Gesture::Word => s.select_word(point),
                 Gesture::Line => s.select_line(point),
@@ -1234,6 +1237,7 @@ impl PaneView {
         let copy = self.with(|win, p| {
             let gesture = p.selecting.take();
             p.autoscroll = None;
+            p.pending = None;
             win.config.copy_on_select && gesture.is_some_and(|g| select::copies_on_release(g, p.dragged))
         });
         if copy == Some(true) {
@@ -1257,6 +1261,26 @@ impl PaneView {
             pb.clearContents();
             pb.setString_forType(&NSString::from_str(&text), unsafe { NSPasteboardTypeString });
         }
+    }
+
+    /// Where `event` is, in this view's pixels.
+    fn px_at(&self, event: &NSEvent) -> (f64, f64) {
+        let at = self.convertPoint_fromView(event.locationInWindow(), None);
+        let scale = self.with(|win, _| win.scale).unwrap_or(1.0);
+        (at.x * scale, at.y * scale)
+    }
+
+    /// Start the selection of a click whose mouse has now moved to `at`
+    /// (pixels), if that is far enough. Whether a selection is being
+    /// made (it started now or before).
+    fn start_pending(p: &mut Pane, at: (f64, f64), cell_width: f64) -> bool {
+        let Some(pending) = p.pending else { return true };
+        if !pending.passed(at, cell_width) {
+            return false;
+        }
+        p.pending = None;
+        p.block = pending.start(&mut p.session.lock_term().state);
+        true
     }
 
     /// Move the selection being made to the cell at view `line`, `col`.
@@ -1358,8 +1382,12 @@ impl PaneView {
             return;
         }
         let speed = self.autoscroll_speed(event);
+        let at = self.px_at(event);
         let (changed, start_timer) = self
-            .with(|_, p| {
+            .with(|win, p| {
+                if !Self::start_pending(p, at, win.renderer.metrics().cell_width as f64) {
+                    return (false, false);
+                }
                 // Past the top or bottom edge, a timer keeps scrolling
                 // while the mouse is held still; it stops once back over
                 // the rows or the button is let go.

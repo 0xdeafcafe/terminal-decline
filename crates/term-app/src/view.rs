@@ -142,6 +142,9 @@ pub(crate) struct Pane {
     pub(crate) dragged: bool,
     /// A rectangular selection (Option-drag); see [`crate::select`].
     pub(crate) block: Option<Block>,
+    /// A plain or Option click whose selection starts once the mouse
+    /// has moved far enough ([`crate::select::Pending`]).
+    pub(crate) pending: Option<crate::select::Pending>,
     /// Scrolling while a selection is dragged past the top or bottom edge.
     pub(crate) autoscroll: Option<AutoScroll>,
     /// An auto-scroll step is waiting to run.
@@ -2634,6 +2637,7 @@ fn spawn_pane(window: usize, config: &Config, theme: &Theme, m: term_font::Metri
         selecting: None,
         dragged: false,
         block: None,
+        pending: None,
         autoscroll: None,
         autoscroll_scheduled: false,
         held: false,

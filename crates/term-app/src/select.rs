@@ -50,6 +50,46 @@ pub fn copies_on_release(gesture: Gesture, dragged: bool) -> bool {
     }
 }
 
+/// How far the pointer must move from where the button went down, in
+/// cell widths, before a plain or Option click becomes a selection. Below
+/// it the click selects nothing, so a click (or a hand that shakes a
+/// pixel or two) doesn't leave one character selected.
+pub const DRAG_THRESHOLD: f64 = 0.5;
+/// The threshold's floor in pixels, for very small fonts.
+const DRAG_THRESHOLD_MIN_PX: f64 = 4.0;
+
+/// A plain or Option click whose selection hasn't started: it does once
+/// the pointer has moved [`DRAG_THRESHOLD`] from where it went down.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Pending {
+    /// The cell the button went down on.
+    pub anchor: Point,
+    /// Where it went down, in pixels.
+    pub at: (f64, f64),
+    /// Option was held: a rectangle.
+    pub block: bool,
+}
+
+impl Pending {
+    /// Whether the pointer at `to` (pixels) is far enough from where the
+    /// button went down for the selection to start.
+    pub fn passed(&self, to: (f64, f64), cell_width: f64) -> bool {
+        let (dx, dy) = (to.0 - self.at.0, to.1 - self.at.1);
+        dx.hypot(dy) >= (cell_width * DRAG_THRESHOLD).max(DRAG_THRESHOLD_MIN_PX)
+    }
+
+    /// Start the selection in `t` at the anchor; the rectangle when it is
+    /// one. Dragging then extends it.
+    pub fn start(&self, t: &mut Terminal) -> Option<Block> {
+        let block = self.block.then(|| Block::at(self.anchor));
+        t.set_selection(Some(match block {
+            Some(b) => b.stream(),
+            None => Selection::new(self.anchor, self.anchor),
+        }));
+        block
+    }
+}
+
 /// Auto-scroll speed per cell height past the edge, in lines a second.
 pub const SPEED_PER_LINE: f64 = 10.0;
 /// Slowest auto-scroll, just past the edge (lines a second).
@@ -213,6 +253,40 @@ mod tests {
         let mut carry = 0.0;
         assert_eq!(autoscroll_step(100.0, 5.0, &mut carry), 10);
         assert_eq!(autoscroll_step(100.0, -1.0, &mut carry), 0);
+    }
+
+    /// Alex's "u": a click, or a click whose hand moved a pixel or two,
+    /// selects nothing; a real drag starts the selection where the
+    /// button went down.
+    #[test]
+    fn a_click_without_a_drag_selects_nothing() {
+        let mut t = Term::new(20, 5, 100, term_core::ImagePool::process());
+        t.advance(b"run it\r\n");
+        let anchor = t.state.point_at(0, 1);
+        let p = Pending {
+            anchor,
+            at: (30.0, 10.0),
+            block: false,
+        };
+        // 16-pixel cells: half a cell is 8 pixels.
+        for to in [(30.0, 10.0), (32.0, 11.0), (37.0, 10.0), (30.0, 3.0)] {
+            assert!(!p.passed(to, 16.0), "{to:?}");
+        }
+        for to in [(38.0, 10.0), (22.0, 10.0), (30.0, 18.0), (36.0, 16.0)] {
+            assert!(p.passed(to, 16.0), "{to:?}");
+        }
+        // Tiny cells still take a few pixels.
+        assert!(!p.passed((33.0, 10.0), 2.0));
+        assert!(p.passed((34.0, 10.0), 2.0));
+
+        assert_eq!(t.state.selection(), None);
+        assert_eq!(p.start(&mut t.state), None);
+        t.state.extend_selection(t.state.point_at(0, 4));
+        assert_eq!(t.state.selection_text().as_deref(), Some("un i"));
+
+        let b = Pending { block: true, ..p }.start(&mut t.state);
+        assert_eq!(b, Some(Block::at(anchor)));
+        assert_eq!(t.state.selection(), Some(Block::at(anchor).stream()));
     }
 
     #[test]

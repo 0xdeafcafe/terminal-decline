@@ -653,6 +653,16 @@ impl Config {
         }
     }
 
+    /// This config with theme `name` for light and dark alike ("" for
+    /// none), `[colors]` still on top: what windows show while Settings
+    /// previews a theme. A theme that doesn't load gives the defaults.
+    pub fn previewing(&self, name: &str, themes_dir: &Path) -> Config {
+        let mut c = self.clone();
+        c.theme = (!name.is_empty()).then(|| ThemeChoice::One(name.to_string()));
+        c.palettes = resolve(c.theme.as_ref(), &c.colors, themes_dir, &mut Vec::new());
+        c
+    }
+
     /// The renderer's theme for a window with `appearance`.
     pub fn theme(&self, appearance: Appearance) -> Theme {
         let p = self.palette(appearance);
@@ -1439,6 +1449,23 @@ mod tests {
             };
             assert_eq!(c.theme(Appearance::Dark).background_opacity, want, "{opacity}");
         }
+    }
+
+    /// Settings' preview: the theme for light and dark alike, `[colors]`
+    /// still on top, and nothing else changed.
+    #[test]
+    fn a_previewed_theme_replaces_the_configs() {
+        let none = Path::new("/nonexistent");
+        let (c, errors) = parse("theme = { light = 'slope-light', dark = 'slope-dark' }\nfont_size = 15\n[colors]\ncursor = '#ff0000'\n");
+        assert!(errors.is_empty(), "{errors:?}");
+        let p = c.previewing("rose-pine-dawn", none);
+        let dawn = Palette::DEFAULT.with(&themes::load(none, "rose-pine-dawn").unwrap());
+        assert_eq!(p.palette(Appearance::Dark).background, dawn.background);
+        assert_eq!(p.palette(Appearance::Light), p.palette(Appearance::Dark));
+        assert_eq!(p.palette(Appearance::Dark).cursor, 0xff0000, "[colors] stay on top");
+        assert_eq!(p.font_size, 15.0);
+        let p = c.previewing("", none);
+        assert_eq!(p.palette(Appearance::Light).background, Palette::DEFAULT.background);
     }
 
     #[test]

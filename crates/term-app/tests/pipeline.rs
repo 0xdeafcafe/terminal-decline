@@ -1381,8 +1381,10 @@ fn prefs(home: TempDir, config: &Path, recorded: Arc<AtomicU64>) -> Harness {
     };
     let signal = Arc::new(Signal::default());
     let mut hooks = signal.hooks();
-    hooks.on_record_chord = Some(Box::new(move || {
-        recorded.fetch_add(1, Ordering::SeqCst);
+    hooks.on_prefs = Some(Box::new(move |what: String| {
+        if what == "record-chord" {
+            recorded.fetch_add(1, Ordering::SeqCst);
+        }
     }));
     let session = Session::spawn(&cmd, size(80, 24), Term::new(80, 24, 100, term_core::ImagePool::process()), hooks).unwrap();
     Harness {

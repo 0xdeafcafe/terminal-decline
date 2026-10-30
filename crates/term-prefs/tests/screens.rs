@@ -137,6 +137,7 @@ impl Screen {
 }
 
 const DOWN: &str = "\x1b[B";
+const UP: &str = "\x1b[A";
 const RIGHT: &str = "\x1b[C";
 const LEFT: &str = "\x1b[D";
 const ESC: &str = "\x1b[27u";
@@ -583,4 +584,42 @@ fn the_file_watch_wakes_a_reload() {
     app.reload();
     s.show(&mut app);
     assert!(s.has("changed on disk") && s.cursor_row().contains("20"), "{}", s.text());
+}
+
+/// Moving through a theme list previews each theme in every window (the
+/// app hears `OSC 7771 ; theme-preview`); Esc puts the old one back and
+/// writes nothing, Enter writes it and keeps it shown until the reload.
+#[test]
+fn theme_lists_preview_live() {
+    let dir = Dir::new("preview");
+    let cfg = dir.file("config.toml", "theme = \"tokyo-night\"\n");
+    let fake = Fake::new(cfg.clone());
+    let mut app = App::new(&fake, vec![cfg.clone()], 0, true);
+    let mut s = Screen::new(&mut app, 80, 24);
+    s.send(&mut app, &format!("/dark theme{ENTER}"));
+    assert!(s.sent.is_empty(), "opening the list previews nothing: {:?}", s.sent);
+    s.send(&mut app, UP);
+    assert_eq!(s.sent, ["\x1b]7771;theme-preview;show;solarized-dark\x1b\\"]);
+    s.send(&mut app, UP);
+    assert_eq!(s.sent.last().unwrap(), "\x1b]7771;theme-preview;show;slope-light\x1b\\");
+    // Typing a filter previews the first match.
+    s.send(&mut app, "toky");
+    assert_eq!(s.sent.last().unwrap(), "\x1b]7771;theme-preview;show;tokyo-night\x1b\\");
+    let n = s.sent.len();
+    s.send(&mut app, "o");
+    assert_eq!(s.sent.len(), n, "the same theme isn't sent twice");
+    s.send(&mut app, ESC);
+    assert_eq!(s.sent.last().unwrap(), "\x1b]7771;theme-preview;cancel\x1b\\");
+    assert_eq!(read(&cfg), "theme = \"tokyo-night\"\n");
+    // Again, and Enter keeps it.
+    s.send(&mut app, &format!("{ENTER}{UP}"));
+    assert_eq!(s.sent.last().unwrap(), "\x1b]7771;theme-preview;show;solarized-dark\x1b\\");
+    s.send(&mut app, ENTER);
+    assert_eq!(s.sent.last().unwrap(), "\x1b]7771;theme-preview;keep\x1b\\");
+    assert_eq!(read(&cfg), "theme = { light = \"tokyo-night\", dark = \"solarized-dark\" }\n");
+    // Run by hand (not in the app), nothing is sent.
+    let mut app = App::new(&fake, vec![cfg.clone()], 0, false);
+    let mut s = Screen::new(&mut app, 80, 24);
+    s.send(&mut app, &format!("/dark theme{ENTER}{UP}{ESC}"));
+    assert!(s.sent.is_empty(), "{:?}", s.sent);
 }

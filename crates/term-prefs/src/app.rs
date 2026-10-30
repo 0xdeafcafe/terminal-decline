@@ -8,8 +8,9 @@ use std::time::{Duration, Instant};
 use toml_edit::{Item, Value};
 
 use crate::file::{self, Edit, KeyPath, ListOp};
-use crate::host::{Checked, Font, Host, Pin};
+use crate::host::{Checked, Font, Host, Pin, ThemeInfo};
 use crate::layers::{Bind, Bound, Layers, Origin};
+use crate::preview::Preview;
 use crate::schema::{self, Applies, Editor, SETTINGS, Section, Setting};
 use crate::ui::frame::{Color, Frame, Style, str_width, truncate};
 use crate::ui::input::{Event, Key, Mods, MouseKind};
@@ -176,6 +177,9 @@ pub struct App<'h> {
     height: usize,
     hit: Hit,
     effects: Vec<Effect>,
+    /// The theme every window shows while a theme list is open (the live
+    /// preview), and its colours for drawing this tab.
+    previewed: Option<(String, Option<ThemeInfo>)>,
 }
 
 fn path_of(key: &str) -> KeyPath {
@@ -271,6 +275,7 @@ impl<'h> App<'h> {
             height: 24,
             hit: Hit::default(),
             effects: Vec::new(),
+            previewed: None,
         };
         app.open(layers, edit);
         app
@@ -1400,8 +1405,10 @@ impl<'h> App<'h> {
                 .filter(|&i| f.is_empty() || items[i].1.to_lowercase().contains(&f) || items[i].0.to_lowercase().contains(&f))
                 .collect()
         };
+        let theme_list = matches!(then, Then::ThemeSide(_));
         match event {
             Event::Key(Key::Esc, _) => {
+                self.end_preview(false);
                 self.say("cancelled");
                 return;
             }
@@ -1422,7 +1429,10 @@ impl<'h> App<'h> {
                         return;
                     }
                 };
+                let undo = self.undo.len();
                 self.committed(then, value, now);
+                // Kept only if it was written; else back to the old one.
+                self.end_preview(self.undo.len() > undo);
                 return;
             }
             Event::Key(Key::Up, _) => sel = sel.saturating_sub(1),
@@ -1448,8 +1458,12 @@ impl<'h> App<'h> {
             }
             _ => {}
         }
-        let n = shown(&items, &filter).len();
-        sel = sel.min(n.saturating_sub(1));
+        let list = shown(&items, &filter);
+        sel = sel.min(list.len().saturating_sub(1));
+        if theme_list && let Some(&i) = list.get(sel) {
+            let name = items[i].0.clone();
+            self.preview(&name);
+        }
         self.mode = Mode::Choice {
             title,
             items,
@@ -1458,6 +1472,51 @@ impl<'h> App<'h> {
             then,
             fonts,
         };
+    }
+
+    /// In a theme list: previews the theme under the selection.
+    fn preview_choice(&mut self) {
+        let Mode::Choice {
+            items,
+            filter,
+            sel,
+            then: Then::ThemeSide(_),
+            ..
+        } = &self.mode
+        else {
+            return;
+        };
+        let f = filter.to_lowercase();
+        let name = items
+            .iter()
+            .filter(|(v, l)| f.is_empty() || l.to_lowercase().contains(&f) || v.to_lowercase().contains(&f))
+            .nth(*sel)
+            .map(|(v, _)| v.clone());
+        if let Some(name) = name {
+            self.preview(&name);
+        }
+    }
+
+    /// Shows theme `name` in every window (the app's live preview) and in
+    /// this tab, if it isn't already.
+    fn preview(&mut self, name: &str) {
+        if self.previewed.as_ref().is_some_and(|(n, _)| n == name) {
+            return;
+        }
+        if self.in_app {
+            self.effects.push(Effect::Send(Preview::Show(name.to_string()).osc()));
+        }
+        let info = if name.is_empty() { None } else { self.host.theme_info(name) };
+        self.previewed = Some((name.to_string(), info));
+    }
+
+    /// The theme list closed: the theme written is kept (`keep`), else
+    /// the windows go back to the config's.
+    fn end_preview(&mut self, keep: bool) {
+        if self.previewed.take().is_some() && self.in_app {
+            let ask = if keep { Preview::Keep } else { Preview::Cancel };
+            self.effects.push(Effect::Send(ask.osc()));
+        }
     }
 
     fn number(&mut self, mode: Mode, event: Event, now: Instant) {
@@ -1737,6 +1796,8 @@ impl<'h> App<'h> {
                                 *sel = i;
                                 if again {
                                     self.handle(Event::Key(Key::Enter, Mods::NONE), now);
+                                } else {
+                                    self.preview_choice();
                                 }
                             }
                             _ => {}
@@ -1778,7 +1839,9 @@ impl<'h> App<'h> {
     /// Draws the frame for the current state at the current size.
     pub fn draw(&mut self) -> Frame {
         let (w, h) = (self.width, self.height);
-        let bg = self.checked.background.unwrap_or(0x000000);
+        // While a theme list previews a theme, this tab shows it too.
+        let previewed = self.previewed.as_ref().and_then(|(_, i)| i.as_ref());
+        let bg = previewed.map(|i| i.background).or(self.checked.background).unwrap_or(0x000000);
         let fg = if luminance(bg) < 0.5 { 0xe8e8e8 } else { 0x1a1a1a };
         let base = Style::default().fg(Color::Rgb(fg)).bg(Color::Rgb(bg));
         let dim = base.fg(Color::Rgb(blend(fg, bg)));

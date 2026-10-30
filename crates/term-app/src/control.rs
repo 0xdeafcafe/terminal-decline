@@ -113,7 +113,9 @@ impl Default for ControlScanner {
 }
 
 /// The preferences' OSC (see [`crate::prefs`]): `record-chord` asks the
-/// app to record the next key, honoured only in the Settings tab.
+/// app to record the next key, and `theme-preview;…` to show a theme in
+/// every window ([`term_prefs::Preview`]); honoured only in the Settings
+/// tab.
 pub const PREFS_PREFIX: &[u8] = b"\x1b]7771;";
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]

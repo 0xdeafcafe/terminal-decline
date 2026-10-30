@@ -90,11 +90,13 @@ pub struct Hooks {
     /// of the terminal. Unlike drawing, this happens while the window is
     /// hidden too (a background tab's title is in the tab bar).
     pub on_events: Option<Box<dyn Fn(Events) + Send>>,
-    /// The Settings tab only: called for each `OSC 7771 ; record-chord` in
-    /// the output, the preferences asking the app to record a chord. Set
-    /// by the app when it starts the preferences itself, so no other
-    /// program can ask. `None` ignores the sequence like any unknown OSC.
-    pub on_record_chord: Option<Box<dyn FnMut() + Send>>,
+    /// The Settings tab only: called with what follows `OSC 7771 ;` for
+    /// each such sequence in the output, the preferences asking the app
+    /// to record a chord (`record-chord`) or to preview a theme
+    /// (`theme-preview;…`). Set by the app when it starts the preferences
+    /// itself, so no other program can ask. `None` ignores the sequences
+    /// like any unknown OSC.
+    pub on_prefs: Option<Box<dyn FnMut(String) + Send>>,
 }
 
 impl Hooks {
@@ -105,7 +107,7 @@ impl Hooks {
             on_control: None,
             on_parsed: None,
             on_events: None,
-            on_record_chord: None,
+            on_prefs: None,
         }
     }
 }
@@ -370,7 +372,7 @@ impl Session {
             mut on_control,
             on_parsed,
             on_events,
-            mut on_record_chord,
+            mut on_prefs,
         } = hooks;
         let images = Some(SessionImages::for_process(&term, terminal_id, dirty.clone(), wake.clone()));
         let images2 = images.clone();
@@ -379,7 +381,7 @@ impl Session {
             let read = catch_unwind(AssertUnwindSafe(|| -> Result<(), Bug> {
                 let mut buf = vec![0u8; READ_BUF];
                 let mut scanner = on_control.as_ref().map(|_| ControlScanner::default());
-                let mut prefs = on_record_chord.as_ref().map(|_| ControlScanner::new(crate::control::PREFS_PREFIX));
+                let mut prefs = on_prefs.as_ref().map(|_| ControlScanner::new(crate::control::PREFS_PREFIX));
                 let mut asked = Vec::new();
                 let mut found = Vec::new();
                 let parse = |bytes: &[u8]| -> Result<(), Bug> {
@@ -417,12 +419,10 @@ impl Session {
                         }
                     }
                     parse(&buf[start..n])?;
-                    if let (Some(scanner), Some(record)) = (&mut prefs, &mut on_record_chord) {
+                    if let (Some(scanner), Some(ask)) = (&mut prefs, &mut on_prefs) {
                         scanner.feed(&buf[..n], &mut asked);
                         for (_, what) in asked.drain(..) {
-                            if what == "record-chord" {
-                                record();
-                            }
+                            ask(what);
                         }
                     }
                     if !dirty2.swap(true, Ordering::AcqRel) {

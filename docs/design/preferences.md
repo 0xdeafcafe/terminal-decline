@@ -211,6 +211,24 @@ The TUI checks each edit with the app's own loader before writing (see
 "Where the code lives"), so its writes add no errors; fonts that aren't
 installed are caught by the picker.
 
+### Theme preview (landed 30 Oct 2026)
+
+Moving through a theme list (the light and dark theme pickers) previews
+the theme under the selection in every window, the Settings tab
+included, without writing anything: the program sends `OSC 7771 ;
+theme-preview ; show ; <name> ST` (only with `--in-app`), and the app,
+hearing it only from the Settings pane as for `record-chord`, gives every
+window its config with that theme for light and dark alike
+(`Config::previewing`; `[colors]` stay on top, as do colours programs set
+with OSC 4/10/11). Esc sends `cancel`, which puts the config's theme
+back. Enter writes the theme as usual, then sends `keep`: the preview
+stays until the reload the write causes, so windows don't flash back to
+the old theme for the 40 ms in between, and goes 1 s later if no reload
+comes (the file didn't change). Closing the Settings tab ends a preview.
+New windows open with the config's theme. The program follows the preview
+in its own colours too, since it draws in the terminal's default and
+palette colours.
+
 ## Keybinds
 
 - `[keybind]` holds changes against `keybind::DEFAULTS`: removing a

@@ -2266,6 +2266,20 @@ impl WindowView {
         }
     }
 
+    /// Pane `pane`'s preferences sent `OSC 7771 ; <what>`: record a chord,
+    /// or preview a theme in every window. Only heard from the Settings
+    /// pane.
+    fn prefs_asked(&self, pane: PaneId, what: &str) {
+        if self.with_state(|st| st.panes.get(&pane).is_some_and(|p| p.settings)) != Some(true) {
+            return;
+        }
+        if what == "record-chord" {
+            self.start_recording(pane);
+        } else if let Some(preview) = term_prefs::Preview::parse(what) {
+            crate::app::preview_theme(preview);
+        }
+    }
+
     /// Pane `pane`'s preferences asked for a chord (`OSC 7771 ;
     /// record-chord`, only heard in the Settings tab): the next key down
     /// in this window is taken before the menus, the input method and
@@ -2411,8 +2425,8 @@ fn pane_hooks(id: usize, pane: PaneId, test: bool, settings: bool) -> Hooks {
         DispatchQueue::main().exec_async(move || with_view(id, |v| v.events(pane, events)));
     }));
     if settings {
-        hooks.on_record_chord = Some(Box::new(move || {
-            DispatchQueue::main().exec_async(move || with_view(id, |v| v.start_recording(pane)));
+        hooks.on_prefs = Some(Box::new(move |what: String| {
+            DispatchQueue::main().exec_async(move || with_view(id, |v| v.prefs_asked(pane, &what)));
         }));
     }
     hooks

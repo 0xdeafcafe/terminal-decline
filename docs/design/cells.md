@@ -1612,6 +1612,35 @@ pub enum HighlightKind { Selection, SearchHit, CurrentSearchHit, HoveredLink }
     rows copied at 300×100 66 µs, all of it v1 decoding, which the R.3
     decode cache and v2 history (PR 7) take on.
 
+**Landed (R.1).** Building was already outside the lock (B1.2); what
+was left on the main thread was waiting for the lock, and finding and
+rasterising new glyphs.
+
+- **The lock.** Measured first, under a `yes` flood: the main thread
+  waited p99 4–26 µs for it, as the reader holds it for one read's
+  parse (~1 KB). So the reader doesn't publish snapshots; instead a
+  frame tries the lock and spins for at most 500 µs
+  (`session::lock_for_frame`). A pane whose reader still holds it
+  (on a loaded Mac the reader can lose its core while parsing; one
+  wait of 2.2 ms was seen) is held for a tick like a synchronized
+  update, its change kept, and the other panes draw. Spinning, not
+  yielding: a yield under load gave the core away for 10 ms.
+- **New glyphs.** A screenful of glyphs not drawn before (the pressure
+  set's glyphs-30k) took 10–200 ms a frame: two thirds finding the
+  fallback font, a third rasterising. Rasterising on another thread
+  needs `Fonts` shared across threads (its fallback registry is a
+  `RefCell`), so for now each pane's build has a time budget
+  (`Renderer::set_glyph_budget`): 3 ms within 250 ms of input, 8 ms
+  otherwise. Past it, new glyphs wait for later frames; the pane says
+  so (`PaneRender::glyphs_deferred`), forgets its rows before its next
+  snapshot and is built every tick until it has them all. The first
+  new glyph of a build always goes ahead; ASCII never waits; a test
+  dump waits for the complete frame. Main-thread time per frame for
+  glyphs-30k: max 167–181 ms → 29–32 ms, total unchanged (248–268 →
+  221–233 ms).
+- **Not measured:** key latency under the flood (the latency harness
+  opens windows in front). Left: rasterising off the main thread.
+
 ### 9.3 The renderer's row cache (R.2)
 
 - A cached row holds its background runs, glyph instances and decorations,

@@ -614,7 +614,7 @@ fn theme_lists_preview_live() {
     s.send(&mut app, UP);
     assert_eq!(s.sent, ["\x1b]7771;theme-preview;show;solarized-dark\x1b\\"]);
     s.send(&mut app, UP);
-    assert_eq!(s.sent.last().unwrap(), "\x1b]7771;theme-preview;show;slope-light\x1b\\");
+    assert_eq!(s.sent.last().unwrap(), "\x1b]7771;theme-preview;show;slope-dark\x1b\\");
     // Typing a filter previews the first match.
     s.send(&mut app, "toky");
     assert_eq!(s.sent.last().unwrap(), "\x1b]7771;theme-preview;show;tokyo-night\x1b\\");
@@ -659,4 +659,72 @@ fn theme_lists_preview_live() {
     let mut s = Screen::new(&mut app, 80, 24);
     s.send(&mut app, &format!("/dark theme{ENTER}{UP}{ESC}"));
     assert!(s.sent.is_empty(), "{:?}", s.sent);
+}
+
+/// The row of a group header (a popup cell holding just `name`).
+fn header(s: &Screen, name: &str) -> Option<usize> {
+    (0..24).find(|&y| s.row(y).split('│').any(|c| c.trim() == name))
+}
+
+/// The row of the first line containing `what`.
+fn line(s: &Screen, what: &str) -> usize {
+    (0..24)
+        .find(|&y| s.row(y).contains(what))
+        .unwrap_or_else(|| panic!("{what}: {}", s.text()))
+}
+
+/// Theme lists show two faint headers, Dark and Light, the side's own
+/// group first. Arrow keys skip the headers, a search keeps only the
+/// headers of groups with a match, and the preview follows each move.
+#[test]
+fn theme_lists_group_by_background() {
+    let dir = Dir::new("groups");
+    let cfg = dir.file("config.toml", "theme = \"tokyo-night\"\n");
+    let fake = Fake::new(cfg.clone());
+    let mut app = App::new(&fake, vec![cfg.clone()], 0, true);
+    let mut s = Screen::new(&mut app, 80, 24);
+    s.send(&mut app, &format!("/dark theme{ENTER}"));
+    let t = s.text();
+    let (hd, hl) = (header(&s, "Dark").expect(&t), header(&s, "Light").expect(&t));
+    let (slope_dark, solarized, tokyo, slope_light) = (
+        line(&s, "Slope Dark"),
+        line(&s, "Solarized Dark"),
+        line(&s, "Tokyo Night"),
+        line(&s, "Slope Light"),
+    );
+    assert!(
+        hd < slope_dark && slope_dark < solarized && solarized < tokyo && tokyo < hl && hl < slope_light,
+        "{t}"
+    );
+    assert!(s.row(tokyo).contains("▸"), "starts on the current theme\n{t}");
+    // Down passes the Light header onto the first light theme; Up comes
+    // back over it.
+    s.send(&mut app, DOWN);
+    assert!(s.row(line(&s, "Slope Light")).contains("▸"), "{}", s.text());
+    assert_eq!(s.sent.last().unwrap(), "\x1b]7771;theme-preview;show;slope-light\x1b\\");
+    s.send(&mut app, UP);
+    assert!(s.row(line(&s, "Tokyo Night")).contains("▸"), "{}", s.text());
+    // Search works across both groups, headers only where something matches.
+    s.send(&mut app, "slope");
+    let t = s.text();
+    assert!(header(&s, "Dark").is_some() && header(&s, "Light").is_some(), "{t}");
+    s.send(&mut app, "-l");
+    let t = s.text();
+    assert!(header(&s, "Dark").is_none() && header(&s, "Light").is_some(), "{t}");
+    assert_eq!(s.sent.last().unwrap(), "\x1b]7771;theme-preview;show;slope-light\x1b\\");
+    s.send(&mut app, &format!("{ESC}{ESC}"));
+    // The light picker has the Light group first.
+    s.send(&mut app, &format!("/light theme{ENTER}"));
+    let t = s.text();
+    let (hd, hl) = (header(&s, "Dark").expect(&t), header(&s, "Light").expect(&t));
+    assert!(
+        hl < line(&s, "Slope Light") && line(&s, "Slope Light") < hd && hd < line(&s, "Slope Dark"),
+        "{t}"
+    );
+    s.send(&mut app, &format!("{ESC}{ESC}"));
+    // At 20×5 the selection stays in view, headers or not.
+    s.resize(&mut app, 20, 5);
+    s.send(&mut app, &format!("/dark theme{ENTER}{DOWN}{UP}{UP}{UP}"));
+    assert!(s.has("▸"), "{}", s.text());
+    s.send(&mut app, &format!("{ESC}{ESC}"));
 }

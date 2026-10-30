@@ -301,6 +301,9 @@ Oct 2026, 1.90 → 2.16 MB) and no measurable parse speed.
   to the program clears the terminal's selection, as typing does
   (`select::reported`): the program draws its own highlight, and Cmd+C
   mustn't copy an old selection the user no longer sees as current.
+  A window has one selection: one starting in a pane (a click, Select
+  All, Select Command Output) clears the other panes'
+  (`select::clear_others`).
   Which click does what is `select::gesture`: Shift-click extends the
   selection (by words or lines if it was made that way), Option-drag makes
   a rectangle. Dragging past the top or bottom edge scrolls, faster the

@@ -209,6 +209,7 @@ define_class!(
 
         #[unsafe(method(selectAll:))]
         fn select_all(&self, _sender: Option<&AnyObject>) {
+            self.clear_other_selections();
             self.with(|_, p| p.session.lock_term().state.select_all());
             self.request_redraw();
         }
@@ -862,6 +863,7 @@ impl PaneView {
     /// at the top of the view or the last ([`crate::prompts::select_output`]);
     /// beep if there is none.
     fn select_output_at(&self, at: Option<Point>) {
+        self.clear_other_selections();
         let selected = self.with(|_, p| {
             let mut t = p.session.lock_term();
             match at {
@@ -1202,6 +1204,7 @@ impl PaneView {
             flags.contains(NSEventModifierFlags::Option),
         );
         let at = self.px_at(event);
+        self.clear_other_selections();
         self.with(|_, p| {
             p.selecting = Some(gesture);
             p.dragged = false;
@@ -1270,6 +1273,14 @@ impl PaneView {
             let pb = NSPasteboard::generalPasteboard();
             pb.clearContents();
             pb.setString_forType(&NSString::from_str(&text), unsafe { NSPasteboardTypeString });
+        }
+    }
+
+    /// One selection per window: this pane's is starting, so the other
+    /// panes' go.
+    fn clear_other_selections(&self) {
+        if let Some(w) = self.window_view() {
+            w.clear_other_selections(self.pane());
         }
     }
 

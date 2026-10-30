@@ -970,6 +970,26 @@ impl WindowView {
     }
 
     /// Draw pane `pane` again soon.
+    /// A selection is starting in `pane`: the other panes' are cleared
+    /// (one selection per window, [`crate::select::clear_others`]).
+    pub(crate) fn clear_other_selections(&self, pane: PaneId) {
+        let cleared = self
+            .with_state(|st| {
+                let mut cleared = Vec::new();
+                for (&id, p) in st.panes.iter_mut().filter(|(id, _)| **id != pane) {
+                    if crate::select::clear_others([&mut p.session.lock_term().state]) {
+                        p.block = None;
+                        cleared.push(id);
+                    }
+                }
+                cleared
+            })
+            .unwrap_or_default();
+        for id in cleared {
+            self.request_redraw(id);
+        }
+    }
+
     pub(crate) fn request_redraw(&self, pane: PaneId) {
         self.with_pane(pane, |_, p| p.session.mark_dirty());
         self.unpause();

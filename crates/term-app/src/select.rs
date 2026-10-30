@@ -102,6 +102,19 @@ pub fn reported(t: &mut Terminal, press: bool) -> bool {
     true
 }
 
+/// One selection per window: a selection starting in one pane (a click,
+/// Select All, Select Command Output) clears the other panes'
+/// `others`, so what is shown selected is what Cmd+C copies. Whether
+/// any was cleared.
+pub fn clear_others<'a>(others: impl IntoIterator<Item = &'a mut Terminal>) -> bool {
+    let mut cleared = false;
+    for t in others {
+        cleared |= t.selection().is_some();
+        t.set_selection(None);
+    }
+    cleared
+}
+
 /// Auto-scroll speed per cell height past the edge, in lines a second.
 pub const SPEED_PER_LINE: f64 = 10.0;
 /// Slowest auto-scroll, just past the edge (lines a second).
@@ -317,6 +330,27 @@ mod tests {
         assert!(reported(&mut t.state, true));
         assert_eq!(t.state.selection(), None);
         assert!(!reported(&mut t.state, true), "nothing left to clear");
+    }
+
+    /// Two panes, each with a selection: starting one in the first
+    /// clears the second's, whatever happens in the first.
+    #[test]
+    fn a_selection_clears_the_other_panes() {
+        let mut a = Term::new(20, 5, 100, term_core::ImagePool::process());
+        let mut b = Term::new(20, 5, 100, term_core::ImagePool::process());
+        let mut c = Term::new(20, 5, 100, term_core::ImagePool::process());
+        for t in [&mut a, &mut b] {
+            t.advance(b"left over");
+            t.state.select_all();
+        }
+        assert!(clear_others([&mut b.state, &mut c.state]));
+        assert_eq!(b.state.selection(), None);
+        assert_eq!(
+            a.state.selection_text().as_deref(),
+            Some("left over\n\n\n\n"),
+            "the pane's own stays"
+        );
+        assert!(!clear_others([&mut b.state, &mut c.state]), "none left");
     }
 
     #[test]

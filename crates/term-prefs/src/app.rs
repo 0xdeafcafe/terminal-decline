@@ -180,8 +180,9 @@ pub struct App<'h> {
     hit: Hit,
     effects: Vec<Effect>,
     /// The theme every window shows while a theme list is open (the live
-    /// preview), and its colours for drawing this tab.
-    previewed: Option<(String, Option<ThemeInfo>)>,
+    /// preview), and the colours windows show with it (`[colors]` on
+    /// top), for drawing this tab.
+    previewed: Option<(String, Checked)>,
     /// Themes' colours for the swatches in theme lists, read once each.
     theme_infos: std::collections::HashMap<String, Option<ThemeInfo>>,
 }
@@ -1506,8 +1507,10 @@ impl<'h> App<'h> {
         if self.in_app {
             self.effects.push(Effect::Send(Preview::Show(name.to_string()).osc()));
         }
-        let info = if name.is_empty() { None } else { self.host.theme_info(name) };
-        self.previewed = Some((name.to_string(), info));
+        let colours = self
+            .host
+            .check_preview(&self.layers.paths, self.layers.edit, &self.layers.text, name);
+        self.previewed = Some((name.to_string(), colours));
     }
 
     /// The theme list closed: the theme written is kept (`keep`), else

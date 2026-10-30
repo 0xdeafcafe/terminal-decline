@@ -599,6 +599,32 @@ fn the_file_watch_wakes_a_reload() {
     assert!(s.has("changed on disk") && s.cursor_row().contains("20"), "{}", s.text());
 }
 
+/// While a theme is previewed, this tab picks its colours from what
+/// windows show: with `[colors]` setting black on black, a theme whose own
+/// colours are readable still gets this tab's own readable text.
+#[test]
+fn a_preview_keeps_the_colors_overrides_readable() {
+    let dir = Dir::new("preview-overrides");
+    let cfg = dir.file(
+        "config.toml",
+        "theme = \"tokyo-night\"\n[colors]\nforeground = \"#000000\"\nbackground = \"#000000\"\n",
+    );
+    let fake = Fake::new(cfg.clone());
+    let mut app = App::new(&fake, vec![cfg.clone()], 0, true);
+    let mut s = Screen::new(&mut app, 80, 24);
+    let ink = |s: &Screen| {
+        let y = (0..24).find(|&y| s.row(y).contains("Slope Dark")).expect("the list");
+        let x = s.row(y).find("Slope Dark").map(|b| s.row(y)[..b].chars().count()).unwrap();
+        s.term.state.visible_row(y).cell(x).style().fg.kind()
+    };
+    s.send(&mut app, &format!("/dark theme{ENTER}{UP}"));
+    assert_eq!(s.sent, ["\x1b]7771;theme-preview;show;solarized-dark\x1b\\"]);
+    // Solarized Dark's own colours are readable; windows show black on
+    // black, so this tab draws in its own colours.
+    assert_eq!(ink(&s), ColorKind::Rgb(0xe8, 0xe8, 0xe8), "{}", s.text());
+    s.send(&mut app, ESC);
+}
+
 /// Moving through a theme list previews each theme in every window (the
 /// app hears `OSC 7771 ; theme-preview`); Esc puts the old one back and
 /// writes nothing, Enter writes it and keeps it shown until the reload.

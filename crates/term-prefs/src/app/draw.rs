@@ -86,12 +86,11 @@ impl Look {
 
 impl App<'_> {
     /// The look for the colours windows show now: a previewed theme's
-    /// while a theme list is open.
+    /// while a theme list is open, with `[colors]` on top as windows show
+    /// it.
     fn look(&self) -> Look {
-        match self.previewed.as_ref() {
-            Some((_, Some(i))) => Look::new(Some(i.foreground), Some(i.background), &i.palette),
-            _ => Look::new(self.checked.foreground, self.checked.background, &self.checked.palette),
-        }
+        let c = self.previewed.as_ref().map_or(&self.checked, |(_, c)| c);
+        Look::new(c.foreground, c.background, &c.palette)
     }
 
     /// The key hints for the mode: key and what it does.

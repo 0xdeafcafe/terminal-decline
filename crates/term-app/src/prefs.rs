@@ -59,6 +59,22 @@ pub fn check(layers: &[PathBuf], themes_dir: &Path, edit: usize, text: &str, app
     }
 }
 
+/// The colours windows show while Settings previews theme `name`: the
+/// config `check` loads, made into the one windows get
+/// (`Config::previewing`, `[colors]` still on top).
+pub fn check_preview(layers: &[PathBuf], themes_dir: &Path, edit: usize, text: &str, name: &str, appearance: Appearance) -> Checked {
+    let refs: Vec<&Path> = layers.iter().map(PathBuf::as_path).collect();
+    let (config, _) = config::load_replacing(&refs, themes_dir, Some((edit, text)));
+    let config = config.previewing(name, themes_dir);
+    let palette = config.palette(config.appearance.resolve(appearance));
+    Checked {
+        notices: Vec::new(),
+        foreground: Some(palette.foreground),
+        background: Some(palette.background),
+        palette: palette.ansi.to_vec(),
+    }
+}
+
 /// Theme `name` as the Settings list shows it: its title, its colours and
 /// the theme made as its other half.
 pub fn theme_info(themes_dir: &Path, name: &str) -> Option<ThemeInfo> {
@@ -179,6 +195,10 @@ impl Host for AppHost {
 
     fn check(&self, layers: &[PathBuf], edit: usize, text: &str) -> Checked {
         check(layers, &self.paths.themes_dir(), edit, text, system_appearance())
+    }
+
+    fn check_preview(&self, layers: &[PathBuf], edit: usize, text: &str, name: &str) -> Checked {
+        check_preview(layers, &self.paths.themes_dir(), edit, text, name, system_appearance())
     }
 
     fn defaults(&self) -> String {
@@ -423,5 +443,20 @@ mod tests {
         assert_eq!(info.palette.len(), 16);
         assert!(theme_info(&dir.join("themes"), "nope").is_none());
         assert_eq!(theme_info(&dir.join("themes"), "dracula").unwrap().partner, None);
+    }
+
+    /// The Settings tab picks its colours from what windows show while it
+    /// previews a theme: `[colors]` stay on top of the previewed theme.
+    #[test]
+    fn preview_colours_keep_the_colors_overrides() {
+        let dir = TempDir::new("prefs-preview");
+        let layers = [dir.join("config.toml")];
+        let themes = dir.join("themes");
+        let plain = check_preview(&layers, &themes, 0, "theme = 'rose-pine'\n", "rose-pine-dawn", Appearance::Dark);
+        assert_eq!(plain.background, Some(0xfaf4ed), "the previewed theme, for dark too");
+        let black = "theme = 'rose-pine'\n[colors]\nforeground = '#000000'\nbackground = '#000000'\n";
+        let c = check_preview(&layers, &themes, 0, black, "rose-pine-dawn", Appearance::Light);
+        assert_eq!((c.foreground, c.background), (Some(0), Some(0)));
+        assert_eq!(c.palette, plain.palette, "the theme's ANSI colours");
     }
 }

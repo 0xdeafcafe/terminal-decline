@@ -1579,6 +1579,31 @@ fn osc8_link_is_saved_and_restored_with_the_cursor() {
 }
 
 #[test]
+fn osc133_reports_commands_starting_and_finishing() {
+    use term_core::Command;
+    let mut t = new(20, 4);
+    t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07cargo build  \r\n\x1b]133;C\x07out\r\n");
+    assert_eq!(t.state.take_commands(), [Command::Started(Some("cargo build".into()))]);
+    assert_eq!(t.state.take_commands(), []);
+    t.advance(b"\x1b]133;D;101\x07\x1b]133;A\x07$ \x1b]133;B\x07ls\r\n\x1b]133;C\x07\x1b]133;D\x07");
+    assert_eq!(
+        t.state.take_commands(),
+        [
+            Command::Finished(Some(101)),
+            Command::Started(Some("ls".into())),
+            Command::Finished(None)
+        ]
+    );
+    // A command line that wrapped onto a second row is one line.
+    let mut t = new(10, 4);
+    t.advance(b"\x1b]133;B\x07echo 12345678\r\n\x1b]133;C\x07");
+    assert_eq!(t.state.take_commands(), [Command::Started(Some("echo 12345678".into()))]);
+    // No B mark: no text.
+    t.advance(b"\x1b]133;C\x07");
+    assert_eq!(t.state.take_commands(), [Command::Started(None)]);
+}
+
+#[test]
 fn osc133_marks_where_the_cursor_is() {
     use term_core::{Mark, MarkKind};
     let mut t = new(20, 3);

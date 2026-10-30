@@ -2346,13 +2346,19 @@ impl WindowView {
         }
     }
 
-    /// Pane `pane`'s preferences sent `OSC 7771 ; <what>`: record a chord,
+    /// Pane `pane`'s preferences sent `OSC 7771 ; <token> ; <what>`
+    /// ([`crate::prefs::token`]): record a chord,
     /// or preview a theme in every window. Only heard from the Settings
     /// pane.
     fn prefs_asked(&self, pane: PaneId, what: &str) {
         if self.with_state(|st| st.panes.get(&pane).is_some_and(|p| p.settings)) != Some(true) {
             return;
         }
+        // Only the preferences themselves know the token, not what they
+        // run or show.
+        let Some(what) = term_prefs::preview::verify(what, crate::prefs::token()) else {
+            return;
+        };
         if what == "record-chord" {
             self.start_recording(pane);
         } else if let Some(preview) = term_prefs::Preview::parse(what) {

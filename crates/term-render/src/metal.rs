@@ -488,6 +488,33 @@ impl GlyphCache {
         self.by_key.retain(|_, slot| !drop(*slot));
     }
 
+    /// Under memory pressure: empty both textures into new ones at their
+    /// starting sizes, so the old ones (and the pages written in them) go
+    /// once the GPU lets them go, and forget every glyph; they are
+    /// rasterised again as frames need them. Returns the bytes the old
+    /// textures held, 0 if they were already empty at their starting
+    /// sizes (another window purged them this turn), or purgeable
+    /// already (every window hidden: macOS may take them as it is).
+    fn purge(&mut self, device: &Device) -> usize {
+        if self.volatile {
+            return 0;
+        }
+        let mut freed = 0;
+        for atlas in [&mut self.mask, &mut self.color] {
+            if atlas.packer.size() == atlas.start && atlas.packer.is_empty() {
+                continue;
+            }
+            let size = atlas.packer.size() as usize;
+            freed += size * size * atlas.bpp;
+            atlas.packer = ShelfPacker::new(atlas.start, atlas.packer.max());
+            atlas.texture = new_texture(device, atlas.format, atlas.start);
+        }
+        if freed > 0 {
+            self.forget(|_| true);
+        }
+        freed
+    }
+
     /// Let macOS reclaim both textures (every window is hidden).
     fn make_purgeable(&mut self) {
         if self.volatile {
@@ -1279,6 +1306,37 @@ impl Renderer {
     pub fn forget_glyphs(&mut self) {
         self.shared.glyphs.borrow_mut().clear();
         self.fonts.clear_shaped_clusters();
+    }
+
+    /// Under memory pressure (roadmap R.5): give back what the next
+    /// frames can make again. The glyph textures, shared by every window,
+    /// start again empty at their starting sizes (every pane of every
+    /// window is built again before its glyphs are drawn), and this
+    /// window's instance buffers and image textures go. Waits for the
+    /// GPU to finish this window's frames first. Returns the bytes given
+    /// back, roughly: what the textures and buffers held.
+    pub fn purge(&mut self) -> usize {
+        self.window.in_flight.wait_idle();
+        let mut freed = 0;
+        let w = &mut self.window;
+        for b in w.rect_buffers.iter_mut().chain(w.image_buffers.iter_mut()) {
+            freed += b.capacity;
+            *b = InstanceBuffer { buffer: None, capacity: 0 };
+        }
+        freed += w
+            .textures
+            .values()
+            .chain(w.old_textures.values())
+            .map(|t| t.width() * t.height() * 4)
+            .sum::<usize>();
+        w.textures.clear();
+        w.old_textures.clear();
+        w.span_textures.clear();
+        let mut cache = self.shared.glyphs.borrow_mut();
+        // Other windows' frames may still sample the textures.
+        cache.in_flight.wait_idle();
+        freed += cache.purge(&self.shared.gpu.device);
+        freed
     }
 
     /// Whether `pane` was built against the glyph textures as they are and

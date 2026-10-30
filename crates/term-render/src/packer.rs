@@ -70,6 +70,8 @@ pub struct ShelfPacker {
     size: u32,
     max: u32,
     full: bool,
+    /// Nothing placed since it was made or cleared.
+    empty: bool,
     /// Free space, filled in order: the first square, then each growth's
     /// right and bottom strips.
     regions: Vec<Region>,
@@ -82,6 +84,7 @@ impl ShelfPacker {
             size,
             max,
             full: false,
+            empty: true,
             regions: vec![Region::new(0, 0, size, size)],
         }
     }
@@ -100,6 +103,11 @@ impl ShelfPacker {
         self.full
     }
 
+    /// Nothing is placed in it.
+    pub fn is_empty(&self) -> bool {
+        self.empty
+    }
+
     /// Place a `w`×`h` rectangle; returns its top-left corner.
     pub fn insert(&mut self, w: u32, h: u32) -> Result<(u32, u32), NoRoom> {
         if w > self.max || h > self.max {
@@ -108,6 +116,7 @@ impl ShelfPacker {
         // Earlier regions keep the space their shelves left; glyphs are
         // added rarely, so trying each in turn costs nothing that matters.
         if let Some(at) = self.regions.iter_mut().find_map(|r| r.insert(w, h)) {
+            self.empty = false;
             return Ok(at);
         }
         // Out of room, or it fits only a bigger texture: ask for one.

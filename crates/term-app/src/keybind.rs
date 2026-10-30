@@ -274,7 +274,7 @@ impl MenuAction {
 
 /// The menus' shortcuts with no config. The pane ones are iTerm2's and
 /// Ghostty's; the prompt ones Terminal.app's and iTerm2's.
-pub const DEFAULTS: [(&str, MenuAction); 36] = [
+pub const DEFAULTS: [(&str, MenuAction); 38] = [
     ("cmd+n", MenuAction::NewWindow),
     ("cmd+t", MenuAction::NewTab),
     ("cmd+w", MenuAction::Close),
@@ -288,6 +288,9 @@ pub const DEFAULTS: [(&str, MenuAction); 36] = [
     ("ctrl+cmd+f", MenuAction::ToggleFullScreen),
     ("cmd+}", MenuAction::NextTab),
     ("cmd+{", MenuAction::PreviousTab),
+    // As in Safari, Terminal.app and Ghostty; the menu shows the Cmd ones.
+    ("ctrl+tab", MenuAction::NextTab),
+    ("shift+ctrl+tab", MenuAction::PreviousTab),
     ("cmd+d", MenuAction::SplitRight),
     ("shift+cmd+d", MenuAction::SplitDown),
     ("shift+cmd+w", MenuAction::CloseWindow),
@@ -896,8 +899,17 @@ mod tests {
         let b = Keybinds::default();
         for (c, a) in DEFAULTS {
             assert_eq!(b.get(&chord(c)), Some(&Bound::Menu(a)), "{c}");
-            assert_eq!(b.chords(a), [chord(c)], "{c}");
+            assert!(b.chords(a).contains(&chord(c)), "{c}");
         }
+        // An action with two default chords shows its first in the menu;
+        // Ctrl+Tab works hidden.
+        assert_eq!(b.chords(MenuAction::NextTab), [chord("cmd+}"), chord("ctrl+tab")]);
+        assert_eq!(b.chords(MenuAction::PreviousTab), [chord("cmd+{"), chord("shift+ctrl+tab")]);
+        let ctrl_tab = KeyInput {
+            keycode: 0x30,
+            ..key("\t", CONTROL)
+        };
+        assert_eq!(b.decide(&ctrl_tab), Some(Decision::Perform(MenuAction::NextTab)));
         assert_eq!(chord("ctrl+cmd+f").key_equivalent(), ("f".into(), COMMAND | CONTROL));
         assert_eq!(chord("cmd+}").key_equivalent(), ("}".into(), COMMAND));
         assert_eq!(chord("cmd+enter").key_equivalent(), ("\r".into(), COMMAND));

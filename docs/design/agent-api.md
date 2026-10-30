@@ -106,8 +106,20 @@ Exit codes of `terminal-decline ctl`: 0 done (for `wait-for`: matched);
 
 ## 5. Costs
 
-Measured on Alex's Mac (M-series), headless server, release build: see
-§7 once landed.
+Measured on Alex's Mac (Apple Silicon, busy with other agents' builds,
+so medians), headless server, release build, 30 Oct 2026:
+
+| | |
+|---|---|
+| Headless server, no sessions | 2.1 MB `phys_footprint` |
+| 50 idle `/bin/sh` sessions, 80×24 | 9.2 MB: **~146 KB per session** (the shells are their own processes) |
+| `spawn` in the server | 3–6 ms median (max 23 ms) |
+| `ctl spawn`, the whole call | 22–34 ms (a client process each time) |
+| First output after spawn | 25–33 ms |
+| `ctl hello` round trip | 13 ms; a cold start of the server 27 ms (up to 370 ms on a binary's first run) |
+| 20 MB of text through one session | parse 116–157 ms (130–175 MB/s) |
+| Screenshot 120×40 at 2× (1940×1300 px) | first 36 ms frame build, 4 ms GPU, 19 ms PNG; again 1–6 ms GPU, 8 ms PNG |
+| `screen --json` 120×40 (230 KB) | 23–29 ms call |
 
 ## 6. Left for later
 
@@ -117,4 +129,14 @@ Measured on Alex's Mac (M-series), headless server, release build: see
 
 ## 7. Landed
 
-(Filled in as it lands.)
+30 Oct 2026: everything above but `--window`. The `ctl` module in
+term-app (`protocol`, `client`, `server`, `headless`, `keys`, `screen`,
+`shot`); `Hooks::on_output`, `Hooks::quiet_exit` and `Session::child`
+in `session`; the `agent_api` setting. Tests: protocol round trips,
+key encoding (legacy and kitty levels), screen reading and CLI parsing
+as unit tests; `crates/term-app/tests/ctl.rs` runs the real binary
+against a headless server in a directory of its own (sessions end to
+end, keys, the socket's permissions, screenshots with text, program
+colours and a kitty image), checking the server is no app (Launch
+Services doesn't know it). The window smoke test for program-set
+colours moved there.

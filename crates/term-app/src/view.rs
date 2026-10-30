@@ -1302,6 +1302,15 @@ impl WindowView {
             ticks.push((*id, frame, t));
         }
         let frames: Vec<PaneFrame> = ticks.iter().map(|(_, f, _)| *f).collect();
+        // A theme transition draws every tick until it ends, from the
+        // frames already built: only its uniforms change. A window hidden
+        // or covered while one plays takes the new theme at once (its
+        // frames are already built with it) and draws nothing.
+        let animating = win.transition.is_some();
+        if animating && !visible {
+            win.transition = None;
+            win.renderer.set_blend(None);
+        }
         let decision = frame_policy::combine(
             &frames,
             &WindowTick {
@@ -1310,21 +1319,10 @@ impl WindowView {
                 focused: win.focused,
                 idle_ticks: win.idle_ticks,
                 last_input_elapsed: win.last_input.elapsed(),
+                animating,
             },
         );
-        // A theme transition draws every tick until it ends, from the
-        // frames already built: only its uniforms change.
         let now = Instant::now();
-        let decision = match decision {
-            Decision::Skip | Decision::Pause { .. } if win.transition.is_some() => Decision::Draw {
-                rate: win.rate.max(frame_policy::RATE_STREAMING),
-            },
-            Decision::Hide { .. } => {
-                win.transition = None;
-                decision
-            }
-            d => d,
-        };
         // A pane held in a synchronized update keeps its change for later.
         let keep_held = |panes: &HashMap<PaneId, Pane>, ticks: &[(PaneId, PaneFrame, _)]| {
             for (id, f, _) in ticks {
@@ -1546,7 +1544,7 @@ impl WindowView {
             .iter()
             .filter_map(|id| panes.get(id))
             .filter(|p| p.crash.is_some_and(|c| c.stopped))
-            .map(|p| rect_instance(p.rect, win.theme.background))
+            .map(|p| rect_instance(p.rect, win.theme.background, transition::slot::BACKGROUND))
             .collect();
         let lines: Vec<RectInstance>;
         let dividers = if stopped.is_empty() {
@@ -1583,7 +1581,7 @@ impl WindowView {
             [one] => one.pane.frame.clear,
             _ => 0,
         };
-        let blend = win.transition.as_ref().map(|t| t.blend(now)).filter(|b| b.progress < 1.0);
+        let blend = win.transition.as_ref().map(|t| t.blend(now)).filter(|b| !b.finished());
         if blend.is_none() {
             // Ended: this frame is the new theme's own.
             win.transition = None;
@@ -1808,7 +1806,11 @@ impl WindowView {
                 }
             }
             let colour = st.win.divider;
-            st.dividers = layout.dividers.iter().map(|d| rect_instance(d.line, colour)).collect();
+            st.dividers = layout
+                .dividers
+                .iter()
+                .map(|d| rect_instance(d.line, colour, transition::slot::DIVIDER))
+                .collect();
             st.grabs = layout.dividers;
             // With several panes the window can't be made smaller than
             // they all fit at their minimum.
@@ -2013,12 +2015,19 @@ impl WindowView {
             Outcome::Hold => {
                 // The session wrote why into the terminal. A pane stopped
                 // for a crash while drawing is held already.
+                let mut settings = false;
                 let testing = self.with_pane(pane, |win, p| {
                     let crashed = p.crash.is_some();
                     p.held = true;
                     p.session.mark_dirty();
+                    settings = p.settings;
                     win.test.is_some() && !crashed
                 });
+                if settings {
+                    // Settings stopped (it crashed, or quit) with its tab
+                    // kept open: no one is left to end its preview.
+                    crate::app::preview_theme(term_prefs::Preview::Cancel);
+                }
                 self.request_redraw(pane);
                 if testing == Some(true) {
                     // Smoke tests can't send a dump command once the
@@ -2506,13 +2515,19 @@ impl WindowView {
         }
     }
 
-    /// Pane `pane`'s preferences sent `OSC 7771 ; <what>`: record a chord,
+    /// Pane `pane`'s preferences sent `OSC 7771 ; <token> ; <what>`
+    /// ([`crate::prefs::token`]): record a chord,
     /// or preview a theme in every window. Only heard from the Settings
     /// pane.
     fn prefs_asked(&self, pane: PaneId, what: &str) {
         if self.with_state(|st| st.panes.get(&pane).is_some_and(|p| p.settings)) != Some(true) {
             return;
         }
+        // Only the preferences themselves know the token, not what they
+        // run or show.
+        let Some(what) = term_prefs::preview::verify(what, crate::prefs::token()) else {
+            return;
+        };
         if what == "record-chord" {
             self.start_recording(pane);
         } else if let Some(preview) = term_prefs::Preview::parse(what) {
@@ -2950,8 +2965,9 @@ fn test_build_panic(now: bool) {
 fn test_build_panic(_now: bool) {}
 
 /// A filled rectangle at `r` (window pixels).
-fn rect_instance(r: PxRect, color: Rgba) -> RectInstance {
+fn rect_instance(r: PxRect, color: Rgba, slot: usize) -> RectInstance {
     RectInstance {
+        tag: term_render::frame::tag_of(slot),
         x: r.x.clamp(0, i16::MAX as i32) as i16,
         y: r.y.clamp(0, i16::MAX as i32) as i16,
         w: r.w.clamp(0, u16::MAX as i32) as u16,

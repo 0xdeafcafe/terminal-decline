@@ -95,6 +95,21 @@ pub trait Host {
     /// The theme names: built-in and in the themes folder.
     fn themes(&self) -> Vec<String>;
 
+    /// The colours windows show while Settings previews theme `name` (""
+    /// for the built-in colours): `layers` loaded as for
+    /// [`check`](Host::check), with that theme for light and dark alike
+    /// and `[colors]` still on top. Only the colours are filled in. By
+    /// default the theme's own colours, with no `[colors]`.
+    fn check_preview(&self, layers: &[PathBuf], edit: usize, text: &str, name: &str) -> Checked {
+        let _ = (layers, edit, text);
+        self.theme_info(name).map_or_else(Checked::default, |i| Checked {
+            notices: Vec::new(),
+            foreground: Some(i.foreground),
+            background: Some(i.background),
+            palette: i.palette,
+        })
+    }
+
     /// Theme `name`'s title and colours, if it loads.
     fn theme_info(&self, name: &str) -> Option<ThemeInfo> {
         let _ = name;
@@ -271,6 +286,36 @@ impl Host for Fake {
             notices,
             foreground: Some(0xd8dee9),
             background: Some(background.unwrap_or(0x16181c)),
+            palette: FAKE_PALETTE.to_vec(),
+        }
+    }
+
+    fn check_preview(&self, layers: &[PathBuf], edit: usize, text: &str, name: &str) -> Checked {
+        let (mut fg, mut bg) = self.theme_info(name).map_or((0xd8dee9, 0x16181c), |i| (i.foreground, i.background));
+        for (i, path) in layers.iter().enumerate() {
+            let owned;
+            let text = if i == edit {
+                text
+            } else {
+                owned = std::fs::read_to_string(path).unwrap_or_default();
+                &owned
+            };
+            let Ok(doc) = text.trim_start_matches('\u{feff}').parse::<toml_edit::DocumentMut>() else {
+                continue;
+            };
+            let colour = |key: &str| {
+                doc.get("colors")
+                    .and_then(|c| c.get(key))
+                    .and_then(|v| v.as_str())
+                    .and_then(crate::schema::parse_hex)
+            };
+            fg = colour("foreground").unwrap_or(fg);
+            bg = colour("background").unwrap_or(bg);
+        }
+        Checked {
+            notices: Vec::new(),
+            foreground: Some(fg),
+            background: Some(bg),
             palette: FAKE_PALETTE.to_vec(),
         }
     }

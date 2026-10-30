@@ -111,7 +111,9 @@ pub fn run(args: &[String], host: &dyn Host) -> i32 {
             return 1;
         }
     };
-    install_panic_hook();
+    // What the app hears from us carries its token (`preview`).
+    let token = std::env::var(preview::TOKEN_ENV).ok().filter(|t| !t.is_empty());
+    install_panic_hook(args.in_app, token.clone());
     let mut app = App::new(host, args.layers, args.edit, args.in_app);
     let (w, h) = tty.size();
     app.resize(w, h);
@@ -124,13 +126,13 @@ pub fn run(args: &[String], host: &dyn Host) -> i32 {
                 Effect::Quit => quit = true,
                 Effect::Repaint => renderer.invalidate(),
                 Effect::Send(s) => {
-                    let _ = tty.write(&s);
+                    let _ = tty.write(&preview::sign(&s, token.as_deref()));
                 }
                 Effect::Watch(files) => host.watch(&files, Arc::new(tty::file_changed)),
                 Effect::EditFile(path) => {
                     let editor = editor::resolve_here(&app.editor_setting());
                     tty.suspend();
-                    let status = editor::command_line(&editor, &path).status();
+                    let status = editor::command_line(&editor, &path).env_remove(preview::TOKEN_ENV).status();
                     let _ = tty.resume();
                     renderer.invalidate();
                     app.reload();
@@ -170,11 +172,12 @@ pub fn run(args: &[String], host: &dyn Host) -> i32 {
     }
 }
 
-/// On a panic: put the terminal back, show the message, and wait for a
-/// key so the tab doesn't just vanish.
-fn install_panic_hook() {
+/// On a panic: end any theme preview, put the terminal back, show the
+/// message, and wait for a key so the tab doesn't just vanish.
+fn install_panic_hook(in_app: bool, token: Option<String>) {
     let old = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        let _ = panic_cleanup(in_app, token.as_deref(), &mut std::io::stdout());
         tty::restore();
         old(info);
         eprintln!("\r\nterminal-decline prefs stopped. Press a key to close.");
@@ -186,12 +189,39 @@ fn install_panic_hook() {
     }));
 }
 
+/// What a panic writes before it waits: in the app, `cancel`, so every
+/// window goes back to the config's theme rather than keep a preview no
+/// one can end while the tab waits for a key. Sent even when nothing is
+/// previewed: the app ignores it then.
+fn panic_cleanup(in_app: bool, token: Option<&str>, out: &mut impl std::io::Write) -> std::io::Result<()> {
+    if in_app {
+        out.write_all(preview::sign(&Preview::Cancel.osc(), token).as_bytes())?;
+        out.flush()?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn args(s: &str) -> Result<Args, String> {
         Args::parse(&s.split_whitespace().map(String::from).collect::<Vec<_>>())
+    }
+
+    /// A panic ends the preview before it waits for a key (in the app
+    /// only); quitting and the tab closing are the app's to notice.
+    #[test]
+    fn a_panic_cancels_the_preview_first() {
+        let mut out = Vec::new();
+        panic_cleanup(true, None, &mut out).unwrap();
+        assert_eq!(out, Preview::Cancel.osc().as_bytes());
+        let mut out = Vec::new();
+        panic_cleanup(true, Some("t0k"), &mut out).unwrap();
+        assert_eq!(out, b"\x1b]7771;t0k;theme-preview;cancel\x1b\\", "with the app's token");
+        let mut out = Vec::new();
+        panic_cleanup(false, Some("t0k"), &mut out).unwrap();
+        assert!(out.is_empty(), "run by hand: nothing to cancel");
     }
 
     #[test]

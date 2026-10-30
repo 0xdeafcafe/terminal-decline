@@ -70,6 +70,7 @@ pub fn decide(
             focused,
             idle_ticks,
             last_input_elapsed,
+            animating: false,
         },
     )
 }
@@ -125,6 +126,10 @@ pub struct WindowTick {
     pub idle_ticks: u8,
     /// Time since the last key, paste, click or scroll in any pane.
     pub last_input_elapsed: Duration,
+    /// A theme transition plays: it draws every tick until it ends, from
+    /// the frames already built. A window that can't be seen drops it
+    /// (the caller, taking the new theme at once).
+    pub animating: bool,
 }
 
 /// The window's decision from its visible panes' (panes hidden by a zoom
@@ -135,6 +140,17 @@ pub struct WindowTick {
 pub fn combine(panes: &[PaneFrame], w: &WindowTick) -> Decision {
     let builds = panes.contains(&PaneFrame::Build);
     let busy = builds || panes.iter().any(|p| matches!(p, PaneFrame::Held | PaneFrame::Waiting));
+    if !busy && w.animating {
+        // Seen or not comes first: a hidden window never draws, so it
+        // doesn't play the rest of a transition either.
+        return if w.visible {
+            Decision::Draw {
+                rate: rate(w).max(RATE_STREAMING),
+            }
+        } else {
+            Decision::Pause { trim_after: IDLE_TRIM }
+        };
+    }
     if !busy {
         // Nothing new: stop the display link until something changes.
         return if w.idle_ticks.saturating_add(1) == IDLE_TICKS_BEFORE_PAUSE {
@@ -149,17 +165,20 @@ pub fn combine(panes: &[PaneFrame], w: &WindowTick) -> Decision {
     if !builds {
         return Decision::Hold;
     }
-    // Full refresh rate right after input; 60 Hz while output streams (no
-    // one reads text scrolling at 120 Hz, and the window server's cost
-    // scales with frames); 30 Hz in a window that isn't focused.
-    let rate = if w.last_input_elapsed < INPUT_BOOST {
+    Decision::Draw { rate: rate(w) }
+}
+
+/// Full refresh rate right after input; 60 Hz while output streams (no
+/// one reads text scrolling at 120 Hz, and the window server's cost
+/// scales with frames); 30 Hz in a window that isn't focused.
+fn rate(w: &WindowTick) -> u16 {
+    if w.last_input_elapsed < INPUT_BOOST {
         RATE_INPUT
     } else if !w.focused {
         RATE_UNFOCUSED
     } else {
         RATE_STREAMING
-    };
-    Decision::Draw { rate }
+    }
 }
 
 #[cfg(test)]
@@ -432,6 +451,7 @@ mod tests {
             focused: true,
             idle_ticks,
             last_input_elapsed: Duration::from_secs(5),
+            animating: false,
         }
     }
 
@@ -500,6 +520,68 @@ mod tests {
                 &[Build, Build],
                 WindowTick { focused: false, ..tick(0) },
                 Decision::Draw { rate: 30 },
+            ),
+            // A theme transition draws every tick while it can be seen.
+            (
+                "transition, all clean",
+                &[Reuse, Reuse],
+                WindowTick {
+                    animating: true,
+                    ..tick(1)
+                },
+                Decision::Draw { rate: 60 },
+            ),
+            (
+                "transition in a window not key",
+                &[Reuse],
+                WindowTick {
+                    animating: true,
+                    focused: false,
+                    ..tick(0)
+                },
+                Decision::Draw { rate: 60 },
+            ),
+            (
+                "transition, just typed",
+                &[Reuse],
+                WindowTick {
+                    animating: true,
+                    last_input_elapsed: 10 * MS,
+                    ..tick(0)
+                },
+                Decision::Draw { rate: 120 },
+            ),
+            // Hidden or covered mid-transition: no draw, pause at once.
+            (
+                "transition, hidden and clean",
+                &[Reuse],
+                WindowTick {
+                    animating: true,
+                    visible: false,
+                    ..tick(0)
+                },
+                Decision::Pause { trim_after: IDLE_TRIM },
+            ),
+            (
+                "transition, minimised and clean",
+                &[Reuse, Reuse],
+                WindowTick {
+                    animating: true,
+                    visible: false,
+                    minimised: true,
+                    ..tick(4)
+                },
+                Decision::Pause { trim_after: IDLE_TRIM },
+            ),
+            (
+                "transition, hidden and changed",
+                &[Build],
+                WindowTick {
+                    animating: true,
+                    visible: false,
+                    ..tick(0)
+                },
+                Decision::Hide { keep_surface: false },
             ),
         ];
         for (what, panes, w, want) in rows {

@@ -911,6 +911,8 @@ impl AppDelegate {
                 argv: std::iter::once(prefs_binary().display().to_string())
                     .chain(self.ivars().origin.prefs_args())
                     .collect(),
+                // Its requests to the app carry this (term_prefs::preview).
+                env: vec![(term_prefs::preview::TOKEN_ENV.to_string(), crate::prefs::token().to_string())],
                 direct: true,
                 ..Command::default()
             },

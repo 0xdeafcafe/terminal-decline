@@ -14,6 +14,21 @@ use crate::config::{self, Config};
 use crate::keybind::{self, Chord, MenuAction};
 use crate::theme::{self, Appearance};
 
+/// The token the Settings tab's requests (`OSC 7771`) must start with,
+/// passed to it in [`term_prefs::preview::TOKEN_ENV`]: one for each run
+/// of the app, so a program that only writes to the Settings tab's
+/// terminal (its editor, a file shown there) can't ask for anything.
+pub fn token() -> &'static str {
+    use std::hash::BuildHasher;
+    static TOKEN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    TOKEN.get_or_init(|| {
+        // `RandomState`'s keys come from the system's random source.
+        let now = std::time::SystemTime::now();
+        let [a, b] = [0u8, 1].map(|i| std::collections::hash_map::RandomState::new().hash_one((i, std::process::id(), now)));
+        format!("{a:016x}{b:016x}")
+    })
+}
+
 /// The real host: the files under `paths`.
 pub struct AppHost {
     paths: Paths,
@@ -53,6 +68,22 @@ pub fn check(layers: &[PathBuf], themes_dir: &Path, edit: usize, text: &str, app
     let palette = config.palette(config.appearance.resolve(appearance));
     Checked {
         notices,
+        foreground: Some(palette.foreground),
+        background: Some(palette.background),
+        palette: palette.ansi.to_vec(),
+    }
+}
+
+/// The colours windows show while Settings previews theme `name`: the
+/// config `check` loads, made into the one windows get
+/// (`Config::previewing`, `[colors]` still on top).
+pub fn check_preview(layers: &[PathBuf], themes_dir: &Path, edit: usize, text: &str, name: &str, appearance: Appearance) -> Checked {
+    let refs: Vec<&Path> = layers.iter().map(PathBuf::as_path).collect();
+    let (config, _) = config::load_replacing(&refs, themes_dir, Some((edit, text)));
+    let config = config.previewing(name, themes_dir);
+    let palette = config.palette(config.appearance.resolve(appearance));
+    Checked {
+        notices: Vec::new(),
         foreground: Some(palette.foreground),
         background: Some(palette.background),
         palette: palette.ansi.to_vec(),
@@ -179,6 +210,10 @@ impl Host for AppHost {
 
     fn check(&self, layers: &[PathBuf], edit: usize, text: &str) -> Checked {
         check(layers, &self.paths.themes_dir(), edit, text, system_appearance())
+    }
+
+    fn check_preview(&self, layers: &[PathBuf], edit: usize, text: &str, name: &str) -> Checked {
+        check_preview(layers, &self.paths.themes_dir(), edit, text, name, system_appearance())
     }
 
     fn defaults(&self) -> String {
@@ -423,5 +458,33 @@ mod tests {
         assert_eq!(info.palette.len(), 16);
         assert!(theme_info(&dir.join("themes"), "nope").is_none());
         assert_eq!(theme_info(&dir.join("themes"), "dracula").unwrap().partner, None);
+    }
+
+    /// One token for the app's run, hard to guess, and what Settings
+    /// signs with it is heard; the same request unsigned isn't.
+    #[test]
+    fn settings_requests_need_the_token() {
+        let t = token();
+        assert_eq!(t, token(), "the same for the whole run");
+        assert!(t.len() == 32 && t.chars().all(|c| c.is_ascii_hexdigit()), "{t}");
+        let signed = term_prefs::preview::sign(&term_prefs::Preview::Cancel.osc(), Some(t));
+        let what = signed.strip_prefix("\x1b]7771;").unwrap().strip_suffix("\x1b\\").unwrap();
+        assert_eq!(term_prefs::preview::verify(what, t), Some("theme-preview;cancel"));
+        assert_eq!(term_prefs::preview::verify("theme-preview;cancel", t), None);
+    }
+
+    /// The Settings tab picks its colours from what windows show while it
+    /// previews a theme: `[colors]` stay on top of the previewed theme.
+    #[test]
+    fn preview_colours_keep_the_colors_overrides() {
+        let dir = TempDir::new("prefs-preview");
+        let layers = [dir.join("config.toml")];
+        let themes = dir.join("themes");
+        let plain = check_preview(&layers, &themes, 0, "theme = 'rose-pine'\n", "rose-pine-dawn", Appearance::Dark);
+        assert_eq!(plain.background, Some(0xfaf4ed), "the previewed theme, for dark too");
+        let black = "theme = 'rose-pine'\n[colors]\nforeground = '#000000'\nbackground = '#000000'\n";
+        let c = check_preview(&layers, &themes, 0, black, "rose-pine-dawn", Appearance::Light);
+        assert_eq!((c.foreground, c.background), (Some(0), Some(0)));
+        assert_eq!(c.palette, plain.palette, "the theme's ANSI colours");
     }
 }

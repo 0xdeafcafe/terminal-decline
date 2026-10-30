@@ -247,10 +247,18 @@ with OSC 4/10/11). Esc sends `cancel`, which puts the config's theme
 back. Enter writes the theme as usual, then sends `keep`: the preview
 stays until the reload the write causes, so windows don't flash back to
 the old theme for the 40 ms in between, and goes 1 s later if no reload
-comes (the file didn't change). Closing the Settings tab ends a preview.
-New windows open with the config's theme. The program follows the preview
-in its own colours too, since it draws in the terminal's default and
-palette colours.
+comes (the file didn't change). Closing the Settings tab ends a preview,
+and so does the program stopping with its tab kept open; a panic sends
+`cancel` before it waits for a key. New windows open with the config's
+theme. The program follows the preview in its own colours too, since it
+draws in the terminal's default and palette colours; it picks its own
+readable text colour from the previewed config as windows show it
+(`[colors]` included, `Host::check_preview`), not from the theme alone.
+
+Every `OSC 7771` request starts with a token the app makes for each run
+and passes in `DECLINE_PREFS_TOKEN` (`OSC 7771 ; <token> ; theme-preview
+; … ST`); the program keeps it from the editor it runs, so neither the
+editor nor a file shown in the tab can send requests.
 
 ### Theme transitions
 
@@ -273,18 +281,30 @@ window's theme changing (`apply_config`, `appearance_changed`).
   each frame of the transition draws those same instances with new
   uniforms: the old and new theme's 24 configurable colours (the 16 ANSI
   colours, foreground, background, cursor, the text under it, selection,
-  the two search-hit colours, the divider) and the progress. An instance
-  whose colour (RGB, alpha aside) equals a slot of the new theme is drawn
-  blended from that slot's old colour, per pixel (by position for the
-  wave and glimmer); anything else stays. So palette-indexed and default
-  colours animate, and truecolour, images, emoji, the 240 fixed colours
-  of the 256-colour cube and colours programs set (OSC 4, 10, 11) stay as
-  they are. It is a match, not a tag: a truecolour equal to a theme colour
-  animates with it, and when two of the new theme's slots are the same
-  colour the first wins. While one plays, the pass is cleared to nothing
-  and the window's background drawn as a rect, so it blends per pixel too.
-- A change while one plays starts from the colours on screen (the
-  cross-fade part of the blend at that moment), not from the old theme.
+  the two search-hit colours, the divider) and the progress. Each
+  instance says which of those slots its colour came from, if any (a
+  tag, set by frame building from what the cell asked for: bits 8–12 of
+  a glyph's flags, and a 4-byte field that makes a rect 16 bytes, was
+  12). A tagged instance is drawn blended from that slot's old colour,
+  per pixel (by position for the wave and glimmer); anything else stays.
+  So palette-indexed and default colours animate, and truecolour (even
+  one equal to a theme colour), images, emoji, the 240 fixed colours of
+  the 256-colour cube and colours programs set (OSC 4, 10, 11; the
+  pane's theme marks them) stay as they are. (Fixed 30 Oct 2026: this
+  was a match by colour, so Tokyo Night to Solarized Dark started its
+  background from Solarized's ANSI 8.) While one plays, the pass is
+  cleared to nothing and the window's background drawn as a rect, so it
+  blends per pixel too.
+- A change while one plays starts from the colours on screen, pixel by
+  pixel: the one playing goes on under the new one, which blends from
+  wherever it has got to (half way through a wave, the swept corner and
+  the unswept one both carry on from their own colour). The uniforms
+  hold up to 8 transitions over one another (1 KB, was 224 bytes); one
+  is dropped when a later one ends, and past 8 (a key held down in the
+  theme list) the oldest is folded into the colours under it as its
+  cross-fade, the only time anything jumps. (Fixed 30 Oct 2026: a change
+  used to restart as a uniform cross-fade from the blend's cross-fade
+  part, so an interrupted wave jumped to one grey.)
 - The display link ticks only while a transition plays (each tick draws
   without building); when it ends the window is idle again, 0 wakeups. A
   window that can't be seen (a background tab) takes the new theme at

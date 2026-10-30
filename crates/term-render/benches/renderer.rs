@@ -121,6 +121,7 @@ fn bench(c: &mut Criterion) {
             w: 1,
             h: h as u16,
             color: rgb(0x808080),
+            tag: 0,
         },
         RectInstance {
             x: 0,
@@ -128,6 +129,7 @@ fn bench(c: &mut Criterion) {
             w: w as u16,
             h: 1,
             color: rgb(0x808080),
+            tag: 0,
         },
     ];
     c.bench_function("renderer 4 panes 80x24 build", |b| {

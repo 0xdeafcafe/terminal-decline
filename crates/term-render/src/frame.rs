@@ -11,6 +11,7 @@ use std::hash::BuildHasherDefault;
 use crate::images::{Grid, Images, pieces_of_row};
 use crate::row_cache::{Built, Entry, KeyHasher, MISSING, Mark, RowCache};
 use crate::shape_cache::ShapeCache;
+use crate::transition::slot;
 
 /// RGBA8 with red in the low byte (matches `unpack_unorm4x8_to_float`).
 pub type Rgba = u32;
@@ -132,6 +133,52 @@ fn rgb_mix(a: Rgba, b: Rgba, t: f32) -> Rgba {
     mix(a & 0x00FF_FFFF, b & 0x00FF_FFFF, t) | 0xFF << 24
 }
 
+/// Where an instance's colour comes from, for theme transitions: 0 for a
+/// colour of its own (truecolour, the 256-colour cube past the 16 ANSI
+/// colours, a colour a program set with OSC 4, 10–12), else 1 + the
+/// theme's slot in [`crate::transition::SLOTS`]. A transition blends a
+/// tagged colour from the old theme's colour in that slot; an untagged
+/// one stays as it is.
+pub type Tag = u32;
+
+/// The tag of transition slot `slot`.
+#[inline]
+pub const fn tag_of(slot: usize) -> Tag {
+    slot as Tag + 1
+}
+
+/// A colour as frame building carries it: what it is and where it comes
+/// from. Two paints are the same only when both are, so a truecolour
+/// background equal to the theme's is still drawn, and stays put.
+#[derive(Clone, Copy, Debug, Default, Eq)]
+pub(crate) struct Paint {
+    pub rgba: Rgba,
+    pub tag: Tag,
+}
+
+impl PartialEq for Paint {
+    /// One comparison, not two: it is in frame building's inner loop.
+    #[inline]
+    fn eq(&self, other: &Paint) -> bool {
+        self.bits() == other.bits()
+    }
+}
+
+impl Paint {
+    #[inline]
+    fn bits(self) -> u64 {
+        self.rgba as u64 | (self.tag as u64) << 32
+    }
+
+    #[inline]
+    fn alpha(self, a: u8) -> Paint {
+        Paint {
+            rgba: with_alpha(self.rgba, a),
+            ..self
+        }
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RectInstance {
@@ -140,6 +187,23 @@ pub struct RectInstance {
     pub w: u16,
     pub h: u16,
     pub color: Rgba,
+    /// Where `color` comes from ([`Tag`]).
+    pub tag: Tag,
+}
+
+impl RectInstance {
+    /// A rectangle in `paint`.
+    #[inline]
+    pub(crate) fn painted(x: i16, y: i16, w: u16, h: u16, paint: Paint) -> RectInstance {
+        RectInstance {
+            x,
+            y,
+            w,
+            h,
+            color: paint.rgba,
+            tag: paint.tag,
+        }
+    }
 }
 
 #[repr(C)]
@@ -153,8 +217,9 @@ pub struct GlyphInstance {
     pub v: u16,
     pub color: Rgba,
     /// Bit 0 ([`GlyphInstance::COLOR`]): sample the colour (emoji) texture.
-    /// The shader reads only that bit; frame building keeps the glyph's
-    /// cell in the others, for the overlays drawn over cached rows.
+    /// Bits 8–12: where `color` comes from ([`Tag`]). The shader reads
+    /// only those; frame building keeps the glyph's cell and flags in the
+    /// others, for the overlays drawn over cached rows.
     pub is_color: u32,
 }
 
@@ -165,12 +230,31 @@ impl GlyphInstance {
     /// Keeps its colour under the block cursor: an underline pattern in
     /// the underline colour the style sets, as its rectangles would.
     const FIXED: u32 = 1 << 2;
+    pub const TAG_SHIFT: u32 = 8;
+    pub const TAG_MASK: u32 = 0x1F << Self::TAG_SHIFT;
     const COL_SHIFT: u32 = 16;
 
-    /// `is_color` for a glyph from `slot` in column `col`.
+    /// `is_color` for a glyph from `slot` in column `col`, in a colour
+    /// with tag `tag`.
     #[inline]
-    fn flags(slot: &GlyphSlot, col: usize, dim: bool) -> u32 {
-        slot.color as u32 | (dim as u32) << 1 | (col.min(u16::MAX as usize) as u32) << Self::COL_SHIFT
+    fn flags(slot: &GlyphSlot, col: usize, dim: bool, tag: Tag) -> u32 {
+        slot.color as u32 | (dim as u32) << 1 | tag << Self::TAG_SHIFT | (col.min(u16::MAX as usize) as u32) << Self::COL_SHIFT
+    }
+
+    /// Where its colour comes from.
+    #[inline]
+    pub fn tag(&self) -> Tag {
+        (self.is_color & Self::TAG_MASK) >> Self::TAG_SHIFT
+    }
+
+    /// The glyph in `paint`.
+    #[inline]
+    fn painted(self, paint: Paint) -> GlyphInstance {
+        GlyphInstance {
+            color: paint.rgba,
+            is_color: self.is_color & !Self::TAG_MASK | paint.tag << Self::TAG_SHIFT,
+            ..self
+        }
     }
 
     /// The column it was built for.
@@ -184,10 +268,13 @@ impl GlyphInstance {
 // which read the instance buffers directly.
 const _: () = {
     use std::mem::{offset_of, size_of};
-    assert!(size_of::<RectInstance>() == 12);
+    assert!(size_of::<RectInstance>() == 16);
     assert!(offset_of!(RectInstance, x) == 0);
     assert!(offset_of!(RectInstance, w) == 4);
     assert!(offset_of!(RectInstance, color) == 8);
+    assert!(offset_of!(RectInstance, tag) == 12);
+    // A tag fits its bits in `is_color`.
+    assert!(tag_of(crate::transition::SLOTS - 1) <= GlyphInstance::TAG_MASK >> GlyphInstance::TAG_SHIFT);
     assert!(size_of::<GlyphInstance>() == 20);
     assert!(offset_of!(GlyphInstance, x) == 0);
     assert!(offset_of!(GlyphInstance, w) == 4);
@@ -258,6 +345,10 @@ pub struct Theme {
     pub palette: [Rgba; 256],
     /// 0–255; below 255 the window background shows through.
     pub background_opacity: u8,
+    /// One bit per transition slot ([`crate::transition::SLOTS`]) whose
+    /// colour a program set (OSC 4, 10–12): the program's, not the
+    /// theme's, so it stays put in a theme transition.
+    pub program_set: u32,
 }
 
 impl Default for Theme {
@@ -296,6 +387,7 @@ impl Theme {
             search_current: rgb(mix(bg, 0xff9f43, 0.85)),
             palette,
             background_opacity: 255,
+            program_set: 0,
         };
         theme.keep_legible();
         theme
@@ -325,12 +417,51 @@ impl Theme {
         self.cursor_text = cursor_text_on(self.cursor, self.background, self.foreground);
     }
 
+    /// The tag of transition slot `slot` in this theme: none if a
+    /// program set its colour.
     #[inline]
-    fn resolve(&self, c: term_core::Color, default: Rgba) -> Rgba {
+    fn tag(&self, slot: usize) -> Tag {
+        if self.program_set >> slot & 1 != 0 { 0 } else { tag_of(slot) }
+    }
+
+    /// The colour in transition slot `slot` (not the divider, which isn't
+    /// the theme's), tagged.
+    #[inline]
+    pub(crate) fn paint(&self, slot: usize) -> Paint {
+        let rgba = match slot {
+            0..16 => self.palette[slot],
+            slot::FOREGROUND => self.foreground,
+            slot::BACKGROUND => self.background,
+            slot::CURSOR => self.cursor,
+            slot::CURSOR_TEXT => self.cursor_text,
+            slot::SELECTION => self.selection,
+            slot::SEARCH_HIT => self.search_hit,
+            slot::SEARCH_CURRENT => self.search_current,
+            // The divider is the window's, not the theme's.
+            _ => {
+                debug_assert!(false, "not a theme colour: {slot}");
+                0
+            }
+        };
+        Paint { rgba, tag: self.tag(slot) }
+    }
+
+    #[inline]
+    fn resolve(&self, c: term_core::Color, default: Paint) -> Paint {
         match c.kind() {
             ColorKind::Default => default,
-            ColorKind::Indexed(i) => self.palette[i as usize],
-            ColorKind::Rgb(r, g, b) => r as u32 | (g as u32) << 8 | (b as u32) << 16 | 0xFF << 24,
+            ColorKind::Indexed(i) => {
+                // Without branches: the 16 ANSI colours a program didn't set.
+                let own = (i < 16) & (self.program_set >> (i & 15) & 1 == 0);
+                Paint {
+                    rgba: self.palette[i as usize],
+                    tag: (i as Tag + 1) * own as Tag,
+                }
+            }
+            ColorKind::Rgb(r, g, b) => Paint {
+                rgba: r as u32 | (g as u32) << 8 | (b as u32) << 16 | 0xFF << 24,
+                tag: 0,
+            },
         }
     }
 }
@@ -368,7 +499,7 @@ struct RowCtx<'a> {
 /// A cell's text colour as drawn, for the pieces of ligatures in it.
 #[derive(Clone, Copy, Default)]
 struct Ink {
-    fg: Rgba,
+    fg: Paint,
     dim: bool,
     /// False for hidden cells and cells under input-method text.
     drawn: bool,
@@ -554,8 +685,8 @@ impl RowSink for Entry {
 #[derive(Clone, Copy)]
 struct Pen {
     /// Text colour and background, after inverse.
-    fg: Rgba,
-    bg: Rgba,
+    fg: Paint,
+    bg: Paint,
     attrs: Attrs,
     underline: Underline,
     /// Unresolved: the default draws underlines in the text colour.
@@ -568,8 +699,12 @@ impl Pen {
     #[inline]
     fn new(style: &term_core::Style, theme: &Theme) -> Pen {
         let a = style.attrs;
-        let mut fg = theme.resolve(style.fg, theme.foreground);
-        let mut bg = theme.resolve(style.bg, theme.background);
+        let default = |rgba, slot| Paint {
+            rgba,
+            tag: theme.tag(slot),
+        };
+        let mut fg = theme.resolve(style.fg, default(theme.foreground, slot::FOREGROUND));
+        let mut bg = theme.resolve(style.bg, default(theme.background, slot::BACKGROUND));
         if a.contains(Attrs::INVERSE) {
             std::mem::swap(&mut fg, &mut bg);
         }
@@ -616,6 +751,9 @@ pub struct FrameInput<'a> {
 #[derive(Default)]
 pub struct Frame {
     pub clear: Rgba,
+    /// Where `clear` comes from: the theme's background unless a program
+    /// set it.
+    pub clear_tag: Tag,
     pub rects: Vec<RectInstance>,
     pub glyphs: Vec<GlyphInstance>,
     /// Underlines, strikethrough and cursor; appended after the backgrounds.
@@ -1023,6 +1161,7 @@ impl Frame {
         let (cw, ch) = (m.cell_width as i32, m.cell_height as i32);
         let (px, py) = (padding.0 as i32, padding.1 as i32);
         self.clear = with_alpha(theme.background, theme.background_opacity);
+        self.clear_tag = theme.paint(slot::BACKGROUND).tag;
         let Frame {
             rects,
             glyphs,
@@ -1040,12 +1179,14 @@ impl Frame {
         let snap = &rows.snap;
         let cols = snap.cols as usize;
         let row_y = |line: usize| py + line as i32 * ch;
-        let full = |line: usize, cells: std::ops::Range<usize>, color: Rgba| RectInstance {
-            x: s16(px + cells.start as i32 * cw),
-            y: s16(row_y(line)),
-            w: ((cells.end - cells.start) as i32 * cw) as u16,
-            h: ch as u16,
-            color,
+        let full = |line: usize, cells: std::ops::Range<usize>, paint: Paint| {
+            RectInstance::painted(
+                s16(px + cells.start as i32 * cw),
+                s16(row_y(line)),
+                ((cells.end - cells.start) as i32 * cw) as u16,
+                ch as u16,
+                paint,
+            )
         };
 
         let c = snap.cursor;
@@ -1118,7 +1259,7 @@ impl Frame {
         }
         let images = &*images;
         // A highlight over image cells is a tint, so the image shows.
-        let highlight = |rects: &mut Vec<RectInstance>, line: usize, a: usize, b: usize, color: Rgba| {
+        let highlight = |rects: &mut Vec<RectInstance>, line: usize, a: usize, b: usize, color: Paint| {
             let mut at = a;
             for c in images.covered_on(line) {
                 let (c0, c1) = ((c.start as usize).max(at), (c.end as usize).min(b));
@@ -1128,7 +1269,7 @@ impl Frame {
                 if at < c0 {
                     rects.push(full(line, at..c0, color));
                 }
-                rects.push(full(line, c0..c1, with_alpha(color, ((color >> 24) / 2) as u8)));
+                rects.push(full(line, c0..c1, color.alpha(((color.rgba >> 24) / 2) as u8)));
                 at = c1;
             }
             if at < b {
@@ -1142,8 +1283,8 @@ impl Frame {
             for h in snap.row_highlights(row) {
                 let (a, b) = (h.cols.start as usize, (h.cols.end as usize).min(cols));
                 match h.kind {
-                    HighlightKind::SearchHit if a < b => highlight(over, line, a, b, theme.search_hit),
-                    HighlightKind::CurrentSearchHit if a < b => highlight(over, line, a, b, theme.search_current),
+                    HighlightKind::SearchHit if a < b => highlight(over, line, a, b, theme.paint(slot::SEARCH_HIT)),
+                    HighlightKind::CurrentSearchHit if a < b => highlight(over, line, a, b, theme.paint(slot::SEARCH_CURRENT)),
                     _ => {}
                 }
             }
@@ -1152,14 +1293,14 @@ impl Frame {
             for h in snap.row_highlights(row) {
                 let (a, b) = (h.cols.start as usize, (h.cols.end as usize).min(cols));
                 if a < b && h.kind == HighlightKind::Selection {
-                    highlight(over, line, a, b, theme.selection);
+                    highlight(over, line, a, b, theme.paint(slot::SELECTION));
                 }
             }
         }
         if let Some((line, cells)) = &block
             && cells.start < cols
         {
-            over.push(full(*line, cells.start..cells.end.min(cols), theme.cursor));
+            over.push(full(*line, cells.start..cells.end.min(cols), theme.paint(slot::CURSOR)));
         }
         for (line, row) in snap.rows.iter().enumerate() {
             for h in snap.row_highlights(row) {
@@ -1169,7 +1310,7 @@ impl Frame {
                     over.push(RectInstance {
                         y: s16(row_y(line) + (m.baseline + m.underline_offset) as i32),
                         h: m.underline_thickness.max(1) as u16,
-                        ..full(line, a..b, theme.foreground)
+                        ..full(line, a..b, theme.paint(slot::FOREGROUND))
                     });
                 }
             }
@@ -1180,11 +1321,8 @@ impl Frame {
         // Decorations and glyphs, recoloured under the block cursor and
         // hidden under input-method text.
         let under_cursor = |dim: bool| {
-            if dim {
-                with_alpha(theme.cursor_text, 160)
-            } else {
-                theme.cursor_text
-            }
+            let text = theme.paint(slot::CURSOR_TEXT);
+            if dim { text.alpha(160) } else { text }
         };
         for (line, l) in laid.iter_mut().enumerate() {
             if l.slot == MISSING {
@@ -1204,7 +1342,8 @@ impl Frame {
                 let placed = &mut out.out[at..at + e.decorations.len()];
                 for (r, mark) in placed.iter_mut().zip(&e.decoration_marks) {
                     if mark.flags & Mark::TEXT_COLOUR != 0 && on.contains(&(mark.col as usize)) {
-                        r.color = under_cursor(mark.flags & Mark::DIM != 0);
+                        let p = under_cursor(mark.flags & Mark::DIM != 0);
+                        (r.color, r.tag) = (p.rgba, p.tag);
                     }
                 }
             }
@@ -1250,11 +1389,10 @@ impl Frame {
                 if hidden.contains(&col) {
                     continue;
                 }
-                let color = match () {
-                    _ if !on.contains(&col) || g.is_color & GlyphInstance::FIXED != 0 => g.color,
-                    _ => under_cursor(g.is_color & GlyphInstance::DIM != 0),
-                };
-                spare_glyphs.push(GlyphInstance { color, ..*g });
+                spare_glyphs.push(match () {
+                    _ if !on.contains(&col) || g.is_color & GlyphInstance::FIXED != 0 => *g,
+                    _ => g.painted(under_cursor(g.is_color & GlyphInstance::DIM != 0)),
+                });
             }
             l.glyphs = out.put(false, p.map(|p| p.glyphs), spare_glyphs);
         }
@@ -1307,6 +1445,7 @@ impl Frame {
         let ch = m.cell_height as i32;
         let (px, py) = (padding.0 as i32, padding.1 as i32);
         self.clear = with_alpha(theme.background, theme.background_opacity);
+        self.clear_tag = theme.paint(slot::BACKGROUND).tag;
 
         // Where the cursor is in the view, if it is visible at all.
         let in_view = term.cursor_in_view();
@@ -1394,15 +1533,9 @@ fn cursor_rects(out: &mut Vec<RectInstance>, c: &CursorDraw, input: &FrameInput)
     let y = input.padding.1 as i32 + line as i32 * ch;
     let w = cw * if c.wide { 2 } else { 1 };
     let h = ch;
-    let color = input.theme.cursor;
+    let color = input.theme.paint(slot::CURSOR);
     let t = (m.cell_width as i32 / 8).max(2);
-    let r = |x: i32, y: i32, w: i32, h: i32| RectInstance {
-        x: s16(x),
-        y: s16(y),
-        w: w as u16,
-        h: h as u16,
-        color,
-    };
+    let r = |x: i32, y: i32, w: i32, h: i32| RectInstance::painted(s16(x), s16(y), w as u16, h as u16, color);
     let rects: &[RectInstance] = match (input.focused, c.shape) {
         (true, CursorShape::Bar) => &[r(x, y, t, h)],
         (true, CursorShape::Underline) => &[r(x, y + h - t, w, t)],
@@ -1436,21 +1569,10 @@ fn draw_preedit(
         }
         let x = input.padding.0 as i32 + col as i32 * cw;
         let w = (cw * width as i32) as u16;
-        rects.push(RectInstance {
-            x: s16(x),
-            y: s16(y),
-            w,
-            h: ch as u16,
-            color: input.theme.background,
-        });
+        let (fg, bg) = (input.theme.paint(slot::FOREGROUND), input.theme.paint(slot::BACKGROUND));
+        rects.push(RectInstance::painted(s16(x), s16(y), w, ch as u16, bg));
         let uy = y + (m.baseline + m.underline_offset) as i32;
-        rects.push(RectInstance {
-            x: s16(x),
-            y: s16(uy),
-            w,
-            h: m.underline_thickness as u16,
-            color: input.theme.foreground,
-        });
+        rects.push(RectInstance::painted(s16(x), s16(uy), w, m.underline_thickness as u16, fg));
         if let Some(g) = glyphs.glyph(c as u32, FontStyle::Regular) {
             out.push(GlyphInstance {
                 x: s16(x + g.left as i32),
@@ -1459,8 +1581,8 @@ fn draw_preedit(
                 h: g.h,
                 u: g.u,
                 v: g.v,
-                color: input.theme.foreground,
-                is_color: g.color as u32,
+                color: fg.rgba,
+                is_color: g.color as u32 | fg.tag << GlyphInstance::TAG_SHIFT,
             });
         }
         col += width;
@@ -1539,7 +1661,7 @@ fn row_cells<const OVERLAY: bool, const LIG: bool, C: CellView, S: RowSink>(
 ) {
     let RowCtx { theme, m, px, y, .. } = *ctx;
     let (cw, ch) = (m.cell_width as i32, m.cell_height as i32);
-    let default_bg = theme.background;
+    let default_bg = theme.paint(slot::BACKGROUND);
     let mut run_start = 0usize;
     let mut run_color = default_bg;
     // Runs of same-styled cells reuse the previous cell's pen: the style
@@ -1558,14 +1680,14 @@ fn row_cells<const OVERLAY: bool, const LIG: bool, C: CellView, S: RowSink>(
         let spacer = cell.is_spacer();
         let (mut fg, mut bg) = (pen.fg, pen.bg);
         if OVERLAY && ctx.sel.contains(&col) {
-            bg = theme.selection;
+            bg = theme.paint(slot::SELECTION);
         }
         if OVERLAY && ctx.block_cursor.contains(&col) {
-            bg = theme.cursor;
-            fg = theme.cursor_text;
+            bg = theme.paint(slot::CURSOR);
+            fg = theme.paint(slot::CURSOR_TEXT);
         }
         if pen.attrs.contains(Attrs::DIM) {
-            fg = with_alpha(fg, 160);
+            fg = fg.alpha(160);
         }
 
         if bg != run_color {
@@ -1600,8 +1722,8 @@ fn row_cells<const OVERLAY: bool, const LIG: bool, C: CellView, S: RowSink>(
                     h: g.h,
                     u: g.u,
                     v: g.v,
-                    color: fg,
-                    is_color: GlyphInstance::flags(&g, col, pen.attrs.contains(Attrs::DIM)),
+                    color: fg.rgba,
+                    is_color: GlyphInstance::flags(&g, col, pen.attrs.contains(Attrs::DIM), fg.tag),
                 });
             }
         } else if !spacer && !pen.attrs.contains(Attrs::HIDDEN) && !covered && !(LIG && pieces.replaced[col]) {
@@ -1626,7 +1748,7 @@ fn other_cell(
     wide: bool,
     face: FontStyle,
     (col, x, y): (usize, i32, i32),
-    fg: Rgba,
+    fg: Paint,
     dim: bool,
     m: Metrics,
     glyphs: &mut impl GlyphSource,
@@ -1648,8 +1770,8 @@ fn other_cell(
                 h: g.h,
                 u: g.u,
                 v: g.v,
-                color: fg,
-                is_color: GlyphInstance::flags(&g, col, dim),
+                color: fg.rgba,
+                is_color: GlyphInstance::flags(&g, col, dim, fg.tag),
             });
         }
         Content::Cluster(text) => draw_cluster(text, wide, face, (col, x, y), fg, dim, m, glyphs, out, pieces),
@@ -1687,7 +1809,7 @@ fn draw_cluster(
     wide: bool,
     face: FontStyle,
     (col, x, y): (usize, i32, i32),
-    fg: Rgba,
+    fg: Paint,
     dim: bool,
     m: Metrics,
     glyphs: &mut impl GlyphSource,
@@ -1707,8 +1829,8 @@ fn draw_cluster(
                 h: slot.h,
                 u: slot.u,
                 v: slot.v,
-                color: fg,
-                is_color: GlyphInstance::flags(&slot, col, dim),
+                color: fg.rgba,
+                is_color: GlyphInstance::flags(&slot, col, dim, fg.tag),
             },
         )
     };
@@ -1832,8 +1954,8 @@ fn draw_subs(ctx: &RowCtx, inks: &[Ink], glyphs: &mut impl GlyphSource, out: &mu
                 h: slot.h,
                 u: slot.u + (l - x0) as u16,
                 v: slot.v,
-                color: ink.fg,
-                is_color: GlyphInstance::flags(&slot, c, ink.dim),
+                color: ink.fg.rgba,
+                is_color: GlyphInstance::flags(&slot, c, ink.dim, ink.fg.tag),
             });
         }
     }
@@ -1843,10 +1965,10 @@ fn draw_subs(ctx: &RowCtx, inks: &[Ink], glyphs: &mut impl GlyphSource, out: &mu
 /// run so far. History rows can be shorter than the screen is wide: the
 /// rest is blank, which only shows a background where it is selected or
 /// under a block cursor.
-fn pad_row(out: &mut impl RowSink, ctx: &RowCtx, from: usize, mut run_start: usize, mut run_color: Rgba) {
+fn pad_row(out: &mut impl RowSink, ctx: &RowCtx, from: usize, mut run_start: usize, mut run_color: Paint) {
     let RowCtx { theme, m, px, y, .. } = *ctx;
     let (cw, ch) = (m.cell_width as i32, m.cell_height as i32);
-    let default_bg = theme.background;
+    let default_bg = theme.paint(slot::BACKGROUND);
     if ctx.sel.is_empty() && ctx.block_cursor.is_empty() {
         // Nothing but the default background past `from`.
         if run_color != default_bg {
@@ -1856,9 +1978,9 @@ fn pad_row(out: &mut impl RowSink, ctx: &RowCtx, from: usize, mut run_start: usi
     }
     for col in from..ctx.cols {
         let bg = if ctx.block_cursor.contains(&col) {
-            theme.cursor
+            theme.paint(slot::CURSOR)
         } else if ctx.sel.contains(&col) {
-            theme.selection
+            theme.paint(slot::SELECTION)
         } else {
             default_bg
         };
@@ -1885,7 +2007,7 @@ fn decorate(
     glyphs: &mut impl GlyphSource,
     pen: Pen,
     theme: &Theme,
-    fg: Rgba,
+    fg: Paint,
     x: i32,
     y: i32,
     m: Metrics,
@@ -1898,18 +2020,8 @@ fn decorate(
         flags: mark.flags | Mark::TEXT_COLOUR,
         ..mark
     };
-    let rect = |out: &mut _, x: i32, y: i32, w: i32, color: Rgba, mark: Mark| {
-        RowSink::decoration(
-            out,
-            RectInstance {
-                x: s16(x),
-                y: s16(y),
-                w: w as u16,
-                h: t as u16,
-                color,
-            },
-            mark,
-        )
+    let rect = |out: &mut _, x: i32, y: i32, w: i32, color: Paint, mark: Mark| {
+        RowSink::decoration(out, RectInstance::painted(s16(x), s16(y), w as u16, t as u16, color), mark)
     };
     if pen.underline != Underline::None {
         let uy = y + (m.baseline + m.underline_offset) as i32;
@@ -1949,8 +2061,8 @@ fn decorate(
                 h: g.h,
                 u: g.u,
                 v: g.v,
-                color,
-                is_color: GlyphInstance::flags(&g, mark.col as usize, mark.flags & Mark::DIM != 0) | fixed,
+                color: color.rgba,
+                is_color: GlyphInstance::flags(&g, mark.col as usize, mark.flags & Mark::DIM != 0, color.tag) | fixed,
             });
         }
     }
@@ -1964,17 +2076,17 @@ fn decorate(
 
 #[allow(clippy::too_many_arguments)]
 #[inline]
-fn push_run(out: &mut impl RowSink, color: Rgba, default_bg: Rgba, start: usize, end: usize, px: i32, y: i32, cw: i32, ch: i32) {
+fn push_run(out: &mut impl RowSink, color: Paint, default_bg: Paint, start: usize, end: usize, px: i32, y: i32, cw: i32, ch: i32) {
     if color == default_bg || end <= start {
         return;
     }
-    out.background(RectInstance {
-        x: s16(px + start as i32 * cw),
-        y: s16(y),
-        w: ((end - start) as i32 * cw) as u16,
-        h: ch as u16,
+    out.background(RectInstance::painted(
+        s16(px + start as i32 * cw),
+        s16(y),
+        ((end - start) as i32 * cw) as u16,
+        ch as u16,
         color,
-    });
+    ));
 }
 
 /// Rows built from `Style`s directly, for what term-core can't set yet
@@ -2044,9 +2156,12 @@ mod tests {
         }
     }
 
-    /// The decorations of one row of `cells` at the top-left of the grid.
+    /// The decorations of one row of `cells` at the top-left of the grid,
+    /// tags aside (`colours_carry_where_they_come_from` checks those).
     fn decorations(theme: &Theme, cells: &[TestCell]) -> Vec<RectInstance> {
-        row(theme, cells).decorations
+        let mut d = row(theme, cells).decorations;
+        d.iter_mut().for_each(|r| r.tag = 0);
+        d
     }
 
     /// One row of `cells` at the top-left of the grid.
@@ -2074,7 +2189,60 @@ mod tests {
     }
 
     fn line(x: i16, y: i16, w: u16, color: Rgba) -> RectInstance {
-        RectInstance { x, y, w, h: T, color }
+        RectInstance {
+            x,
+            y,
+            w,
+            h: T,
+            color,
+            tag: 0,
+        }
+    }
+
+    /// Each instance knows the theme slot its colour came from, by what
+    /// the cell asked for, not by its RGB: a truecolour equal to a theme
+    /// colour, a cube colour and a colour a program set have none.
+    #[test]
+    fn colours_carry_where_they_come_from() {
+        use crate::transition::slot;
+        let mut theme = Theme::default();
+        let bg_of = |fg: Color, bg: Color, attrs: Attrs| {
+            styled(|s| {
+                s.fg = fg;
+                s.bg = bg;
+                s.attrs = attrs;
+                s.underline = Underline::Single;
+            })
+        };
+        let fg = theme.foreground;
+        let (r, g, b) = ((fg & 0xff) as u8, (fg >> 8 & 0xff) as u8, (fg >> 16 & 0xff) as u8);
+        let cells = [
+            TestCell('a', bg_of(Color::DEFAULT, Color::indexed(2), Attrs::empty())),
+            TestCell('b', bg_of(Color::indexed(5), Color::rgb(r, g, b), Attrs::empty())),
+            TestCell('c', bg_of(Color::rgb(r, g, b), Color::indexed(100), Attrs::empty())),
+            TestCell('d', bg_of(Color::indexed(1), Color::DEFAULT, Attrs::INVERSE)),
+        ];
+        let tags = |theme: &Theme| {
+            let e = row(theme, &cells);
+            let bg: Vec<_> = e.backgrounds.iter().map(|r| (r.x / 16, r.tag)).collect();
+            // The underlines are in the text colour.
+            let fg: Vec<_> = e.decorations.iter().map(|r| ((r.x / 16) as usize, r.tag)).collect();
+            (bg, fg)
+        };
+        let (bg, fg) = tags(&theme);
+        assert_eq!(bg, [(0, tag_of(2)), (1, 0), (2, 0), (3, tag_of(1))]);
+        assert_eq!(
+            fg,
+            [(0, tag_of(slot::FOREGROUND)), (1, tag_of(5)), (2, 0), (3, tag_of(slot::BACKGROUND))]
+        );
+        // The truecolour background equal to the theme's text colour is
+        // drawn even so.
+        assert_eq!(row(&theme, &cells).backgrounds[1].color, theme.foreground);
+        // A program set ANSI 2 and the background: theirs, not the theme's.
+        theme.program_set = 1 << 2 | 1 << slot::BACKGROUND;
+        let (bg, fg) = tags(&theme);
+        assert_eq!(bg, [(0, 0), (1, 0), (2, 0), (3, tag_of(1))]);
+        assert_eq!(fg[3], (3, 0));
     }
 
     #[test]

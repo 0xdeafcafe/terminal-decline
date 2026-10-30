@@ -247,10 +247,18 @@ with OSC 4/10/11). Esc sends `cancel`, which puts the config's theme
 back. Enter writes the theme as usual, then sends `keep`: the preview
 stays until the reload the write causes, so windows don't flash back to
 the old theme for the 40 ms in between, and goes 1 s later if no reload
-comes (the file didn't change). Closing the Settings tab ends a preview.
-New windows open with the config's theme. The program follows the preview
-in its own colours too, since it draws in the terminal's default and
-palette colours.
+comes (the file didn't change). Closing the Settings tab ends a preview,
+and so does the program stopping with its tab kept open; a panic sends
+`cancel` before it waits for a key. New windows open with the config's
+theme. The program follows the preview in its own colours too, since it
+draws in the terminal's default and palette colours; it picks its own
+readable text colour from the previewed config as windows show it
+(`[colors]` included, `Host::check_preview`), not from the theme alone.
+
+Every `OSC 7771` request starts with a token the app makes for each run
+and passes in `DECLINE_PREFS_TOKEN` (`OSC 7771 ; <token> ; theme-preview
+; … ST`); the program keeps it from the editor it runs, so neither the
+editor nor a file shown in the tab can send requests.
 
 ### Theme transitions
 

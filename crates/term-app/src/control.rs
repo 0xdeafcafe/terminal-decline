@@ -34,6 +34,8 @@
 //! - `save`: write what a restart would save (every window, its tabs and
 //!   panes) to the dump file's path with `.saved` added, as JSON;
 //! - `settings`: Terminal Decline > Settings… (Cmd+,);
+//! - `edit-config`: Terminal Decline > Edit config.toml (a tab running the
+//!   editor);
 //! - `type-settings TEXT`: type TEXT into the Settings tab, as keys would
 //!   (`\r`, `\e` and `\\` stand for Return, Esc and a backslash);
 //! - `key CODE [MODS]`: put a key press on the app's event queue, where a
@@ -236,6 +238,8 @@ pub enum Control {
     Save,
     /// Terminal Decline > Settings….
     Settings,
+    /// Terminal Decline > Edit config.toml.
+    EditConfig,
     /// Bytes typed into the Settings tab.
     TypeSettings(Vec<u8>),
     /// A key event for the app: key code and `NSEventModifierFlags`.
@@ -352,6 +356,7 @@ impl Control {
                 n => FocusTarget::Index(n.parse().ok()?),
             }),
             "settings" => Control::Settings,
+            "edit-config" => Control::EditConfig,
             "resize" => Control::Resize {
                 cols: words.next()?.parse().ok().filter(|&c| c > 0)?,
                 lines: words.next()?.parse().ok().filter(|&l| l > 0)?,
@@ -651,6 +656,7 @@ mod tests {
             ("drop ", None),
             ("drop", None),
             ("settings", Some(Control::Settings)),
+            ("edit-config", Some(Control::EditConfig)),
             ("update-check", Some(Control::UpdateCheck)),
             ("update-check now", None),
             (

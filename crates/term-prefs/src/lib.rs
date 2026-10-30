@@ -11,6 +11,7 @@
 //!   terminal.
 
 pub mod app;
+pub mod editor;
 pub mod file;
 pub mod host;
 pub mod layers;
@@ -42,10 +43,12 @@ pub struct Args {
     pub in_app: bool,
 }
 
-pub const USAGE: &str = "usage: terminal-decline prefs [--layer FILE]... [--edit N] [--in-app]
+pub const USAGE: &str = "usage: terminal-decline settings [--layer FILE]... [--edit N] [--in-app]
+       terminal-decline prefs ...    (the same)
 
 Edits the settings in config.toml (or the file --edit names among the
---layer files, lowest first) in this terminal.";
+--layer files, lowest first) in this terminal: any terminal, with or
+without Terminal Decline running.";
 
 impl Args {
     /// Parses the arguments after `prefs`. `--layer` may repeat or take
@@ -125,18 +128,9 @@ pub fn run(args: &[String], host: &dyn Host) -> i32 {
                 }
                 Effect::Watch(files) => host.watch(&files, Arc::new(tty::file_changed)),
                 Effect::EditFile(path) => {
+                    let editor = editor::resolve_here(&app.editor_setting());
                     tty.suspend();
-                    let editor = std::env::var("VISUAL")
-                        .ok()
-                        .or_else(|| std::env::var("EDITOR").ok())
-                        .filter(|e| !e.trim().is_empty())
-                        .unwrap_or_else(|| "vi".into());
-                    let status = std::process::Command::new("/bin/sh")
-                        .arg("-c")
-                        .arg(format!("{editor} \"$1\""))
-                        .arg("sh")
-                        .arg(&path)
-                        .status();
+                    let status = editor::command_line(&editor, &path).status();
                     let _ = tty.resume();
                     renderer.invalidate();
                     app.reload();

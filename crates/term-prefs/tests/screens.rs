@@ -495,7 +495,7 @@ fn a_file_that_does_not_parse_is_read_only() {
     assert!(s.has("error: config.toml can't be edited here"), "{}", s.text());
     assert_eq!(read(&cfg), broken);
     s.send(&mut app, &format!("{ESC}e"));
-    // `e` hands the file to $EDITOR (the runner's part).
+    // `e` hands the file to the editor (the runner's part).
     assert_eq!(s.edited, std::slice::from_ref(&cfg));
     // Fixed by hand meanwhile: reload says so.
     std::fs::write(&cfg, "font_size = 15\n").unwrap();
@@ -503,6 +503,22 @@ fn a_file_that_does_not_parse_is_read_only() {
     s.show(&mut app);
     assert!(s.has("config.toml changed on disk: reloaded"), "{}", s.text());
     assert!(!s.has("doesn't parse"));
+}
+
+#[test]
+fn the_editor_setting_is_read_from_the_layers() {
+    let dir = Dir::new("editor");
+    let low = dir.file("low.toml", "editor = 'nano'\n");
+    let high = dir.file("high.toml", "");
+    let fake = Fake::new(high.clone());
+    let app = App::new(&fake, vec![low.clone(), high.clone()], 1, false);
+    assert_eq!(app.editor_setting(), "nano");
+    std::fs::write(&high, "editor = 'code -w'\n").unwrap();
+    let app = App::new(&fake, vec![low, high], 1, false);
+    assert_eq!(app.editor_setting(), "code -w");
+    let none = dir.file("none.toml", "");
+    let app = App::new(&fake, vec![none], 0, false);
+    assert_eq!(app.editor_setting(), "");
 }
 
 #[test]
@@ -597,6 +613,26 @@ fn the_file_watch_wakes_a_reload() {
     app.reload();
     s.show(&mut app);
     assert!(s.has("changed on disk") && s.cursor_row().contains("20"), "{}", s.text());
+}
+
+/// Run by name in any other terminal (`terminal-decline settings`, no
+/// `--in-app`), nothing is sent to the terminal: themes preview in the
+/// tab alone, and a shortcut is typed, not recorded.
+#[test]
+fn outside_the_app_nothing_is_sent() {
+    let dir = Dir::new("outside");
+    let cfg = dir.file("config.toml", "theme = \"tokyo-night\"\n");
+    let fake = Fake::new(cfg.clone());
+    let mut app = App::new(&fake, vec![cfg.clone()], 0, false);
+    let mut s = Screen::new(&mut app, 80, 24);
+    s.send(&mut app, &format!("/dark theme{ENTER}{UP}{UP}"));
+    s.send(&mut app, ESC);
+    s.send(&mut app, &format!("{ENTER}{UP}{ENTER}"));
+    assert!(read(&cfg).contains("solarized-dark"), "the theme list was used: {}", read(&cfg));
+    s.send(&mut app, ESC);
+    s.send(&mut app, &format!("{RIGHT}{RIGHT}{DOWN}{DOWN}c"));
+    assert!(s.has("type the shortcut"), "{}", s.text());
+    assert!(s.sent.is_empty(), "nothing for an app that isn't there: {:?}", s.sent);
 }
 
 /// Moving through a theme list previews each theme in every window (the

@@ -467,6 +467,16 @@ pub const SETTINGS: &[Setting] = &[
         Editor::Toggle,
         "Check for updates once a day and install them when the app quits (the app only, never pins)",
     ),
+    unset(
+        setting(
+            "editor",
+            "Editor",
+            Advanced,
+            Editor::Text,
+            "The program that opens config.toml (Edit config.toml, and e here), with its arguments",
+        ),
+        "$VISUAL or $EDITOR, else nano, vim or vi",
+    ),
     Setting {
         hidden: true,
         ..setting(
@@ -612,6 +622,7 @@ mod tests {
                 "image_memory",
                 "image_file_transfer",
                 "update",
+                "editor",
                 "pin_app",
             ]
         );

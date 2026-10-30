@@ -996,7 +996,9 @@ pub fn update(paths: &Paths, run: &mut Runner, confirm: &mut Confirm) -> Result<
 
 /// `pin --edit NAME` (§5.2): opens the pin's settings in `editor`
 /// (`$VISUAL`/`$EDITOR`, run through the shell so it may have
-/// arguments), else in the default text editor, then returns what the
+/// arguments), else in a window of the app running the editor (the
+/// `editor` setting, `$VISUAL`/`$EDITOR` of the login shell, nano, vim
+/// or vi; never TextEdit), then returns what the
 /// config loader finds wrong with them. Only the settings change, so the
 /// pin keeps its permissions; a running pin reloads them.
 pub fn edit(name: &str, paths: &Paths, editor: Option<&str>, run: &mut Runner) -> Result<Vec<String>, String> {
@@ -1011,14 +1013,14 @@ pub fn edit(name: &str, paths: &Paths, editor: Option<&str>, run: &mut Runner) -
             Command::new("/bin/sh").arg("-c").arg(format!("{ed} \"$1\"")).arg("sh").arg(&file),
         ),
         None => {
-            let ok = succeeds(run, Command::new("/usr/bin/open").arg("-t").arg(&file));
-            if ok {
-                println!(
-                    "opened {} in your text editor; a running {name} reloads it when saved",
-                    file.display()
-                );
-            }
-            ok
+            // Not in a terminal: a window of the app, running the editor
+            // through the login shell until it exits.
+            let setting = crate::config::load(&[&paths.config_file(), &file], &paths.themes_dir())
+                .0
+                .editor
+                .unwrap_or_default();
+            let argv = term_prefs::editor::tab_argv(&term_pty::login_shell(), &setting, &file);
+            succeeds(run, Command::new(&paths.exe).arg("-e").args(argv))
         }
     };
     if !opened {
@@ -1824,7 +1826,12 @@ mod tests {
         let text = std::fs::read_to_string(&file).unwrap();
         std::fs::write(&file, format!("font_sise = 3\n{text}")).unwrap();
         let errors = edit("Rush", &env.paths, None, &mut rec.runner());
-        assert_eq!(rec.programs(), ["open"]);
+        // A window of the app running the editor, never TextEdit.
+        let call = &rec.calls[0];
+        assert_eq!(call[1], "-e");
+        assert_eq!(call[2], "/usr/bin/env");
+        assert!(call.contains(&format!("TD_EDITOR_FILE={}", file.display())), "{call:?}");
+        assert!(!call.iter().any(|a| a == "-t" || a.contains("open")), "{call:?}");
         assert!(
             errors.as_ref().is_ok_and(|e| e.len() == 1 && e[0].contains("font_sise")),
             "{errors:?}"

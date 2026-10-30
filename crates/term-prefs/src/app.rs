@@ -26,7 +26,7 @@ pub const WRITE_EVERY: Duration = Duration::from_millis(100);
 pub enum Effect {
     /// Bytes for the terminal (the chord recording request).
     Send(String),
-    /// Run `$EDITOR` on this file, then [`App::reload`].
+    /// Run the editor on this file, then [`App::reload`].
     EditFile(PathBuf),
     /// Draw the next frame whole.
     Repaint,
@@ -283,6 +283,12 @@ impl<'h> App<'h> {
         };
         app.open(layers, edit);
         app
+    }
+
+    /// The `editor` setting in effect (empty when unset).
+    pub fn editor_setting(&self) -> String {
+        let (item, _) = self.layers.lookup(&["editor".to_string()]);
+        item.and_then(|i| i.as_str()).unwrap_or("").to_string()
     }
 
     fn open(&mut self, layers: Vec<PathBuf>, edit: usize) {

@@ -2890,6 +2890,7 @@ impl WindowView {
                     }
                 }
                 Some(Control::Settings) => crate::app::show_settings_now(),
+                Some(Control::EditConfig) => crate::app::edit_config_now(),
                 Some(Control::UpdateCheck) => crate::update::sparkle::check_in_background(),
                 Some(Control::MemoryPressure) => {
                     crate::memory::relieve("memory pressure (test control)");

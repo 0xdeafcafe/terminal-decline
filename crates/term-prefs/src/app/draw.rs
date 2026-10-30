@@ -660,12 +660,18 @@ impl App<'_> {
             ("/", "search all settings"),
             ("r", "reset: remove it from this file"),
             ("u", "undo the last change"),
-            ("e", "open the file in $EDITOR"),
+            ("e", "open the file in your editor"),
             ("c a d", "shortcuts: rebind, add, unbind"),
             ("ctrl+l", "redraw"),
             ("q esc", "quit"),
         ];
-        let notes = ["Each change is saved at once; the file can", "always be edited by hand."];
+        let notes = [
+            "Each change is saved at once; the file can",
+            "always be edited by hand.",
+            "",
+            "Run it in any terminal with:",
+            "  terminal-decline settings  (or decline settings)",
+        ];
         let lines: Vec<String> = keys
             .iter()
             .map(|(k, v)| format!("{k:<12} {v}"))

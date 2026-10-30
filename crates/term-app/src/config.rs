@@ -237,6 +237,10 @@ pub struct Config {
     /// (docs/design/updater.md). Only Terminal Decline.app's own process
     /// reads it; pins never update themselves.
     pub update: bool,
+    /// Let the user's own programs drive terminals through `terminal-decline
+    /// ctl` and its socket (docs/design/agent-api.md). Only the app's own
+    /// process serves; pins never do.
+    pub agent_api: bool,
     /// Set in a pin's config: the app bundle it belongs to.
     #[allow(dead_code)]
     pub pin_app: Option<String>,
@@ -280,6 +284,7 @@ impl Default for Config {
             palettes: Palettes::default(),
             keybind: KeybindConfig::default(),
             update: true,
+            agent_api: true,
             pin_app: None,
         }
     }

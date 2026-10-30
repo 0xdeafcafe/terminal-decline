@@ -467,6 +467,13 @@ pub const SETTINGS: &[Setting] = &[
         Editor::Toggle,
         "Check for updates once a day and install them when the app quits (the app only, never pins)",
     ),
+    setting(
+        "agent_api",
+        "Agent API",
+        Advanced,
+        Editor::Toggle,
+        "Let your own programs drive terminals with terminal-decline ctl (the app only, never pins)",
+    ),
     Setting {
         hidden: true,
         ..setting(
@@ -612,6 +619,7 @@ mod tests {
                 "image_memory",
                 "image_file_transfer",
                 "update",
+                "agent_api",
                 "pin_app",
             ]
         );

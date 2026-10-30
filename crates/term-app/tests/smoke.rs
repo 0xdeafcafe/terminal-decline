@@ -1470,6 +1470,62 @@ fn smoke_option_click_moves_the_shell_cursor() {
     assert!(s.starts_with(&want), "{s}");
 }
 
+/// Alex's two selections: over a program that takes the mouse, a
+/// Shift-drag makes a terminal selection (the program gets nothing); a
+/// plain click goes to the program and clears it; a Shift-click without
+/// a drag selects nothing; and a key typed clears a selection, so Cmd+C
+/// never copies an old one.
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_shift_drag_selects_over_a_program_taking_the_mouse() {
+    if !have_metal() {
+        return;
+    }
+    let dir = TempDir::new("shiftdrag");
+    let wait = "i=0; while [ \"$(stty size)\" != '20 80' ] && [ $i -lt 100 ]; do sleep 0.05; i=$((i+1)); done; ";
+    let script = format!(
+        "{resize}{wait}stty raw -echo; \
+         printf '\\033[H\\033[Jhello world\\033[?1002h\\033[?1006h'; \
+         {shift_down}{shift_drag}{shift_up}{dump}\
+         {down}{up}r=$(dd bs=1 count=18 2>/dev/null); {dump}\
+         {click_down}{click_up}{dump}\
+         {word_down}{word_drag}{word_up}{dump}\
+         {key}k=$(dd bs=1 count=1 2>/dev/null); {dump}\
+         printf '\\033[?1002l\\033[?1006l\\033[H\\033[J'; printf 'r=%s k=%s\\n' \"$r\" \"$k\" | tr -d '\\033'; \
+         {dump}{quit}sleep 20",
+        resize = osc("resize 80 20"),
+        shift_down = osc("mouse down 0 0 shift"),
+        shift_drag = osc("mouse drag 0 4 shift"),
+        shift_up = osc("mouse up 0 4 shift"),
+        // A plain click goes to the program: SGR reports at column 7.
+        down = osc("mouse down 0 6"),
+        up = osc("mouse up 0 6"),
+        click_down = osc("mouse down 0 2 shift"),
+        click_up = osc("mouse up 0 2 shift"),
+        word_down = osc("mouse down 0 6 shift"),
+        word_drag = osc("mouse drag 0 10 shift"),
+        word_up = osc("mouse up 0 10 shift"),
+        key = osc("key 0"),
+        dump = osc("dump"),
+        quit = osc("quit"),
+    );
+    let (status, _) = decline(&dir, &script, true);
+    assert!(status.success(), "{status}");
+    let d = dumps(&dir);
+    assert_eq!(d.len(), 6, "{d:?}");
+    let selection = |x: &Value| x["selection"].as_str().map(str::to_owned);
+    assert_eq!(selection(&d[0]).as_deref(), Some("hello"), "{}", d[0]);
+    assert_eq!(selection(&d[1]), None, "a click sent to the program clears it: {}", d[1]);
+    assert_eq!(selection(&d[2]), None, "a Shift-click alone selects nothing: {}", d[2]);
+    assert_eq!(selection(&d[3]).as_deref(), Some("world"), "{}", d[3]);
+    assert_eq!(selection(&d[4]), None, "a key typed clears it: {}", d[4]);
+    let s = screen(&d[5]);
+    assert!(
+        s.starts_with("r=[<0;7;1M[<0;7;1m k=a"),
+        "only the plain click went to the program: {s}"
+    );
+}
+
 /// Colours a program sets are drawn: OSC 11 changes the background and
 /// OSC 10 the foreground, OSC 4 a palette entry, and the resets go back
 /// to the theme. The program reads the theme's palette with OSC 4 ?.

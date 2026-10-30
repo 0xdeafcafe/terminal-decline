@@ -69,6 +69,26 @@ impl<'de> Deserialize<'de> for UpdateMode {
     }
 }
 
+/// The cursor's shape until a program sets its own (`cursor_style`).
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum CursorStyle {
+    #[default]
+    Block,
+    Bar,
+    Underline,
+}
+
+impl CursorStyle {
+    pub fn shape(self) -> term_core::CursorShape {
+        match self {
+            CursorStyle::Block => term_core::CursorShape::Block,
+            CursorStyle::Bar => term_core::CursorShape::Bar,
+            CursorStyle::Underline => term_core::CursorShape::Underline,
+        }
+    }
+}
+
 /// `[colors]`, and a theme file: only what is set. Unset colours (and
 /// palette entries left out or `""`) come from the theme, else the
 /// defaults ([`Palette::DEFAULT`]).
@@ -234,6 +254,11 @@ pub struct Config {
     pub unfocused_pane_opacity: f64,
     /// Blur what shows through when `opacity` is below 1.
     pub blur: bool,
+    /// The cursor's shape, `"block"` (the default), `"bar"` or
+    /// `"underline"`, and whether it blinks, until a program sets its own
+    /// (DECSCUSR, which `CSI 0 SP q` undoes).
+    pub cursor_style: CursorStyle,
+    pub cursor_blink: bool,
     /// Copy a selection to the clipboard as soon as it is made with the
     /// mouse, without Cmd+C.
     pub copy_on_select: bool,
@@ -324,6 +349,8 @@ impl Default for Config {
             opacity: 1.0,
             unfocused_pane_opacity: 1.0,
             blur: false,
+            cursor_style: CursorStyle::Block,
+            cursor_blink: false,
             copy_on_select: false,
             confirm_close: false,
             columns: 100,
@@ -825,6 +852,8 @@ pub fn program_theme(base: &Theme, t: &term_core::Terminal) -> Option<Theme> {
     // program's background, so they stay readable on it.
     if term_render::rgb(bg) != base.background {
         theme.set_background(bg);
+    } else {
+        theme.keep_legible();
     }
     Some(theme)
 }
@@ -1179,6 +1208,19 @@ mod tests {
             ]
         );
         assert!(c.missing_font_notices(&[]).is_empty());
+    }
+
+    #[test]
+    fn cursor_style_and_blink() {
+        let c = Config::default();
+        assert_eq!((c.cursor_style, c.cursor_blink), (CursorStyle::Block, false));
+        let (c, errors) = parse("cursor_style = 'bar'\ncursor_blink = true");
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!((c.cursor_style, c.cursor_blink), (CursorStyle::Bar, true));
+        assert_eq!(c.cursor_style.shape(), term_core::CursorShape::Bar);
+        let (c, errors) = parse("cursor_style = 'beam'");
+        assert_eq!(c.cursor_style, CursorStyle::Block);
+        assert!(errors[0].starts_with("config: cursor_style: "), "{errors:?}");
     }
 
     #[test]
@@ -1617,7 +1659,10 @@ mod tests {
         assert_eq!(rgb_of(drawn.palette[1]), 0xff0000);
         assert_eq!(drawn.palette[2], theme.palette[2]);
         assert_eq!(drawn.foreground, theme.foreground);
-        assert_eq!(drawn.selection, theme.selection);
+        assert!(
+            term_render::contrast(drawn.selection, drawn.background) >= term_render::SELECTION_CONTRAST,
+            "the selection shows on the program's background"
+        );
         assert_ne!(drawn.search_hit, theme.search_hit, "hits follow the program's background");
         // A new theme (a config reload, the appearance switching): the
         // program's colours stay on top of it.

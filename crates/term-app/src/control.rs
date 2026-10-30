@@ -253,6 +253,17 @@ pub enum Control {
     /// Cmd-click on a visible cell (line, column), or, with the flag,
     /// Option-click.
     Click(usize, usize, bool),
+    /// A left mouse button event on a visible cell (line, column), as
+    /// the pointer makes it: down, dragged there, or up, with Shift
+    /// and Option held or not. It takes the path a real one does (to
+    /// the program, if it takes the mouse, or to the selection).
+    Mouse {
+        kind: MouseKind,
+        line: usize,
+        col: usize,
+        shift: bool,
+        option: bool,
+    },
     /// Scroll the view this many lines back.
     Scroll(isize),
     /// A menu item's action, as choosing the item sends it.
@@ -294,6 +305,14 @@ fn unescape(s: &str) -> Vec<u8> {
         }
     }
     out
+}
+
+/// Which left mouse button event [`Control::Mouse`] makes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MouseKind {
+    Down,
+    Drag,
+    Up,
 }
 
 impl Control {
@@ -375,6 +394,32 @@ impl Control {
                     Some(_) => return None,
                 },
             ),
+            "mouse" => {
+                let kind = match words.next()? {
+                    "down" => MouseKind::Down,
+                    "drag" => MouseKind::Drag,
+                    "up" => MouseKind::Up,
+                    _ => return None,
+                };
+                let (line, col) = (words.next()?.parse().ok()?, words.next()?.parse().ok()?);
+                let (mut shift, mut option) = (false, false);
+                if let Some(mods) = words.next() {
+                    for m in mods.split('+') {
+                        match m {
+                            "shift" => shift = true,
+                            "option" => option = true,
+                            _ => return None,
+                        }
+                    }
+                }
+                Control::Mouse {
+                    kind,
+                    line,
+                    col,
+                    shift,
+                    option,
+                }
+            }
             "scroll" => Control::Scroll(words.next()?.parse().ok()?),
             "menu" => Control::Menu(crate::keybind::MenuAction::from_name(words.next()?)?),
             "key" => {
@@ -647,6 +692,28 @@ mod tests {
             ("focus 2", Some(Control::Focus(FocusTarget::Index(2)))),
             ("find-click 1", Some(Control::FindClick(1))),
             ("find-click", None),
+            (
+                "mouse down 0 3 shift+option",
+                Some(Control::Mouse {
+                    kind: MouseKind::Down,
+                    line: 0,
+                    col: 3,
+                    shift: true,
+                    option: true,
+                }),
+            ),
+            (
+                "mouse up 2 1",
+                Some(Control::Mouse {
+                    kind: MouseKind::Up,
+                    line: 2,
+                    col: 1,
+                    shift: false,
+                    option: false,
+                }),
+            ),
+            ("mouse drag 0", None),
+            ("mouse down 0 1 cmd", None),
             ("focus next", Some(Control::Focus(FocusTarget::Next))),
             ("focus previous", Some(Control::Focus(FocusTarget::Previous))),
             ("focus left", Some(Control::Focus(FocusTarget::Towards(Direction::Left)))),

@@ -1530,6 +1530,26 @@ fn decscusr_sets_cursor_shape() {
     assert!(!t.state.cursor_blink());
 }
 
+/// The user's cursor (settings) is the cursor until a program sets one;
+/// `CSI 0 SP q` and a reset go back to it, and a new setting changes a
+/// cursor the program left alone but not one it set.
+#[test]
+fn cursor_default_is_used_until_a_program_sets_one() {
+    let mut t = new(4, 1);
+    t.state.set_cursor_default(CursorShape::Bar, true);
+    assert_eq!((t.state.cursor_shape(), t.state.cursor_blink()), (CursorShape::Bar, true));
+    t.advance(b"\x1b[4 q");
+    assert_eq!((t.state.cursor_shape(), t.state.cursor_blink()), (CursorShape::Underline, false));
+    t.state.set_cursor_default(CursorShape::Block, true);
+    assert_eq!(t.state.cursor_shape(), CursorShape::Underline, "the program's stays");
+    t.advance(b"\x1b[0 q");
+    assert_eq!((t.state.cursor_shape(), t.state.cursor_blink()), (CursorShape::Block, true));
+    t.advance(b"\x1b[6 q\x1bc");
+    assert_eq!((t.state.cursor_shape(), t.state.cursor_blink()), (CursorShape::Block, true), "RIS");
+    t.state.set_cursor_default(CursorShape::Underline, false);
+    assert_eq!((t.state.cursor_shape(), t.state.cursor_blink()), (CursorShape::Underline, false));
+}
+
 #[test]
 fn scroll_view_clamps_to_scrollback() {
     let mut t = new(5, 2);

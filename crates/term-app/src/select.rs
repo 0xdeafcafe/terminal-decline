@@ -40,6 +40,16 @@ pub fn gesture(clicks: isize, shift: bool, option: bool) -> Gesture {
     }
 }
 
+/// The gesture for a click made with Shift held over a program that
+/// takes the mouse: Shift only keeps the click from the program, so it
+/// works as the click without Shift would. A Shift-drag starts a new
+/// selection (not extending one left from before, nor selecting the
+/// cell clicked until the mouse moves), and Shift+Option-drag a
+/// rectangle.
+pub fn gesture_over_program(clicks: isize, option: bool) -> Gesture {
+    gesture(clicks, false, option)
+}
+
 /// Whether letting go of the button copies the selection (with
 /// `copy_on_select` on): a word, line or Shift-click always made one; a
 /// plain or rectangular click only if the mouse was dragged.
@@ -48,6 +58,71 @@ pub fn copies_on_release(gesture: Gesture, dragged: bool) -> bool {
         Gesture::Word | Gesture::Line | Gesture::Extend => true,
         Gesture::Start | Gesture::Block => dragged,
     }
+}
+
+/// How far the pointer must move from where the button went down, in
+/// cell widths, before a plain or Option click becomes a selection. Below
+/// it the click selects nothing, so a click (or a hand that shakes a
+/// pixel or two) doesn't leave one character selected.
+pub const DRAG_THRESHOLD: f64 = 0.5;
+/// The threshold's floor in pixels, for very small fonts.
+const DRAG_THRESHOLD_MIN_PX: f64 = 4.0;
+
+/// A plain or Option click whose selection hasn't started: it does once
+/// the pointer has moved [`DRAG_THRESHOLD`] from where it went down.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Pending {
+    /// The cell the button went down on.
+    pub anchor: Point,
+    /// Where it went down, in pixels.
+    pub at: (f64, f64),
+    /// Option was held: a rectangle.
+    pub block: bool,
+}
+
+impl Pending {
+    /// Whether the pointer at `to` (pixels) is far enough from where the
+    /// button went down for the selection to start.
+    pub fn passed(&self, to: (f64, f64), cell_width: f64) -> bool {
+        let (dx, dy) = (to.0 - self.at.0, to.1 - self.at.1);
+        dx.hypot(dy) >= (cell_width * DRAG_THRESHOLD).max(DRAG_THRESHOLD_MIN_PX)
+    }
+
+    /// Start the selection in `t` at the anchor; the rectangle when it is
+    /// one. Dragging then extends it.
+    pub fn start(&self, t: &mut Terminal) -> Option<Block> {
+        let block = self.block.then(|| Block::at(self.anchor));
+        t.set_selection(Some(match block {
+            Some(b) => b.stream(),
+            None => Selection::new(self.anchor, self.anchor),
+        }));
+        block
+    }
+}
+
+/// A mouse button event went to the program (it takes the mouse): a
+/// press clears the terminal's own selection, as typing does, so Cmd+C
+/// can't copy an old selection while the program draws its own. Whether
+/// there was one to clear (the pane needs drawing).
+pub fn reported(t: &mut Terminal, press: bool) -> bool {
+    if !press || t.selection().is_none() {
+        return false;
+    }
+    t.set_selection(None);
+    true
+}
+
+/// One selection per window: a selection starting in one pane (a click,
+/// Select All, Select Command Output) clears the other panes'
+/// `others`, so what is shown selected is what Cmd+C copies. Whether
+/// any was cleared.
+pub fn clear_others<'a>(others: impl IntoIterator<Item = &'a mut Terminal>) -> bool {
+    let mut cleared = false;
+    for t in others {
+        cleared |= t.selection().is_some();
+        t.set_selection(None);
+    }
+    cleared
 }
 
 /// Auto-scroll speed per cell height past the edge, in lines a second.
@@ -156,6 +231,18 @@ mod tests {
         }
     }
 
+    /// Over a program that takes the mouse, Shift is what lets the
+    /// terminal select: a Shift-drag starts a new selection, as a plain
+    /// drag does elsewhere, rather than stretching an old one.
+    #[test]
+    fn shift_over_a_program_starts_a_new_selection() {
+        use Gesture::*;
+        for (clicks, option, want) in [(1, false, Start), (1, true, Block), (2, false, Word), (3, true, Line)] {
+            assert_eq!(gesture_over_program(clicks, option), want, "clicks={clicks} option={option}");
+            assert_eq!(gesture(clicks, true, option), Extend, "elsewhere Shift extends");
+        }
+    }
+
     #[test]
     fn which_releases_copy() {
         use Gesture::*;
@@ -213,6 +300,79 @@ mod tests {
         let mut carry = 0.0;
         assert_eq!(autoscroll_step(100.0, 5.0, &mut carry), 10);
         assert_eq!(autoscroll_step(100.0, -1.0, &mut carry), 0);
+    }
+
+    /// Alex's "u": a click, or a click whose hand moved a pixel or two,
+    /// selects nothing; a real drag starts the selection where the
+    /// button went down.
+    #[test]
+    fn a_click_without_a_drag_selects_nothing() {
+        let mut t = Term::new(20, 5, 100, term_core::ImagePool::process());
+        t.advance(b"run it\r\n");
+        let anchor = t.state.point_at(0, 1);
+        let p = Pending {
+            anchor,
+            at: (30.0, 10.0),
+            block: false,
+        };
+        // 16-pixel cells: half a cell is 8 pixels.
+        for to in [(30.0, 10.0), (32.0, 11.0), (37.0, 10.0), (30.0, 3.0)] {
+            assert!(!p.passed(to, 16.0), "{to:?}");
+        }
+        for to in [(38.0, 10.0), (22.0, 10.0), (30.0, 18.0), (36.0, 16.0)] {
+            assert!(p.passed(to, 16.0), "{to:?}");
+        }
+        // Tiny cells still take a few pixels.
+        assert!(!p.passed((33.0, 10.0), 2.0));
+        assert!(p.passed((34.0, 10.0), 2.0));
+
+        assert_eq!(t.state.selection(), None);
+        assert_eq!(p.start(&mut t.state), None);
+        t.state.extend_selection(t.state.point_at(0, 4));
+        assert_eq!(t.state.selection_text().as_deref(), Some("un i"));
+
+        let b = Pending { block: true, ..p }.start(&mut t.state);
+        assert_eq!(b, Some(Block::at(anchor)));
+        assert_eq!(t.state.selection(), Some(Block::at(anchor).stream()));
+    }
+
+    /// The other half of Alex's report: with a program taking the mouse,
+    /// drags go to the program, which highlights on its own; the
+    /// terminal's old selection must not stay behind for Cmd+C.
+    #[test]
+    fn a_click_sent_to_the_program_clears_the_selection() {
+        let mut t = Term::new(20, 5, 100, term_core::ImagePool::process());
+        t.advance(b"\x1b[?1000h\x1b[?1006hsome u text");
+        let u = t.state.point_at(0, 5);
+        t.state.set_selection(Some(Selection::new(u, u)));
+        assert_eq!(t.state.selection_text().as_deref(), Some("u"));
+        // A release (or motion) alone leaves it.
+        assert!(!reported(&mut t.state, false));
+        assert_eq!(t.state.selection_text().as_deref(), Some("u"));
+        assert!(reported(&mut t.state, true));
+        assert_eq!(t.state.selection(), None);
+        assert!(!reported(&mut t.state, true), "nothing left to clear");
+    }
+
+    /// Two panes, each with a selection: starting one in the first
+    /// clears the second's, whatever happens in the first.
+    #[test]
+    fn a_selection_clears_the_other_panes() {
+        let mut a = Term::new(20, 5, 100, term_core::ImagePool::process());
+        let mut b = Term::new(20, 5, 100, term_core::ImagePool::process());
+        let mut c = Term::new(20, 5, 100, term_core::ImagePool::process());
+        for t in [&mut a, &mut b] {
+            t.advance(b"left over");
+            t.state.select_all();
+        }
+        assert!(clear_others([&mut b.state, &mut c.state]));
+        assert_eq!(b.state.selection(), None);
+        assert_eq!(
+            a.state.selection_text().as_deref(),
+            Some("left over\n\n\n\n"),
+            "the pane's own stays"
+        );
+        assert!(!clear_others([&mut b.state, &mut c.state]), "none left");
     }
 
     #[test]

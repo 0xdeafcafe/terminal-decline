@@ -40,6 +40,98 @@ fn with_alpha(c: Rgba, a: u8) -> Rgba {
     (c & 0x00FF_FFFF) | (a as u32) << 24
 }
 
+/// Relative luminance (WCAG 2) of a colour, alpha ignored.
+fn luminance(c: Rgba) -> f32 {
+    let lin = |v: u32| {
+        let v = (v & 0xFF) as f32 / 255.0;
+        if v <= 0.03928 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+    };
+    0.2126 * lin(c) + 0.7152 * lin(c >> 8) + 0.0722 * lin(c >> 16)
+}
+
+/// The WCAG 2 contrast ratio of two colours: 1 (the same) to 21 (black
+/// and white).
+pub fn contrast(a: Rgba, b: Rgba) -> f32 {
+    let (la, lb) = (luminance(a), luminance(b));
+    (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
+}
+
+/// The least contrast the selection has against the background: below
+/// it a selection of a character or two is hard to see. Most themes'
+/// own selection colours are well above it.
+pub const SELECTION_CONTRAST: f32 = 1.5;
+/// The least contrast the theme's text keeps on the selection while the
+/// selection is made stronger.
+pub const SELECTED_TEXT_CONTRAST: f32 = 3.0;
+/// The contrast the text under a block cursor gets when the background
+/// colour (its usual colour) can't give it.
+pub const CURSOR_TEXT_CONTRAST: f32 = 4.5;
+/// The least contrast the cursor has against the selection, so a cursor
+/// inside a selection (drawn over it) is still seen. Built-in themes'
+/// light orange cursors on light selections stand out by hue from about
+/// 1.4.
+pub const CURSOR_ON_SELECTION_CONTRAST: f32 = 1.4;
+
+/// `cursor` made visible on `selection`: moved towards black or white
+/// (whichever is further from the selection) until it has
+/// [`CURSOR_ON_SELECTION_CONTRAST`]; unchanged if it has it already.
+fn visible_cursor(cursor: Rgba, selection: Rgba) -> Rgba {
+    if contrast(cursor, selection) >= CURSOR_ON_SELECTION_CONTRAST {
+        return cursor;
+    }
+    let far = if luminance(selection) > 0.18 {
+        rgb(0x000000)
+    } else {
+        rgb(0xffffff)
+    };
+    (1..=20)
+        .map(|step| rgb_mix(cursor, far, step as f32 / 20.0))
+        .find(|c| contrast(*c, selection) >= CURSOR_ON_SELECTION_CONTRAST)
+        .unwrap_or(far)
+}
+
+/// `selection` made visible on `bg`: moved towards `fg` until it has
+/// [`SELECTION_CONTRAST`] against `bg`, as far as `fg` keeps
+/// [`SELECTED_TEXT_CONTRAST`] on it (or what it had, if less).
+fn visible_selection(selection: Rgba, bg: Rgba, fg: Rgba) -> Rgba {
+    if contrast(selection, bg) >= SELECTION_CONTRAST {
+        return selection;
+    }
+    let text_floor = SELECTED_TEXT_CONTRAST.min(contrast(fg, selection));
+    let mut best = selection;
+    for step in 1..=50 {
+        let c = rgb_mix(selection, fg, step as f32 / 100.0);
+        if contrast(fg, c) < text_floor {
+            break;
+        }
+        best = c;
+        if contrast(c, bg) >= SELECTION_CONTRAST {
+            break;
+        }
+    }
+    best
+}
+
+/// The text colour on a block `cursor`: the background where that reads
+/// ([`CURSOR_TEXT_CONTRAST`]), else the foreground, else whichever of
+/// those, black and white reads best.
+fn cursor_text_on(cursor: Rgba, bg: Rgba, fg: Rgba) -> Rgba {
+    for c in [bg, fg] {
+        if contrast(c, cursor) >= CURSOR_TEXT_CONTRAST {
+            return c;
+        }
+    }
+    [bg, fg, rgb(0x000000), rgb(0xffffff)]
+        .into_iter()
+        .max_by(|a, b| contrast(*a, cursor).total_cmp(&contrast(*b, cursor)))
+        .unwrap_or(bg)
+}
+
+/// [`mix`] for theme colours (alpha opaque).
+fn rgb_mix(a: Rgba, b: Rgba, t: f32) -> Rgba {
+    mix(a & 0x00FF_FFFF, b & 0x00FF_FFFF, t) | 0xFF << 24
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RectInstance {
@@ -194,7 +286,7 @@ impl Theme {
             let v = 8 + i * 10;
             palette[232 + i as usize] = rgb(v << 16 | v << 8 | v);
         }
-        Theme {
+        let mut theme = Theme {
             foreground: rgb(fg),
             background: rgb(bg),
             cursor: rgb(cursor),
@@ -204,16 +296,33 @@ impl Theme {
             search_current: rgb(mix(bg, 0xff9f43, 0.85)),
             palette,
             background_opacity: 255,
-        }
+        };
+        theme.keep_legible();
+        theme
     }
 
     /// A new background (0xRRGGBB), with the colours made from it: the
     /// text under a block cursor and the search hits'.
     pub fn set_background(&mut self, bg: u32) {
         self.background = rgb(bg);
-        self.cursor_text = rgb(bg);
         self.search_hit = rgb(mix(bg, 0xe5c07b, 0.45));
         self.search_current = rgb(mix(bg, 0xff9f43, 0.85));
+        self.keep_legible();
+    }
+
+    /// Make the selection and the text under a block cursor readable
+    /// whatever the theme (or a program, OSC 10-12) chose: the selection
+    /// gets at least [`SELECTION_CONTRAST`] against the background, moved
+    /// towards the foreground, so even one selected character shows; the
+    /// text under the cursor is the background colour where that reads,
+    /// else the colour that reads best; a cursor of (nearly) the
+    /// selection's colour is moved away from it, so it shows inside a
+    /// selection. Run again after changing the foreground, background or
+    /// cursor colour.
+    pub fn keep_legible(&mut self) {
+        self.selection = visible_selection(self.selection, self.background, self.foreground);
+        self.cursor = visible_cursor(self.cursor, self.selection);
+        self.cursor_text = cursor_text_on(self.cursor, self.background, self.foreground);
     }
 
     #[inline]

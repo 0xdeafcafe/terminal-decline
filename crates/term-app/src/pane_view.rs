@@ -19,7 +19,7 @@ use objc2_app_kit::{
 use objc2_foundation::{
     NSArray, NSAttributedString, NSAttributedStringKey, NSNotFound, NSObjectProtocol, NSPoint, NSRange, NSRect, NSSize, NSString, NSURL,
 };
-use term_core::{Point, Selection};
+use term_core::Point;
 
 use crate::find_bar::{Find, FindBar};
 use crate::keybind;
@@ -29,7 +29,7 @@ use crate::layout;
 use crate::mouse;
 use crate::panes::PaneId;
 use crate::search::Query;
-use crate::select::{self, Block, Gesture};
+use crate::select::{self, Gesture};
 use crate::view::{AutoScroll, Pane, Win, WindowView, pane_padding, with_view};
 
 pub struct Ivars {
@@ -209,6 +209,7 @@ define_class!(
 
         #[unsafe(method(selectAll:))]
         fn select_all(&self, _sender: Option<&AnyObject>) {
+            self.clear_other_selections();
             self.with(|_, p| p.session.lock_term().state.select_all());
             self.request_redraw();
         }
@@ -761,6 +762,56 @@ impl PaneView {
         }
     }
 
+    /// The test control's mouse event ([`crate::control::Control::Mouse`]):
+    /// a left button event in the middle of view cell (`line`, `col`),
+    /// handled as a real one is.
+    pub(crate) fn test_mouse(&self, kind: crate::control::MouseKind, line: usize, col: usize, shift: bool, option: bool) {
+        use crate::control::MouseKind;
+        let Some(window) = self.window() else { return };
+        let titlebar = self.window_view().map_or(0.0, |w| w.titlebar_height());
+        let Some(at) = self.with(|win, p| {
+            let m = win.renderer.metrics();
+            let pad = pane_padding(&win.config, titlebar, win.scale, p.rect);
+            let (x, y) = layout::cell_origin(line, col, m.into(), pad);
+            NSPoint::new(
+                (x as f64 + m.cell_width as f64 / 2.0) / win.scale,
+                (y as f64 + m.cell_height as f64 / 2.0) / win.scale,
+            )
+        }) else {
+            return;
+        };
+        let mut flags = NSEventModifierFlags::empty();
+        if shift {
+            flags |= NSEventModifierFlags::Shift;
+        }
+        if option {
+            flags |= NSEventModifierFlags::Option;
+        }
+        let kind_of = match kind {
+            MouseKind::Down => NSEventType::LeftMouseDown,
+            MouseKind::Drag => NSEventType::LeftMouseDragged,
+            MouseKind::Up => NSEventType::LeftMouseUp,
+        };
+        let Some(event) = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+            kind_of,
+            self.convertPoint_toView(at, None),
+            flags,
+            0.0,
+            window.windowNumber(),
+            None,
+            0,
+            1,
+            1.0,
+        ) else {
+            return;
+        };
+        match kind {
+            MouseKind::Down => self.mouse_button_event(&event, mouse::LEFT, true),
+            MouseKind::Drag => self.mouse_motion(&event, Some(mouse::LEFT)),
+            MouseKind::Up => self.mouse_button_event(&event, mouse::LEFT, false),
+        }
+    }
+
     /// Visible line and column under the mouse, clamped to the grid.
     fn cell_at(&self, event: &NSEvent) -> Option<(usize, usize)> {
         self.cell_at_point(self.convertPoint_fromView(event.locationInWindow(), None))
@@ -862,6 +913,7 @@ impl PaneView {
     /// at the top of the view or the last ([`crate::prompts::select_output`]);
     /// beep if there is none.
     fn select_output_at(&self, at: Option<Point>) {
+        self.clear_other_selections();
         let selected = self.with(|_, p| {
             let mut t = p.session.lock_term();
             match at {
@@ -1135,6 +1187,11 @@ impl PaneView {
         mouse::reports(mode, shift).then_some((mode, sgr))
     }
 
+    /// Whether the program has mouse reporting on (Shift or not).
+    fn program_takes_mouse(&self) -> bool {
+        self.with(|_, p| p.session.lock_term().state.modes().mouse != term_core::MouseMode::Off) == Some(true)
+    }
+
     fn send_mouse(&self, code: u8, line: usize, col: usize, press: bool, sgr: bool) {
         if let Some(bytes) = mouse::encode(code, line, col, press, sgr) {
             self.send_raw(bytes);
@@ -1162,8 +1219,18 @@ impl PaneView {
             return;
         }
         if let Some((_, sgr)) = self.reporting(event) {
-            self.with(|_, p| p.mouse_button = press.then_some(button));
+            let cleared = self.with(|_, p| {
+                p.mouse_button = press.then_some(button);
+                let cleared = select::reported(&mut p.session.lock_term().state, press);
+                if cleared {
+                    p.block = None;
+                }
+                cleared
+            });
             self.send_mouse(button + Self::mods_of(event), line, col, press, sgr);
+            if cleared == Some(true) {
+                self.request_redraw();
+            }
             return;
         }
         // Option-click on the shell's command line moves its cursor there;
@@ -1186,29 +1253,39 @@ impl PaneView {
             return;
         }
         let flags = event.modifierFlags();
-        let gesture = select::gesture(
-            event.clickCount(),
+        let (shift, option) = (
             flags.contains(NSEventModifierFlags::Shift),
             flags.contains(NSEventModifierFlags::Option),
         );
+        // Here with Shift while the program takes the mouse: Shift only
+        // kept the click from it, so this starts a new selection.
+        let gesture = if shift && self.program_takes_mouse() {
+            select::gesture_over_program(event.clickCount(), option)
+        } else {
+            select::gesture(event.clickCount(), shift, option)
+        };
+        let at = self.px_at(event);
+        self.clear_other_selections();
         self.with(|_, p| {
             p.selecting = Some(gesture);
             p.dragged = false;
             p.autoscroll = None;
+            p.pending = None;
             let block = p.block.take();
             let mut t = p.session.lock_term();
             let s = &mut t.state;
             let point = s.point_at(line, col);
             match gesture {
-                Gesture::Start => {
-                    // Remember the anchor in an empty selection; dragging extends it.
-                    s.set_selection(Some(Selection::new(point, point)));
+                // A click clears the selection; one starts at the cell
+                // only once the mouse is dragged far enough from it.
+                Gesture::Start | Gesture::Block => {
+                    s.set_selection(None);
+                    p.pending = Some(select::Pending {
+                        anchor: point,
+                        at,
+                        block: gesture == Gesture::Block,
+                    });
                     p.scroll_accum = 0.0;
-                }
-                Gesture::Block => {
-                    let b = Block::at(point);
-                    s.set_selection(Some(b.stream()));
-                    p.block = Some(b);
                 }
                 Gesture::Word => s.select_word(point),
                 Gesture::Line => s.select_line(point),
@@ -1234,6 +1311,7 @@ impl PaneView {
         let copy = self.with(|win, p| {
             let gesture = p.selecting.take();
             p.autoscroll = None;
+            p.pending = None;
             win.config.copy_on_select && gesture.is_some_and(|g| select::copies_on_release(g, p.dragged))
         });
         if copy == Some(true) {
@@ -1257,6 +1335,34 @@ impl PaneView {
             pb.clearContents();
             pb.setString_forType(&NSString::from_str(&text), unsafe { NSPasteboardTypeString });
         }
+    }
+
+    /// One selection per window: this pane's is starting, so the other
+    /// panes' go.
+    fn clear_other_selections(&self) {
+        if let Some(w) = self.window_view() {
+            w.clear_other_selections(self.pane());
+        }
+    }
+
+    /// Where `event` is, in this view's pixels.
+    fn px_at(&self, event: &NSEvent) -> (f64, f64) {
+        let at = self.convertPoint_fromView(event.locationInWindow(), None);
+        let scale = self.with(|win, _| win.scale).unwrap_or(1.0);
+        (at.x * scale, at.y * scale)
+    }
+
+    /// Start the selection of a click whose mouse has now moved to `at`
+    /// (pixels), if that is far enough. Whether a selection is being
+    /// made (it started now or before).
+    fn start_pending(p: &mut Pane, at: (f64, f64), cell_width: f64) -> bool {
+        let Some(pending) = p.pending else { return true };
+        if !pending.passed(at, cell_width) {
+            return false;
+        }
+        p.pending = None;
+        p.block = pending.start(&mut p.session.lock_term().state);
+        true
     }
 
     /// Move the selection being made to the cell at view `line`, `col`.
@@ -1358,8 +1464,12 @@ impl PaneView {
             return;
         }
         let speed = self.autoscroll_speed(event);
+        let at = self.px_at(event);
         let (changed, start_timer) = self
-            .with(|_, p| {
+            .with(|win, p| {
+                if !Self::start_pending(p, at, win.renderer.metrics().cell_width as f64) {
+                    return (false, false);
+                }
                 // Past the top or bottom edge, a timer keeps scrolling
                 // while the mouse is held still; it stops once back over
                 // the rows or the button is let go.

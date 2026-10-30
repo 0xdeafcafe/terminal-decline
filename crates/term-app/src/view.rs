@@ -145,6 +145,9 @@ pub(crate) struct Pane {
     pub(crate) dragged: bool,
     /// A rectangular selection (Option-drag); see [`crate::select`].
     pub(crate) block: Option<Block>,
+    /// A plain or Option click whose selection starts once the mouse
+    /// has moved far enough ([`crate::select::Pending`]).
+    pub(crate) pending: Option<crate::select::Pending>,
     /// Scrolling while a selection is dragged past the top or bottom edge.
     pub(crate) autoscroll: Option<AutoScroll>,
     /// An auto-scroll step is waiting to run.
@@ -1110,6 +1113,26 @@ impl WindowView {
     }
 
     /// Draw pane `pane` again soon.
+    /// A selection is starting in `pane`: the other panes' are cleared
+    /// (one selection per window, [`crate::select::clear_others`]).
+    pub(crate) fn clear_other_selections(&self, pane: PaneId) {
+        let cleared = self
+            .with_state(|st| {
+                let mut cleared = Vec::new();
+                for (&id, p) in st.panes.iter_mut().filter(|(id, _)| **id != pane) {
+                    if crate::select::clear_others([&mut p.session.lock_term().state]) {
+                        p.block = None;
+                        cleared.push(id);
+                    }
+                }
+                cleared
+            })
+            .unwrap_or_default();
+        for id in cleared {
+            self.request_redraw(id);
+        }
+    }
+
     pub(crate) fn request_redraw(&self, pane: PaneId) {
         self.with_pane(pane, |_, p| p.session.mark_dirty());
         self.unpause();
@@ -1867,6 +1890,7 @@ impl WindowView {
                 if report {
                     p.session.report(t.state.take_replies());
                 }
+                t.state.set_cursor_default(config.cursor_style.shape(), config.cursor_blink);
                 if t.state.ambiguous_width() != config.ambiguous_width {
                     // For output from now on; what is on screen stays.
                     t.state.set_ambiguous_width(config.ambiguous_width);
@@ -2753,6 +2777,7 @@ fn spawn_pane(window: usize, config: &Config, theme: &Theme, m: term_font::Metri
     let (cols, lines) = n.grid;
     let mut t = Term::new(cols, lines, config.scrollback, term_core::ImagePool::process());
     t.state.set_ambiguous_width(config.ambiguous_width);
+    t.state.set_cursor_default(config.cursor_style.shape(), config.cursor_blink);
     // Before the program starts: nothing to report yet.
     crate::config::set_term_colors(&mut t.state, theme);
     for notice in n.notices {
@@ -2775,6 +2800,7 @@ fn spawn_pane(window: usize, config: &Config, theme: &Theme, m: term_font::Metri
         selecting: None,
         dragged: false,
         block: None,
+        pending: None,
         autoscroll: None,
         autoscroll_scheduled: false,
         held: false,
@@ -3067,6 +3093,17 @@ impl WindowView {
                     match (self.focused_view(), uri.flatten()) {
                         (Some(view), Some(uri)) => view.open_link(&uri),
                         _ => NSBeep(),
+                    }
+                }
+                Some(Control::Mouse {
+                    kind,
+                    line,
+                    col,
+                    shift,
+                    option,
+                }) => {
+                    if let Some(view) = self.focused_view() {
+                        view.test_mouse(kind, line, col, shift, option);
                     }
                 }
                 Some(Control::Scroll(lines)) => {

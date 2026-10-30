@@ -53,8 +53,53 @@ fn selection_stays_on_its_text_as_it_scrolls_into_history() {
     t.advance(b"\r\nfive\r\nsix");
     assert_eq!(t.state.scrollback_len(), 3);
     assert_eq!(copied(&t), "two");
+    // Once it drops out, the text under it is gone, and so is the
+    // selection.
     t.advance(b"\r\nseven");
-    assert_eq!(copied(&t), "");
+    assert_eq!(t.state.selection(), None);
+}
+
+/// A program redrawing the screen (a TUI) under a selection: once the
+/// text under it changes, the selection is gone, so Cmd+C can't copy text
+/// that is no longer shown. Output that leaves it alone keeps it.
+#[test]
+fn output_that_changes_the_selected_text_clears_the_selection() {
+    let mut t = Term::new(20, 4, 100, term_core::ImagePool::process());
+    t.advance(b"menu: run quit\r\nstatus ok");
+    select(&mut t, (0, 6), (0, 8));
+    assert_eq!(copied(&t), "run");
+    // The same text drawn again, and changes beside it on its row and
+    // on other rows, leave it.
+    t.advance(b"\x1b[1;1Hmenu: run quit\x1b[1;12HQUIT\x1b[2;8Hbusy\x1b[4;1Hmore");
+    assert_eq!(copied(&t), "run");
+    // Its own cells written with other text clear it.
+    t.advance(b"\x1b[1;7Hrub");
+    assert_eq!(t.state.selection(), None);
+
+    // Erasing counts too, as does clearing the screen.
+    select(&mut t, (1, 0), (1, 5));
+    assert_eq!(copied(&t), "status");
+    t.advance(b"\x1b[2;3H\x1b[K");
+    assert_eq!(t.state.selection(), None);
+    select(&mut t, (3, 0), (3, 3));
+    t.advance(b"\x1b[2J");
+    assert_eq!(t.state.selection(), None);
+}
+
+#[test]
+fn output_that_scrolls_the_selection_into_history_keeps_it() {
+    let mut t = Term::new(20, 3, 100, term_core::ImagePool::process());
+    t.advance(b"first\r\nsecond\r\nthird");
+    // From history-to-be into the screen's last line.
+    select(&mut t, (0, 0), (2, 2));
+    assert_eq!(copied(&t), "first\nsecond\nthi");
+    for i in 0..10 {
+        t.advance(format!("\r\nline {i}").as_bytes());
+    }
+    assert_eq!(copied(&t), "first\nsecond\nthi");
+    // A selection already in history stays whatever the screen does.
+    t.advance(b"\x1b[2J\x1b[Hnew");
+    assert_eq!(copied(&t), "first\nsecond\nthi");
 }
 
 #[test]

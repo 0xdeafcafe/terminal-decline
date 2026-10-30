@@ -118,7 +118,8 @@ fn decrqss_cursor_style_and_margins() {
         "esctest DECRQSS_DECSCUSR"
     );
     assert_eq!(ask(&mut t, "\x1b[5 q\x1bP$q q\x1b\\"), "\x1bP1$r5 q\x1b\\");
-    assert_eq!(ask(&mut t, "\x1b[0 q\x1bP$q q\x1b\\"), "\x1bP1$r1 q\x1b\\");
+    // 0 is the user's cursor: a steady block unless set otherwise.
+    assert_eq!(ask(&mut t, "\x1b[0 q\x1bP$q q\x1b\\"), "\x1bP1$r2 q\x1b\\");
     assert_eq!(ask(&mut t, "\x1bP$qr\x1b\\"), "\x1bP1$r1;10r\x1b\\");
     assert_eq!(
         ask(&mut t, "\x1b[5;6r\x1bP$qr\x1b\\"),

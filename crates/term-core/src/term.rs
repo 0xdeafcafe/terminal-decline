@@ -275,6 +275,21 @@ pub struct Selection {
     pub kind: SelectionKind,
 }
 
+/// What a selection covers on the screen, kept while output is parsed:
+/// output that changes the text under the selection clears it, as xterm
+/// and Alacritty do, so what is shown selected is still what Cmd+C copies.
+/// Only screen lines can change: history is kept as it was written, so
+/// lines that were history when the selection was made aren't read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SelectionWatch {
+    selection: Selection,
+    /// The first point read: the selection's start, or the screen's top
+    /// if it starts in history.
+    from: Point,
+    /// The text from `from` to the selection's end.
+    text: String,
+}
+
 /// Where the view is: following output, or showing history from a fixed
 /// place.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -409,10 +424,17 @@ pub struct Terminal {
     modes: Modes,
     cursor_shape: CursorShape,
     cursor_blink: bool,
+    /// The user's cursor (the `cursor_style` and `cursor_blink`
+    /// settings): what the cursor is until a program sets its own
+    /// (DECSCUSR), and what `CSI 0 SP q` and a reset go back to.
+    cursor_default: (CursorShape, bool),
     title: Option<String>,
     title_changed: bool,
     bell: bool,
     selection: Option<Selection>,
+    /// The selection's text on the screen as parsing last found it, so
+    /// output that changes it clears the selection ([`SelectionWatch`]).
+    selection_watch: Option<SelectionWatch>,
     /// Text a program asked to put on the clipboard (OSC 52).
     clipboard: Option<String>,
     /// A notification (OSC 9 / OSC 777) and progress (OSC 9;4) not yet taken.
@@ -565,10 +587,12 @@ impl Terminal {
             modes: Modes::default(),
             cursor_shape: CursorShape::Block,
             cursor_blink: false,
+            cursor_default: (CursorShape::Block, false),
             title: None,
             title_changed: false,
             bell: false,
             selection: None,
+            selection_watch: None,
             clipboard: None,
             notification: None,
             progress: None,
@@ -745,9 +769,21 @@ impl Terminal {
         self.cursor_shape
     }
 
-    /// The program asked for a blinking cursor.
+    /// The cursor blinks: the program asked for it, or the user's
+    /// setting does while the program hasn't said.
     pub fn cursor_blink(&self) -> bool {
         self.cursor_blink
+    }
+
+    /// The user's cursor shape and blinking (settings), used until a
+    /// program sets its own and again after `CSI 0 SP q` or a reset. A
+    /// cursor the program hasn't changed from the old default changes
+    /// now.
+    pub fn set_cursor_default(&mut self, shape: CursorShape, blink: bool) {
+        if (self.cursor_shape, self.cursor_blink) == self.cursor_default {
+            (self.cursor_shape, self.cursor_blink) = (shape, blink);
+        }
+        self.cursor_default = (shape, blink);
     }
 
     /// The window title the program set (OSC 0/2).
@@ -1288,8 +1324,57 @@ impl Terminal {
     }
 
     pub fn selection_text(&self) -> Option<String> {
-        let sel = self.selection?;
+        let (a, b) = self.selection?.ordered();
+        Some(self.text_between(a, b))
+    }
+
+    /// Before parsing: what the selection covers on the screen, kept
+    /// (and read again) only when the selection is new. Whether there is
+    /// one to watch.
+    pub(crate) fn watch_selection(&mut self) -> bool {
+        let Some(sel) = self.selection else {
+            self.selection_watch = None;
+            return false;
+        };
+        if self.selection_watch.as_ref().is_some_and(|w| w.selection == sel) {
+            return true;
+        }
         let (a, b) = sel.ordered();
+        let from = a.max(Point {
+            line: self.top_line,
+            col: 0,
+        });
+        let text = if from <= b { self.text_between(from, b) } else { String::new() };
+        self.selection_watch = Some(SelectionWatch {
+            selection: sel,
+            from,
+            text,
+        });
+        true
+    }
+
+    /// After parsing: clear the selection if the output changed the text
+    /// under it.
+    pub(crate) fn check_selection(&mut self) {
+        let Some(w) = self.selection_watch.take() else { return };
+        if self.selection != Some(w.selection) {
+            // The parser itself moved or cleared it.
+            return;
+        }
+        let (_, b) = w.selection.ordered();
+        if w.from > b {
+            self.selection_watch = Some(w);
+            return;
+        }
+        if self.text_between(w.from, b) == w.text {
+            self.selection_watch = Some(w);
+        } else {
+            self.selection = None;
+        }
+    }
+
+    /// The text from `a` to `b` (both included, `a` first).
+    fn text_between(&self, a: Point, b: Point) -> String {
         let mut out = String::new();
         for line in a.line..=b.line {
             let Some(row) = self.row_at(line) else { continue };
@@ -1322,7 +1407,7 @@ impl Terminal {
                 out.push('\n');
             }
         }
-        Some(out)
+        out
     }
 
     pub fn resize(&mut self, cols: usize, lines: usize) {
@@ -2025,6 +2110,8 @@ impl Terminal {
         fresh.ambiguous = self.ambiguous;
         fresh.grapheme_log = self.grapheme_log.take();
         fresh.hover = self.hover;
+        fresh.cursor_default = self.cursor_default;
+        (fresh.cursor_shape, fresh.cursor_blink) = self.cursor_default;
         // The find bar stays open: its search carries on over the new state.
         fresh.search = self.search.take();
         // Like xterm, a full reset clears scrollback too.
@@ -3267,7 +3354,10 @@ impl Perform for Terminal {
             ('u', []) => self.restore_cursor(),
             ('q', [b' ']) => {
                 let (shape, blink) = match arg(0) {
-                    0 | 1 => (CursorShape::Block, true),
+                    // 0 is the user's cursor (xterm's is a blinking
+                    // block), as in Ghostty and kitty.
+                    0 => self.cursor_default,
+                    1 => (CursorShape::Block, true),
                     2 => (CursorShape::Block, false),
                     3 => (CursorShape::Underline, true),
                     4 => (CursorShape::Underline, false),
@@ -3850,7 +3940,12 @@ impl Term {
         if self.state.waiting_for_head() {
             return 0;
         }
-        self.parser.advance_until_terminated(&mut self.state, bytes)
+        let watch = self.state.watch_selection();
+        let n = self.parser.advance_until_terminated(&mut self.state, bytes);
+        if watch {
+            self.state.check_selection();
+        }
+        n
     }
 
     /// A parser and a [`Terminal::new`].
@@ -3877,7 +3972,11 @@ impl Term {
                 }
             }
         } else {
+            let watch = self.state.watch_selection();
             self.parser.advance(&mut self.state, bytes);
+            if watch {
+                self.state.check_selection();
+            }
         }
         #[cfg(debug_assertions)]
         if let Err(e) = self.state.check_invariants() {

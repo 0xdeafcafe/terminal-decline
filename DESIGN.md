@@ -107,6 +107,12 @@ watch a run.
   and column to a Point), `cursor_in_view`, `view_top`/`set_view_top`, the
   selection gestures (`select_word`, `select_line`, `select_all`,
   `extend_selection`) and the word rule (`term_core::word`).
+- Output that changes the text under the selection clears it (as xterm
+  and Alacritty do): before a parse the selection's text on the screen is
+  kept (read again only for a new selection), and after it compared
+  (`SelectionWatch`). Text drawn again unchanged, writes beside it and
+  scrolling into history keep it; with no selection it costs a branch
+  per parse call.
 - Parsing: `vte` is vendored (`vendor/vte`, through `[patch.crates-io]`)
   with `Perform::print_ascii`, which hands over each run of printable ASCII
   whole; the end of a run is found 8 bytes at a time. `Terminal::write_ascii`
@@ -238,6 +244,16 @@ Oct 2026, 1.90 → 2.16 MB) and no measurable parse speed.
   compilation if the Metal toolchain is missing).
 - Cursor, selection and underline/strikethrough are drawn in the shader from
   flags; no extra geometry.
+- Selection and cursor colours stay legible whatever the theme or a
+  program sets (`Theme::keep_legible`): the selection gets at least 1.5:1
+  contrast against the background (WCAG ratio), moved towards the
+  foreground while the text keeps 3:1 on it, so one selected character
+  shows; the text under a block cursor is the background colour where
+  that has 4.5:1 on the cursor, else the foreground, black or white,
+  whichever reads best. The cursor is drawn over the selection, and a
+  cursor with less than 1.4:1 against the selection is moved towards
+  black or white until it has it, so a cursor inside a selection shows;
+  an unfocused window's or pane's cursor is a hollow box.
 - Background blur/transparency: `NSVisualEffectView` behind a non-opaque
   Metal layer, opt-in by config.
 - sRGB colours (no Display P3 tagging, which would over-saturate app colours).
@@ -296,9 +312,22 @@ Oct 2026, 1.90 → 2.16 MB) and no measurable parse speed.
   and dragging after a double- or triple-click grows by words or lines), wheel
   scrolls scrollback, or when the program asks for mouse reporting (1000/1002/
   1003 + SGR 1006) events go to the program; Shift overrides to select.
+  A plain click clears the selection and selects nothing: a selection
+  starts only once the mouse has moved half a cell width (at least 4
+  pixels) from where the button went down (`select::Pending`), so a click
+  or a shaky hand doesn't leave one character selected. A click that goes
+  to the program clears the terminal's selection, as typing does
+  (`select::reported`): the program draws its own highlight, and Cmd+C
+  mustn't copy an old selection the user no longer sees as current.
+  A window has one selection: one starting in a pane (a click, Select
+  All, Select Command Output) clears the other panes'
+  (`select::clear_others`).
   Which click does what is `select::gesture`: Shift-click extends the
   selection (by words or lines if it was made that way), Option-drag makes
-  a rectangle. Dragging past the top or bottom edge scrolls, faster the
+  a rectangle. Over a program taking the mouse, Shift only keeps the click
+  from it (`select::gesture_over_program`): a Shift-drag starts a new
+  selection (never stretching an old one), Shift+Option-drag a rectangle,
+  and a Shift-click without a drag selects nothing. Dragging past the top or bottom edge scrolls, faster the
   further past (10 lines a second per cell height, 3 to 150), driven by a
   16 ms dispatch timer that runs only while the mouse is held past an edge.
   `copy_on_select = true` copies a selection when the button is let go
@@ -589,7 +618,11 @@ apps, so permissions they were granted are asked for again.
 ## Config
 
 `~/.config/terminal-decline/config.toml`: font family/size, colours (16 + fg/bg/cursor/
-selection), padding, opacity/blur, option-as-meta, scrollback lines, shell.
+selection), padding, opacity/blur, option-as-meta, scrollback lines, shell,
+and the cursor (`cursor_style` block/bar/underline, `cursor_blink`): the
+cursor until a program sets its own with DECSCUSR; `CSI 0 SP q` and a
+reset go back to it, and a changed setting reaches panes whose program
+hasn't set one (`Terminal::set_cursor_default`).
 
 Themes (`theme`): `theme = "name"` loads `~/.config/terminal-decline/themes/<name>.toml`,
 else the built-in theme of that name; `theme = { light = "x", dark = "y" }`
@@ -630,7 +663,8 @@ foreground/background/cursor/selection colours, font-family (the first is
 font-feature (`font_features`; CSS-style `"cv05" 2` and `liga off`
 converted, one line's comma-separated entries split, the last setting of
 a tag kept), font-size, adjust-cell-height/width percentages, background-opacity,
-background-blur, macos-option-as-alt, copy-on-select, window-padding-x,
+background-blur, macos-option-as-alt, cursor-style, cursor-style-blink,
+copy-on-select, window-padding-x,
 window-width/height, split-divider-color (`[colors] split_divider`),
 unfocused-split-opacity (`unfocused_pane_opacity`) and keybinds (actions
 with a Terminal Decline equivalent, new_split right/down, goto_split,

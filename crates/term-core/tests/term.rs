@@ -417,11 +417,13 @@ fn selection_without_scrollback_does_not_slide_to_the_next_line() {
     select(&mut t, (0, 0), (0, 2));
     assert_eq!(t.state.selection_text().unwrap(), "aaa");
     t.advance(b"\r\nccc");
-    assert_eq!(t.state.selection_text().unwrap(), "");
-    // A selection over both rows keeps only the part still on screen.
+    // Its text is gone (and with it the selection), not "ccc".
+    assert_eq!(t.state.selection_text().unwrap_or_default(), "");
+    // The same over both rows: half of its text went, so it goes.
     select(&mut t, (0, 0), (1, 2));
+    assert_eq!(t.state.selection_text().unwrap(), "bbb\nccc");
     t.advance(b"\r\nddd");
-    assert_eq!(t.state.selection_text().unwrap(), "ccc");
+    assert_eq!(t.state.selection(), None);
 }
 
 #[test]
@@ -431,7 +433,8 @@ fn selection_on_alt_screen_does_not_slide_to_the_next_line() {
     select(&mut t, (0, 0), (0, 2));
     assert_eq!(t.state.selection_text().unwrap(), "aaa");
     t.advance(b"\r\nccc");
-    assert_eq!(t.state.selection_text().unwrap(), "");
+    // Its text is gone (and with it the selection), not "ccc".
+    assert_eq!(t.state.selection_text().unwrap_or_default(), "");
     assert_eq!(t.state.scrollback_len(), 0);
 }
 

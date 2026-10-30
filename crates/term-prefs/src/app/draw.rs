@@ -620,7 +620,13 @@ impl App<'_> {
             ("ctrl+l", "redraw"),
             ("q esc", "quit"),
         ];
-        let notes = ["Each change is saved at once; the file can", "always be edited by hand."];
+        let notes = [
+            "Each change is saved at once; the file can",
+            "always be edited by hand.",
+            "",
+            "Run it in any terminal with:",
+            "  terminal-decline settings  (or decline settings)",
+        ];
         let lines: Vec<String> = keys
             .iter()
             .map(|(k, v)| format!("{k:<12} {v}"))

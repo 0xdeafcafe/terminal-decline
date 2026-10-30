@@ -615,6 +615,26 @@ fn the_file_watch_wakes_a_reload() {
     assert!(s.has("changed on disk") && s.cursor_row().contains("20"), "{}", s.text());
 }
 
+/// Run by name in any other terminal (`terminal-decline settings`, no
+/// `--in-app`), nothing is sent to the terminal: themes preview in the
+/// tab alone, and a shortcut is typed, not recorded.
+#[test]
+fn outside_the_app_nothing_is_sent() {
+    let dir = Dir::new("outside");
+    let cfg = dir.file("config.toml", "theme = \"tokyo-night\"\n");
+    let fake = Fake::new(cfg.clone());
+    let mut app = App::new(&fake, vec![cfg.clone()], 0, false);
+    let mut s = Screen::new(&mut app, 80, 24);
+    s.send(&mut app, &format!("/dark theme{ENTER}{UP}{UP}"));
+    s.send(&mut app, ESC);
+    s.send(&mut app, &format!("{ENTER}{UP}{ENTER}"));
+    assert!(read(&cfg).contains("solarized-dark"), "the theme list was used: {}", read(&cfg));
+    s.send(&mut app, ESC);
+    s.send(&mut app, &format!("{RIGHT}{RIGHT}{DOWN}{DOWN}c"));
+    assert!(s.has("type the shortcut"), "{}", s.text());
+    assert!(s.sent.is_empty(), "nothing for an app that isn't there: {:?}", s.sent);
+}
+
 /// Moving through a theme list previews each theme in every window (the
 /// app hears `OSC 7771 ; theme-preview`); Esc puts the old one back and
 /// writes nothing, Enter writes it and keeps it shown until the reload.

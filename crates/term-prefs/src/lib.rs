@@ -43,10 +43,12 @@ pub struct Args {
     pub in_app: bool,
 }
 
-pub const USAGE: &str = "usage: terminal-decline prefs [--layer FILE]... [--edit N] [--in-app]
+pub const USAGE: &str = "usage: terminal-decline settings [--layer FILE]... [--edit N] [--in-app]
+       terminal-decline prefs ...    (the same)
 
 Edits the settings in config.toml (or the file --edit names among the
---layer files, lowest first) in this terminal.";
+--layer files, lowest first) in this terminal: any terminal, with or
+without Terminal Decline running.";
 
 impl Args {
     /// Parses the arguments after `prefs`. `--layer` may repeat or take

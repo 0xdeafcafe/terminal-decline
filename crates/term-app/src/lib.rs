@@ -67,7 +67,7 @@ usage: terminal-decline [--config FILE] [-e PROGRAM [ARGS...]]
        terminal-decline pin --repair [NAME] [--yes] | --update [--yes]
        terminal-decline import ghostty [PATH] [--write [--force]]
        terminal-decline import iterm FILE.itermcolors [--name NAME] [--write [--force]]
-       terminal-decline prefs [--layer FILE]... [--edit N]
+       terminal-decline settings [--layer FILE]... [--edit N]   (also `prefs`)
 
 Runs a terminal window. With -e, runs PROGRAM instead of your login shell.
 `terminal-decline pin` makes PROGRAM its own macOS app, with its own Dock icon.";

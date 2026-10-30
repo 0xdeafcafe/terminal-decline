@@ -599,3 +599,62 @@ picks. Alex generates the EdDSA key pair (secret plus two backups).
 10. **Telling the user.** Say nothing after an update, or print one dim
     line in the first window after it ("updated to 0.5.0"), as config
     notices are shown?
+
+---
+
+## 11. Updates for builds from source (dogfood)
+
+Sparkle stays off in dogfood builds (§2): they would be replaced by a
+release. They update from their own checkout instead (the `update`
+module's `source` and `dogfood` parts).
+
+- **Where from.** `scripts/dogfood.sh` passes the checkout and `git
+  rev-parse HEAD` to `bundle.sh`, which writes them into
+  `Contents/Resources/dogfood` (`repo=…`, `commit=…`) before signing. An
+  empty marker (older builds) means no updates from source.
+- **Checking.** Only `Role::App`'s first process (a lock beside the
+  updater's), never under the test control. A minute after launch, then
+  every four hours: one-shot dispatch timers re-armed after each check,
+  so an idle app wakes six times a day for it. A thread runs `git fetch
+  --quiet --no-tags origin main` in the checkout (no prompts:
+  `GIT_TERMINAL_PROMPT=0`, ssh in batch mode) and counts
+  `commit..origin/main`.
+- **Deciding** (`source::decide`, table-tested): nothing new → nothing
+  (or "up to date" when asked); a checkout with uncommitted changes or
+  not on `main` → "Update available … Not updating: <why>", never an
+  update; `update = "notify"` → "Update available: N new commits" with
+  the newest subjects and an **Update** button, once per `origin/main`
+  (kept in `~/Library/Caches/terminal-decline/update-told`); `"auto"` →
+  updates once nobody has touched the Mac for 10 minutes
+  (`CGEventSourceSecondsSinceLastEventType`), on AC power, with no
+  program running in any pane, looking again every 15 minutes until
+  then; `"off"` → no checks.
+- **Menus.** Terminal Decline › Check for Updates… (Sparkle's check in
+  release builds, this one in builds from source) and, for builds from
+  source, Update to Latest.
+- **Updating.** `git merge --ff-only origin/main`, then the checkout's
+  `scripts/dogfood.sh` under `taskpolicy -b` (background QoS: throttled
+  CPU and disk), with `DECLINE_DOGFOOD_DIR` set to the folder the app is
+  in and PATH gaining `~/.cargo/bin` and Homebrew's; output to
+  `~/Library/Logs/terminal-decline/update-build.log`. The install
+  restarts the app into its windows (reload.rs). A failure is an "Update
+  failed" notification naming the log; a click opens it.
+- **The setting.** `update = "notify" | "auto" | "off"`; `true` and
+  `false` from before read as `"notify"` and `"off"`. The default is
+  `"notify"`: an update is minutes of release build and a restart that
+  ends running programs (their command lines are typed back, not run),
+  which shouldn't happen unasked. Release builds treat `"auto"` and
+  `"notify"` alike: Sparkle installs on quit, which interrupts nothing.
+
+**Telling** (question 10, both kinds): when Sparkle has an update staged
+to install on quit (`willInstallUpdateOnQuit`), "Terminal Decline X will
+install when you quit", once per version; on the first launch after an
+update, "Updated to X" (a release's opens its release page; a build from
+source's lists the new commits). Kept in
+`~/Library/Caches/terminal-decline/updates-seen`.
+
+**Landed** (30 Oct 2026): all of the above, with unit tests for
+`decide`, the marker, the texts, and a fake remote in a temp dir (check,
+tree, fast-forward, a passing and a failing `dogfood.sh`). Not measured
+yet: the wakeups around a check (expected: one fetch every four hours,
+0 between).

@@ -3,7 +3,7 @@
 //! - `terminal-decline import ghostty [PATH]` reads Ghostty's config (default
 //!   `~/.config/ghostty/config`) and gives the Terminal Decline config for it:
 //!   theme, palette and colours, fonts, opacity and blur, option-as-meta,
-//!   copy-on-select, padding, window size, split colours and opacity, and
+//!   cursor style, copy-on-select, padding, window size, split colours and opacity, and
 //!   keybinds, where Terminal Decline has the setting.
 //! - `terminal-decline import iterm FILE.itermcolors` turns an iTerm2 colour preset
 //!   into a theme file, `themes/<name>.toml`.
@@ -590,6 +590,16 @@ pub fn ghostty(text: &str, path: &Path, theme_dirs: &[PathBuf]) -> GhosttyImport
                 "left" | "right" => set("option_as_meta", quote(&value), &mut top),
                 _ => skip("not true, false, left or right"),
             },
+            "cursor-style" => match value.as_str() {
+                "block" | "bar" | "underline" => set("cursor_style", quote(&value), &mut top),
+                _ => skip("not block, bar or underline"),
+            },
+            "cursor-style-blink" => match value.as_str() {
+                "true" | "false" => set("cursor_blink", value.clone(), &mut top),
+                // Ghostty's default: blinking as the program asks.
+                "" => {}
+                _ => skip("not true or false"),
+            },
             "copy-on-select" => match value.as_str() {
                 "true" | "clipboard" => set("copy_on_select", "true".into(), &mut top),
                 "false" => set("copy_on_select", "false".into(), &mut top),
@@ -660,7 +670,7 @@ pub fn ghostty(text: &str, path: &Path, theme_dirs: &[PathBuf]) -> GhosttyImport
     }
 
     let mut out = format!("# Imported from {} by `terminal-decline import ghostty`.\n", path.display());
-    const ORDER: [&str; 19] = [
+    const ORDER: [&str; 21] = [
         "theme",
         "font_family",
         "font_fallback",
@@ -676,6 +686,8 @@ pub fn ghostty(text: &str, path: &Path, theme_dirs: &[PathBuf]) -> GhosttyImport
         "blur",
         "unfocused_pane_opacity",
         "option_as_meta",
+        "cursor_style",
+        "cursor_blink",
         "copy_on_select",
         "columns",
         "lines",
@@ -1007,6 +1019,7 @@ mod tests {
         assert_eq!(c.cell_width, term_font::CellWidth::Percent(5.0));
         assert_eq!(c.opacity, 0.92);
         assert!(c.blur && c.copy_on_select);
+        assert_eq!((c.cursor_style, c.cursor_blink), (config::CursorStyle::Bar, true));
         assert_eq!(c.option_as_meta, config::OptionAsMeta::Left);
         assert_eq!(c.padding, 8.0);
         assert_eq!((c.columns, c.lines), (120, 36));

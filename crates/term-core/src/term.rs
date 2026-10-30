@@ -404,6 +404,10 @@ pub struct Terminal {
     modes: Modes,
     cursor_shape: CursorShape,
     cursor_blink: bool,
+    /// The user's cursor (the `cursor_style` and `cursor_blink`
+    /// settings): what the cursor is until a program sets its own
+    /// (DECSCUSR), and what `CSI 0 SP q` and a reset go back to.
+    cursor_default: (CursorShape, bool),
     title: Option<String>,
     title_changed: bool,
     bell: bool,
@@ -557,6 +561,7 @@ impl Terminal {
             modes: Modes::default(),
             cursor_shape: CursorShape::Block,
             cursor_blink: false,
+            cursor_default: (CursorShape::Block, false),
             title: None,
             title_changed: false,
             bell: false,
@@ -736,9 +741,21 @@ impl Terminal {
         self.cursor_shape
     }
 
-    /// The program asked for a blinking cursor.
+    /// The cursor blinks: the program asked for it, or the user's
+    /// setting does while the program hasn't said.
     pub fn cursor_blink(&self) -> bool {
         self.cursor_blink
+    }
+
+    /// The user's cursor shape and blinking (settings), used until a
+    /// program sets its own and again after `CSI 0 SP q` or a reset. A
+    /// cursor the program hasn't changed from the old default changes
+    /// now.
+    pub fn set_cursor_default(&mut self, shape: CursorShape, blink: bool) {
+        if (self.cursor_shape, self.cursor_blink) == self.cursor_default {
+            (self.cursor_shape, self.cursor_blink) = (shape, blink);
+        }
+        self.cursor_default = (shape, blink);
     }
 
     /// The window title the program set (OSC 0/2).
@@ -2014,6 +2031,8 @@ impl Terminal {
         fresh.ambiguous = self.ambiguous;
         fresh.grapheme_log = self.grapheme_log.take();
         fresh.hover = self.hover;
+        fresh.cursor_default = self.cursor_default;
+        (fresh.cursor_shape, fresh.cursor_blink) = self.cursor_default;
         // The find bar stays open: its search carries on over the new state.
         fresh.search = self.search.take();
         // Like xterm, a full reset clears scrollback too.
@@ -3256,7 +3275,10 @@ impl Perform for Terminal {
             ('u', []) => self.restore_cursor(),
             ('q', [b' ']) => {
                 let (shape, blink) = match arg(0) {
-                    0 | 1 => (CursorShape::Block, true),
+                    // 0 is the user's cursor (xterm's is a blinking
+                    // block), as in Ghostty and kitty.
+                    0 => self.cursor_default,
+                    1 => (CursorShape::Block, true),
                     2 => (CursorShape::Block, false),
                     3 => (CursorShape::Underline, true),
                     4 => (CursorShape::Underline, false),

@@ -584,7 +584,11 @@ apps, so permissions they were granted are asked for again.
 ## Config
 
 `~/.config/terminal-decline/config.toml`: font family/size, colours (16 + fg/bg/cursor/
-selection), padding, opacity/blur, option-as-meta, scrollback lines, shell.
+selection), padding, opacity/blur, option-as-meta, scrollback lines, shell,
+and the cursor (`cursor_style` block/bar/underline, `cursor_blink`): the
+cursor until a program sets its own with DECSCUSR; `CSI 0 SP q` and a
+reset go back to it, and a changed setting reaches panes whose program
+hasn't set one (`Terminal::set_cursor_default`).
 
 Themes (`theme`): `theme = "name"` loads `~/.config/terminal-decline/themes/<name>.toml`,
 else the built-in theme of that name; `theme = { light = "x", dark = "y" }`
@@ -625,7 +629,8 @@ foreground/background/cursor/selection colours, font-family (the first is
 font-feature (`font_features`; CSS-style `"cv05" 2` and `liga off`
 converted, one line's comma-separated entries split, the last setting of
 a tag kept), font-size, adjust-cell-height/width percentages, background-opacity,
-background-blur, macos-option-as-alt, copy-on-select, window-padding-x,
+background-blur, macos-option-as-alt, cursor-style, cursor-style-blink,
+copy-on-select, window-padding-x,
 window-width/height, split-divider-color (`[colors] split_divider`),
 unfocused-split-opacity (`unfocused_pane_opacity`) and keybinds (actions
 with a Terminal Decline equivalent, new_split right/down, goto_split,

@@ -1744,6 +1744,7 @@ impl WindowView {
                 if report {
                     p.session.report(t.state.take_replies());
                 }
+                t.state.set_cursor_default(config.cursor_style.shape(), config.cursor_blink);
                 if t.state.ambiguous_width() != config.ambiguous_width {
                     // For output from now on; what is on screen stays.
                     t.state.set_ambiguous_width(config.ambiguous_width);
@@ -2635,6 +2636,7 @@ fn spawn_pane(window: usize, config: &Config, theme: &Theme, m: term_font::Metri
     let (cols, lines) = n.grid;
     let mut t = Term::new(cols, lines, config.scrollback, term_core::ImagePool::process());
     t.state.set_ambiguous_width(config.ambiguous_width);
+    t.state.set_cursor_default(config.cursor_style.shape(), config.cursor_blink);
     // Before the program starts: nothing to report yet.
     crate::config::set_term_colors(&mut t.state, theme);
     for notice in n.notices {

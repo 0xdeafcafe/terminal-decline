@@ -271,6 +271,11 @@ pub struct Config {
     pub command: Vec<String>,
     pub cwd: Option<String>,
     pub env: BTreeMap<String, String>,
+    /// Load the shell integration (OSC 133 prompt marks and OSC 7) into
+    /// the login shell of new tabs and panes, without the user sourcing
+    /// anything: zsh, bash and fish ([`term_pty::integration`]). Off, the
+    /// shell is started exactly as it is.
+    pub shell_integration: bool,
     /// Window title for a pin; also shown in the Window menu.
     pub title: Option<String>,
     /// Kitty graphics, iTerm2 images and Sixel (docs/design/images.md).
@@ -358,6 +363,7 @@ impl Default for Config {
             command: Vec::new(),
             cwd: None,
             env: BTreeMap::new(),
+            shell_integration: true,
             title: None,
             images: true,
             image_memory: 0,
@@ -1267,6 +1273,8 @@ mod tests {
         let c = Config::default();
         assert!(c.title_status);
         assert!(!parse("title_status = false").0.title_status);
+        assert!(c.shell_integration);
+        assert!(!parse("shell_integration = false").0.shell_integration);
         assert!(c.notify_on_finish);
         assert_eq!(c.notify_after, 10);
         let (c, errors) = parse("notify_on_finish = false\nnotify_after = 30");
@@ -1577,6 +1585,7 @@ mod tests {
             ("scrollback", "scrollback = 5"),
             ("blur", "blur = true"),
             ("title", "title = 'x'"),
+            ("shell_integration", "shell_integration = false"),
         ] {
             let (new, errors) = parse(text);
             assert!(errors.is_empty(), "{errors:?}");
@@ -1584,7 +1593,20 @@ mod tests {
         }
         let mut keys = term_prefs::schema::new_windows_keys();
         keys.sort_unstable();
-        assert_eq!(keys, ["blur", "columns", "command", "cwd", "env", "lines", "scrollback", "title"]);
+        assert_eq!(
+            keys,
+            [
+                "blur",
+                "columns",
+                "command",
+                "cwd",
+                "env",
+                "lines",
+                "scrollback",
+                "shell_integration",
+                "title"
+            ]
+        );
     }
 
     #[test]

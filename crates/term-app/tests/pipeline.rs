@@ -149,6 +149,7 @@ fn command(argv: &[&str], home: &Path) -> Command {
         ],
         shell: Some("/bin/sh".into()),
         direct: false,
+        integration: None,
     }
 }
 
@@ -447,6 +448,7 @@ fn login_shell(shell: &str, home: &Path) -> Command {
         ],
         shell: Some(shell.into()),
         direct: false,
+        integration: None,
     }
 }
 
@@ -1378,6 +1380,7 @@ fn prefs(home: TempDir, config: &Path, recorded: Arc<AtomicU64>) -> Harness {
         ],
         shell: Some("/nonexistent/shell".into()),
         direct: true,
+        integration: None,
     };
     let signal = Arc::new(Signal::default());
     let mut hooks = signal.hooks();

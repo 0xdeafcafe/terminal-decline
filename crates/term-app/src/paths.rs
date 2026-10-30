@@ -101,6 +101,19 @@ impl Paths {
         }
     }
 
+    /// Where the shell integration is (`shell/` in the repository; see
+    /// [`term_pty::integration`]): `Contents/Resources/shell-integration`
+    /// in the app bundle, else `shell-integration` beside the executable,
+    /// else, for a build in a checkout (`target/debug/terminal-decline`,
+    /// or a test in `target/debug/deps`), the checkout's `shell/`.
+    pub fn shell_integration_dir(&self) -> Option<PathBuf> {
+        let exe = self.exe.canonicalize().unwrap_or_else(|_| self.exe.clone());
+        let bundled = self.app_bundle.iter().map(|app| app.join("Contents/Resources/shell-integration"));
+        let beside = exe.parent().map(|dir| dir.join("shell-integration"));
+        let checkout = exe.ancestors().skip(2).take(3).map(|dir| dir.join("shell"));
+        bundled.chain(beside).chain(checkout).find(|dir| dir.join("zsh/.zshenv").is_file())
+    }
+
     /// The config directory from before the rename, beside the current one:
     /// `~/.config/decline`.
     pub fn old_config_dir(&self) -> Option<PathBuf> {
@@ -244,6 +257,47 @@ mod tests {
 
     fn read(p: impl AsRef<Path>) -> String {
         std::fs::read_to_string(p).unwrap()
+    }
+
+    fn integration_at(dir: &Path) {
+        std::fs::create_dir_all(dir.join("zsh")).unwrap();
+        std::fs::write(dir.join("zsh/.zshenv"), "").unwrap();
+    }
+
+    #[test]
+    fn shell_integration_in_the_bundle_beside_the_binary_or_the_checkout() {
+        let dir = TempDir::new("integration-dir");
+        let root = dir.path().canonicalize().unwrap();
+        let found = |exe: &str, app: Option<&str>| {
+            let paths = Paths {
+                exe: root.join(exe),
+                app_bundle: app.map(|a| root.join(a)),
+                ..paths(&dir)
+            };
+            paths.shell_integration_dir().map(|d| d.strip_prefix(&root).unwrap().to_path_buf())
+        };
+        // A checkout: target/debug/terminal-decline and a test's binary.
+        std::fs::create_dir_all(root.join("checkout/target/debug/deps")).unwrap();
+        assert_eq!(found("checkout/target/debug/terminal-decline", None), None);
+        integration_at(&root.join("checkout/shell"));
+        assert_eq!(found("checkout/target/debug/terminal-decline", None), Some("checkout/shell".into()));
+        assert_eq!(
+            found("checkout/target/debug/deps/pipeline-1234", None),
+            Some("checkout/shell".into())
+        );
+        // Beside a binary.
+        integration_at(&root.join("checkout/target/debug/shell-integration"));
+        assert_eq!(
+            found("checkout/target/debug/terminal-decline", None),
+            Some("checkout/target/debug/shell-integration".into())
+        );
+        // In the bundle, wherever the executable is (a pin's stub).
+        let app = "Terminal Decline.app";
+        integration_at(&root.join(app).join("Contents/Resources/shell-integration"));
+        assert_eq!(
+            found("Pin.app/Contents/MacOS/pin", Some(app)),
+            Some(Path::new(app).join("Contents/Resources/shell-integration"))
+        );
     }
 
     /// An old config dir with a config, a theme and a pin's settings.

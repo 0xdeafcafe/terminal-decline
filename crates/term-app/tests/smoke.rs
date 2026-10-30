@@ -566,6 +566,59 @@ fn smoke_the_title_says_what_the_shell_does() {
     );
 }
 
+/// The login shell gets the shell integration without sourcing anything
+/// (`shell_integration` is on by default): a long command typed at a
+/// plain zsh's prompt puts the title status up, then waiting. Needs zsh
+/// as the login shell; its startup files come from a temp `ZDOTDIR`,
+/// whose `.zshrc` sets only a prompt and, from `zle-line-init`, runs a
+/// command at the first prompt and dumps and quits at the second.
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_the_login_shell_gets_the_integration_by_itself() {
+    if !have_metal() {
+        return;
+    }
+    if !term_pty::login_shell().ends_with("/zsh") {
+        eprintln!("skipped: the login shell isn't zsh");
+        return;
+    }
+    let dir = TempDir::new("integration-login");
+    let zshrc = format!(
+        r#"PS1='READY> '
+td_prompts=0
+td_run() {{ sleep 2.3; {dump}sleep 0.3; }}
+td-line-init() {{
+  td_prompts=$((td_prompts + 1))
+  if (( td_prompts == 1 )); then
+    BUFFER=td_run
+    zle accept-line
+  elif (( td_prompts == 2 )); then
+    {{ sleep 0.5; {dump}sleep 0.5; {quit}}} > /dev/tty 2>&1 &!
+  fi
+}}
+zle -N zle-line-init td-line-init
+"#,
+        dump = osc("dump"),
+        quit = osc("quit"),
+    );
+    std::fs::write(dir.path().join(".zshrc"), zshrc).unwrap();
+    let mut cmd = Command::new(APP);
+    cmd.env("XDG_CONFIG_HOME", dir.config_home())
+        .env("ZDOTDIR", dir.path())
+        .env("DECLINE_TEST_DUMP", dir.dump_file())
+        .current_dir(dir.path());
+    let (status, _) = run(&mut cmd);
+    assert!(status.success(), "{status}");
+    let d = dumps(&dir);
+    assert_eq!(d.len(), 2, "{d:?}");
+    assert_eq!(d[0]["title"], "td_run · 2s — Terminal Decline", "{}", d[0]);
+    let waiting = d[1]["title"].as_str().unwrap();
+    assert!(
+        waiting.starts_with("waiting · ") && waiting.ends_with(" — Terminal Decline"),
+        "{waiting}"
+    );
+}
+
 /// The bundled app asks for permission on the first notification and
 /// posts through the notification center. Opt in with
 /// `DECLINE_SMOKE_NOTIFY=1`: each run's temp bundle leaves an entry in

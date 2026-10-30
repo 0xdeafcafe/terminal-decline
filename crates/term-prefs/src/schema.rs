@@ -461,6 +461,13 @@ pub const SETTINGS: &[Setting] = &[
         Editor::Map,
         "Variables set for the programs started",
     )),
+    new_windows(setting(
+        "shell_integration",
+        "Shell integration",
+        Advanced,
+        Editor::Toggle,
+        "Load prompt marks into zsh, bash and fish, for jumping between prompts and command status (off: start the shell untouched)",
+    )),
     new_windows(Setting {
         pin_only: true,
         ..unset(
@@ -657,6 +664,7 @@ mod tests {
                 "command",
                 "cwd",
                 "env",
+                "shell_integration",
                 "title",
                 "images",
                 "image_memory",
@@ -677,7 +685,20 @@ mod tests {
         // `config::new_windows_only` in the app.
         let mut keys = new_windows_keys();
         keys.sort_unstable();
-        assert_eq!(keys, ["blur", "columns", "command", "cwd", "env", "lines", "scrollback", "title"]);
+        assert_eq!(
+            keys,
+            [
+                "blur",
+                "columns",
+                "command",
+                "cwd",
+                "env",
+                "lines",
+                "scrollback",
+                "shell_integration",
+                "title"
+            ]
+        );
     }
 
     #[test]

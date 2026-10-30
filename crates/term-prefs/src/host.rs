@@ -226,6 +226,7 @@ update = "notify"
 columns = 100
 lines = 30
 command = []
+shell_integration = true
 
 [env]
 

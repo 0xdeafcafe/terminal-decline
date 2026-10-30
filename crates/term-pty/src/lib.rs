@@ -9,6 +9,7 @@ use std::process::ExitStatus;
 use std::sync::{Arc, Mutex};
 
 mod command;
+pub mod integration;
 
 pub use command::{Command, build_argv, build_env, exec_argv, resolve_cwd};
 
@@ -129,7 +130,13 @@ impl Pty {
         // Build everything the child needs before forking: after fork only
         // async-signal-safe calls are allowed.
         let shell = cmd.shell.clone().filter(|s| !s.is_empty()).unwrap_or_else(login_shell);
-        let (program, argv) = exec_argv(cmd, &shell).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        let (program, mut argv) = exec_argv(cmd, &shell).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        let mut env = build_env(std::env::vars(), &cmd.env);
+        if let Some(dir) = &cmd.integration
+            && !cmd.direct
+        {
+            integration::apply(dir, &shell, &cmd.argv, &mut argv, &mut env);
+        }
         // Written to the terminal by the child if exec fails (it can't
         // format anything after forking).
         let exec_failed = format!("terminal-decline: could not start {program}\r\n");
@@ -138,7 +145,6 @@ impl Pty {
         let mut argv_ptrs: Vec<*const libc::c_char> = argv.iter().map(|a| a.as_ptr()).collect();
         argv_ptrs.push(std::ptr::null());
 
-        let env = build_env(std::env::vars(), &cmd.env);
         // HOME as the child will see it, so a caller's HOME is honoured.
         let home = env
             .iter()

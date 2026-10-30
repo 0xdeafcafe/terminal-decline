@@ -1,7 +1,7 @@
 //! What to run, and the pure pieces of turning that into `execve` arguments.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// A program to run on a PTY.
 #[derive(Clone, Debug, Default)]
@@ -18,6 +18,10 @@ pub struct Command {
     /// login shell: no `.zprofile`, and it starts even when the shell is
     /// broken or doesn't take `$0` / `$@` (the app's own Settings).
     pub direct: bool,
+    /// The shell integration directory (`shell/` in the repository) to
+    /// load into the shell: see [`crate::integration`]. Only a login
+    /// shell (empty `argv`) or a command that is a lone shell takes it.
+    pub integration: Option<PathBuf>,
 }
 
 /// The environment for the child: `inherited`, then ours, then `extra`.

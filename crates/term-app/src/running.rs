@@ -429,6 +429,7 @@ mod tests {
             env: Vec::new(),
             shell: Some("/bin/sh".into()),
             direct: false,
+            integration: None,
         };
         let size = term_pty::Size {
             cols: 80,

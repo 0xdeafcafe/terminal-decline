@@ -16,6 +16,9 @@
 # (a Developer ID Application certificate in the keychain; pins.md §11,
 # question 2), which signs with the hardened runtime and a timestamp.
 #
+# The app runs this itself to update (Terminal Decline > Update to Latest),
+# with DECLINE_DOGFOOD_DIR set to the folder it is installed in.
+#
 # Usage: scripts/dogfood.sh [--open]
 #   --open   start it after installing (otherwise only a running copy restarts)
 set -euo pipefail
@@ -36,7 +39,10 @@ version="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json
 
 stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
-DOGFOOD=1 CODESIGN_IDENTITY="${DECLINE_DOGFOOD_IDENTITY:--}" scripts/bundle.sh "$stage" "$version" >/dev/null
+# The checkout and commit go into the bundle's dogfood marker, so the app
+# can check origin/main for new commits and update itself from here
+# (docs/design/updater.md §11).
+DOGFOOD=1 DOGFOOD_REPO="$repo" DOGFOOD_COMMIT="$(git rev-parse HEAD)" CODESIGN_IDENTITY="${DECLINE_DOGFOOD_IDENTITY:--}" scripts/bundle.sh "$stage" "$version" >/dev/null
 
 mkdir -p "$apps"
 # Swap in the new bundle, then remove the old one: removing the old

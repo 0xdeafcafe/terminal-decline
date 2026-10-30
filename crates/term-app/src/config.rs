@@ -24,6 +24,51 @@ pub enum OptionAsMeta {
     None,
 }
 
+/// `update`: what the app does about updates (docs/design/updater.md).
+/// `true` and `false`, from before, mean `"notify"` and `"off"`.
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum UpdateMode {
+    /// Builds from source update themselves once the Mac has been idle a
+    /// while, on AC power; release builds install on quit.
+    Auto,
+    /// Builds from source say an update is there and wait to be told;
+    /// release builds install on quit (nothing is interrupted).
+    #[default]
+    Notify,
+    /// No checks.
+    Off,
+}
+
+impl UpdateMode {
+    /// Whether anything is checked at all.
+    pub fn on(self) -> bool {
+        self != UpdateMode::Off
+    }
+}
+
+impl<'de> Deserialize<'de> for UpdateMode {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<UpdateMode, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Bool(bool),
+            Text(String),
+        }
+        let bad = || serde::de::Error::custom("use \"auto\", \"notify\" or \"off\"");
+        match Raw::deserialize(d).map_err(|_| bad())? {
+            Raw::Bool(true) => Ok(UpdateMode::Notify),
+            Raw::Bool(false) => Ok(UpdateMode::Off),
+            Raw::Text(t) => match t.as_str() {
+                "auto" => Ok(UpdateMode::Auto),
+                "notify" => Ok(UpdateMode::Notify),
+                "off" => Ok(UpdateMode::Off),
+                _ => Err(bad()),
+            },
+        }
+    }
+}
+
 /// `[colors]`, and a theme file: only what is set. Unset colours (and
 /// palette entries left out or `""`) come from the theme, else the
 /// defaults ([`Palette::DEFAULT`]).
@@ -245,10 +290,12 @@ pub struct Config {
     /// How long a command must run, in seconds, for `notify_on_finish`.
     #[serde(deserialize_with = "notify_after")]
     pub notify_after: u32,
-    /// Check for updates once a day and install them when the app quits
-    /// (docs/design/updater.md). Only Terminal Decline.app's own process
-    /// reads it; pins never update themselves.
-    pub update: bool,
+    /// Updates (docs/design/updater.md): `"notify"` (the default),
+    /// `"auto"` or `"off"`. Release builds check once a day and install on
+    /// quit unless off; builds from source say when `main` is ahead, and
+    /// with `"auto"` update themselves when the Mac is idle. Only Terminal
+    /// Decline.app's own process reads it; pins never update themselves.
+    pub update: UpdateMode,
     /// Set in a pin's config: the app bundle it belongs to.
     #[allow(dead_code)]
     pub pin_app: Option<String>,
@@ -294,7 +341,7 @@ impl Default for Config {
             title_status: true,
             notify_on_finish: true,
             notify_after: 10,
-            update: true,
+            update: UpdateMode::Notify,
             pin_app: None,
         }
     }
@@ -1142,10 +1189,13 @@ mod tests {
 
     #[test]
     fn update_is_on_unless_turned_off() {
-        assert!(Config::default().update);
-        assert!(!parse("update = false").0.update);
+        assert_eq!(Config::default().update, UpdateMode::Notify);
+        assert_eq!(parse("update = false").0.update, UpdateMode::Off);
+        assert_eq!(parse("update = true").0.update, UpdateMode::Notify);
+        assert_eq!(parse("update = 'auto'").0.update, UpdateMode::Auto);
+        assert_eq!(parse("update = 'off'").0.update, UpdateMode::Off);
         let (c, errors) = parse("update = 'no'");
-        assert!(c.update);
+        assert_eq!(c.update, UpdateMode::Notify);
         assert!(errors[0].starts_with("config: update: "), "{errors:?}");
     }
 

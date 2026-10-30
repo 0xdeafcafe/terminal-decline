@@ -24,7 +24,9 @@
 # Ad-hoc builds are hardened only with HARDENED=1, then with
 # packaging/entitlements-dev.plist (library validation off: ad-hoc code
 # has no team ID to match). DOGFOOD=1 marks a local build that restarts
-# itself when a newer one is installed (crates/term-app/src/reload.rs).
+# itself when a newer one is installed (crates/term-app/src/reload.rs);
+# with DOGFOOD_REPO and DOGFOOD_COMMIT, its marker names the checkout and
+# commit, for updates from source (crates/term-app/src/update/source.rs).
 #
 # Sparkle (docs/design/updater.md §5): when scripts/sparkle.sh has fetched
 # it (target/sparkle/<version>, or SPARKLE_DIR), Sparkle.framework is
@@ -290,7 +292,13 @@ ${usage_strings}${sparkle_keys}${icon_entry}
 EOF
 
 if [[ "${DOGFOOD:-}" == "1" ]]; then
-  touch "$contents/Resources/dogfood"
+  # Where it was built from (dogfood.sh sets these), before signing seals
+  # the bundle: the app checks that checkout for updates.
+  if [[ -n "${DOGFOOD_REPO:-}" && -n "${DOGFOOD_COMMIT:-}" ]]; then
+    printf 'repo=%s\ncommit=%s\n' "$DOGFOOD_REPO" "$DOGFOOD_COMMIT" > "$contents/Resources/dogfood"
+  else
+    touch "$contents/Resources/dogfood"
+  fi
 fi
 
 # Inside out, never --deep (it would sign nested code with the app's

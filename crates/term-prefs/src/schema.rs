@@ -483,10 +483,10 @@ pub const SETTINGS: &[Setting] = &[
     ),
     setting(
         "update",
-        "Check for updates",
+        "Updates",
         Advanced,
-        Editor::Toggle,
-        "Check for updates once a day and install them when the app quits (the app only, never pins)",
+        Editor::Choice(&["notify", "auto", "off"]),
+        "notify: say when there is one; auto: builds from source also update when idle; release builds install on quit",
     ),
     Setting {
         hidden: true,

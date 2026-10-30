@@ -7,8 +7,9 @@
 //! calls). [`sparkle`] loads Sparkle.framework at run time, never in a
 //! pin, and forwards Sparkle's calls to them.
 //!
-//! The updater is off in dogfood builds, nightlies, ad-hoc builds and
-//! pins, so a local build never offers or installs anything.
+//! Sparkle is off in dogfood builds, nightlies, ad-hoc builds and pins,
+//! so a local build never installs a release. Dogfood builds update from
+//! their own checkout instead ([`source`], [`dogfood`]).
 
 use std::cell::RefCell;
 use std::fs::File;
@@ -17,6 +18,8 @@ use std::path::{Path, PathBuf};
 
 use crate::entry::Role;
 
+pub mod dogfood;
+pub mod source;
 pub mod sparkle;
 
 /// The test feed's env var, honoured only with the test control on

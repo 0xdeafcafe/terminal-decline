@@ -507,16 +507,18 @@ fn smoke_a_long_command_finishing_in_a_background_tab_notifies() {
         return;
     }
     let dir = TempDir::new("notify-finish");
-    std::fs::write(
-        dir.config_home().join("terminal-decline/config.toml"),
-        "notify_after = 1
-",
-    )
-    .unwrap();
+    let config = dir.config_home().join("terminal-decline");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(config.join("config.toml"), "notify_after = 1\n").unwrap();
     let d = dir.path().display();
     let wait = |cond: String| format!("i=0; while ! {{ {cond}; }} && [ $i -lt 200 ]; do sleep 0.05; i=$((i+1)); done; ");
     let script = format!(
-        "if mkdir '{d}/first' 2>/dev/null; then            {tab}{wait_two}           printf '\033]133;A\007$ \033]133;B\007make test\r\n\033]133;C\007'; sleep 1.2;            printf '\033]133;D;3\007';            printf '\033]133;A\007$ \033]133;B\007true\r\n\033]133;C\007\033]133;D;0\007';            sleep 11; printf '\007'; sleep 0.2; {dump}{quit}         else touch '{d}/two'; fi; sleep 30",
+        "if mkdir '{d}/first' 2>/dev/null; then {tab}{wait_two}\
+         printf '\\033]133;A\\007$ \\033]133;B\\007make test\\r\\n\\033]133;C\\007'; sleep 1.2; \
+         printf '\\033]133;D;3\\007'; \
+         printf '\\033]133;A\\007$ \\033]133;B\\007true\\r\\n\\033]133;C\\007\\033]133;D;0\\007'; \
+         sleep 11; printf '\\007'; sleep 0.2; {dump}{quit}\
+         else touch '{d}/two'; fi; sleep 30",
         tab = osc("tab"),
         wait_two = wait(format!("[ -e '{d}/two' ]")),
         dump = osc("dump"),

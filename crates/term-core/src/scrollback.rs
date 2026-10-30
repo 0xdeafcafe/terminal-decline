@@ -58,6 +58,10 @@ use crate::search::Filter;
 use crate::style::{Attrs, Style, Underline};
 use crate::unicode;
 
+mod packed;
+pub(crate) use packed::Body;
+use packed::{Cache, Packed};
+
 /// The most bytes in one part of a block (meta, text, the dictionary), so
 /// that every offset fits in 16 bits.
 const PART: usize = u16::MAX as usize;
@@ -256,7 +260,11 @@ impl BlockData {
 /// History's own record of a sealed block, changed only under the lock.
 #[derive(Debug)]
 struct BlockEntry {
-    data: Arc<BlockData>,
+    /// Stable line number of its first line (its data's, kept here so
+    /// the output path never reads the data).
+    first: u64,
+    /// As written, or compressed while idle (R.7).
+    data: Body,
     /// Lines still in use: `pop()` lowers it, the shared data is untouched.
     len: u32,
     /// Its search filter (§13.6), built in the background; None = scan it.
@@ -1057,6 +1065,25 @@ struct View<'a> {
     ambiguous: u8,
 }
 
+/// A block held for reading: the open one, a sealed one as written, or
+/// a compressed one decompressed (shared with the cache), with its lines
+/// in use.
+enum Held<'a> {
+    Open(&'a OpenBlock),
+    Sealed(&'a BlockData, usize),
+    Unpacked(Arc<BlockData>, usize),
+}
+
+impl Held<'_> {
+    fn view(&self) -> View<'_> {
+        match self {
+            Held::Open(o) => o.view(),
+            Held::Sealed(d, len) => d.view(*len),
+            Held::Unpacked(d, len) => d.view(*len),
+        }
+    }
+}
+
 /// Where a line's marks start in its meta: after its runs, clusters and
 /// width exceptions, from `pos` (the runs).
 fn marks_at(meta: &[u8], flags: u8, mut pos: usize) -> usize {
@@ -1733,6 +1760,8 @@ pub struct Scrollback {
     /// Image lists of blocks freed since [`Scrollback::take_freed_images`].
     freed_images: Vec<ImageKey>,
     scratch: Scratch,
+    /// Compressed blocks decompressed again (R.7).
+    cache: Cache,
 }
 
 impl Scrollback {
@@ -1751,6 +1780,7 @@ impl Scrollback {
             cache_key: [0, 0],
             freed_images: Vec::new(),
             scratch: Scratch::default(),
+            cache: Cache::default(),
         }
     }
 
@@ -1801,7 +1831,7 @@ impl Scrollback {
 
     /// Bytes held, for measuring.
     pub fn memory_bytes(&self) -> usize {
-        self.sealed_bytes + self.open.bytes() + self.blocks.capacity() * std::mem::size_of::<BlockEntry>()
+        self.sealed_bytes + self.open.bytes() + self.blocks.capacity() * std::mem::size_of::<BlockEntry>() + self.cache.bytes()
     }
 
     pub fn stats(&self) -> HistoryStats {
@@ -1814,18 +1844,25 @@ impl Scrollback {
         }
     }
 
-    /// The sealed blocks and how many of each one's lines are in use, as a
-    /// search captures them.
-    pub fn sealed(&self) -> impl Iterator<Item = (&Arc<BlockData>, usize)> {
-        self.blocks.iter().map(|b| (&b.data, b.len as usize))
+    /// The sealed blocks (compressed ones decompressed) and how many of
+    /// each one's lines are in use.
+    pub fn sealed(&self) -> impl Iterator<Item = (Arc<BlockData>, usize)> {
+        self.blocks.iter().map(|b| (b.data.unpack(), b.len as usize))
+    }
+
+    /// Sealed blocks compressed (R.7).
+    #[doc(hidden)]
+    pub fn packed_blocks(&self) -> usize {
+        self.blocks.iter().filter(|b| b.data.is_packed()).count()
     }
 
     pub fn clear(&mut self) {
         for b in &self.blocks {
-            self.freed_images.extend_from_slice(&b.data.images);
+            self.freed_images.extend_from_slice(b.data.images());
         }
         self.freed_images.append(&mut self.open.images);
         self.blocks = VecDeque::new();
+        self.cache.clear();
         self.open = OpenBlock::new(self.end, self.open.ambiguous);
         self.sealed_bytes = 0;
         self.start = self.end;
@@ -1927,6 +1964,7 @@ impl Scrollback {
     }
 
     /// Seal the open block, if it holds any lines.
+    #[inline(never)]
     fn seal(&mut self) {
         if self.open.lines() == 0 {
             return;
@@ -1935,7 +1973,8 @@ impl Scrollback {
         let data = self.open.seal();
         self.sealed_bytes += data.bytes();
         self.blocks.push_back(BlockEntry {
-            data: Arc::new(data),
+            first: data.first,
+            data: Body::Plain(Arc::new(data)),
             len,
             filter: None,
         });
@@ -1953,7 +1992,7 @@ impl Scrollback {
 
     /// The first line still stored (hidden or not).
     fn oldest(&self) -> u64 {
-        self.blocks.front().map_or(self.open.first, |b| b.data.first)
+        self.blocks.front().map_or(self.open.first, |b| b.first)
     }
 
     /// Apply the limits: hide lines past the line limit, free blocks with
@@ -1962,7 +2001,7 @@ impl Scrollback {
     fn trim(&mut self) {
         self.start = self.start.max(self.end.saturating_sub(self.limit as u64));
         while let Some(b) = self.blocks.front()
-            && b.data.first + b.len as u64 <= self.start
+            && b.first + b.len as u64 <= self.start
         {
             self.free_oldest();
         }
@@ -1977,16 +2016,17 @@ impl Scrollback {
     /// Add the own images every block still listed names to `out`.
     pub fn listed_images(&self, out: &mut std::collections::HashSet<ImageKey>) {
         for b in &self.blocks {
-            out.extend(b.data.images.iter().copied());
+            out.extend(b.data.images().iter().copied());
         }
         out.extend(self.open.images.iter().copied());
     }
 
+    #[inline(never)]
     fn free_oldest(&mut self) {
         if let Some(b) = self.blocks.pop_front() {
-            self.freed_images.extend_from_slice(&b.data.images);
+            self.freed_images.extend_from_slice(b.data.images());
             self.sealed_bytes -= b.bytes();
-            self.start = self.start.max(b.data.first + b.len as u64);
+            self.start = self.start.max(b.first + b.len as u64);
         }
     }
 
@@ -2008,7 +2048,7 @@ impl Scrollback {
             b.len -= 1;
             if b.len == 0 {
                 let b = self.blocks.pop_back().expect("a block");
-                self.freed_images.extend_from_slice(&b.data.images);
+                self.freed_images.extend_from_slice(b.data.images());
                 self.sealed_bytes -= b.bytes();
             }
             // The next push starts a new open block where this one ends.
@@ -2078,7 +2118,8 @@ impl Scrollback {
         links: &mut Vec<Option<Arc<LinkValue>>>,
         reader: &mut HistoryReader,
     ) -> bool {
-        let Some((view, n)) = self.locate(i) else { return false };
+        let Some((held, n)) = self.locate(i) else { return false };
+        let view = held.view();
         let line = self.start + i as u64;
         let first = line - n as u64;
         let start = (reader.next == Some((first, line))).then_some(reader.at);
@@ -2091,8 +2132,8 @@ impl Scrollback {
     /// Line `i`'s OSC 133 marks, without decoding its cells.
     pub fn marks(&self, i: usize) -> Vec<Mark> {
         let mut out = Vec::new();
-        if let Some((v, n)) = self.locate(i) {
-            v.marks(n, |m| out.push(m));
+        if let Some((h, n)) = self.locate(i) {
+            h.view().marks(n, |m| out.push(m));
         }
         out
     }
@@ -2100,11 +2141,11 @@ impl Scrollback {
     /// Whether line `i` has marks, from its flags.
     /// Whether stored line `i` has kitty placeholder cells.
     pub fn has_placeholders(&self, i: usize) -> bool {
-        self.locate(i).is_some_and(|(v, n)| has_placeholders(v.meta_of(n)))
+        self.flags_of(i).is_some_and(|f| f & flag::EXTRA != 0) && self.locate(i).is_some_and(|(h, n)| has_placeholders(h.view().meta_of(n)))
     }
 
     pub fn has_marks(&self, i: usize) -> bool {
-        self.locate(i).is_some_and(|(v, n)| v.flags(n) & flag::MARKS != 0)
+        self.flags_of(i).is_some_and(|f| f & flag::MARKS != 0)
     }
 
     /// The nearest line with marks before line `i` (`up`) or at or after
@@ -2118,8 +2159,8 @@ impl Scrollback {
             let (lo, hi, any) = if line >= self.open.first {
                 (self.open.first, self.end, self.open.has_marks)
             } else {
-                let b = &self.blocks[self.blocks.partition_point(|b| b.data.first <= line) - 1];
-                (b.data.first, b.data.first + b.len as u64, b.data.has_marks)
+                let b = &self.blocks[self.blocks.partition_point(|b| b.first <= line) - 1];
+                (b.first, b.first + b.len as u64, b.data.has_marks())
             };
             let lo = (lo.max(self.start) - self.start) as usize;
             let hi = (hi - self.start) as usize;
@@ -2143,36 +2184,78 @@ impl Scrollback {
 
     /// Whether line `i` soft-wraps onto the next, without decoding it.
     pub fn wrapped(&self, i: usize) -> bool {
-        self.locate(i).is_some_and(|(v, n)| v.flags(n) & flag::WRAPPED != 0)
+        self.flags_of(i).is_some_and(|f| f & flag::WRAPPED != 0)
     }
 
     /// Whether line `i`'s last style fills to the end of the row (FILL),
     /// without decoding it.
     pub fn fill(&self, i: usize) -> bool {
-        self.locate(i).is_some_and(|(v, n)| v.flags(n) & flag::FILL != 0)
+        self.flags_of(i).is_some_and(|f| f & flag::FILL != 0)
     }
 
-    /// The text of line `i` as stored (no end byte), without decoding it.
-    pub fn text(&self, i: usize) -> Option<&[u8]> {
-        let (v, n) = self.locate(i)?;
-        let (at, len) = v.text_span(n);
-        Some(&v.text[at..at + len])
+    /// The text of line `i` as stored (no end byte), without decoding it
+    /// (a compressed block's is copied out).
+    pub fn text(&self, i: usize) -> Option<std::borrow::Cow<'_, [u8]>> {
+        let (h, n) = self.locate(i)?;
+        match h {
+            Held::Open(o) => {
+                let v = o.view();
+                let (at, len) = v.text_span(n);
+                Some(std::borrow::Cow::Borrowed(&o.text[at..at + len]))
+            }
+            Held::Sealed(d, len) => {
+                let v = d.view(len);
+                let (at, len) = v.text_span(n);
+                Some(std::borrow::Cow::Borrowed(&d.text[at..at + len]))
+            }
+            Held::Unpacked(..) => {
+                let v = h.view();
+                let (at, len) = v.text_span(n);
+                Some(std::borrow::Cow::Owned(v.text[at..at + len].to_vec()))
+            }
+        }
     }
 
     /// The block holding line `i` (0..len), and the line's index in it.
+    /// A compressed block is decompressed through the cache.
     #[inline]
-    fn locate(&self, i: usize) -> Option<(View<'_>, usize)> {
+    fn locate(&self, i: usize) -> Option<(Held<'_>, usize)> {
+        let (b, n) = self.entry(i)?;
+        Some(match b {
+            None => (Held::Open(&self.open), n),
+            Some(b) => match &b.data {
+                Body::Plain(d) => (Held::Sealed(d, b.len as usize), n),
+                Body::Packed(p) => (Held::Unpacked(self.cache.get(p), b.len as usize), n),
+            },
+        })
+    }
+
+    /// The entry holding line `i` (None for the open block), and the
+    /// line's index in it.
+    #[inline]
+    fn entry(&self, i: usize) -> Option<(Option<&BlockEntry>, usize)> {
         if i >= self.len() {
             return None;
         }
         let line = self.start + i as u64;
         if line >= self.open.first {
-            return Some((self.open.view(), (line - self.open.first) as usize));
+            return Some((None, (line - self.open.first) as usize));
         }
         // Few blocks (about one per thousand lines): binary search.
-        let idx = self.blocks.partition_point(|b| b.data.first <= line) - 1;
+        let idx = self.blocks.partition_point(|b| b.first <= line) - 1;
         let b = &self.blocks[idx];
-        Some((b.data.view(b.len as usize), (line - b.data.first) as usize))
+        Some((Some(b), (line - b.first) as usize))
+    }
+
+    /// Line `i`'s flags byte, without decompressing its block.
+    #[inline]
+    fn flags_of(&self, i: usize) -> Option<u8> {
+        let (b, n) = self.entry(i)?;
+        Some(match b.map(|b| &b.data) {
+            None => self.open.view().flags(n),
+            Some(Body::Plain(d)) => d.view(d.starts.len()).flags(n),
+            Some(Body::Packed(p)) => p.flags(n),
+        })
     }
 
     /// The structure, cheaply (after every `advance` in debug builds):
@@ -2188,10 +2271,10 @@ impl Scrollback {
         }
         let mut bytes = 0;
         for b in &self.blocks {
-            if b.data.first != next || b.len == 0 || b.len as usize > b.data.lines() {
+            if b.first != next || b.len == 0 || b.len as usize > b.data.lines() {
                 return Err(format!(
                     "block from {} with {} of {} lines, expected from {next}",
-                    b.data.first,
+                    b.first,
                     b.len,
                     b.data.lines()
                 ));
@@ -2245,7 +2328,12 @@ impl Scrollback {
     pub fn check_all(&self) -> Result<(), String> {
         self.check()?;
         for (i, b) in self.blocks.iter().enumerate() {
-            let d = &b.data;
+            let d = &b.data.unpack();
+            if let Body::Packed(p) = &b.data
+                && d.starts.iter().enumerate().any(|(n, &s)| d.meta[s as usize] != p.flags(n))
+            {
+                return Err(format!("block {i}: its flags differ from its lines'"));
+            }
             if d.starts.len() != d.lines() || d.checkpoints.len() != d.lines().div_ceil(CHECKPOINT) {
                 return Err(format!("block {i}: {} checkpoints for {} lines", d.checkpoints.len(), d.lines()));
             }
@@ -2400,7 +2488,7 @@ fn get_style(data: &[u8]) -> Style {
 
 /// A block as a search takes it: its data, its lines in use and its
 /// filter.
-pub(crate) type SearchBlock = (Arc<BlockData>, usize, Option<Arc<Filter>>);
+pub(crate) type SearchBlock = (Body, usize, Option<Arc<Filter>>);
 
 /// What search reads (§13.4, §13.5).
 impl BlockData {
@@ -2439,7 +2527,7 @@ impl Scrollback {
         let mut out: Vec<SearchBlock> = self
             .blocks
             .iter()
-            .filter(|b| b.data.first + b.len as u64 > from)
+            .filter(|b| b.first + b.len as u64 > from)
             .map(|b| (b.data.clone(), b.len as usize, b.filter.clone()))
             .collect();
         if self.open.lines() > 0 {
@@ -2459,13 +2547,13 @@ impl Scrollback {
                 has_marks: o.has_marks,
                 images: o.images.clone().into_boxed_slice(),
             };
-            out.push((Arc::new(data), o.lines(), None));
+            out.push((Body::Plain(Arc::new(data)), o.lines(), None));
         }
         (out, self.start)
     }
 
     /// Up to `max` sealed blocks without a filter, newest first (§13.6).
-    pub(crate) fn unfiltered(&self, max: usize) -> Vec<Arc<BlockData>> {
+    pub(crate) fn unfiltered(&self, max: usize) -> Vec<Body> {
         self.blocks
             .iter()
             .rev()
@@ -2477,10 +2565,10 @@ impl Scrollback {
 
     /// Store `filter` for `data`'s block, if it is still stored. Filters
     /// count against the backstop, so this may free the oldest blocks.
-    pub(crate) fn set_filter(&mut self, data: &Arc<BlockData>, filter: Arc<Filter>) {
-        let i = self.blocks.partition_point(|b| b.data.first < data.first);
+    pub(crate) fn set_filter(&mut self, data: &Body, filter: Arc<Filter>) {
+        let i = self.blocks.partition_point(|b| b.first < data.first());
         if let Some(b) = self.blocks.get_mut(i)
-            && Arc::ptr_eq(&b.data, data)
+            && b.data.same(data)
             && b.filter.is_none()
         {
             b.filter = Some(filter);
@@ -2500,8 +2588,8 @@ impl Scrollback {
     pub(crate) fn block_first(&self, line: u64) -> u64 {
         self.blocks
             .iter()
-            .find(|b| b.data.first + b.len as u64 > line)
-            .map_or(self.open.first, |b| b.data.first)
+            .find(|b| b.first + b.len as u64 > line)
+            .map_or(self.open.first, |b| b.first)
     }
 
     /// The first line still visible.
@@ -2526,8 +2614,8 @@ impl Scrollback {
             let (end, width) = if line >= self.open.first {
                 (self.end, if self.open.width == u16::MAX { 0 } else { self.open.width })
             } else {
-                let b = &self.blocks[self.blocks.partition_point(|b| b.data.first <= line) - 1];
-                (b.data.first + b.len as u64, b.data.width)
+                let b = &self.blocks[self.blocks.partition_point(|b| b.first <= line) - 1];
+                (b.first + b.len as u64, b.data.width())
             };
             let to = ((end - self.start) as usize).min(hi);
             if !f(i, to, width) {
@@ -2546,8 +2634,8 @@ impl Scrollback {
             let w = if self.open.width == u16::MAX { 0 } else { self.open.width };
             return (self.open.first, self.end, true, w);
         }
-        let b = &self.blocks[self.blocks.partition_point(|b| b.data.first <= line) - 1];
-        (b.data.first, b.data.first + b.len as u64, false, b.data.width)
+        let b = &self.blocks[self.blocks.partition_point(|b| b.first <= line) - 1];
+        (b.first, b.first + b.len as u64, false, b.data.width())
     }
 
     /// The shapes of history lines `lo..hi` (0 = oldest visible), in
@@ -2558,7 +2646,8 @@ impl Scrollback {
         let hi = hi.min(self.len());
         let mut i = lo;
         while i < hi {
-            let Some((view, n0)) = self.locate(i) else { return };
+            let Some((held, n0)) = self.locate(i) else { return };
+            let view = held.view();
             let line = self.start + i as u64;
             let (_, end, _, width) = self.block_lines(line);
             let to = ((end - self.start) as usize).min(hi);
@@ -2595,3 +2684,102 @@ impl Scrollback {
 
 #[cfg(test)]
 mod tests;
+
+/// Blocks to compress off the lock (R.7, §11.8): taken under the lock by
+/// [`crate::Terminal::compress_job`], compressed by [`CompressJob::run`]
+/// on a background thread and swapped in by
+/// [`crate::Terminal::add_compressed`] under the lock.
+#[derive(Debug, Default)]
+pub struct CompressJob {
+    blocks: Vec<Arc<BlockData>>,
+    built: Vec<Arc<Packed>>,
+}
+
+impl CompressJob {
+    /// Blocks it compresses.
+    pub fn len(&self) -> usize {
+        self.blocks.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.blocks.is_empty()
+    }
+
+    /// Compress the blocks (off the lock).
+    pub fn run(&mut self) {
+        self.built = self.blocks.iter().map(|d| Arc::new(Packed::pack(d))).collect();
+    }
+}
+
+impl Scrollback {
+    /// Up to `max` sealed blocks not compressed yet, oldest first.
+    pub(crate) fn compress_job(&self, max: usize) -> CompressJob {
+        let blocks = self
+            .blocks
+            .iter()
+            .filter_map(|b| match &b.data {
+                Body::Plain(d) => Some(d.clone()),
+                Body::Packed(_) => None,
+            })
+            .take(max)
+            .collect();
+        CompressJob { blocks, built: Vec::new() }
+    }
+
+    /// Swap in the blocks `job` compressed, for blocks still stored as
+    /// they were. Readers holding the old data carry on with it.
+    pub(crate) fn add_compressed(&mut self, job: CompressJob) {
+        for (d, p) in job.blocks.iter().zip(job.built) {
+            let i = self.blocks.partition_point(|b| b.first < d.first);
+            if let Some(b) = self.blocks.get_mut(i)
+                && let Body::Plain(old) = &b.data
+                && Arc::ptr_eq(old, d)
+            {
+                let before = b.data.bytes();
+                b.data = Body::Packed(p);
+                self.sealed_bytes = self.sealed_bytes - before + b.data.bytes();
+            }
+        }
+    }
+
+    /// Compress every sealed block now, and drop the decompressed-block
+    /// cache and the search filters (rebuilt while idle): under memory
+    /// pressure (R.5). The bytes held before and after.
+    pub(crate) fn shrink(&mut self) -> (usize, usize) {
+        let before = self.memory_bytes();
+        let mut job = self.compress_job(usize::MAX);
+        job.run();
+        self.add_compressed(job);
+        self.cache.clear();
+        for b in &mut self.blocks {
+            if b.filter.take().is_some() {
+                self.sealed_bytes -= Filter::BYTES;
+            }
+        }
+        self.blocks.shrink_to_fit();
+        // The open block's spare room: it grows again by doubling.
+        let o = &mut self.open;
+        o.meta.shrink_to_fit();
+        o.starts.shrink_to_fit();
+        o.text.shrink_to_fit();
+        o.checkpoints.shrink_to_fit();
+        o.styles.shrink_to_fit();
+        o.style_starts.shrink_to_fit();
+        (before, self.memory_bytes())
+    }
+}
+
+impl Scrollback {
+    /// Measuring aid: decompress every compressed block once.
+    #[doc(hidden)]
+    pub fn unpack_all(&self) -> usize {
+        let mut n = 0;
+        for b in &self.blocks {
+            if b.data.is_packed() {
+                std::hint::black_box(b.data.unpack());
+                n += 1;
+            }
+        }
+        n
+    }
+}

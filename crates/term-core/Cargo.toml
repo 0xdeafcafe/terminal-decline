@@ -8,6 +8,7 @@ license.workspace = true
 vte.workspace = true
 term-image.workspace = true
 memchr = "2.7"
+lz4_flex = { version = "0.14", default-features = false, features = ["std", "safe-encode", "safe-decode"] }
 
 [dev-dependencies]
 criterion = { version = "0.7", default-features = false }

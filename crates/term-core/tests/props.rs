@@ -1311,3 +1311,65 @@ proptest! {
         check(&t)?;
     }
 }
+
+// ---------------------------------------------------------------------------
+// Compressed history (R.7).
+
+proptest! {
+    #![proptest_config(config())]
+
+    /// Compressing history at any point changes nothing a reader sees: the
+    /// screen after any steps (resizes reflow history, scrolling reads it),
+    /// every stored line, pulling lines back and searching. Both terminals
+    /// seal their open block after every step, so there are many blocks.
+    #[test]
+    fn compressing_history_changes_nothing(
+        cols in 1usize..=80,
+        lines in 1usize..=20,
+        limit in select(vec![2usize, 10, 1000]),
+        steps in prop::collection::vec((step(), 0u8..4), 1..30),
+    ) {
+        let mut plain = Term::new(cols, lines, limit, term_core::ImagePool::process());
+        let mut packed = Term::new(cols, lines, limit, term_core::ImagePool::process());
+        for (step, extra) in &steps {
+            apply(&mut plain, step);
+            apply(&mut packed, step);
+            plain.state.seal_history_for_test();
+            packed.state.seal_history_for_test();
+            match extra {
+                0 => {
+                    packed.state.shrink_history();
+                }
+                1 => {
+                    // The idle job: some blocks at a time.
+                    if let Some(mut job) = packed.state.compress_job(2) {
+                        job.run();
+                        packed.state.add_compressed(job);
+                    }
+                }
+                2 => {
+                    plain.state.pull_back_for_test(2);
+                    packed.state.pull_back_for_test(2);
+                }
+                _ => {}
+            }
+            check(&packed)?;
+            prop_assert_eq!(plain.state.dump(), packed.state.dump(), "after {:?}", step);
+        }
+        for q in ["a", "e ", "ab", "\u{1f600}"] {
+            let query = term_core::Query { text: q.into(), ignore_case: true, word: term_core::WordMatch::Contains };
+            prop_assert_eq!(search(&mut plain, query.clone()), search(&mut packed, query));
+        }
+        prop_assert_eq!(history(&mut plain), history(&mut packed));
+    }
+}
+
+fn search(t: &mut Term, query: term_core::Query) -> Vec<term_core::Hit> {
+    let mut job = t.state.start_search(query);
+    let mut batches = Vec::new();
+    job.run(|b| batches.push(b));
+    for b in batches {
+        t.state.add_search_hits(b);
+    }
+    t.state.search_hits()
+}

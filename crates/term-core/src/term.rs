@@ -17,6 +17,7 @@ use crate::style::{Attrs, LinkId, Style, Underline};
 use crate::style_table::{StyleStats, StyleTable};
 use crate::unicode::{self, Segmenter};
 
+mod compress;
 mod graphics;
 mod history;
 mod own_images;

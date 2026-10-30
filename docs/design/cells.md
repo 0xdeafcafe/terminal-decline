@@ -2452,6 +2452,46 @@ decompresses a block only when its filter lets it through (§13.6). R.7's
 target, 100k lines of `ls`/log output ≤ 3 MB, starts from 5.9 MB instead of
 9.3.
 
+**Landed (R.7).** What was built (`scrollback/packed.rs`, with hooks in
+`scrollback.rs`, `search.rs`, `search/filter.rs` and `term/compress.rs`),
+and where it differs from the plan above:
+- **The entry** holds a `Body`: the `Arc<BlockData>` as written, or an
+  `Arc<Packed>`. `Terminal::compress_job` takes uncompressed sealed
+  blocks under the lock, oldest first; `CompressJob::run` compresses
+  them off it (`lz4_flex`, pure Rust, safe code only); `add_compressed`
+  swaps them in under the lock if the entry still holds the same data.
+  The app runs it from the idle filters thread once every block has its
+  filter. Nothing on the output path compresses. `shrink_history` (R.5)
+  compresses every sealed block at once, drops the cache and the
+  filters, and gives back the open block's spare room.
+- **What stays outside** is less than planned: the first line, width,
+  ambiguous setting, `head_continues`, `has_marks`, the image list, the
+  links (shared `Arc`s) and each line's flags byte, kept as runs (most
+  lines of a block share theirs). `starts`, `checkpoints` and
+  `style_starts` are compressed too, as deltas with low bytes then high
+  bytes (they shrink 2.3 KB to under 0.9 KB a block): nothing reads them
+  without the text yet. Meta, text, the dictionary and the offsets are
+  each compressed on their own, about 4% smaller than as one stream.
+- **The cache** keeps the last two blocks decompressed (`Cache`, behind
+  a `Mutex` so history stays `Sync`). Every reader that needs more than
+  flags (`read`/`get_at_width`, marks, `text`, `shapes`, `pop_into`)
+  goes through it; `wrapped`, `fill` and `has_marks` don't decompress.
+  `memory_bytes` counts it.
+- **Search** takes `Body`s; each segment decompresses its block the
+  first time it is read, off the lock, and keeps it until the search
+  ends. Filter jobs decompress compressed blocks off the lock too, and
+  a filter is stored by the identity of the `Body` it was built from.
+- **Measured** (`scrollback_mem compressed` / `file <path>`, 160
+  columns, 100k lines, after `shrink_history`): synthetic `ls --color`
+  5.93 → 0.54 MB, `ls -l --color` 6.21 → 2.67 MB, a service log with
+  random ids 9.09 → 3.00 MB, plain 4.33 → 0.53 MB; real `ls -lR` of
+  `/usr` 6.31 → 1.21 MB and `/var/log/install.log` 11.19 → 1.58 MB.
+  Decoding a block takes 13–30 µs. Filters, when built, add 4 KB a
+  block on top (0.2–0.6 MB per 100k lines).
+- **Not done:** a block its filter rules out is still decompressed for
+  its boundary with the next block, and a search holds every block it
+  decompressed until it ends.
+
 **Landed (PR 7).** What was built (`scrollback.rs` and its tests in
 `scrollback/tests.rs`, with hooks in `term.rs`, `snapshot.rs` and
 `style_table.rs`), and where it differs from §11.1–§11.7:

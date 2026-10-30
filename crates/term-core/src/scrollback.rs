@@ -589,7 +589,8 @@ impl OpenBlock {
 
         // Common case: every cell is narrow ASCII (or empty) in the
         // default style, so the text is a byte copy and there are no runs.
-        if cells[..len].iter().fold(0, |a, c| a | c.bits()) & !0x7F == 0 && !row.has_marks() {
+        let or = cells[..len].iter().fold(0, |a, c| a | c.bits());
+        if or & !0x7F == 0 && !row.has_marks() {
             let end = if wrapped { cols } else { trim_spaces(&cells[..len]) };
             room(&mut self.meta, 7);
             if wrapped {
@@ -625,106 +626,39 @@ impl OpenBlock {
                 len
             }
         };
-        let text_end = if wrapped { text_cols } else { text_end(&cells[..run_end]) };
+        // Every stored cell narrow ASCII (or empty), in any style: the
+        // text is a byte copy, with no clusters, width exceptions or
+        // placeholders (`ls --color`, compiler output).
+        let ascii = or & (Cell::CONTENT & !0x7F | Cell::KIND | Cell::WIDTH) == 0;
+        let text_end = if wrapped {
+            text_cols
+        } else if ascii {
+            let mut end = len;
+            while end > 0 && matches!(cells[end - 1].bits() & 0x7F, 0 | 0x20) {
+                end -= 1;
+            }
+            end
+        } else {
+            text_end(&cells[..run_end])
+        };
         let last = cells[cols - 1];
         let fill = !wrapped && last.shows_empty() && last.bits() & (Cell::CONTENT | Cell::KIND) == 0 && !last.is_spacer();
 
         // The text, and the clusters and width exceptions it needs.
         scratch.clusters.clear();
         scratch.widths.clear();
-        let cluster_bytes = row.clusters().map_or(0, |x| x.raw().0.len());
-        // The text is written in place into room for its longest form
-        // (4 bytes a cell, plus cluster text), then cut to length: no
-        // capacity check or `memcpy` call per character.
-        let most = text_end * 4 + cluster_bytes;
-        room(&mut self.text, most + 1);
-        let text_start = self.text.len();
-        self.text.resize(text_start + most, 0);
-        let buf = &mut self.text[text_start..];
-        let mut at = 0;
-        let amb = self.ambiguous;
-        let (mut scalars, mut cluster_end, mut entry, mut width_next) = (0u32, 0u32, 0u32, 0u32);
-        // The last scalar looked up in the Unicode table and its width.
-        let mut last = ('\0', 1);
         scratch.placeholders.clear();
-        for cell in &cells[..text_end] {
-            let c = *cell;
-            if c.is_spacer() {
-                continue;
-            }
-            let bits = c.bits();
-            let predicted;
-            if bits & (Cell::CONTENT & !0x7F | Cell::KIND | Cell::WIDTH) == 0 {
-                // Narrow ASCII (or empty), not a cluster: the usual case.
-                buf[at] = if bits as u8 == 0 { b' ' } else { bits as u8 };
-                at += 1;
-                scalars += 1;
-                entry += 1;
-                continue;
-            } else if c.is_cluster() {
-                let s = row.clusters().map_or("", |x| x.get(c.codepoint()));
-                let n = s.chars().count() as u32;
-                if n == 0 {
-                    buf[at] = b' ';
-                    at += 1;
-                    predicted = 1;
-                    scalars += 1;
-                } else {
-                    buf[at..at + s.len()].copy_from_slice(s.as_bytes());
-                    at += s.len();
-                    if n > 1 {
-                        // A cluster's width goes in its entry: no need to
-                        // segment it again when it is read back.
-                        let wide = c.is_wide() as u32;
-                        scratch.clusters.push((scalars - cluster_end, (n - 1) << 1 | wide));
-                        cluster_end = scalars + n;
-                        predicted = 1 + wide as u8;
-                    } else {
-                        predicted = single_width(s.chars().next().unwrap_or(' '), amb);
-                    }
-                    scalars += n;
-                }
-            } else if c.is_placeholder() {
-                // 0x00 in the text (never matches a search, copied as a
-                // space); the piece goes in the line's placeholder list.
-                buf[at] = 0;
-                at += 1;
-                scalars += 1;
-                predicted = 1;
-                // Its column, from where it is (no counter in the loop for
-                // the rare case).
-                let x = (std::ptr::from_ref(cell).addr() - cells.as_ptr().addr()) / std::mem::size_of::<Cell>();
-                add_placeholder(&mut scratch.placeholders, x as u32, c);
-            } else {
-                let ch = match c.codepoint() {
-                    0 => ' ',
-                    cp => char::from_u32(cp).unwrap_or(' '),
-                };
-                at += ch.encode_utf8(&mut buf[at..at + 4]).len();
-                predicted = if scratch.widths_as_written && ch != ' ' {
-                    actual(c)
-                } else {
-                    if ch != last.0 {
-                        last = (ch, scratch.memo.width(ch, amb));
-                    }
-                    last.1
-                };
-                scalars += 1;
-            }
-            let actual = actual(c);
-            if actual != predicted {
-                scratch.widths.push((entry - width_next, actual));
-                width_next = entry + 1;
-            }
-            entry += 1;
-        }
-        self.text.truncate(text_start + at);
-        if self.text.capacity() > PART + 1 && self.text.len() <= PART {
-            // The room for the longest form went past 64 KB and the text
-            // itself didn't: give the rest back.
-            self.text.shrink_to(PART + 1);
-        }
-        let tlen = at;
+        let tlen = if ascii {
+            room(&mut self.text, text_end + 1);
+            self.text.extend(
+                cells[..text_end]
+                    .iter()
+                    .map(|c| if c.bits() as u8 == 0 { b' ' } else { c.bits() as u8 }),
+            );
+            text_end
+        } else {
+            self.encode_text(row, text_end, scratch)
+        };
         if !wrapped {
             self.text.push(END);
         }
@@ -834,6 +768,105 @@ impl OpenBlock {
                 end = start + n;
             }
         }
+    }
+
+    /// The text of `row`'s cells up to `text_end`, with the
+    /// clusters, width exceptions and placeholders it needs, into the
+    /// scratch lists. Returns the text's length.
+    fn encode_text(&mut self, row: &Row, text_end: usize, scratch: &mut Scratch) -> usize {
+        let cells = &row.cells[..];
+        let cluster_bytes = row.clusters().map_or(0, |x| x.raw().0.len());
+        // The text is written in place into room for its longest form
+        // (4 bytes a cell, plus cluster text), then cut to length: no
+        // capacity check or `memcpy` call per character.
+        let most = text_end * 4 + cluster_bytes;
+        room(&mut self.text, most + 1);
+        let text_start = self.text.len();
+        self.text.resize(text_start + most, 0);
+        let buf = &mut self.text[text_start..];
+        let mut at = 0;
+        let amb = self.ambiguous;
+        let (mut scalars, mut cluster_end, mut entry, mut width_next) = (0u32, 0u32, 0u32, 0u32);
+        // The last scalar looked up in the Unicode table and its width.
+        let mut last = ('\0', 1);
+        for cell in &cells[..text_end] {
+            let c = *cell;
+            if c.is_spacer() {
+                continue;
+            }
+            let bits = c.bits();
+            let predicted;
+            if bits & (Cell::CONTENT & !0x7F | Cell::KIND | Cell::WIDTH) == 0 {
+                // Narrow ASCII (or empty), not a cluster: the usual case.
+                buf[at] = if bits as u8 == 0 { b' ' } else { bits as u8 };
+                at += 1;
+                scalars += 1;
+                entry += 1;
+                continue;
+            } else if c.is_cluster() {
+                let s = row.clusters().map_or("", |x| x.get(c.codepoint()));
+                let n = s.chars().count() as u32;
+                if n == 0 {
+                    buf[at] = b' ';
+                    at += 1;
+                    predicted = 1;
+                    scalars += 1;
+                } else {
+                    buf[at..at + s.len()].copy_from_slice(s.as_bytes());
+                    at += s.len();
+                    if n > 1 {
+                        // A cluster's width goes in its entry: no need to
+                        // segment it again when it is read back.
+                        let wide = c.is_wide() as u32;
+                        scratch.clusters.push((scalars - cluster_end, (n - 1) << 1 | wide));
+                        cluster_end = scalars + n;
+                        predicted = 1 + wide as u8;
+                    } else {
+                        predicted = single_width(s.chars().next().unwrap_or(' '), amb);
+                    }
+                    scalars += n;
+                }
+            } else if c.is_placeholder() {
+                // 0x00 in the text (never matches a search, copied as a
+                // space); the piece goes in the line's placeholder list.
+                buf[at] = 0;
+                at += 1;
+                scalars += 1;
+                predicted = 1;
+                // Its column, from where it is (no counter in the loop for
+                // the rare case).
+                let x = (std::ptr::from_ref(cell).addr() - cells.as_ptr().addr()) / std::mem::size_of::<Cell>();
+                add_placeholder(&mut scratch.placeholders, x as u32, c);
+            } else {
+                let ch = match c.codepoint() {
+                    0 => ' ',
+                    cp => char::from_u32(cp).unwrap_or(' '),
+                };
+                at += ch.encode_utf8(&mut buf[at..at + 4]).len();
+                predicted = if scratch.widths_as_written && ch != ' ' {
+                    actual(c)
+                } else {
+                    if ch != last.0 {
+                        last = (ch, scratch.memo.width(ch, amb));
+                    }
+                    last.1
+                };
+                scalars += 1;
+            }
+            let actual = actual(c);
+            if actual != predicted {
+                scratch.widths.push((entry - width_next, actual));
+                width_next = entry + 1;
+            }
+            entry += 1;
+        }
+        self.text.truncate(text_start + at);
+        if self.text.capacity() > PART + 1 && self.text.len() <= PART {
+            // The room for the longest form went past 64 KB and the text
+            // itself didn't: give the rest back.
+            self.text.shrink_to(PART + 1);
+        }
+        at
     }
 
     /// Drop the newest line.

@@ -330,7 +330,8 @@ fn focus() {
     }
 }
 
-fn own_version() -> String {
+/// This build's version (`CFBundleShortVersionString`).
+pub fn own_version() -> String {
     NSBundle::mainBundle()
         .objectForInfoDictionaryKey(&NSString::from_str("CFBundleShortVersionString"))
         .and_then(|o| o.downcast::<NSString>().ok())
@@ -593,6 +594,9 @@ define_class!(
             let (_, version, _) = read_item(item);
             log(&format!("ready: {} installs when the app quits", version.as_deref().unwrap_or("?")));
             set_status("ready");
+            if let Some(v) = &version {
+                super::announce::ready(v);
+            }
             false
         }
 

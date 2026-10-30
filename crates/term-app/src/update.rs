@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 
 use crate::entry::Role;
 
+pub mod announce;
 pub mod dogfood;
 pub mod source;
 pub mod sparkle;

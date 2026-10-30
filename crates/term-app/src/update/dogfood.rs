@@ -87,6 +87,12 @@ pub fn start(role: &Role, mode: UpdateMode) -> bool {
     true
 }
 
+/// The checkout and commit this build came from, while updates from
+/// source run.
+pub fn source() -> Option<Source> {
+    STATE.with(|s| s.borrow().as_ref().map(|st| st.src.clone()))
+}
+
 /// Whether updates from source run in this process.
 pub fn shown() -> bool {
     STATE.with(|s| s.borrow().is_some())

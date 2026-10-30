@@ -124,6 +124,15 @@ define_class!(
             let mode = self.ivars().config.borrow().update;
             let sparkle = crate::update::sparkle::start(&self.ivars().role, mode.on());
             let source = crate::update::dogfood::start(&self.ivars().role, mode);
+            // "Updated to …" after an update of either kind.
+            if sparkle {
+                crate::update::announce::at_launch(
+                    crate::update::announce::Build::Release(crate::update::sparkle::own_version()),
+                    None,
+                );
+            } else if let Some(src) = crate::update::dogfood::source() {
+                crate::update::announce::at_launch(crate::update::announce::Build::Source(src.commit), Some(src.repo));
+            }
             if sparkle || source {
                 let menus = build_menus(mtm, &self.ivars().app_name, &self.ivars().config.borrow().keybinds());
                 NSApplication::sharedApplication(mtm).setMainMenu(Some(&menus));

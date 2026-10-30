@@ -53,22 +53,35 @@ Screen Recording).
 brew install --cask 0xdeafcafe/tap/terminal-decline
 ```
 
-**From source**, as the bare command, with no app bundle (so no Dock pins
-made from the app, and no updater):
+**From source, as a macOS app.** You need Rust (`rustup`, stable) and
+the Xcode command line tools (`xcode-select --install`; the full Xcode
+adds the Metal compiler, otherwise shaders compile at start). Then:
+
+```sh
+git clone https://github.com/0xdeafcafe/terminal-decline
+cd terminal-decline
+scripts/dogfood.sh --open
+```
+
+This builds a release, makes the app bundle (launcher, library and pin
+stub), signs it and installs it as `~/Applications/Terminal Decline.app`,
+then opens it. Drag it to the Dock to keep it there.
+
+- To install somewhere else: `DECLINE_DOGFOOD_DIR=/Applications scripts/dogfood.sh --open`.
+- To update: `git pull`, then `scripts/dogfood.sh` again. A running copy
+  restarts into the new build and reopens its windows in the same folders
+  and places.
+- It is signed ad-hoc, so macOS asks again for permissions (files,
+  notifications) after each rebuild. To keep them, sign with your own
+  certificate: `DECLINE_DOGFOOD_IDENTITY="Developer ID Application: …" scripts/dogfood.sh`.
+- The in-app updater stays off in these builds: updating is `git pull`.
+
+**From source, as the bare command** (no app bundle, so no Dock pins made
+from the app and no updater):
 
 ```sh
 cargo install --locked --git https://github.com/0xdeafcafe/terminal-decline terminal-decline
 ```
-
-**For development**, build the app bundle and install it as
-`~/Applications/Terminal Decline.app`:
-
-```sh
-scripts/dogfood.sh --open
-```
-
-Run it again after a change: a running copy restarts into the new build
-and reopens its windows in the same folders and places.
 
 macOS 14 (Sonoma) or later. Releases are Apple Silicon only; source builds
 are tested on Apple Silicon. MIT licensed.

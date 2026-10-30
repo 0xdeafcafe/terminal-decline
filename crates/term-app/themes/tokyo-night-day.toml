@@ -1,0 +1,13 @@
+# Tokyo Night Day, by enkia: https://github.com/enkia/tokyo-night-vscode-theme
+# (MIT licence). Colours from Folke Lemaitre's tokyonight.nvim terminal
+# extras,
+# https://raw.githubusercontent.com/folke/tokyonight.nvim/main/extras/ghostty/tokyonight_day
+# (Apache License 2.0, Copyright Folke Lemaitre).
+foreground = "#3760bf"
+background = "#e1e2e7"
+cursor = "#3760bf"
+selection = "#b7c1e3"
+palette = [
+    "#b4b5b9", "#f52a65", "#587539", "#8c6c3e", "#2e7de9", "#9854f1", "#007197", "#6172b0",
+    "#a1a6c5", "#ff4774", "#5c8524", "#a27629", "#358aff", "#a463ff", "#007ea8", "#3760bf",
+]

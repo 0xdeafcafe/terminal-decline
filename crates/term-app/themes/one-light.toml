@@ -1,0 +1,15 @@
+# One Light, by Atom (GitHub): https://github.com/atom/one-light-syntax
+# Copyright (c) 2014 GitHub Inc. MIT licence. Colours from Oli Morris's
+# onedarkpro.nvim terminal port,
+# https://raw.githubusercontent.com/olimorris/onedarkpro.nvim/main/extras/ghostty/onedarkpro_onelight
+# (MIT); cursor and selection from Atom's one-light-syntax,
+# https://raw.githubusercontent.com/atom/one-light-syntax/master/styles/syntax-variables.less
+# (MIT).
+foreground = "#6a6a6a"
+background = "#fafafa"
+cursor = "#526fff"
+selection = "#e5e5e6"
+palette = [
+    "#6a6a6a", "#e05661", "#1da912", "#eea825", "#118dc3", "#9a77cf", "#56b6c2", "#fafafa",
+    "#bebebe", "#e88189", "#25d717", "#f2bb54", "#1caceb", "#b69ddc", "#7bc6d0", "#ffffff",
+]

@@ -1,0 +1,13 @@
+# Catppuccin Frappé: https://github.com/catppuccin/catppuccin
+# Copyright (c) 2021 Catppuccin. MIT licence. Colours from the official
+# Ghostty port,
+# https://raw.githubusercontent.com/catppuccin/ghostty/main/themes/catppuccin-frappe.conf
+# (MIT).
+foreground = "#c6d0f5"
+background = "#303446"
+cursor = "#f2d5cf"
+selection = "#44495d"
+palette = [
+    "#51576d", "#e78284", "#a6d189", "#e5c890", "#8caaee", "#f4b8e4", "#81c8be", "#a5adce",
+    "#626880", "#e78284", "#a6d189", "#e5c890", "#8caaee", "#f4b8e4", "#81c8be", "#b5bfe2",
+]

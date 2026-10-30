@@ -1,0 +1,13 @@
+# Rosé Pine Dawn, by Rosé Pine: https://github.com/rose-pine/rose-pine-theme
+# Copyright (c) Rosé Pine. MIT licence. Colours from the official Ghostty
+# port,
+# https://raw.githubusercontent.com/rose-pine/ghostty/main/dist/rose-pine-dawn
+# (MIT).
+foreground = "#575279"
+background = "#faf4ed"
+cursor = "#575279"
+selection = "#dfdad9"
+palette = [
+    "#f2e9e1", "#b4637a", "#286983", "#ea9d34", "#56949f", "#907aa9", "#d7827e", "#575279",
+    "#9893a5", "#b4637a", "#286983", "#ea9d34", "#56949f", "#907aa9", "#d7827e", "#575279",
+]

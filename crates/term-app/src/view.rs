@@ -1188,8 +1188,7 @@ impl WindowView {
     /// even before its occlusion state catches up with a tab switch.
     pub(crate) fn visible(&self) -> bool {
         self.window().is_some_and(|w| {
-            let behind = w
-                .tabGroup()
+            let behind = crate::background::tab_group(&w)
                 .and_then(|g| g.selectedWindow())
                 .is_some_and(|front| !std::ptr::eq::<NSWindow>(&*front, &*w));
             !behind

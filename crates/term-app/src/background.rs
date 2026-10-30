@@ -28,7 +28,7 @@ use objc2::runtime::{AnyObject, NSObjectProtocol};
 use objc2::{ClassType, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSEvent, NSEventMask, NSEventModifierFlags, NSEventType, NSResponder, NSWindow,
-    NSWindowDidBecomeKeyNotification, NSWindowDidResignKeyNotification,
+    NSWindowDidBecomeKeyNotification, NSWindowDidResignKeyNotification, NSWindowTabGroup,
 };
 use objc2_foundation::{NSNotification, NSObject};
 
@@ -121,6 +121,16 @@ pub fn hide(window: &NSWindow) {
     }
 }
 
+/// The window's tab group when it has more than one tab, else `None`.
+/// Asking a window for its `tabGroup` makes AppKit build the group's tab
+/// bar, a tab bar item and a copy of the app's icon for it (1.4 MB of
+/// footprint for a window on its own), even when the bar never shows;
+/// `tabbedWindows` doesn't, and is `None` for a window on its own.
+pub fn tab_group(window: &NSWindow) -> Option<Retained<NSWindowTabGroup>> {
+    window.tabbedWindows().filter(|t| t.len() > 1)?;
+    window.tabGroup()
+}
+
 /// `makeKeyAndOrderFront:`. In the background: the window, transparent,
 /// goes behind every other window (a tab is selected in its group
 /// instead) and becomes the app's own key window.
@@ -130,7 +140,7 @@ pub fn make_key_and_order_front(window: &NSWindow) {
         return;
     }
     hide(window);
-    match window.tabGroup().filter(|g| g.windows().len() > 1) {
+    match tab_group(window) {
         Some(group) => group.setSelectedWindow(Some(window)),
         None if !window.isVisible() => window.orderBack(None),
         None => {}
@@ -214,7 +224,7 @@ pub fn closed(window: &NSWindow, windows: Vec<Retained<NSWindow>>) {
         let windows = windows.into_inner(MainThreadMarker::new().expect("on the main thread"));
         let open: Vec<_> = windows.into_iter().filter(|w| w.isVisible()).collect();
         let selected = open.iter().find(|w| {
-            w.tabGroup()
+            tab_group(w)
                 .and_then(|g| g.selectedWindow())
                 .is_none_or(|s| std::ptr::eq::<NSWindow>(&*s, &***w))
         });

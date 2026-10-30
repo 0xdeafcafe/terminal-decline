@@ -2758,7 +2758,13 @@ fn spawn_pane(window: usize, config: &Config, theme: &Theme, m: term_font::Metri
         crate::session::write_notice(&mut t, notice);
     }
     let hooks = pane_hooks(window, n.id, test, n.settings);
-    let session = Session::spawn(n.command, pty_size(cols, lines, m), t, hooks)?;
+    // The login shell (or a command that is just a shell) gets the shell
+    // integration; Settings and other programs don't.
+    let mut command = n.command.clone();
+    if config.shell_integration && !n.settings && !command.direct {
+        command.integration = crate::Paths::current().shell_integration_dir();
+    }
+    let session = Session::spawn(&command, pty_size(cols, lines, m), t, hooks)?;
     Ok(Pane {
         view: n.view,
         session,

@@ -12,11 +12,51 @@ WezTerm and Ghostty also read:
 | `ESC ] 133 ; C BEL` | when a command runs | its output starts |
 | `ESC ] 133 ; D ; status BEL` | before the next prompt | the command ended, with its exit status |
 
-The app doesn't inject anything into your shell. Instead `shell/` in
-this repository has a snippet for each of zsh, bash and fish that sends
-the marks; source the one for your shell.
+The app loads the marks into the shell by itself, the way Ghostty and
+kitty do: nothing to source. `shell/` in this repository has the snippet
+for each of zsh, bash and fish that sends them (and reports the folder
+with OSC 7); the app bundles it as
+`Terminal Decline.app/Contents/Resources/shell-integration` (a build in
+a checkout uses the checkout's `shell/`).
 
-## Setting it up
+## How the app loads it
+
+Only into the login shell it starts for a tab, window or pane, or a
+command that is just a shell (`command = ["fish"]`, a pin running
+`bash`). Other commands, Settings, and shells started from those shells
+(`ssh`, `sudo -s`, `tmux`, a `zsh` typed at the prompt) are left alone.
+TERM, TERM_PROGRAM and the rest are as without it. Your startup files
+still run, all of them, in the order the shell reads them:
+
+- **zsh**: `ZDOTDIR` points at `shell-integration/zsh`, whose `.zshenv`,
+  `.zprofile`, `.zshrc` and `.zlogin` each source yours (from your own
+  `ZDOTDIR`, or `$HOME`) with your `ZDOTDIR` in place while it runs; after
+  your `.zshrc` comes `decline.zsh`, so its hooks follow those of any
+  prompt theme (Powerlevel10k and its instant prompt, Oh My Zsh,
+  Starship). Once startup is done `ZDOTDIR` is yours again (or unset).
+- **bash**: started as `bash --rcfile shell-integration/bash/decline-inject.bash`,
+  which reads what a login bash would (`/etc/profile`, then the first of
+  `~/.bash_profile`, `~/.bash_login` and `~/.profile`), then
+  `decline.bash`. A login bash ignores `--rcfile`, so the shell isn't
+  flagged as a login shell (`shopt login_shell` is off, `logout` says to
+  use `exit`), as with Ghostty. Works with macOS's bash 3.2, which
+  doesn't read `ENV` in POSIX mode (Ghostty's other route); there the
+  snippet's `DEBUG` trap replaces one your files set (bash-preexec's,
+  say), so turn the setting off if you rely on one.
+- **fish**: `shell-integration` goes first in `XDG_DATA_DIRS`, so fish
+  reads `fish/vendor_conf.d/decline.fish` there before `config.fish`; it
+  takes the directory out of `XDG_DATA_DIRS` again and loads
+  `decline.fish`, which wraps the prompt when the first one is drawn.
+
+`shell_integration = false` (Settings > Advanced > Shell integration)
+starts the shell exactly as it is, for new tabs and windows.
+
+## Sourcing it by hand
+
+For a shell the app didn't start (over `ssh`, in `tmux`), or with
+`shell_integration = false`, source the snippet for the shell. A dotfile
+that already sources it is fine with the app loading it too: each
+snippet does nothing the second time.
 
 **zsh**: at the end of `~/.zshrc`, after any prompt theme (Powerlevel10k,
 Starship, Oh My Zsh themes), so its marks go around the prompt they set:

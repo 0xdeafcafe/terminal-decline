@@ -113,9 +113,11 @@ What is in the code today:
   (Option-drag), Shift-click, copy on select (off by default).
 - **Keyboard**: the kitty keyboard protocol, the layout-independent
   Ctrl/Meta keys, and a `keybind` setting to remap, unbind or send text.
-- **Shell integration**: OSC 133 snippets for zsh, bash and fish in
-  [shell/](shell/) (sourced by you, not injected): jump between prompts,
-  select a command's output, Option-click to move the cursor. See
+- **Shell integration**: OSC 133 prompt marks and OSC 7 for zsh, bash
+  and fish, loaded into the login shell by the app (`shell_integration`;
+  the snippets are in [shell/](shell/) to source by hand elsewhere): jump
+  between prompts, select a command's output, Option-click to move the
+  cursor, the title status and finish notifications. See
   [docs/shell-integration.md](docs/shell-integration.md).
 - **Settings**: `~/.config/terminal-decline/config.toml`, reloaded when it
   changes; Settings... (Cmd+,) opens a settings screen in a tab, and

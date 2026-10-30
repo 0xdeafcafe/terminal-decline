@@ -95,6 +95,9 @@ cp "$lib" "$contents/Frameworks/libterminal_decline.dylib"
 cp "$stub" "$contents/Helpers/terminal-decline-pin"
 chmod 755 "$contents/MacOS/terminal-decline" "$contents/Helpers/terminal-decline-pin"
 chmod 644 "$contents/Frameworks/libterminal_decline.dylib"
+# The shell integration the app loads into the shells it starts
+# (crates/term-pty/src/integration.rs), dotfiles (zsh/.zshenv) included.
+ditto "$repo_root/shell" "$contents/Resources/shell-integration"
 
 # Sparkle.framework, without what only an Xcode build or a sandboxed app
 # uses: the XPC services (the folder and its top-level symlink, or

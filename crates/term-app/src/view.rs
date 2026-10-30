@@ -1043,10 +1043,21 @@ impl WindowView {
             changed
         });
         if changed == Some(true) {
+            let layer = &self.ivars().layer;
             if visible {
+                // Its drawables back at full size, then drawn at once.
+                if let Some(window) = self.window() {
+                    let (size, scale) = (self.frame().size, window.backingScaleFactor());
+                    layer.setDrawableSize(NSSize::new((size.width * scale).round(), (size.height * scale).round()));
+                }
                 self.redraw_all();
-            } else {
+            } else if minimised {
+                // The Dock shows a minimised window's last frame.
                 self.trim_drawables();
+            } else {
+                // Nothing of it can be seen: let both drawables go, not
+                // only the spare one, until it is shown again.
+                layer.setDrawableSize(NSSize::new(1.0, 1.0));
             }
         }
         visible

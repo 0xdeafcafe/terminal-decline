@@ -26,7 +26,7 @@ pub const WRITE_EVERY: Duration = Duration::from_millis(100);
 pub enum Effect {
     /// Bytes for the terminal (the chord recording request).
     Send(String),
-    /// Run `$EDITOR` on this file, then [`App::reload`].
+    /// Run the editor on this file, then [`App::reload`].
     EditFile(PathBuf),
     /// Draw the next frame whole.
     Repaint,
@@ -184,6 +184,9 @@ pub struct App<'h> {
     previewed: Option<(String, Option<ThemeInfo>)>,
     /// Themes' colours for the swatches in theme lists, read once each.
     theme_infos: std::collections::HashMap<String, Option<ThemeInfo>>,
+    /// For a list with group headers: the item on each row shown (`None`
+    /// for a header). Empty for a list without.
+    hit_rows: Vec<Option<usize>>,
 }
 
 fn path_of(key: &str) -> KeyPath {
@@ -276,9 +279,16 @@ impl<'h> App<'h> {
             effects: Vec::new(),
             previewed: None,
             theme_infos: Default::default(),
+            hit_rows: Vec::new(),
         };
         app.open(layers, edit);
         app
+    }
+
+    /// The `editor` setting in effect (empty when unset).
+    pub fn editor_setting(&self) -> String {
+        let (item, _) = self.layers.lookup(&["editor".to_string()]);
+        item.and_then(|i| i.as_str()).unwrap_or("").to_string()
     }
 
     fn open(&mut self, layers: Vec<PathBuf>, edit: usize) {
@@ -1031,10 +1041,22 @@ impl<'h> App<'h> {
                     .map(|(l, d)| if side == "light" { l } else { d })
                     .unwrap_or_default();
                 let mut items = vec![("".to_string(), "none (the built-in colours)".to_string())];
-                items.extend(self.host.themes().into_iter().map(|t| {
-                    let title = self.host.theme_info(&t).map_or_else(|| t.clone(), |i| i.title);
-                    (t, title)
-                }));
+                // Grouped by background: the side's own group first, the
+                // order inside a group kept. The list draws the headers;
+                // they are not items.
+                let (mut own, mut other) = (Vec::new(), Vec::new());
+                for t in self.host.themes() {
+                    let info = self.host.theme_info(&t);
+                    let dark = info.as_ref().is_none_or(ThemeInfo::is_dark);
+                    let title = info.map_or_else(|| t.clone(), |i| i.title);
+                    if dark == (side == "dark") {
+                        own.push((t, title));
+                    } else {
+                        other.push((t, title));
+                    }
+                }
+                items.extend(own);
+                items.extend(other);
                 let title = if side == "light" { "Light theme" } else { "Dark theme" };
                 self.choose(title, items, &current, Then::ThemeSide(side), false);
             }
@@ -1789,7 +1811,12 @@ impl<'h> App<'h> {
             MouseKind::Press(0) => {
                 if let Some((x0, x1, y0, first, count)) = hit.popup {
                     if (x0..x1).contains(&x) && y >= y0 && y < y0 + count {
-                        let i = first + (y - y0);
+                        // A header row isn't an item.
+                        let i = match self.hit_rows.get(y - y0) {
+                            Some(Some(i)) => *i,
+                            Some(None) => return,
+                            None => first + (y - y0),
+                        };
                         match &mut self.mode {
                             Mode::Choice { sel, .. } | Mode::List { sel, .. } => {
                                 let again = *sel == i;

@@ -166,7 +166,7 @@ pub fn run(role: Role, args: Vec<String>) -> i32 {
 /// app.
 fn subcommand(args: &[String], paths: &Paths, moved: Option<&str>) -> Option<i32> {
     let first = args.first().map(String::as_str);
-    if matches!(first, Some("pin" | "import" | "prefs"))
+    if matches!(first, Some("pin" | "import" | "prefs" | "settings"))
         && let Some(m) = moved
     {
         eprintln!("terminal-decline: {m}");
@@ -179,8 +179,10 @@ fn subcommand(args: &[String], paths: &Paths, moved: Option<&str>) -> Option<i32
                 1
             }
         }),
-        // Settings… (Cmd+,), or run by hand: the preferences in this terminal.
-        Some("prefs") => Some(crate::prefs::run(&args[1..], paths)),
+        // Settings… (Cmd+,), or run by hand: the preferences in this terminal,
+        // as `prefs` or by its name, `settings`. By hand nothing is sent to
+        // the terminal: no app is assumed to be there (`--in-app` says so).
+        Some("prefs" | "settings") => Some(crate::prefs::run(&args[1..], paths)),
         Some("import") => Some(match crate::import::run(&args[1..], paths) {
             Ok(()) => 0,
             Err(e) => {
@@ -247,6 +249,7 @@ mod tests {
             &["--config", "/tmp/c.toml"],
             &["pin", "--list"],
             &["prefs"],
+            &["settings"],
             &["import", "ghostty"],
             &["-h"],
             &["--restore"],
@@ -255,6 +258,19 @@ mod tests {
             let e = pin_arguments(&args(refused)).unwrap_err();
             assert!(e.contains("refused"), "{refused:?}: {e}");
         }
+    }
+
+    #[test]
+    fn settings_is_prefs_by_another_name() {
+        let paths = Paths::from_env();
+        // Both reach the preferences, which refuse a bad argument (2)
+        // before touching the terminal; anything else starts the app.
+        for name in ["prefs", "settings"] {
+            assert_eq!(subcommand(&args(&[name, "--bogus"]), &paths, None), Some(2), "{name}");
+            assert_eq!(subcommand(&args(&[name, "--help"]), &paths, None), Some(2), "{name}");
+        }
+        assert_eq!(subcommand(&args(&["nonsense"]), &paths, None), None);
+        assert_eq!(subcommand(&args(&[]), &paths, None), None);
     }
 
     #[test]

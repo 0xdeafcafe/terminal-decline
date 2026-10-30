@@ -2394,3 +2394,56 @@ fn smoke_memory_pressure_gives_memory_back_and_redraws() {
         history(&d[1]) / 1e6
     );
 }
+
+/// Terminal Decline > Edit config.toml (the `edit-config` control command)
+/// opens a tab running the user's editor on the config file, never
+/// TextEdit: a fake editor named by the `editor` setting writes the file it
+/// was given into a marker. The window gets a second tab for it.
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_edit_config_opens_a_tab_running_the_editor() {
+    if !have_metal() {
+        return;
+    }
+    let dir = TempDir::new("editor");
+    let d = dir.path().display();
+    let conf_dir = dir.config_home().join("terminal-decline");
+    std::fs::create_dir_all(&conf_dir).unwrap();
+    let file = conf_dir.join("config.toml");
+    let fake = dir.path().join("fake-editor");
+    std::fs::write(
+        &fake,
+        format!("#!/bin/sh\nprintf %s \"$1\" > '{d}/marker.tmp'\nmv '{d}/marker.tmp' '{d}/marker'\nsleep 30\n"),
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    std::fs::write(&file, format!("editor = '{}'\n", fake.display())).unwrap();
+    let script = format!(
+        "echo before; {edit}i=0; until [ -e '{d}/marker' ] || [ $i -ge 200 ]; do sleep 0.05; i=$((i+1)); done; \
+         echo edited; {dump}{wait}{quit}sleep 20",
+        edit = osc("edit-config"),
+        dump = osc("dump"),
+        wait = dump_until(&dir, "edited[|]"),
+        quit = osc("quit"),
+    );
+    let mut cmd = Command::new(APP);
+    cmd.args(["-e", "/bin/sh", "-c", &script])
+        .env("XDG_CONFIG_HOME", dir.config_home())
+        .env("DECLINE_TEST_DUMP", dir.dump_file())
+        // Their login shell, as the app runs the editor through it.
+        .env("SHELL", "/bin/sh")
+        .current_dir(dir.path());
+    let (status, _) = run(&mut cmd);
+    assert!(status.success(), "{status}");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("marker")).unwrap_or_default(),
+        file.display().to_string()
+    );
+    let all = dumps(&dir);
+    let last = all.iter().find(|x| screen(x).contains("edited|")).expect("no dump after the edit");
+    check_dump(last);
+    assert_eq!(num(last, "tabs"), 2.0, "the editor has its own tab: {last}");
+}

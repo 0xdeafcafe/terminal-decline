@@ -492,7 +492,22 @@ impl App<'_> {
                 } else {
                     Vec::new()
                 };
-                let (cx, cy) = self.popup(f, title, Some(filter), &labels, &swatches, *sel, look);
+                // Theme lists: a faint header where the background turns
+                // from dark to light (or back), for the groups that have a
+                // match.
+                let mut groups: Vec<(usize, &str)> = Vec::new();
+                if matches!(then, Then::ThemeSide(_)) {
+                    let mut last = None;
+                    for (k, (v, _)) in shown.iter().enumerate() {
+                        let Some(info) = self.theme_info_cached(v) else { continue };
+                        let dark = info.is_dark();
+                        if last != Some(dark) {
+                            groups.push((k, if dark { "Dark" } else { "Light" }));
+                            last = Some(dark);
+                        }
+                    }
+                }
+                let (cx, cy) = self.popup(f, title, Some(filter), &labels, &swatches, &groups, *sel, look);
                 f.cursor = Some((cx + str_width(filter), cy));
             }
             Mode::List { path, sel, .. } => {
@@ -503,7 +518,7 @@ impl App<'_> {
                 } else {
                     items
                 };
-                self.popup(f, title, None, &labels, &[], *sel, look);
+                self.popup(f, title, None, &labels, &[], &[], *sel, look);
             }
             Mode::Text {
                 title,
@@ -513,7 +528,7 @@ impl App<'_> {
                 ..
             } => {
                 let before: String = buf.chars().take(*c).collect();
-                let (cx, cy) = self.popup(f, title, Some(buf), &[], &[], 0, look);
+                let (cx, cy) = self.popup(f, title, Some(buf), &[], &[], &[], 0, look);
                 f.cursor = Some((cx + str_width(&before), cy));
             }
             _ => {}
@@ -534,7 +549,8 @@ impl App<'_> {
 
     /// A box over the right of the screen: an optional input line, then
     /// the items with `sel` marked, each with its theme's colours if
-    /// `swatches` has them. Returns where the input text starts.
+    /// `swatches` has them. `groups` are headers, each with the index of
+    /// the item it comes before. Returns where the input text starts.
     #[allow(clippy::too_many_arguments)]
     fn popup(
         &mut self,
@@ -543,6 +559,7 @@ impl App<'_> {
         head: Option<&str>,
         items: &[String],
         swatches: &[Option<ThemeInfo>],
+        groups: &[(usize, &str)],
         sel: usize,
         look: &Look,
     ) -> (usize, usize) {
@@ -552,7 +569,9 @@ impl App<'_> {
         let extra = usize::from(head.is_some());
         // Under the header, when there is one.
         let y = usize::from(w >= 60 && h >= 12);
-        let ph = (items.len() + extra + 2).min(h.saturating_sub(1 + y)).max(3.min(h - y));
+        let ph = (items.len() + groups.len() + extra + 2)
+            .min(h.saturating_sub(1 + y))
+            .max(3.min(h - y));
         f.fill(x, y, pw, ph, look.base);
         f.boxed(x, y, pw, ph, title, look.dim, look.accent.bold());
         let inner = pw - 2;
@@ -569,7 +588,28 @@ impl App<'_> {
             input = (tx, y + 1);
         }
         let room = ph.saturating_sub(2 + extra);
-        let first = if sel < items.len() && sel >= room { sel + 1 - room } else { 0 };
+        // The rows: items, with a header row before each group's first.
+        let mut rows: Vec<(Option<usize>, &str)> = Vec::new();
+        for k in 0..items.len() {
+            if let Some((_, name)) = groups.iter().find(|(at, _)| *at == k) {
+                rows.push((None, name));
+            }
+            rows.push((Some(k), ""));
+        }
+        // Scrolled to the selection, and to its header if it is a group's
+        // first and there is room.
+        let at = rows.iter().position(|(k, _)| *k == Some(sel)).unwrap_or(usize::MAX);
+        let at = if at != usize::MAX && at > 0 && rows[at - 1].0.is_none() && room > 1 {
+            at - 1
+        } else {
+            at
+        };
+        let first = if at != usize::MAX && at + 1 > room { at + 1 - room } else { 0 };
+        self.hit_rows = if groups.is_empty() {
+            Vec::new()
+        } else {
+            rows.iter().skip(first).take(room).map(|(k, _)| *k).collect()
+        };
         let iy = y + 1 + extra;
         // Theme swatches: `Aa` in the theme's text colour on its
         // background, then its first six ANSI colours.
@@ -578,8 +618,13 @@ impl App<'_> {
         } else {
             0
         };
-        for (k, item) in items.iter().enumerate().skip(first).take(room) {
-            let yy = iy + k - first;
+        for (r, (k, title)) in rows.iter().enumerate().skip(first).take(room) {
+            let yy = iy + r - first;
+            let Some(k) = *k else {
+                f.text(x + 3, yy, x + 1 + inner, title, look.dim);
+                continue;
+            };
+            let item = &items[k];
             let selected = k == sel;
             let style = if selected { look.sel } else { look.base };
             if selected {
@@ -603,7 +648,7 @@ impl App<'_> {
                 f.cursor = Some((x + 2, yy));
             }
         }
-        self.hit.popup = Some((x + 1, x + 1 + inner, iy, first, room.min(items.len().saturating_sub(first))));
+        self.hit.popup = Some((x + 1, x + 1 + inner, iy, first, room.min(rows.len().saturating_sub(first))));
         input
     }
 
@@ -615,19 +660,25 @@ impl App<'_> {
             ("/", "search all settings"),
             ("r", "reset: remove it from this file"),
             ("u", "undo the last change"),
-            ("e", "open the file in $EDITOR"),
+            ("e", "open the file in your editor"),
             ("c a d", "shortcuts: rebind, add, unbind"),
             ("ctrl+l", "redraw"),
             ("q esc", "quit"),
         ];
-        let notes = ["Each change is saved at once; the file can", "always be edited by hand."];
+        let notes = [
+            "Each change is saved at once; the file can",
+            "always be edited by hand.",
+            "",
+            "Run it in any terminal with:",
+            "  terminal-decline settings  (or decline settings)",
+        ];
         let lines: Vec<String> = keys
             .iter()
             .map(|(k, v)| format!("{k:<12} {v}"))
             .chain(std::iter::once(String::new()))
             .chain(notes.iter().map(|s| s.to_string()))
             .collect();
-        self.popup(f, "Help", None, &lines, &[], usize::MAX, look);
+        self.popup(f, "Help", None, &lines, &[], &[], usize::MAX, look);
         // The keys in the accent.
         if let Some((x0, x1, y0, first, count)) = self.hit.popup {
             for (k, (key, _)) in keys.iter().enumerate().skip(first).take(count) {

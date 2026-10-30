@@ -92,6 +92,7 @@ are tested on Apple Silicon. MIT licensed.
 terminal-decline              # your login shell
 terminal-decline -e htop      # a program instead of the shell
 terminal-decline pin Rush --icon rush.png -- ./rush   # Rush.app with its own Dock icon
+terminal-decline settings     # the Settings screen, in any terminal (also `decline settings`)
 ```
 
 ## Features
@@ -118,7 +119,10 @@ What is in the code today:
   [docs/shell-integration.md](docs/shell-integration.md).
 - **Settings**: `~/.config/terminal-decline/config.toml`, reloaded when it
   changes; Settings... (Cmd+,) opens a settings screen in a tab, and
-  `terminal-decline prefs` opens it from any terminal.
+  `terminal-decline settings` (or `decline settings`; `prefs` works too)
+  opens it in any terminal, over ssh or in Terminal.app, without the app
+  running. Edit config.toml opens the file in a tab running your editor
+  (the `editor` setting, else `$VISUAL`/`$EDITOR`, else nano, vim or vi).
 - **Themes**: eight built in (Catppuccin, Gruvbox, Solarized, Tokyo Night,
   Slope) and your own in `~/.config/terminal-decline/themes/`.
 - **Importers**: `terminal-decline import ghostty` turns a Ghostty config

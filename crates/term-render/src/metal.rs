@@ -16,6 +16,7 @@ use std::ptr::NonNull;
 use std::rc::{Rc, Weak};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 use block2::RcBlock;
 use objc2::Message;
@@ -354,6 +355,54 @@ pub struct GlyphCache {
     windows: usize,
     hidden: usize,
     volatile: bool,
+    /// The time the frame being built may spend on new glyphs.
+    budget: Budget,
+}
+
+/// The time one pane's build may spend finding and rasterising glyphs it
+/// hasn't drawn before (roadmap R.1). A screenful of new CJK or emoji
+/// takes 10–200 ms on the main thread (two thirds of it finding the
+/// fallback font, a third rasterising), which held up typing; past the
+/// budget, new glyphs wait for the next frames, which the pane builds
+/// until it has them all. Printable ASCII never waits.
+#[derive(Default)]
+struct Budget {
+    /// `None`: no limit (tests, and anything that isn't a window's frame).
+    limit: Option<Duration>,
+    /// Set by the first new glyph.
+    deadline: Option<Instant>,
+    /// A glyph was left for a later frame.
+    deferred: bool,
+}
+
+impl Budget {
+    fn begin(&mut self, limit: Option<Duration>) {
+        *self = Budget {
+            limit,
+            ..Budget::default()
+        };
+    }
+
+    /// Whether a new glyph must wait for a later frame. The first new
+    /// glyph of a build never does, so every build makes progress.
+    fn spent(&mut self) -> bool {
+        let Some(limit) = self.limit else { return false };
+        let now = Instant::now();
+        let Some(deadline) = self.deadline else {
+            self.deadline = Some(now + limit);
+            return false;
+        };
+        if now >= deadline {
+            self.deferred = true;
+            return true;
+        }
+        false
+    }
+
+    /// Whether a glyph was left for later; the limit goes.
+    fn end(&mut self) -> bool {
+        std::mem::take(self).deferred
+    }
 }
 
 thread_local! {
@@ -386,6 +435,7 @@ impl GlyphCache {
             windows: 0,
             hidden: 0,
             volatile: false,
+            budget: Budget::default(),
         }
     }
 
@@ -398,6 +448,7 @@ impl GlyphCache {
             by_char,
             in_flight,
             generation,
+            budget,
             ..
         } = self;
         // A handful of font sets at most: a search beats hashing.
@@ -417,6 +468,7 @@ impl GlyphCache {
             fonts,
             id,
             generation: *generation,
+            budget,
         }
     }
 
@@ -530,6 +582,7 @@ pub(crate) struct PaneGlyphs<'a> {
     fonts: &'a Fonts,
     id: FontsId,
     generation: u64,
+    budget: &'a mut Budget,
 }
 
 impl PaneGlyphs<'_> {
@@ -590,6 +643,9 @@ impl GlyphSource for PaneGlyphs<'_> {
         if let Some(slot) = self.chars.other.get(&(cp, style)) {
             return *slot;
         }
+        if self.budget.spent() {
+            return None;
+        }
         let slot = self.lookup(cp, style)?;
         self.chars.other.insert((cp, style), slot);
         slot
@@ -602,6 +658,9 @@ impl GlyphSource for PaneGlyphs<'_> {
 
     #[inline]
     fn glyph_key(&mut self, key: GlyphKey) -> Option<GlyphSlot> {
+        if !self.by_key.contains_key(&(self.id, key)) && self.budget.spent() {
+            return None;
+        }
         self.by_key(key).flatten()
     }
 
@@ -654,6 +713,8 @@ pub struct PaneRender {
     pub frame: Frame,
     /// The glyph textures' generation and the fonts it was built against.
     built_with: Option<(u64, FontsId)>,
+    /// Its last build left new glyphs for later (see [`Budget`]).
+    deferred: bool,
 }
 
 impl PaneRender {
@@ -666,6 +727,14 @@ impl PaneRender {
     pub fn forget(&mut self) {
         self.frame = Frame::default();
         self.built_with = None;
+        self.deferred = false;
+    }
+
+    /// Its last build drew without some new glyphs, to keep within the
+    /// time [`Renderer::set_glyph_budget`] gives: build it again next
+    /// frame (every row, so they get their glyphs).
+    pub fn glyphs_deferred(&self) -> bool {
+        self.deferred
     }
 }
 
@@ -1044,6 +1113,8 @@ pub struct Renderer {
     /// the window is hidden.
     last_surface: Option<Retained<objc2_io_surface::IOSurfaceRef>>,
     hidden: bool,
+    /// The time each pane's build may spend on new glyphs; `None`: no limit.
+    glyph_budget: Option<Duration>,
 }
 
 impl Renderer {
@@ -1091,6 +1162,7 @@ impl Renderer {
             pane: PaneRender::default(),
             last_surface: None,
             hidden: false,
+            glyph_budget: None,
         }
     }
 
@@ -1223,7 +1295,14 @@ impl Renderer {
     /// GPU state except new glyphs (and, rarely, a glyph texture that
     /// grows).
     pub fn build_pane(&mut self, pane: &mut PaneRender, term: &mut Terminal, input: &FrameInput) {
-        build(&self.shared, self.fonts_id, &self.fonts, pane, term, input);
+        build(&self.shared, self.fonts_id, &self.fonts, self.glyph_budget, pane, term, input);
+    }
+
+    /// Let each pane's build spend at most `limit` on glyphs it hasn't
+    /// drawn before, leaving the rest for later frames
+    /// ([`PaneRender::glyphs_deferred`]); `None` (the default): no limit.
+    pub fn set_glyph_budget(&mut self, limit: Option<Duration>) {
+        self.glyph_budget = limit;
     }
 
     /// The part of building `pane` that needs `term` locked: the snapshot,
@@ -1233,7 +1312,7 @@ impl Renderer {
     /// lock).
     pub fn snapshot_pane(&mut self, pane: &mut PaneRender, term: &mut Terminal, input: &FrameInput) {
         let generation = self.shared.glyphs.borrow_mut().source(self.fonts_id, &self.fonts).generation();
-        pane.frame.snapshot(term, input, generation);
+        snapshot(pane, term, input, generation);
     }
 
     /// Build `pane` from its last [`snapshot_pane`](Self::snapshot_pane),
@@ -1242,7 +1321,7 @@ impl Renderer {
     /// must be copied again): build it with
     /// [`build_pane`](Self::build_pane), with the terminal locked.
     pub fn build_from_snapshot(&mut self, pane: &mut PaneRender, input: &FrameInput) -> bool {
-        finish(&self.shared, self.fonts_id, &self.fonts, pane, input)
+        finish(&self.shared, self.fonts_id, &self.fonts, self.glyph_budget, pane, input)
     }
 
     /// [`build_pane`](Self::build_pane), with `inject` changing the
@@ -1278,7 +1357,15 @@ impl Renderer {
     /// Build the full-window pane's instances ([`build_pane`](Self::build_pane)
     /// on [`Renderer::pane`]).
     pub fn prepare(&mut self, term: &mut Terminal, input: &FrameInput) {
-        build(&self.shared, self.fonts_id, &self.fonts, &mut self.pane, term, input);
+        build(
+            &self.shared,
+            self.fonts_id,
+            &self.fonts,
+            self.glyph_budget,
+            &mut self.pane,
+            term,
+            input,
+        );
     }
 
     /// The reference path (`Frame::build_live`) into the full-window pane.
@@ -1368,10 +1455,18 @@ impl Drop for Renderer {
 }
 
 /// [`Renderer::build_pane`].
-fn build(shared: &Shared, id: FontsId, fonts: &Fonts, pane: &mut PaneRender, term: &mut Terminal, input: &FrameInput) {
+fn build(
+    shared: &Shared,
+    id: FontsId,
+    fonts: &Fonts,
+    budget: Option<Duration>,
+    pane: &mut PaneRender,
+    term: &mut Terminal,
+    input: &FrameInput,
+) {
     let generation = shared.glyphs.borrow_mut().source(id, fonts).generation();
-    pane.frame.snapshot(term, input, generation);
-    if finish(shared, id, fonts, pane, input) {
+    snapshot(pane, term, input, generation);
+    if finish(shared, id, fonts, budget, pane, input) {
         return;
     }
     // A glyph texture was emptied at its cap (by this build or another
@@ -1383,13 +1478,31 @@ fn build(shared: &Shared, id: FontsId, fonts: &Fonts, pane: &mut PaneRender, ter
     pane.frame.snapshot(term, input, glyphs.generation());
     pane.frame.build_snapshot(input, &mut glyphs);
     pane.built_with = Some(cache.built_with(id));
+    deferred(&mut cache, pane);
+}
+
+/// Ends the build's glyph budget, noting whether the pane was drawn
+/// without some new glyphs.
+fn deferred(cache: &mut GlyphCache, pane: &mut PaneRender) {
+    pane.deferred = cache.budget.end();
+}
+
+/// Takes `pane`'s snapshot. A pane last drawn without some new glyphs
+/// forgets its rows first, so they are all copied and built again (they
+/// were cached without those glyphs).
+fn snapshot(pane: &mut PaneRender, term: &mut Terminal, input: &FrameInput, generation: u64) {
+    if std::mem::take(&mut pane.deferred) {
+        pane.frame.forget_rows();
+    }
+    pane.frame.snapshot(term, input, generation);
 }
 
 /// [`Renderer::build_from_snapshot`]: false when a glyph texture was
 /// emptied since the snapshot or while building, and the pane needs every
 /// row copied again.
-fn finish(shared: &Shared, id: FontsId, fonts: &Fonts, pane: &mut PaneRender, input: &FrameInput) -> bool {
+fn finish(shared: &Shared, id: FontsId, fonts: &Fonts, budget: Option<Duration>, pane: &mut PaneRender, input: &FrameInput) -> bool {
     let mut cache = shared.glyphs.borrow_mut();
+    cache.budget.begin(budget);
     if !pane.frame.build_snapshot(input, &mut cache.source(id, fonts)) {
         return false;
     }
@@ -1404,6 +1517,7 @@ fn finish(shared: &Shared, id: FontsId, fonts: &Fonts, pane: &mut PaneRender, in
         pane.frame.redraw(input, &mut cache.source(id, fonts));
     }
     pane.built_with = Some(cache.built_with(id));
+    deferred(&mut cache, pane);
     true
 }
 

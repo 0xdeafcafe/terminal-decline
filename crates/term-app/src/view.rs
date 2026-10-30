@@ -52,6 +52,11 @@ use crate::theme::Appearance;
 
 pub(crate) const BLINK_INTERVAL: Duration = Duration::from_millis(530);
 
+/// The time a pane's frame may spend on glyphs it hasn't drawn before;
+/// the rest come in the next frames (roadmap R.1). Under half a 120 Hz
+/// refresh, so a flood of new CJK or emoji doesn't hold up typing.
+pub(crate) const GLYPH_BUDGET: Duration = Duration::from_millis(3);
+
 /// What the window keeps: its layer's renderer and display link, and what
 /// is the same for all its panes (splits design §2.2).
 pub(crate) struct Win {
@@ -1317,6 +1322,10 @@ impl WindowView {
             if !ok {
                 p.render.forget();
                 crashed.push(id);
+            } else if p.render.glyphs_deferred() {
+                // Drawn without some new glyphs: built again next tick.
+                p.session.mark_dirty();
+                win.link.setPaused(false);
             }
         }
         if !crashed.is_empty() {
@@ -1374,8 +1383,11 @@ impl WindowView {
         drop(draws);
         win.frames += 1;
         let mut poll_dump = false;
+        // A dump shows every glyph: it waits for the frame that has them.
+        let complete = !shown.iter().filter_map(|id| panes.get(id)).any(|p| p.render.glyphs_deferred());
         if let Some(test) = &mut win.test
             && test.dump == DumpState::Requested
+            && complete
         {
             test.dump = DumpState::Drawn(win.renderer.frames_submitted());
             poll_dump = true;

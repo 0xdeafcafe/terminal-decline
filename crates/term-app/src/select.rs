@@ -40,6 +40,16 @@ pub fn gesture(clicks: isize, shift: bool, option: bool) -> Gesture {
     }
 }
 
+/// The gesture for a click made with Shift held over a program that
+/// takes the mouse: Shift only keeps the click from the program, so it
+/// works as the click without Shift would. A Shift-drag starts a new
+/// selection (not extending one left from before, nor selecting the
+/// cell clicked until the mouse moves), and Shift+Option-drag a
+/// rectangle.
+pub fn gesture_over_program(clicks: isize, option: bool) -> Gesture {
+    gesture(clicks, false, option)
+}
+
 /// Whether letting go of the button copies the selection (with
 /// `copy_on_select` on): a word, line or Shift-click always made one; a
 /// plain or rectangular click only if the mouse was dragged.
@@ -218,6 +228,18 @@ mod tests {
                 want,
                 "clicks={clicks} shift={shift} option={option}"
             );
+        }
+    }
+
+    /// Over a program that takes the mouse, Shift is what lets the
+    /// terminal select: a Shift-drag starts a new selection, as a plain
+    /// drag does elsewhere, rather than stretching an old one.
+    #[test]
+    fn shift_over_a_program_starts_a_new_selection() {
+        use Gesture::*;
+        for (clicks, option, want) in [(1, false, Start), (1, true, Block), (2, false, Word), (3, true, Line)] {
+            assert_eq!(gesture_over_program(clicks, option), want, "clicks={clicks} option={option}");
+            assert_eq!(gesture(clicks, true, option), Extend, "elsewhere Shift extends");
         }
     }
 

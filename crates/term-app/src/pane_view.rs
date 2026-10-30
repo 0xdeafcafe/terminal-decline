@@ -762,6 +762,56 @@ impl PaneView {
         }
     }
 
+    /// The test control's mouse event ([`crate::control::Control::Mouse`]):
+    /// a left button event in the middle of view cell (`line`, `col`),
+    /// handled as a real one is.
+    pub(crate) fn test_mouse(&self, kind: crate::control::MouseKind, line: usize, col: usize, shift: bool, option: bool) {
+        use crate::control::MouseKind;
+        let Some(window) = self.window() else { return };
+        let titlebar = self.window_view().map_or(0.0, |w| w.titlebar_height());
+        let Some(at) = self.with(|win, p| {
+            let m = win.renderer.metrics();
+            let pad = pane_padding(&win.config, titlebar, win.scale, p.rect);
+            let (x, y) = layout::cell_origin(line, col, m.into(), pad);
+            NSPoint::new(
+                (x as f64 + m.cell_width as f64 / 2.0) / win.scale,
+                (y as f64 + m.cell_height as f64 / 2.0) / win.scale,
+            )
+        }) else {
+            return;
+        };
+        let mut flags = NSEventModifierFlags::empty();
+        if shift {
+            flags |= NSEventModifierFlags::Shift;
+        }
+        if option {
+            flags |= NSEventModifierFlags::Option;
+        }
+        let kind_of = match kind {
+            MouseKind::Down => NSEventType::LeftMouseDown,
+            MouseKind::Drag => NSEventType::LeftMouseDragged,
+            MouseKind::Up => NSEventType::LeftMouseUp,
+        };
+        let Some(event) = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+            kind_of,
+            self.convertPoint_toView(at, None),
+            flags,
+            0.0,
+            window.windowNumber(),
+            None,
+            0,
+            1,
+            1.0,
+        ) else {
+            return;
+        };
+        match kind {
+            MouseKind::Down => self.mouse_button_event(&event, mouse::LEFT, true),
+            MouseKind::Drag => self.mouse_motion(&event, Some(mouse::LEFT)),
+            MouseKind::Up => self.mouse_button_event(&event, mouse::LEFT, false),
+        }
+    }
+
     /// Visible line and column under the mouse, clamped to the grid.
     fn cell_at(&self, event: &NSEvent) -> Option<(usize, usize)> {
         self.cell_at_point(self.convertPoint_fromView(event.locationInWindow(), None))
@@ -1137,6 +1187,11 @@ impl PaneView {
         mouse::reports(mode, shift).then_some((mode, sgr))
     }
 
+    /// Whether the program has mouse reporting on (Shift or not).
+    fn program_takes_mouse(&self) -> bool {
+        self.with(|_, p| p.session.lock_term().state.modes().mouse != term_core::MouseMode::Off) == Some(true)
+    }
+
     fn send_mouse(&self, code: u8, line: usize, col: usize, press: bool, sgr: bool) {
         if let Some(bytes) = mouse::encode(code, line, col, press, sgr) {
             self.send_raw(bytes);
@@ -1198,11 +1253,17 @@ impl PaneView {
             return;
         }
         let flags = event.modifierFlags();
-        let gesture = select::gesture(
-            event.clickCount(),
+        let (shift, option) = (
             flags.contains(NSEventModifierFlags::Shift),
             flags.contains(NSEventModifierFlags::Option),
         );
+        // Here with Shift while the program takes the mouse: Shift only
+        // kept the click from it, so this starts a new selection.
+        let gesture = if shift && self.program_takes_mouse() {
+            select::gesture_over_program(event.clickCount(), option)
+        } else {
+            select::gesture(event.clickCount(), shift, option)
+        };
         let at = self.px_at(event);
         self.clear_other_selections();
         self.with(|_, p| {

@@ -2951,6 +2951,17 @@ impl WindowView {
                         _ => NSBeep(),
                     }
                 }
+                Some(Control::Mouse {
+                    kind,
+                    line,
+                    col,
+                    shift,
+                    option,
+                }) => {
+                    if let Some(view) = self.focused_view() {
+                        view.test_mouse(kind, line, col, shift, option);
+                    }
+                }
                 Some(Control::Scroll(lines)) => {
                     if let Some(pane) = self.focused_pane() {
                         self.with_pane(pane, |_, p| p.session.lock_term().state.scroll_view(lines));

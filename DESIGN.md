@@ -319,7 +319,10 @@ Oct 2026, 1.90 → 2.16 MB) and no measurable parse speed.
   (`select::clear_others`).
   Which click does what is `select::gesture`: Shift-click extends the
   selection (by words or lines if it was made that way), Option-drag makes
-  a rectangle. Dragging past the top or bottom edge scrolls, faster the
+  a rectangle. Over a program taking the mouse, Shift only keeps the click
+  from it (`select::gesture_over_program`): a Shift-drag starts a new
+  selection (never stretching an old one), Shift+Option-drag a rectangle,
+  and a Shift-click without a drag selects nothing. Dragging past the top or bottom edge scrolls, faster the
   further past (10 lines a second per cell height, 3 to 150), driven by a
   16 ms dispatch timer that runs only while the mouse is held past an edge.
   `copy_on_select = true` copies a selection when the button is let go

@@ -98,6 +98,9 @@ pub(crate) struct Win {
     shown: bool,
     /// The image pool was told this window is hidden (images.md §5.5).
     images_hidden: bool,
+    /// Bumped each time the title is set: a title clock armed before
+    /// does nothing.
+    title_clock: u64,
     /// This is the Settings tab, which the app started itself: a fixed
     /// title, always opaque, not a running program for `confirm_close`,
     /// and the only session whose chord recording is honoured.
@@ -838,6 +841,7 @@ impl WindowView {
                 hidden: 0,
                 shown: true,
                 images_hidden: false,
+                title_clock: 0,
                 settings,
                 recording: None,
                 recordings: 0,
@@ -874,26 +878,20 @@ impl WindowView {
     /// goes on the Dock icon.
     fn events(&self, pane: PaneId, events: Events) {
         let mtm = MainThreadMarker::from(self);
-        // Every pane keeps its title; only the focused pane's is the window's.
-        let Some(Some((fixed_title, focused))) = self.with_state(|st| {
+        // Every pane keeps its title; only the focused pane's is the
+        // window's. A title set with a command's start counts as the
+        // shell's, not the command's: it is taken in first.
+        let Some(Some(focused)) = self.with_state(|st| {
             let focused = st.tree.focused() == pane;
-            let fixed = st.win.config.title.is_some();
             let p = st.panes.get_mut(&pane)?;
             if let Some(title) = &events.title {
                 p.title = Some(title.clone());
+                p.activity.titled();
             }
-            Some((fixed || p.settings, focused))
+            Some(focused)
         }) else {
             return;
         };
-        let window = self.window();
-        if let Some(window) = &window
-            && !fixed_title
-            && focused
-            && let Some(title) = &events.title
-        {
-            window.setTitle(&NSString::from_str(title));
-        }
         let looking = self.looking(pane);
         let now = Instant::now();
         let finished = self
@@ -908,6 +906,9 @@ impl WindowView {
             })
             .flatten();
         let Some((on, after, finished, settings)) = finished else { return };
+        if focused && (events.title.is_some() || !events.commands.is_empty()) {
+            self.refresh_title();
+        }
         if settings {
             // The Settings tab's own program.
         } else if !looking.at_pane() {
@@ -935,6 +936,59 @@ impl WindowView {
         }
         if let Some(p) = events.progress {
             crate::notify::set_progress(mtm, self.ivars().id, p);
+        }
+    }
+
+    /// The window's (tab's) title: the Settings tab's, a pin's fixed one,
+    /// else what the focused pane does with `title_status` on and its
+    /// shell's marks ([`crate::activity::status_title`]), else its
+    /// program's title. The clock is armed again for the next change.
+    pub(crate) fn refresh_title(&self) {
+        let now = Instant::now();
+        let home = std::env::var("HOME").ok();
+        let got = self.with_state(|st| {
+            let fixed = st.win.config.title.clone();
+            let pinned = fixed.is_some();
+            let status = st.win.config.title_status;
+            let after = Duration::from_secs(st.win.config.notify_after.into());
+            let shown = st.win.shown;
+            let p = st.focused()?;
+            let title = match (p.settings, fixed) {
+                (true, _) => "Settings".to_string(),
+                (false, Some(t)) => t,
+                (false, None) => status
+                    .then(|| {
+                        let folder = p.activity.marks.then(|| pane_cwd(p)).flatten();
+                        let folder = folder.map(|f| crate::activity::tilde(&f, home.as_deref()));
+                        crate::activity::status_title(&p.activity, p.title.as_deref(), folder.as_deref(), after, now)
+                    })
+                    .flatten()
+                    .unwrap_or_else(|| p.title.clone().unwrap_or_else(|| crate::PRODUCT_NAME.into())),
+            };
+            let tick = (status && shown && !p.settings && !pinned)
+                .then(|| crate::activity::next_change(&p.activity, after, now))
+                .flatten();
+            st.win.title_clock += 1;
+            Some((title, tick, st.win.title_clock))
+        });
+        let Some(Some((title, tick, clock))) = got else { return };
+        if let Some(window) = self.window()
+            && window.title().to_string() != title
+        {
+            window.setTitle(&NSString::from_str(&title));
+        }
+        // One shot, to the next change of the title: none at the prompt,
+        // none while hidden (showing the window refreshes it).
+        if let Some(after) = tick {
+            let id = self.ivars().id;
+            let at = DispatchTime::NOW.time(after.as_nanos().min(i64::MAX as u128) as i64 + 1_000_000);
+            let _ = DispatchQueue::main().after(at, move || {
+                with_view(id, |v| {
+                    if v.with_state(|st| st.win.title_clock == clock) == Some(true) {
+                        v.refresh_title();
+                    }
+                })
+            });
         }
     }
 
@@ -1140,6 +1194,8 @@ impl WindowView {
             changed
         });
         if changed == Some(true) {
+            // The title's clock runs only while the window can be seen.
+            self.refresh_title();
             let layer = &self.ivars().layer;
             if visible {
                 // Its drawables back at full size, then drawn at once.
@@ -1828,6 +1884,8 @@ impl WindowView {
             // Padding or cell size may have changed the grid.
             self.resize();
             self.redraw_all();
+            // `title_status` may have changed.
+            self.refresh_title();
         }
     }
 
@@ -2136,19 +2194,13 @@ impl WindowView {
             st.tree.focus(pane);
             unzoomed = zoomed != st.tree.zoomed();
             let key = st.win.focused;
-            let fixed = st.win.config.title.clone();
             let p = st.panes.get_mut(&pane)?;
             p.swallow_click = clicked;
             p.cursor_on = true;
             let report = key && p.session.lock_term().state.modes().focus_events;
-            let title = match (p.settings, fixed) {
-                (true, _) => "Settings".to_string(),
-                (false, Some(t)) => t,
-                (false, None) => p.title.clone().unwrap_or_else(|| "Terminal Decline".into()),
-            };
-            Some((report, p.view.clone(), title))
+            Some((report, p.view.clone()))
         });
-        let Some(Some((report, view, title))) = got else { return };
+        let Some(Some((report, view))) = got else { return };
         if unzoomed {
             // Focusing a pane hidden by a zoom ended it.
             self.resize();
@@ -2157,9 +2209,7 @@ impl WindowView {
         if report {
             view.send_raw(b"\x1b[I".to_vec());
         }
-        if let Some(window) = self.window() {
-            window.setTitle(&NSString::from_str(&title));
-        }
+        self.refresh_title();
         self.request_redraw(pane);
     }
 
@@ -3131,6 +3181,7 @@ impl WindowView {
                     visible: self.visible(),
                     sheet: self.window().is_some_and(|w| w.attachedSheet().is_some()),
                     top_inset: self.titlebar_height(),
+                    title: self.window().map(|w| w.title().to_string()).unwrap_or_default(),
                     badge: objc2_app_kit::NSApplication::sharedApplication(MainThreadMarker::from(self))
                         .dockTile()
                         .badgeLabel()
@@ -3205,6 +3256,7 @@ struct Window {
     visible: bool,
     sheet: bool,
     top_inset: f64,
+    title: String,
     badge: Option<String>,
     active: bool,
     secure_input: bool,
@@ -3306,6 +3358,7 @@ fn write_dump(st: &mut State, window: Window) {
         pad_top,
         notifications: crate::notify::stats(),
         badge: window.badge,
+        title: window.title,
         active: window.active,
         secure_input: window.secure_input,
         settings_ready: window.settings.0,

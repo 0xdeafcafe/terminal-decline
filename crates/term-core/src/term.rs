@@ -49,6 +49,8 @@ pub struct Notification {
 /// A command's start or end, as the shell's OSC 133 marks say.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Command {
+    /// `133;A`: the shell shows its prompt.
+    Prompt,
     /// `133;C`: the command line was run. Its text, from the B mark to
     /// the cursor (its first line, trimmed), if the B mark was seen and
     /// is still on the screen.
@@ -1721,7 +1723,7 @@ impl Terminal {
                 self.input_at.take().and_then(|from| self.command_text(from, here)),
             )),
             MarkKind::End => Some(Command::Finished(status)),
-            MarkKind::Prompt => None,
+            MarkKind::Prompt => Some(Command::Prompt),
         };
         if let Some(c) = command {
             if self.commands.len() == COMMANDS_KEPT {

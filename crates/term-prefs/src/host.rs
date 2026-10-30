@@ -199,6 +199,7 @@ opacity = 1.0
 blur = false
 copy_on_select = false
 confirm_close = false
+title_status = true
 notify_on_finish = true
 notify_after = 10
 images = false

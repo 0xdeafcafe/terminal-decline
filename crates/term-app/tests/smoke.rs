@@ -536,6 +536,34 @@ fn smoke_a_long_command_finishing_in_a_background_tab_notifies() {
     assert_eq!(all[0]["badge"], "2", "{}", all[0]);
 }
 
+/// With the shell's OSC 133 marks the title says what it does: the
+/// command running and for how long (the clock ticks), then waiting in
+/// its folder.
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_the_title_says_what_the_shell_does() {
+    if !have_metal() {
+        return;
+    }
+    let dir = TempDir::new("title-status");
+    let script = format!(
+        "printf '\\033]133;A\\007$ \\033]133;B\\007make all\\r\\n\\033]133;C\\007'; sleep 2.3; {dump}\
+         sleep 0.5; printf '\\033]133;D;0\\007\\033]133;A\\007$ '; sleep 0.3; {dump}{quit}sleep 10",
+        dump = osc("dump"),
+        quit = osc("quit"),
+    );
+    let (status, _) = decline(&dir, &script, true);
+    assert!(status.success(), "{status}");
+    let d = dumps(&dir);
+    assert_eq!(d.len(), 2, "{d:?}");
+    assert_eq!(d[0]["title"], "make all · 2s — Terminal Decline", "{}", d[0]);
+    let waiting = d[1]["title"].as_str().unwrap();
+    assert!(
+        waiting.starts_with("waiting · ") && waiting.ends_with(" — Terminal Decline"),
+        "{waiting}"
+    );
+}
+
 /// The bundled app asks for permission on the first notification and
 /// posts through the notification center. Opt in with
 /// `DECLINE_SMOKE_NOTIFY=1`: each run's temp bundle leaves an entry in

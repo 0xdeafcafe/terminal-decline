@@ -233,6 +233,11 @@ pub struct Config {
     /// `[keybind]`: shortcuts remapped, unbound, or sending text; see
     /// [`crate::keybind`].
     pub keybind: KeybindConfig,
+    /// The window and tab title says what the focused pane does: the
+    /// command running and for how long, or waiting at the prompt in which
+    /// folder (needs the shell's OSC 133 marks; see
+    /// [`crate::activity::status_title`]).
+    pub title_status: bool,
     /// Notify when a command that ran at least `notify_after` seconds
     /// finishes in a tab or pane you aren't looking at (needs the shell's
     /// OSC 133 marks; see [`crate::activity`]).
@@ -286,6 +291,7 @@ impl Default for Config {
             colors: Colors::default(),
             palettes: Palettes::default(),
             keybind: KeybindConfig::default(),
+            title_status: true,
             notify_on_finish: true,
             notify_after: 10,
             update: true,
@@ -1146,6 +1152,8 @@ mod tests {
     #[test]
     fn finish_notifications_are_on_after_ten_seconds() {
         let c = Config::default();
+        assert!(c.title_status);
+        assert!(!parse("title_status = false").0.title_status);
         assert!(c.notify_on_finish);
         assert_eq!(c.notify_after, 10);
         let (c, errors) = parse("notify_on_finish = false\nnotify_after = 30");

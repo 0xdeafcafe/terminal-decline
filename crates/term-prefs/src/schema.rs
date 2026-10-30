@@ -402,6 +402,13 @@ pub const SETTINGS: &[Setting] = &[
         "Ask before closing a window or quitting while a program other than the shell runs",
     ),
     setting(
+        "title_status",
+        "Status in the title",
+        Window,
+        Editor::Toggle,
+        "The title says what the shell does: the command running and for how long, or waiting in which folder",
+    ),
+    setting(
         "notify_on_finish",
         "Notify when commands finish",
         Window,
@@ -618,6 +625,7 @@ mod tests {
                 "scrollback",
                 "copy_on_select",
                 "confirm_close",
+                "title_status",
                 "notify_on_finish",
                 "notify_after",
                 "command",

@@ -3,7 +3,9 @@
 //! finished, how long it took and how it ended. A long command that
 //! finishes where you aren't looking is a notification
 //! ([`should_notify`]); bursts of notifications from one window are
-//! merged into one ([`Coalescer`]).
+//! merged into one ([`Coalescer`]). With `title_status` on, the window
+//! and tab title says what the focused pane does ([`status_title`]),
+//! ticking only while a command runs ([`next_change`]).
 //!
 //! Everything here is plain data and decisions, tested without AppKit;
 //! the view module feeds it the marks as they are parsed.
@@ -19,6 +21,9 @@ pub struct Running {
     /// What was typed, if the shell's marks showed it.
     pub command: Option<String>,
     pub since: Instant,
+    /// The program set the title (OSC 0/2) since it started: its title
+    /// is shown as it is.
+    pub titled: bool,
 }
 
 /// A command that finished.
@@ -40,7 +45,7 @@ impl Finished {
 /// One pane's shell, as its marks tell it.
 #[derive(Clone, Debug, Default)]
 pub struct Activity {
-    /// The shell has sent a C or D mark: what it does is known.
+    /// The shell has sent an OSC 133 mark: what it does is known.
     pub marks: bool,
     pub running: Option<Running>,
     /// The last command that finished.
@@ -53,8 +58,13 @@ impl Activity {
     pub fn apply(&mut self, c: Command, now: Instant) -> Option<Finished> {
         self.marks = true;
         match c {
+            Command::Prompt => None,
             Command::Started(command) => {
-                self.running = Some(Running { command, since: now });
+                self.running = Some(Running {
+                    command,
+                    since: now,
+                    titled: false,
+                });
                 None
             }
             Command::Finished(status) => {
@@ -70,6 +80,88 @@ impl Activity {
             }
         }
     }
+
+    /// The program set the title: while a command runs, its title wins.
+    pub fn titled(&mut self) {
+        if let Some(r) = &mut self.running {
+            r.titled = true;
+        }
+    }
+}
+
+/// How long the title shows a long command's result before it says
+/// "waiting" again.
+pub const RESULT_SHOWN: Duration = Duration::from_secs(5);
+
+/// What the title says pane's shell is doing, with `title_status` on:
+///
+/// - running: `cargo build · 12s — Terminal Decline`, or the program's own
+///   title as it set it (a program that sets one, an editor or Claude
+///   Code, says better what it does, and its clock would only tick for
+///   nothing);
+/// - just after a command of at least `after` finished, for
+///   [`RESULT_SHOWN`]: `✓ cargo build · 1m 12s — Terminal Decline` or
+///   `✗ cargo build · exit 101 — Terminal Decline`;
+/// - at the prompt: `waiting · ~/src/project — Terminal Decline`.
+///
+/// `None` without marks: the shell doesn't say, so the title is the
+/// program's, as without `title_status`.
+pub fn status_title(a: &Activity, program: Option<&str>, folder: Option<&str>, after: Duration, now: Instant) -> Option<String> {
+    let app = crate::PRODUCT_NAME;
+    if !a.marks {
+        return None;
+    }
+    if let Some(r) = &a.running {
+        if r.titled
+            && let Some(t) = program.filter(|t| !t.is_empty())
+        {
+            return Some(t.into());
+        }
+        let took = elapsed(now.saturating_duration_since(r.since));
+        return Some(format!("{} · {took} — {app}", name(&r.command)));
+    }
+    if let Some(f) = a
+        .finished
+        .as_ref()
+        .filter(|f| f.took >= after && now.saturating_duration_since(f.at) < RESULT_SHOWN)
+    {
+        let what = name(&f.command);
+        return Some(match f.status {
+            Some(s) if s != 0 => format!("✗ {what} · exit {s} — {app}"),
+            _ => format!("✓ {what} · {} — {app}", elapsed(f.took)),
+        });
+    }
+    Some(match folder {
+        Some(f) => format!("waiting · {f} — {app}"),
+        None => format!("waiting — {app}"),
+    })
+}
+
+/// How long until [`status_title`] says something else by itself: the
+/// next whole second of a running command's time under a minute, then
+/// the next whole minute; the end of a result's [`RESULT_SHOWN`]. `None`
+/// when it only changes with the next mark (at the prompt, or a program
+/// that set its own title).
+pub fn next_change(a: &Activity, after: Duration, now: Instant) -> Option<Duration> {
+    if !a.marks {
+        return None;
+    }
+    if let Some(r) = &a.running {
+        if r.titled {
+            return None;
+        }
+        let e = now.saturating_duration_since(r.since);
+        let step = if e < Duration::from_secs(60) {
+            Duration::from_secs(1)
+        } else {
+            Duration::from_secs(60)
+        };
+        let into = Duration::from_nanos((e.as_nanos() % step.as_nanos()) as u64);
+        return Some(step - into);
+    }
+    let f = a.finished.as_ref()?;
+    let since = now.saturating_duration_since(f.at);
+    (f.took >= after && since < RESULT_SHOWN).then(|| RESULT_SHOWN - since)
 }
 
 /// A duration as the title and notifications show it: `12s` under a
@@ -417,6 +509,100 @@ mod tests {
         c.add(1, 5, Kind::Message, "a", "x", t0).unwrap();
         assert_eq!(c.add(1, 6, Kind::Bell, "b", "Bell", t0 + secs(1)), None);
         assert_eq!(c.add(1, 5, Kind::Message, "a", "y", t0 + secs(2)).unwrap().body, "y · and 1 more");
+    }
+
+    #[test]
+    fn the_title_says_what_the_shell_does() {
+        let t0 = Instant::now();
+        let after = secs(10);
+        let mut a = Activity::default();
+        assert_eq!(status_title(&a, Some("vim"), Some("~/td"), after, t0), None, "no marks");
+        a.apply(Command::Prompt, t0);
+        assert_eq!(
+            status_title(&a, None, Some("~/td"), after, t0).unwrap(),
+            "waiting · ~/td — Terminal Decline"
+        );
+        assert_eq!(status_title(&a, None, None, after, t0).unwrap(), "waiting — Terminal Decline");
+        a.apply(Command::Started(Some("cargo build".into())), t0);
+        let at = |s: u64| t0 + secs(s);
+        assert_eq!(
+            status_title(&a, None, None, after, at(12)).unwrap(),
+            "cargo build · 12s — Terminal Decline"
+        );
+        assert_eq!(
+            status_title(&a, None, None, after, at(72)).unwrap(),
+            "cargo build · 1m 12s — Terminal Decline"
+        );
+        assert_eq!(
+            status_title(&a, None, None, after, at(3780)).unwrap(),
+            "cargo build · 1h 3m — Terminal Decline"
+        );
+        a.apply(Command::Finished(Some(0)), at(72));
+        assert_eq!(
+            status_title(&a, None, None, after, at(73)).unwrap(),
+            "✓ cargo build · 1m 12s — Terminal Decline"
+        );
+        assert_eq!(
+            status_title(&a, None, Some("~/td"), after, at(77)).unwrap(),
+            "waiting · ~/td — Terminal Decline"
+        );
+        // A failure; a quick command shows no result.
+        a.apply(Command::Started(Some("cargo test".into())), at(100));
+        a.apply(Command::Finished(Some(101)), at(111));
+        assert_eq!(
+            status_title(&a, None, None, after, at(112)).unwrap(),
+            "✗ cargo test · exit 101 — Terminal Decline"
+        );
+        a.apply(Command::Started(Some("ls".into())), at(200));
+        a.apply(Command::Finished(Some(0)), at(201));
+        assert_eq!(status_title(&a, None, None, after, at(201)).unwrap(), "waiting — Terminal Decline");
+        // A program's own title wins while it runs.
+        a.apply(Command::Started(Some("vim x".into())), at(300));
+        assert_eq!(
+            status_title(&a, Some("old"), None, after, at(301)).unwrap(),
+            "vim x · 1s — Terminal Decline"
+        );
+        a.titled();
+        assert_eq!(status_title(&a, Some("x - VIM"), None, after, at(301)).unwrap(), "x - VIM");
+        // A title set at the prompt doesn't count for the next command.
+        let mut b = Activity::default();
+        b.titled();
+        b.apply(Command::Started(None), t0);
+        assert_eq!(
+            status_title(&b, Some("zsh"), None, after, t0).unwrap(),
+            "command · 0s — Terminal Decline"
+        );
+    }
+
+    #[test]
+    fn the_clock_ticks_at_the_next_change() {
+        let t0 = Instant::now();
+        let after = secs(10);
+        let ms = Duration::from_millis;
+        let mut a = Activity::default();
+        assert_eq!(next_change(&a, after, t0), None);
+        a.apply(Command::Prompt, t0);
+        assert_eq!(next_change(&a, after, t0), None, "idle at the prompt");
+        a.apply(Command::Started(Some("make".into())), t0);
+        assert_eq!(next_change(&a, after, t0), Some(secs(1)));
+        assert_eq!(next_change(&a, after, t0 + ms(12_300)), Some(ms(700)));
+        assert_eq!(next_change(&a, after, t0 + ms(59_900)), Some(ms(100)));
+        assert_eq!(next_change(&a, after, t0 + secs(60)), Some(secs(60)), "minutes from here");
+        assert_eq!(next_change(&a, after, t0 + secs(72)), Some(secs(48)));
+        assert_eq!(next_change(&a, after, t0 + secs(3790)), Some(secs(50)));
+        // The result shows for RESULT_SHOWN, then nothing ticks.
+        a.apply(Command::Finished(Some(0)), t0 + secs(72));
+        assert_eq!(next_change(&a, after, t0 + secs(72)), Some(RESULT_SHOWN));
+        assert_eq!(next_change(&a, after, t0 + secs(74)), Some(RESULT_SHOWN - secs(2)));
+        assert_eq!(next_change(&a, after, t0 + secs(72) + RESULT_SHOWN), None);
+        // A quick command shows no result to time.
+        a.apply(Command::Started(None), t0 + secs(100));
+        a.apply(Command::Finished(Some(0)), t0 + secs(101));
+        assert_eq!(next_change(&a, after, t0 + secs(101)), None);
+        // A program with its own title: nothing to tick.
+        a.apply(Command::Started(None), t0 + secs(200));
+        a.titled();
+        assert_eq!(next_change(&a, after, t0 + secs(201)), None);
     }
 
     #[test]

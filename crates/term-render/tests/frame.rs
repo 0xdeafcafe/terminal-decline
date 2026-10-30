@@ -201,7 +201,14 @@ fn rect(col: i16, line: i16, cells: u16, color: Rgba) -> RectInstance {
         w: cells * CW as u16,
         h: CH as u16,
         color,
+        tag: 0,
     }
+}
+
+/// `rects` with their tags left out, to compare with ones made here (the
+/// unit tests in frame.rs check tags).
+fn untagged(rects: &[RectInstance]) -> Vec<RectInstance> {
+    rects.iter().map(|&r| RectInstance { tag: 0, ..r }).collect()
 }
 
 /// The glyphs as a grid of characters, by position → cell.
@@ -433,7 +440,7 @@ fn same_colour_cells_merge_into_one_run() {
     let theme = Theme::default();
     let f = build(&mut t.state);
     assert_eq!(
-        f.rects,
+        untagged(&f.rects),
         [
             rect(0, 0, 3, theme.palette[1]),
             rect(5, 0, 2, theme.palette[2]),
@@ -452,7 +459,10 @@ fn selection_is_drawn_over_the_run() {
         .set_selection(Some(Selection::new(Point { line, col: 3 }, Point { line, col: 2 })));
     let theme = Theme::default();
     let f = build(&mut t.state);
-    assert_eq!(f.rects, [rect(0, 0, 6, theme.palette[1]), rect(2, 0, 2, theme.selection)]);
+    assert_eq!(
+        untagged(&f.rects),
+        [rect(0, 0, 6, theme.palette[1]), rect(2, 0, 2, theme.selection)]
+    );
 }
 
 #[test]
@@ -467,7 +477,7 @@ fn selection_covers_short_history_rows_to_the_edge() {
         .set_selection(Some(Selection::new(Point { line, col: 1 }, Point { line, col: 9 })));
     let theme = Theme::default();
     let f = build(&mut t.state);
-    assert_eq!(f.rects, [rect(1, 0, 9, theme.selection)]);
+    assert_eq!(untagged(&f.rects), [rect(1, 0, 9, theme.selection)]);
     assert_eq!(decoded(&f, 10, 2, (0, 0)), ["ab        ", "cd        "]);
 }
 
@@ -477,7 +487,7 @@ fn run_breaks_at_inverse() {
     let theme = Theme::default();
     let f = build(&mut t.state);
     assert_eq!(
-        f.rects,
+        untagged(&f.rects),
         [
             rect(0, 0, 2, theme.palette[1]),
             rect(2, 0, 2, theme.foreground),
@@ -491,7 +501,7 @@ fn block_cursor_is_drawn_over_the_run() {
     let mut t = term(10, 1, "\x1b[41mabcdef\x1b[4G");
     let theme = Theme::default();
     let f = build(&mut t.state);
-    assert_eq!(f.rects, [rect(0, 0, 6, theme.palette[1]), rect(3, 0, 1, theme.cursor)]);
+    assert_eq!(untagged(&f.rects), [rect(0, 0, 6, theme.palette[1]), rect(3, 0, 1, theme.cursor)]);
 }
 
 // ---- styles --------------------------------------------------------------
@@ -507,7 +517,10 @@ fn inverse_swaps_colours() {
     let f = build(&mut t.state);
     assert_eq!(glyph_at(&f, 0, 0).unwrap().color, theme.background);
     assert_eq!(glyph_at(&f, 1, 0).unwrap().color, theme.palette[2]);
-    assert_eq!(f.rects, [rect(0, 0, 1, theme.foreground), rect(1, 0, 1, theme.palette[1])]);
+    assert_eq!(
+        untagged(&f.rects),
+        [rect(0, 0, 1, theme.foreground), rect(1, 0, 1, theme.palette[1])]
+    );
 }
 
 #[test]
@@ -559,10 +572,14 @@ fn underline_positions_from_metrics() {
         w: CW as u16,
         h: M.underline_thickness as u16,
         color: fg,
+        tag: 0,
     };
     let double_gap = 2 * M.underline_thickness as i16;
     let strike_y = CH + M.baseline as i16 - M.strike_offset as i16;
-    assert_eq!(f.rects, [line(0, uy), line(1, uy), line(1, uy + double_gap), line(2, strike_y)]);
+    assert_eq!(
+        untagged(&f.rects),
+        [line(0, uy), line(1, uy), line(1, uy + double_gap), line(2, strike_y)]
+    );
 }
 
 #[test]
@@ -624,8 +641,9 @@ fn hovered_link_is_underlined_in_the_text_colour() {
         w: 4 * CW as u16,
         h: M.underline_thickness as u16,
         color: theme.foreground,
+        tag: 0,
     };
-    assert_eq!(f.rects, [plain.rects.clone(), vec![underline]].concat());
+    assert_eq!(untagged(&f.rects), [plain.rects.clone(), vec![underline]].concat());
     t.state.set_hover(Some(t.state.point_at(0, 0)));
     assert_eq!(hovered(&mut t).rects, plain.rects, "off the link");
 }
@@ -633,7 +651,7 @@ fn hovered_link_is_underlined_in_the_text_colour() {
 // ---- cursor --------------------------------------------------------------
 
 fn cursor_rects(f: &Frame, theme: &Theme) -> Vec<RectInstance> {
-    f.rects.iter().copied().filter(|r| r.color == theme.cursor).collect()
+    untagged(&f.rects).into_iter().filter(|r| r.color == theme.cursor).collect()
 }
 
 #[test]
@@ -641,7 +659,7 @@ fn block_cursor_swaps_cell_colours() {
     let mut t = term(10, 2, "ab\x1b[1G");
     let theme = Theme::default();
     let f = build(&mut t.state);
-    assert_eq!(f.rects, [rect(0, 0, 1, theme.cursor)]);
+    assert_eq!(untagged(&f.rects), [rect(0, 0, 1, theme.cursor)]);
     assert_eq!(glyph_at(&f, 0, 0).unwrap().color, theme.cursor_text);
     assert_eq!(glyph_at(&f, 1, 0).unwrap().color, theme.foreground);
 }
@@ -659,7 +677,8 @@ fn bar_cursor() {
             y: 0,
             w: t_px as u16,
             h: CH as u16,
-            color: theme.cursor
+            color: theme.cursor,
+            tag: 0,
         }]
     );
     assert_eq!(glyph_at(&f, 1, 0).unwrap().color, theme.foreground, "bar doesn't recolour text");
@@ -678,7 +697,8 @@ fn underline_cursor() {
             y: 2 * CH - t_px,
             w: CW as u16,
             h: t_px as u16,
-            color: theme.cursor
+            color: theme.cursor,
+            tag: 0,
         }]
     );
 }
@@ -691,6 +711,7 @@ fn hollow_box(col: i16, line: i16, cells: i16, color: Rgba) -> Vec<RectInstance>
         w: w as u16,
         h: h as u16,
         color,
+        tag: 0,
     };
     vec![r(x, y, w, 1), r(x, y + h - 1, w, 1), r(x, y, 1, h), r(x + w - 1, y, 1, h)]
 }
@@ -750,7 +771,7 @@ fn cursor_hidden_in_blink_off_phase_only_when_blinking_and_focused() {
     assert_eq!(cursor_rects(&off(&mut blinking, false), &theme).len(), 4, "unfocused doesn't blink");
     let mut steady = term(10, 2, "ab\x1b[2 q");
     assert_eq!(
-        off(&mut steady, true).rects,
+        untagged(&off(&mut steady, true).rects),
         [rect(2, 0, 1, theme.cursor)],
         "steady cursor ignores the phase"
     );
@@ -775,7 +796,7 @@ fn cursor_on_wide_char_is_two_cells() {
     let mut t = term(10, 2, "a漢b\x1b[2G");
     assert_eq!(t.state.cursor().col(), 1);
     let f = build(&mut t.state);
-    assert_eq!(f.rects, [rect(1, 0, 2, theme.cursor)], "block covers both halves");
+    assert_eq!(untagged(&f.rects), [rect(1, 0, 2, theme.cursor)], "block covers both halves");
     assert_eq!(glyph_at(&f, 1, 0).unwrap().color, theme.cursor_text);
 
     let f = build_with(
@@ -1020,7 +1041,10 @@ fn indexed_and_truecolour_cells_resolve_exactly() {
     let f = build(&mut t.state);
     assert_eq!(glyph_at(&f, 0, 0).unwrap().color, 0xFF03_0201);
     assert_eq!(glyph_at(&f, 1, 0).unwrap().color, rgb(0x5f87af));
-    assert_eq!(f.rects, [rect(0, 0, 1, rgb(0xfa8007)), rect(1, 0, 1, theme.palette[244])]);
+    assert_eq!(
+        untagged(&f.rects),
+        [rect(0, 0, 1, rgb(0xfa8007)), rect(1, 0, 1, theme.palette[244])]
+    );
 }
 
 #[test]
@@ -1067,8 +1091,13 @@ fn search_hits_are_drawn_under_the_selection() {
     assert!(f.build_snapshot(&input, &mut Fake));
     // Then the block cursor, after the text.
     let rects: Vec<RectInstance> = f.rects.iter().copied().filter(|r| r.color != theme.cursor).collect();
+    // Each in its theme colour, which a transition blends.
+    use term_render::frame::tag_of;
+    use term_render::transition::slot;
+    let tags: Vec<_> = rects.iter().map(|r| r.tag).collect();
+    assert_eq!(tags, [slot::SEARCH_CURRENT, slot::SEARCH_HIT, slot::SELECTION].map(tag_of));
     assert_eq!(
-        rects,
+        untagged(&rects),
         [
             rect(0, 0, 2, theme.search_current),
             rect(2, 0, 3, theme.search_hit),

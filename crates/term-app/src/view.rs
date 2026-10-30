@@ -1376,7 +1376,7 @@ impl WindowView {
             .iter()
             .filter_map(|id| panes.get(id))
             .filter(|p| p.crash.is_some_and(|c| c.stopped))
-            .map(|p| rect_instance(p.rect, win.theme.background))
+            .map(|p| rect_instance(p.rect, win.theme.background, transition::slot::BACKGROUND))
             .collect();
         let lines: Vec<RectInstance>;
         let dividers = if stopped.is_empty() {
@@ -1637,7 +1637,11 @@ impl WindowView {
                 }
             }
             let colour = st.win.divider;
-            st.dividers = layout.dividers.iter().map(|d| rect_instance(d.line, colour)).collect();
+            st.dividers = layout
+                .dividers
+                .iter()
+                .map(|d| rect_instance(d.line, colour, transition::slot::DIVIDER))
+                .collect();
             st.grabs = layout.dividers;
             // With several panes the window can't be made smaller than
             // they all fit at their minimum.
@@ -2793,8 +2797,9 @@ fn test_build_panic(now: bool) {
 fn test_build_panic(_now: bool) {}
 
 /// A filled rectangle at `r` (window pixels).
-fn rect_instance(r: PxRect, color: Rgba) -> RectInstance {
+fn rect_instance(r: PxRect, color: Rgba, slot: usize) -> RectInstance {
     RectInstance {
+        tag: term_render::frame::tag_of(slot),
         x: r.x.clamp(0, i16::MAX as i32) as i16,
         y: r.y.clamp(0, i16::MAX as i32) as i16,
         w: r.w.clamp(0, u16::MAX as i32) as u16,

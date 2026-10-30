@@ -281,16 +281,20 @@ window's theme changing (`apply_config`, `appearance_changed`).
   each frame of the transition draws those same instances with new
   uniforms: the old and new theme's 24 configurable colours (the 16 ANSI
   colours, foreground, background, cursor, the text under it, selection,
-  the two search-hit colours, the divider) and the progress. An instance
-  whose colour (RGB, alpha aside) equals a slot of the new theme is drawn
-  blended from that slot's old colour, per pixel (by position for the
-  wave and glimmer); anything else stays. So palette-indexed and default
-  colours animate, and truecolour, images, emoji, the 240 fixed colours
-  of the 256-colour cube and colours programs set (OSC 4, 10, 11) stay as
-  they are. It is a match, not a tag: a truecolour equal to a theme colour
-  animates with it, and when two of the new theme's slots are the same
-  colour the first wins. While one plays, the pass is cleared to nothing
-  and the window's background drawn as a rect, so it blends per pixel too.
+  the two search-hit colours, the divider) and the progress. Each
+  instance says which of those slots its colour came from, if any (a
+  tag, set by frame building from what the cell asked for: bits 8–12 of
+  a glyph's flags, and a 4-byte field that makes a rect 16 bytes, was
+  12). A tagged instance is drawn blended from that slot's old colour,
+  per pixel (by position for the wave and glimmer); anything else stays.
+  So palette-indexed and default colours animate, and truecolour (even
+  one equal to a theme colour), images, emoji, the 240 fixed colours of
+  the 256-colour cube and colours programs set (OSC 4, 10, 11; the
+  pane's theme marks them) stay as they are. (Fixed 30 Oct 2026: this
+  was a match by colour, so Tokyo Night to Solarized Dark started its
+  background from Solarized's ANSI 8.) While one plays, the pass is
+  cleared to nothing and the window's background drawn as a rect, so it
+  blends per pixel too.
 - A change while one plays starts from the colours on screen (the
   cross-fade part of the blend at that moment), not from the old theme.
 - The display link ticks only while a transition plays (each tick draws

@@ -746,6 +746,22 @@ pub fn program_theme(base: &Theme, t: &term_core::Terminal) -> Option<Theme> {
     if term_render::rgb(bg) != base.background {
         theme.set_background(bg);
     }
+    // The colours the program set are its own: a theme transition leaves
+    // them as they are.
+    use term_render::transition::slot;
+    let base_palette = query_palette(base);
+    let mut set = 0u32;
+    for (i, (&p, &b)) in palette.iter().zip(&base_palette).enumerate().take(16) {
+        set |= ((p != b) as u32) << i;
+    }
+    let base_dynamic = query_colors(base);
+    for (k, s) in [slot::FOREGROUND, slot::BACKGROUND, slot::CURSOR].into_iter().enumerate() {
+        set |= ((dynamic[k] != base_dynamic[k]) as u32) << s;
+    }
+    if set >> slot::BACKGROUND & 1 != 0 {
+        set |= 1 << slot::CURSOR_TEXT | 1 << slot::SEARCH_HIT | 1 << slot::SEARCH_CURRENT;
+    }
+    theme.program_set = set;
     Some(theme)
 }
 
@@ -1509,6 +1525,11 @@ mod tests {
         assert_eq!(drawn.foreground, theme.foreground);
         assert_eq!(drawn.selection, theme.selection);
         assert_ne!(drawn.search_hit, theme.search_hit, "hits follow the program's background");
+        // Theirs, so a theme transition leaves them alone: ANSI 1, the
+        // background and the colours made from it.
+        use term_render::transition::slot;
+        let theirs = 1 << 1 | 1 << slot::BACKGROUND | 1 << slot::CURSOR_TEXT | 1 << slot::SEARCH_HIT | 1 << slot::SEARCH_CURRENT;
+        assert_eq!(drawn.program_set, theirs);
         // A new theme (a config reload, the appearance switching): the
         // program's colours stay on top of it.
         let mut other = theme.clone();

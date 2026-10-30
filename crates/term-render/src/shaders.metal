@@ -15,6 +15,7 @@ struct Rect {
     short2 pos;
     ushort2 size;
     uint color; // RGBA8, red in the low byte
+    uint tag;   // where the colour comes from: 0 its own, else 1 + a theme slot
 };
 
 // A theme transition (transition.rs, `Uniforms`): the old and new
@@ -31,26 +32,23 @@ struct Blend {
     uint new_slots[SLOTS];
 };
 
-// An instance colour as the transition draws it: from the old theme's
-// colour in the slot whose new colour it equals (RGB only; the first
-// match), else unchanged. `matched` says whether it moves at all.
+// An instance colour as the transition draws it: a colour tagged with a
+// theme slot (frame.rs, `Tag`) comes from the old theme's colour in that
+// slot, keeping its own alpha; an untagged one stays as it is. `matched`
+// says whether it moves at all.
 struct Blended {
     float4 old_colour;
     float4 new_colour;
     float matched;
 };
 
-static Blended blended(uint packed, constant Blend &b) {
+static Blended blended(uint packed, uint tag, constant Blend &b) {
     float4 c = unpack_unorm4x8_to_float(packed);
     Blended o = { c, c, 0.0 };
-    uint rgb = packed & 0x00FFFFFFu;
-    for (uint k = 0; k < b.count; k++) {
-        if ((b.new_slots[k] & 0x00FFFFFFu) == rgb) {
-            float4 old = unpack_unorm4x8_to_float(b.old_slots[k]);
-            o.old_colour = float4(old.rgb, c.a);
-            o.matched = 1.0;
-            break;
-        }
+    if (tag != 0u && tag <= b.count) {
+        float4 old = unpack_unorm4x8_to_float(b.old_slots[tag - 1u]);
+        o.old_colour = float4(old.rgb, c.a);
+        o.matched = 1.0;
     }
     return o;
 }
@@ -121,7 +119,7 @@ vertex RectOut rect_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     float2 corner = float2(vid & 1, vid >> 1);
     RectOut o;
     o.pos = to_clip(u.origin + float2(r.pos) + corner * float2(r.size), u.viewport);
-    Blended c = blended(r.color, b);
+    Blended c = blended(r.color, r.tag, b);
     o.old_colour = c.old_colour;
     o.new_colour = c.new_colour;
     o.matched = c.matched;
@@ -138,7 +136,7 @@ struct Glyph {
     ushort2 size;   // bitmap size
     ushort2 uv;     // top-left in the glyph texture
     uint color;     // RGBA8 text colour
-    uint is_color;  // bit 0: sample the colour (emoji) texture; the rest is the CPU's
+    uint is_color;  // bit 0: sample the colour (emoji) texture; bits 8-12 the colour's tag; the rest is the CPU's
 };
 
 struct GlyphOut {
@@ -159,7 +157,7 @@ vertex GlyphOut glyph_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     GlyphOut o;
     o.pos = to_clip(u.origin + float2(g.pos) + corner * float2(g.size), u.viewport);
     o.uv = float2(g.uv) + corner * float2(g.size);
-    Blended c = blended(g.color, b);
+    Blended c = blended(g.color, (g.is_color >> 8) & 0x1Fu, b);
     o.old_colour = c.old_colour;
     o.new_colour = c.new_colour;
     o.matched = c.matched;

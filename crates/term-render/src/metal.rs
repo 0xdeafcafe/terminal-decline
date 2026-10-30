@@ -966,12 +966,18 @@ impl Window {
         // While a transition plays, the pass is cleared to nothing and the
         // clear colour drawn as a rect over it all, first, so it blends
         // per pixel like the rest (a wave sweeps the background too).
+        // It is a pane's background, so it has that pane's tag.
+        let clear_tag = match panes {
+            [one] if one.pane.frame.clear == clear => one.pane.frame.clear_tag,
+            _ => crate::frame::tag_of(crate::transition::slot::BACKGROUND),
+        };
         let backdrop = (blend.kind != 0 && clear >> 24 != 0).then(|| RectInstance {
             x: 0,
             y: 0,
             w: width.min(u16::MAX as u32) as u16,
             h: height.min(u16::MAX as u32) as u16,
             color: clear,
+            tag: clear_tag,
         });
         let clear = if backdrop.is_some() { 0 } else { clear };
 
@@ -993,6 +999,7 @@ impl Window {
                 w: s.w.min(u16::MAX as i32) as u16,
                 h: s.h.min(u16::MAX as i32) as u16,
                 color: frame.clear,
+                tag: frame.clear_tag,
             });
             // Glyphs placed in textures since emptied would draw other
             // glyphs: such a pane draws its backgrounds until rebuilt.

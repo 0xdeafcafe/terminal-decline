@@ -2,19 +2,17 @@
 //! the GPU, with no row built again while it plays.
 //!
 //! Frame building resolves colours to RGBA on the CPU, as always, and the
-//! rows are built once with the new theme. While a transition plays, each
-//! draw also gets two tables of the theme's [`SLOTS`] configurable colours
-//! (the 16 ANSI colours, foreground, background, cursor, the text under
-//! it, selection, the two search-hit colours and the pane divider): the
-//! old theme's and the new one's. An instance whose colour (RGB, alpha
-//! aside) equals a slot of the new table is drawn blended from that slot's
-//! old colour; any other colour stays as it is. So palette-indexed colours
-//! and the defaults animate, while truecolour, images, emoji and the 240
-//! fixed colours of the 256-colour cube stay put. The rule is a match, not
-//! a tag: a truecolour equal to a theme colour animates with it, and when
-//! two slots of the new theme are the same colour the first one wins.
-//! Colours a program set (OSC 4, 10, 11) aren't the theme's, so they stay
-//! too.
+//! rows are built once with the new theme. Each instance also carries
+//! where its colour came from (a [`Tag`](crate::frame::Tag)): one of the
+//! theme's [`SLOTS`] configurable colours (the 16 ANSI colours,
+//! foreground, background, cursor, the text under it, selection, the two
+//! search-hit colours and the pane divider), or a colour of its own.
+//! While a transition plays, each draw also gets two tables of those
+//! colours, the old theme's and the new one's, and a tagged instance is
+//! drawn blended from its slot's old colour. So palette-indexed colours
+//! and the defaults animate, while truecolour (even one equal to a theme
+//! colour), images, emoji, the 240 fixed colours of the 256-colour cube
+//! and colours a program set (OSC 4, 10, 11) stay put.
 //!
 //! The maths is here, in Rust, for tests and for a transition that starts
 //! while another plays (it starts from the colours on screen); the
@@ -26,6 +24,18 @@ use crate::frame::{Rgba, Theme};
 
 /// The theme colours a transition blends.
 pub const SLOTS: usize = 24;
+
+/// Where each colour is in [`Slots`], after the 16 ANSI colours.
+pub mod slot {
+    pub const FOREGROUND: usize = 16;
+    pub const BACKGROUND: usize = 17;
+    pub const CURSOR: usize = 18;
+    pub const CURSOR_TEXT: usize = 19;
+    pub const SELECTION: usize = 20;
+    pub const SEARCH_HIT: usize = 21;
+    pub const SEARCH_CURRENT: usize = 22;
+    pub const DIVIDER: usize = 23;
+}
 pub type Slots = [Rgba; SLOTS];
 
 /// How the new theme comes in (`theme_transition`).

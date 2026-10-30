@@ -380,3 +380,101 @@ fn fade_draws_the_midpoint_at_half_way() {
     renderer.set_blend(None);
     assert_eq!(draw(&mut renderer, &t).centre(3, 1), [0xff, 0xff, 0xff, 0xff]);
 }
+
+/// Tokyo Night to Solarized Dark, two shipped themes (term-app/themes):
+/// Tokyo Night's background is Solarized's ANSI 8 and its foreground is
+/// its cursor, which a match by colour mixed up. At the start of a
+/// transition every theme colour is the old theme's, as drawn without
+/// one; at the end the new theme's; and truecolour equal to a new theme
+/// colour (the background, the text colour) stays as it is throughout.
+#[test]
+fn transitions_start_at_the_old_theme_and_leave_literals_alone() {
+    use term_render::transition::{Blend, Kind, slots};
+    if MTLCreateSystemDefaultDevice().is_none() {
+        assert!(std::env::var_os("CI").is_none(), "no Metal device on CI");
+        eprintln!("skipping: no Metal device");
+        return;
+    }
+    let (tokyo, solarized) = (tokyo_night(), solarized_dark());
+    let mut renderer = Renderer::new(Fonts::new("Menlo", 24.0));
+    let mut t = Term::new(COLS, LINES, 0, term_core::ImagePool::process());
+    // Row 0: the default background, ANSI 8's, truecolour #002b36
+    // (Solarized's background), inverse (the text colour as background).
+    // Row 1: default text, truecolour #839496 text (Solarized's text
+    // colour), then the block cursor.
+    t.advance(b" \x1b[100m \x1b[48;2;0;43;54m \x1b[0;7m \x1b[0m\r\na\x1b[38;2;131;148;150mb\x1b[0m");
+    let divider = rgb(0x333333);
+    for (old, new) in [(&tokyo, &solarized), (&solarized, &tokyo)] {
+        let before = render(&mut renderer, &mut t, old);
+        let after = render(&mut renderer, &mut t, new);
+        let blend = |progress| Blend {
+            kind: Kind::Fade,
+            progress,
+            old: slots(old, divider),
+            new: slots(new, divider),
+        };
+        let (cw, ch) = before.cell;
+        let cell_of = |x: usize, y: usize| (x / cw, y / ch);
+        let text = [0x96, 0x94, 0x83, 0xff]; // #839496 as BGRA
+        for (progress, want) in [(0.0, &before), (1.0, &after)] {
+            renderer.set_blend(Some(blend(progress)));
+            let got = draw(&mut renderer, &t);
+            let height = got.data.len() / 4 / got.width;
+            for y in 0..height {
+                for x in 0..got.width {
+                    let (cell, ink) = (cell_of(x, y), after.at(x, y) == text);
+                    let w = match cell {
+                        // The truecolour background.
+                        (2, 0) => after.at(x, y),
+                        // The truecolour text: where it is all ink (its
+                        // edges show the background through).
+                        (1, 1) if ink => after.at(x, y),
+                        (1, 1) => continue,
+                        _ => want.at(x, y),
+                    };
+                    let g = got.at(x, y);
+                    assert!(
+                        g.iter().zip(w).all(|(&a, b)| a.abs_diff(b) <= 1),
+                        "at progress {progress}, pixel ({x}, {y}): got {g:?}, want {w:?}"
+                    );
+                }
+            }
+        }
+        renderer.set_blend(None);
+    }
+    // The literals really are Solarized's colours.
+    let px = render(&mut renderer, &mut t, &solarized);
+    assert_eq!(px.centre(2, 0), px.centre(0, 0), "truecolour #002b36 is Solarized's background");
+    assert!(
+        px.cell_pixels(1, 1).filter(|&p| p == [0x96, 0x94, 0x83, 0xff]).count() > 10,
+        "solid text pixels"
+    );
+}
+
+/// Tokyo Night as shipped (term-app/themes/tokyo-night.toml).
+fn tokyo_night() -> Theme {
+    Theme::new(
+        [
+            0x15161e, 0xf7768e, 0x9ece6a, 0xe0af68, 0x7aa2f7, 0xbb9af7, 0x7dcfff, 0xa9b1d6, //
+            0x414868, 0xff899d, 0x9fe044, 0xfaba4a, 0x8db0ff, 0xc7a9ff, 0xa4daff, 0xc0caf5,
+        ],
+        0xc0caf5,
+        0x1a1b26,
+        0xc0caf5,
+        0x283457,
+    )
+}
+
+/// Solarized Dark as shipped (term-app/themes/solarized-dark.toml).
+fn solarized_dark() -> Theme {
+    Theme::new(
+        [
+            0x073642, 0xdc322f, 0x859900, 0xb58900, 0x268bd2, 0xd33682, 0x2aa198, 0xeee8d5, //
+            0x002b36, 0xcb4b16, 0x586e75, 0x657b83, 0x839496, 0x6c71c4, 0x93a1a1, 0xfdf6e3,
+        ],
+        0x839496,
+        0x002b36,
+        0x93a1a1,
+        0x073642,
+    )
+}

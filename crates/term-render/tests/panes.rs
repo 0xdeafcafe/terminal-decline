@@ -190,6 +190,7 @@ fn two_panes_land_in_their_rects() {
         w: 1,
         h: 2 * ch as u16,
         color: rgb(0x808080),
+        tag: 0,
     };
     let rect = |x: usize| PxRect {
         x: x as i32,

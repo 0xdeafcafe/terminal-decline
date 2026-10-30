@@ -146,6 +146,8 @@ pub fn write_png(img: &Image, path: &str) -> Result<(), String> {
     let mut enc = png::Encoder::new(std::io::BufWriter::new(file), img.width, img.height);
     enc.set_color(png::ColorType::Rgba);
     enc.set_depth(png::BitDepth::Eight);
+    // Screenshots are for reading back, not keeping: fast over small.
+    enc.set_compression(png::Compression::Fast);
     let mut w = enc.write_header().map_err(|e| format!("{path}: {e}"))?;
     w.write_image_data(&img.rgba).map_err(|e| format!("{path}: {e}"))?;
     w.finish().map_err(|e| format!("{path}: {e}"))

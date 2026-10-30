@@ -141,7 +141,10 @@ impl Server {
                 Ok(req) => self.dispatch(req),
                 Err(e) => json!({ "ok": false, "error": format!("bad request: {e}") }),
             };
-            writeln!(out, "{reply}")?;
+            // One write: Display would make one per token.
+            let mut text = reply.to_string();
+            text.push('\n');
+            out.write_all(text.as_bytes())?;
         }
     }
 

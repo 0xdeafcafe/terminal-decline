@@ -321,7 +321,17 @@ impl Terminal {
         let mut unit: Option<std::sync::Arc<Unit>> = None;
         for &at in view_rows.iter() {
             let highlights = out.highlights.len() as u32;
-            self.view_pieces(at, &mut pieces);
+            match at {
+                // The unit is the one the row is copied from below: laid
+                // out (or found) once for its rows, not once per row.
+                ViewRow::History { lo, hi, row } => {
+                    if unit.as_ref().is_none_or(|u| u.lo != lo || u.hi != hi) {
+                        unit = Some(self.unit(lo, hi));
+                    }
+                    unit.as_ref().expect("a unit").pieces(row, self.cols, &mut pieces);
+                }
+                ViewRow::Screen(_) => self.view_pieces(at, &mut pieces),
+            }
             if with_images {
                 let r = out.rows.len();
                 row_pieces.extend(pieces.iter().map(|p| (r, *p)));
@@ -460,6 +470,17 @@ impl Terminal {
                             && self
                                 .scrollback
                                 .read(i, self.cols, &mut out.row, &mut out.row_styles, &mut out.row_links, &mut reader)
+                    } else if kept && !self.placeholders_written {
+                        // Kept: not emitted again (roadmap R.3), only
+                        // its flags read.
+                        let (wrapped, fill) = u.row_flags(row);
+                        debug_assert_eq!((wrapped, fill), {
+                            let (r, fill) = u.row(row, self.cols);
+                            (r.wrapped, fill)
+                        });
+                        flags.set(RowFlags::WRAPPED, wrapped);
+                        flags.set(RowFlags::FILL, fill);
+                        false
                     } else {
                         let (r, fill) = u.row(row, self.cols);
                         flags.set(RowFlags::WRAPPED, r.wrapped);

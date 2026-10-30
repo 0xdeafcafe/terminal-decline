@@ -162,11 +162,11 @@ pub fn run(role: Role, args: Vec<String>) -> i32 {
     0
 }
 
-/// `pin`, `prefs` and `import`: their exit status, or `None` to start the
+/// `pin`, `prefs`, `import` and `ctl`: their exit status, or `None` to start the
 /// app.
 fn subcommand(args: &[String], paths: &Paths, moved: Option<&str>) -> Option<i32> {
     let first = args.first().map(String::as_str);
-    if matches!(first, Some("pin" | "import" | "prefs" | "settings"))
+    if matches!(first, Some("pin" | "import" | "prefs" | "settings" | "ctl"))
         && let Some(m) = moved
     {
         eprintln!("terminal-decline: {m}");
@@ -183,6 +183,8 @@ fn subcommand(args: &[String], paths: &Paths, moved: Option<&str>) -> Option<i32
         // as `prefs` or by its name, `settings`. By hand nothing is sent to
         // the terminal: no app is assumed to be there (`--in-app` says so).
         Some("prefs" | "settings") => Some(crate::prefs::run(&args[1..], paths)),
+        // The agent API (docs/design/agent-api.md).
+        Some("ctl") => Some(crate::ctl::run(&args[1..])),
         Some("import") => Some(match crate::import::run(&args[1..], paths) {
             Ok(()) => 0,
             Err(e) => {

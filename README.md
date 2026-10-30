@@ -95,6 +95,28 @@ terminal-decline pin Rush --icon rush.png -- ./rush   # Rush.app with its own Do
 terminal-decline settings     # the Settings screen, in any terminal (also `decline settings`)
 ```
 
+## Driving it from agents and tests
+
+`terminal-decline ctl` runs programs in real Terminal Decline terminals
+without windows, for agents and tests to type into, read and measure:
+
+```sh
+terminal-decline ctl spawn --name top --size 100x30 -- htop
+terminal-decline ctl wait-for top --text "Load average" --timeout 5000
+terminal-decline ctl screen top            # the screen as text; --json for cells, colours, cursor, modes
+terminal-decline ctl screenshot top top.png   # drawn on the GPU with your fonts and theme
+terminal-decline ctl kill top
+```
+
+Each command prints a line of JSON and exits 0 when done (3 when
+`wait-for` timed out); keys go through the app's own encoding, kitty
+keyboard protocol included (`send top --key ctrl+c --text q`). It talks
+to the running app, or starts a headless server with no Dock icon that
+leaves once idle, over a socket only your user can reach;
+`agent_api = false` turns it off. `terminal-decline ctl --help` lists
+the commands; [docs/design/agent-api.md](docs/design/agent-api.md) has
+the details.
+
 ## Features
 
 What is in the code today:

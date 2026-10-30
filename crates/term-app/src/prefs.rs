@@ -50,7 +50,7 @@ impl AppHost {
 
 /// The appearance the system is in, for picking a light/dark theme's
 /// colours: windows follow it unless they are given another.
-fn system_appearance() -> Appearance {
+pub(crate) fn system_appearance() -> Appearance {
     let key = objc2_foundation::NSString::from_str("AppleInterfaceStyle");
     let style = objc2_foundation::NSUserDefaults::standardUserDefaults().stringForKey(&key);
     match style {

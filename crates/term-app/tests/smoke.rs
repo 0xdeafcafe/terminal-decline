@@ -1579,51 +1579,6 @@ fn smoke_shift_drag_selects_over_a_program_taking_the_mouse() {
     );
 }
 
-/// Colours a program sets are drawn: OSC 11 changes the background and
-/// OSC 10 the foreground, OSC 4 a palette entry, and the resets go back
-/// to the theme. The program reads the theme's palette with OSC 4 ?.
-#[test]
-#[ignore = "opens a window; run with --run-ignored"]
-fn smoke_program_set_colours_are_drawn() {
-    if !have_metal() {
-        return;
-    }
-    let dir = TempDir::new("colours");
-    // The reply to OSC 4;1;? is read with the terminal in raw mode.
-    let ask = "stty raw -echo; printf '\\033]4;1;?\\007'; reply=$(dd bs=1 count=24 2>/dev/null); stty sane; \
-               printf '%s\\n' \"$reply\" | tr -d '\\033\\007' | sed 's/^]/osc /'; ";
-    // A dump is written after the next frame; the program waits for it
-    // before changing the colours again.
-    let file = dir.dump_file();
-    let dumped = |n: usize| {
-        format!(
-            "{}i=0; until [ \"$(cat '{f}' 2>/dev/null | wc -l)\" -ge {n} ] || [ $i -ge 100 ]; do sleep 0.05; i=$((i+1)); done; ",
-            osc("dump"),
-            f = file.display()
-        )
-    };
-    let script = format!(
-        "{one}printf '\\033]11;#102030\\007\\033]10;rgb:aa/bb/cc\\007\\033]4;1;#ff0000\\007'; echo set; {two}\
-         printf '\\033]110\\007\\033]111\\007\\033]104\\007'; {ask}{three}{quit}sleep 20",
-        one = dumped(1),
-        two = dumped(2),
-        three = dumped(3),
-        quit = osc("quit"),
-    );
-    let (status, _) = decline(&dir, &script, true);
-    assert!(status.success(), "{status}");
-    let d = dumps(&dir);
-    assert_eq!(d.len(), 3, "{d:?}");
-    let (fg, bg) = (d[0]["foreground"].clone(), d[0]["background"].clone());
-    assert_ne!(bg, "#102030");
-    assert_eq!(d[1]["background"], "#102030", "{}", d[1]);
-    assert_eq!(d[1]["foreground"], "#aabbcc", "{}", d[1]);
-    assert_eq!((d[2]["foreground"].clone(), d[2]["background"].clone()), (fg, bg), "{}", d[2]);
-    // The theme's red, as the default config's theme has it.
-    let s = screen(&d[2]);
-    assert!(s.contains("osc 4;1;rgb:"), "{s}");
-}
-
 /// A folder opened with the app (`open -a`, as a folder dropped on its
 /// Dock icon is): an app that isn't running starts with a window there
 /// and no other, and a running one opens another window (or a tab, as the

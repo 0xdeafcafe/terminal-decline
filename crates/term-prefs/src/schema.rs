@@ -519,6 +519,13 @@ pub const SETTINGS: &[Setting] = &[
         ),
         "$VISUAL or $EDITOR, else nano, vim or vi",
     ),
+    setting(
+        "agent_api",
+        "Agent API",
+        Advanced,
+        Editor::Toggle,
+        "Let your own programs drive terminals with terminal-decline ctl (the app only, never pins)",
+    ),
     Setting {
         hidden: true,
         ..setting(
@@ -671,6 +678,7 @@ mod tests {
                 "image_file_transfer",
                 "update",
                 "editor",
+                "agent_api",
                 "pin_app",
             ]
         );

@@ -330,6 +330,10 @@ pub struct Config {
     /// Settings), with its arguments; unset, `$VISUAL` or `$EDITOR`, else
     /// nano, vim or vi.
     pub editor: Option<String>,
+    /// Let the user's own programs drive terminals through `terminal-decline
+    /// ctl` and its socket (docs/design/agent-api.md). Only the app's own
+    /// process serves; pins never do.
+    pub agent_api: bool,
     /// Set in a pin's config: the app bundle it belongs to.
     #[allow(dead_code)]
     pub pin_app: Option<String>,
@@ -380,6 +384,7 @@ impl Default for Config {
             notify_after: 10,
             update: UpdateMode::Notify,
             editor: None,
+            agent_api: true,
             pin_app: None,
         }
     }

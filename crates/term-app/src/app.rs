@@ -118,6 +118,11 @@ define_class!(
             self.watch_for_new_build();
             self.watch_config();
             crate::memory::listen();
+            // The agent API's socket (docs/design/agent-api.md §2): the
+            // app only, not pins nor the smoke tests' app.
+            if self.ivars().role == crate::entry::Role::App && self.ivars().config.borrow().agent_api && !crate::background::on() {
+                crate::ctl::serve_in_app();
+            }
             // The updater (docs/design/updater.md): off in pins, dogfood,
             // nightly and ad-hoc builds; on, the app menu gains Check for
             // Updates….

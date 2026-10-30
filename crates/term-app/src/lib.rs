@@ -12,6 +12,7 @@ mod background;
 pub mod config;
 pub mod control;
 pub mod crash;
+pub mod ctl;
 pub mod desktop;
 mod divider_view;
 pub mod entry;
@@ -69,6 +70,7 @@ usage: terminal-decline [--config FILE] [-e PROGRAM [ARGS...]]
        terminal-decline import ghostty [PATH] [--write [--force]]
        terminal-decline import iterm FILE.itermcolors [--name NAME] [--write [--force]]
        terminal-decline settings [--layer FILE]... [--edit N]   (also `prefs`)
+       terminal-decline ctl COMMAND [ARGS...]   (drive terminals from agents; ctl --help)
 
 Runs a terminal window. With -e, runs PROGRAM instead of your login shell.
 `terminal-decline pin` makes PROGRAM its own macOS app, with its own Dock icon.";

@@ -71,6 +71,9 @@ pub enum Outcome {
     Hold,
 }
 
+/// See [`Hooks::on_output`].
+pub type OnOutput = Box<dyn FnMut(&[u8], Duration) + Send>;
+
 /// Callbacks from the reader thread.
 pub struct Hooks {
     /// Called when new output arrived and no redraw was pending.
@@ -97,6 +100,14 @@ pub struct Hooks {
     /// itself, so no other program can ask. `None` ignores the sequences
     /// like any unknown OSC.
     pub on_prefs: Option<Box<dyn FnMut(String) + Send>>,
+    /// The agent API's sessions ([`crate::ctl`]): called after each batch
+    /// of output has been parsed, with the batch and the time parsing it
+    /// took.
+    pub on_output: Option<OnOutput>,
+    /// Don't write "[process exited with status N]" when the program
+    /// fails within [`QUICK_EXIT`]: the agent API reports the status
+    /// itself.
+    pub quiet_exit: bool,
 }
 
 impl Hooks {
@@ -108,6 +119,8 @@ impl Hooks {
             on_parsed: None,
             on_events: None,
             on_prefs: None,
+            on_output: None,
+            quiet_exit: false,
         }
     }
 }
@@ -403,6 +416,8 @@ impl Session {
             on_parsed,
             on_events,
             mut on_prefs,
+            mut on_output,
+            quiet_exit,
         } = hooks;
         let images = Some(SessionImages::for_process(&term, terminal_id, dirty.clone(), wake.clone()));
         let images2 = images.clone();
@@ -439,6 +454,7 @@ impl Session {
                         return Ok(());
                     }
                     batches2.fetch_add(1, Ordering::Relaxed);
+                    let parse_started = on_output.as_ref().map(|_| Instant::now());
                     let mut start = 0;
                     if let (Some(scanner), Some(control)) = (&mut scanner, &mut on_control) {
                         scanner.feed(&buf[..n], &mut found);
@@ -449,6 +465,9 @@ impl Session {
                         }
                     }
                     parse(&buf[start..n])?;
+                    if let (Some(f), Some(t0)) = (&mut on_output, parse_started) {
+                        f(&buf[..n], t0.elapsed());
+                    }
                     if let (Some(scanner), Some(ask)) = (&mut prefs, &mut on_prefs) {
                         scanner.feed(&buf[..n], &mut asked);
                         for (_, what) in asked.drain(..) {
@@ -463,6 +482,7 @@ impl Session {
             let outcome = match read {
                 // The message is in the terminal already.
                 Ok(Ok(())) if stopped2.load(Ordering::Acquire) => Outcome::Hold,
+                Ok(Ok(())) if quiet_exit => Outcome::Closed,
                 Ok(Ok(())) => finished(&term2, &child, started),
                 Ok(Err(Bug)) | Err(_) => {
                     child.signal(libc::SIGKILL, true);
@@ -632,6 +652,11 @@ impl Session {
             Some(pty) => pty.resize(size),
             None => Ok(()),
         }
+    }
+
+    /// The program's process, for its exit status.
+    pub fn child(&self) -> Option<term_pty::Child> {
+        self.pty.as_ref().map(Pty::child)
     }
 
     pub fn pid(&self) -> Option<libc::pid_t> {

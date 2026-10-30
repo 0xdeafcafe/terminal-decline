@@ -14,8 +14,8 @@ The terminal itself is in daily use by its author; the Developer ID
 signing, notarization and the in-app updater need the Apple and Sparkle
 secrets, which are not set up yet, so builds are ad-hoc signed for now.
 What `0.1.0` needs is in [docs/release-checklist.md](docs/release-checklist.md);
-the road to 1.0 (inline images, Sixel, performance work, the measured
-comparison with Ghostty) is in [docs/roadmap.md](docs/roadmap.md). The
+the road to 1.0 (performance work, the measured comparison with
+Ghostty) is in [docs/roadmap.md](docs/roadmap.md). The
 speed and memory goals are goals: published numbers will come with the
 beta, not before.
 
@@ -94,7 +94,8 @@ What is in the code today:
   Finder and Services open a window there, notifications (OSC 9/777 and
   the bell) when unfocused, Dock progress, Secure Keyboard Entry.
 
-Not there yet: inline images (kitty graphics, iTerm2, Sixel). The in-app
+Inline images: kitty graphics, iTerm2 (`imgcat`) and Sixel, on by default
+(`images = false` turns them off). The in-app
 updater (Sparkle) is built, but only offers releases that are signed and
 notarized, so it has nothing to offer until the secrets are set. It was called Decline
 before; the first run moves `~/.config/decline` to the new config folder.

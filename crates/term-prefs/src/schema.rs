@@ -423,7 +423,7 @@ pub const SETTINGS: &[Setting] = &[
         "Images",
         Advanced,
         Editor::Toggle,
-        "Show images that programs send (kitty graphics, iTerm2, Sixel); off for now",
+        "Show images that programs send (kitty graphics, iTerm2, Sixel)",
     ),
     setting(
         "image_memory",

@@ -204,7 +204,7 @@ pub struct Config {
     /// Window title for a pin; also shown in the Window menu.
     pub title: Option<String>,
     /// Kitty graphics, iTerm2 images and Sixel (docs/design/images.md).
-    /// Off for now; `TD_IMAGES=1` in the environment turns it on for
+    /// On by default; `TD_IMAGES=1` in the environment turns it on for
     /// tests whatever this says.
     pub images: bool,
     /// The memory images may use, in MB (at most 16384); 0, the default,
@@ -259,7 +259,7 @@ impl Default for Config {
             cwd: None,
             env: BTreeMap::new(),
             title: None,
-            images: false,
+            images: true,
             image_memory: 0,
             image_file_transfer: true,
             theme: None,
@@ -1371,11 +1371,11 @@ mod tests {
     fn image_settings_default_read_and_report_bad_values() {
         let (c, errors) = parse("");
         assert!(errors.is_empty(), "{errors:?}");
-        assert!(!c.images && c.image_memory == 0 && c.image_file_transfer);
-        let all = "images = true\nimage_memory = 256\nimage_file_transfer = false";
+        assert!(c.images && c.image_memory == 0 && c.image_file_transfer);
+        let all = "images = false\nimage_memory = 256\nimage_file_transfer = false";
         let (c, errors) = parse(all);
         assert!(errors.is_empty(), "{errors:?}");
-        assert!(c.images && c.image_memory == 256 && !c.image_file_transfer);
+        assert!(!c.images && c.image_memory == 256 && !c.image_file_transfer);
         for text in [
             "image_memory = -1",
             "image_memory = 99999",
@@ -1389,7 +1389,7 @@ mod tests {
                 errors[0].starts_with("config: image") && errors[0].ends_with("; ignored"),
                 "{errors:?}"
             );
-            assert_eq!((c.images, c.image_memory, c.image_file_transfer), (false, 0, true), "{text}");
+            assert_eq!((c.images, c.image_memory, c.image_file_transfer), (true, 0, true), "{text}");
         }
         // All three apply to running windows.
         let (new, _) = parse(all);

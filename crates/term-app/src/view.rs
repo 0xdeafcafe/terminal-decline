@@ -1134,6 +1134,15 @@ impl WindowView {
             ticks.push((*id, frame, t));
         }
         let frames: Vec<PaneFrame> = ticks.iter().map(|(_, f, _)| *f).collect();
+        // A theme transition draws every tick until it ends, from the
+        // frames already built: only its uniforms change. A window hidden
+        // or covered while one plays takes the new theme at once (its
+        // frames are already built with it) and draws nothing.
+        let animating = win.transition.is_some();
+        if animating && !visible {
+            win.transition = None;
+            win.renderer.set_blend(None);
+        }
         let decision = frame_policy::combine(
             &frames,
             &WindowTick {
@@ -1142,21 +1151,10 @@ impl WindowView {
                 focused: win.focused,
                 idle_ticks: win.idle_ticks,
                 last_input_elapsed: win.last_input.elapsed(),
+                animating,
             },
         );
-        // A theme transition draws every tick until it ends, from the
-        // frames already built: only its uniforms change.
         let now = Instant::now();
-        let decision = match decision {
-            Decision::Skip | Decision::Pause { .. } if win.transition.is_some() => Decision::Draw {
-                rate: win.rate.max(frame_policy::RATE_STREAMING),
-            },
-            Decision::Hide { .. } => {
-                win.transition = None;
-                decision
-            }
-            d => d,
-        };
         // A pane held in a synchronized update keeps its change for later.
         let keep_held = |panes: &HashMap<PaneId, Pane>, ticks: &[(PaneId, PaneFrame, _)]| {
             for (id, f, _) in ticks {

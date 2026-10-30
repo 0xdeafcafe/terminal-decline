@@ -183,6 +183,8 @@ pub const FAKE_PALETTE: [u32; 16] = [
 ];
 
 pub const FAKE_DEFAULTS: &str = r#"appearance = "system"
+theme_transition = "fade"
+theme_transition_ms = 300
 font_family = "Menlo"
 font_size = 13.0
 font_fallback = []

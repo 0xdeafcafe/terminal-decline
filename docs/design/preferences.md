@@ -67,16 +67,39 @@ Two things follow from living in a tab:
 ## Layout (sectioned list)
 
 ```
-┌ Sections ─────┐┌ Appearance ───────────────────────────────────────┐
-│ ▸ Appearance  ││ Theme             slope-dark          ▸           │
-│   Font        ││ Light/dark pair   off                             │
-│   Keys        ││ Colours           from the theme      ▸           │
-│   Window      ││ Opacity           1.00                            │
-│   Pins        ││ Blur              off                 new windows │
-│   Advanced    ││ Padding           6                               │
-└───────────────┘└───────────────────────────────────────────────────┘
- ↑↓ move  ←→ section  enter edit  / search  r reset  ? help  q quit
+ Settings  config.toml
+╭───────────────┬─ Appearance ─────────────────────────────────────────────────╮
+│ ▸ Appearance  │ ▸ Appearance        system                           default │
+│   Font        │   Light theme          Tokyo Night                  set here │
+│   Keys        │   Dark theme           Tokyo Night                  set here │
+│   Window      │   Theme transition  fade                             default │
+│   Pins        │   Transition time   300                              default │
+│   Advanced    │   Foreground        from the theme                           │
+│               │   ...                                                        │
+├───────────────┴──────────────────────────────────────────────────────────────┤
+│ Appearance  system  ·  default                                               │
+│ Follow macOS, or always light or always dark: which of the two themes below… │
+│ Sample text dim bold                                                         │
+╰──────────────────────────────────────────────────────────────────────────────╯
+ ↑↓ move  ←→ section  enter edit  / search  r reset  u undo  ? help  q quit
 ```
+
+Polished 30 Oct 2026, after rush's interface: a header naming the file,
+one card with rounded corners holding the sections beside the settings
+and, under a rule, the selected setting (its value, where it comes from
+and what a reset gives, its description, and a sample of the colours),
+then a line of key hints that drops the less needed ones first on narrow
+screens (help and quit stay). Below 60×12 it is one column: the section,
+its settings, the description and the keys. The tab draws in the
+terminal's own colours: the default foreground and background, faint
+(SGR 2) for what is secondary, and one ANSI colour of the theme as the
+accent (the first of blue, bright blue, cyan, bright cyan, magenta,
+bright magenta and green with a contrast of 3 on the background), with
+the selection as that colour behind the background's. So it previews and
+animates with the other windows. Only when the theme's foreground isn't
+readable on its background (a contrast under 3) does it pick its own
+two. The theme lists show each theme's colours beside its name: `Aa` in
+its text colour on its background, then its first six ANSI colours.
 
 - Sections hold only settings that exist (the schema test keeps it so;
   later settings get entries when they are built):

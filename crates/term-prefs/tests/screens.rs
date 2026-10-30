@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use term_core::{Attrs, Term};
+use term_core::{Attrs, ColorKind, Term};
 use term_prefs::app::{App, Effect};
 use term_prefs::host::{Fake, Pin};
 use term_prefs::ui::frame::Renderer;
@@ -155,16 +155,25 @@ fn the_layout_at_80_by_24() {
     let mut app = App::new(&fake, vec![cfg.clone()], 0, false);
     let s = Screen::new(&mut app, 80, 24);
     let t = s.text();
-    assert!(s.row(0).starts_with("┌ Sections ─"), "{t}");
-    assert!(s.row(0).contains("┐┌ Appearance ─"), "{t}");
-    assert!(s.row(1).starts_with("│ ▸ Appearance  ││ ▸ Appearance"), "{t}");
-    assert!(t.contains("│   Font"), "{t}");
+    // The header, then one card: sections beside the settings, the
+    // selected setting under them.
+    assert!(s.row(0).starts_with(" Settings  config.toml"), "{t}");
+    assert!(s.row(1).starts_with("╭───────────────┬─ Appearance ─"), "{t}");
+    assert!(s.row(2).starts_with("│ ▸ Appearance  │ ▸ Appearance        system"), "{t}");
+    assert!(t.contains("│   Font        │"), "{t}");
     assert!(t.contains("Light theme       none"), "{t}");
-    assert!(t.contains("Blur") || t.contains("Colour"), "{t}");
-    assert!(s.row(23).contains("↑↓ move  ←→ section  enter edit  / search"), "{t}");
-    // The description of the selected row, and the preview strip.
-    assert!(s.row(22).contains("Follow macOS"), "{t}");
-    assert!(s.row(21).contains("Preview  Sample text"), "{t}");
+    assert!(t.contains("Theme transition  fade"), "{t}");
+    assert!(s.row(18).starts_with("├───────────────┴──"), "{t}");
+    // The detail pane: name, value and where it comes from; the
+    // description; the sample of the colours.
+    assert!(s.row(19).contains("│ Appearance  system  ·  default"), "{t}");
+    assert!(s.row(20).contains("Follow macOS"), "{t}");
+    assert!(s.row(21).contains("Sample text dim bold"), "{t}");
+    assert!(s.row(22).starts_with("╰───"), "{t}");
+    assert_eq!(
+        s.row(23),
+        " ↑↓ move  ←→ section  enter edit  / search  r reset  u undo  ? help  q quit"
+    );
     // The real cursor is on the selected row; nothing was written.
     assert!(s.cursor_row().contains("▸ Appearance"));
     assert!(!cfg.exists());
@@ -178,31 +187,31 @@ fn moving_and_sections() {
     let mut app = App::new(&fake, vec![cfg], 0, false);
     let mut s = Screen::new(&mut app, 80, 24);
     s.send(&mut app, RIGHT);
-    assert!(s.has("┌ Font ─"));
+    assert!(s.has("┬─ Font ─"));
     assert!(s.cursor_row().contains("▸ Family"), "{}", s.text());
     s.send(&mut app, DOWN);
     assert!(s.cursor_row().contains("▸ Size") && s.cursor_row().contains("13"), "{}", s.text());
     assert!(s.cursor_row().contains("default"));
     s.send(&mut app, &RIGHT.repeat(4));
-    assert!(s.has("┌ Advanced ─"));
+    assert!(s.has("┬─ Advanced ─"));
     assert!(s.has("+ add a variable"));
     // Title is a pin's setting only.
     assert!(!s.has("Title"));
     s.send(&mut app, RIGHT);
-    assert!(s.has("┌ Appearance ─"));
+    assert!(s.has("┬─ Appearance ─"));
     s.send(&mut app, LEFT);
-    assert!(s.has("┌ Advanced ─"));
+    assert!(s.has("┬─ Advanced ─"));
     // Mouse: click "Keys" in the sections pane.
-    s.send(&mut app, "\x1b[<0;5;4M\x1b[<0;5;4m");
-    assert!(s.has("┌ Keys ─"), "{}", s.text());
+    s.send(&mut app, "\x1b[<0;5;5M\x1b[<0;5;5m");
+    assert!(s.has("┬─ Keys ─"), "{}", s.text());
     assert!(s.has("cmd+t") && s.has("New Tab"));
     // Wheel down moves the selection.
     s.send(&mut app, "\x1b[<65;30;5M");
     assert!(s.cursor_row().contains("cmd+n"), "{}", s.text());
     s.send(&mut app, "?");
-    assert!(s.has("┌ Help"));
+    assert!(s.has("╭ Help"));
     s.send(&mut app, "x");
-    assert!(!s.has("┌ Help"));
+    assert!(!s.has("╭ Help"));
     s.send(&mut app, "q");
     assert!(s.quit);
 }
@@ -272,7 +281,7 @@ fn toggles_choices_text_and_colours() {
     s.send(&mut app, ESC);
     // Choice list with a filter.
     s.send(&mut app, &format!("/option{ENTER}"));
-    assert!(s.has("filter:"), "{}", s.text());
+    assert!(s.has("╭ Option as Meta ─") && s.has("│ ❯ "), "{}", s.text());
     assert!(s.has("▸ none"));
     s.send(&mut app, "le");
     assert!(s.has("▸ left") && !s.has("both"), "{}", s.text());
@@ -479,8 +488,8 @@ fn a_file_that_does_not_parse_is_read_only() {
     let fake = Fake::new(cfg.clone());
     let mut app = App::new(&fake, vec![cfg.clone()], 0, false);
     let mut s = Screen::new(&mut app, 80, 24);
-    assert!(s.row(0).starts_with("error: config.toml doesn't parse"), "{}", s.text());
-    assert!(s.row(0).contains("line 1"), "{}", s.text());
+    assert!(s.row(1).starts_with(" error: config.toml doesn't parse"), "{}", s.text());
+    assert!(s.row(1).contains("line 1"), "{}", s.text());
     s.send(&mut app, "/copy on");
     s.send(&mut app, ENTER);
     assert!(s.has("error: config.toml can't be edited here"), "{}", s.text());
@@ -504,17 +513,21 @@ fn small_screens_and_resizes() {
     let mut app = App::new(&fake, vec![cfg.clone()], 0, false);
     let mut s = Screen::new(&mut app, 20, 5);
     let t = s.text();
-    assert!(s.row(0).starts_with("┌ Appearance (1/6)"), "{t}");
-    assert!(s.row(1).starts_with("│ ▸ Appeara"), "{t}");
+    // One column: the section, its settings, the description, the keys.
+    assert_eq!(s.row(0), " Appearance 1/6", "{t}");
+    assert_eq!(s.row(1), " ▸ Appearan… system", "{t}");
+    assert_eq!(s.row(2), "   Light th… none …", "{t}");
+    assert_eq!(s.row(3), " Follow macOS, or …", "{t}");
+    assert_eq!(s.row(4), " ? help  q quit", "{t}");
     assert!(s.cursor_row().contains("▸"));
     s.send(&mut app, DOWN);
-    assert!(s.row(1).contains("▸ Light"), "{}", s.text());
+    assert!(s.row(2).contains("▸ Light"), "{}", s.text());
     s.send(&mut app, RIGHT);
-    assert!(s.row(0).starts_with("┌ Font (2/6)"), "{}", s.text());
+    assert_eq!(s.row(0), " Font 2/6", "{}", s.text());
     s.resize(&mut app, 80, 24);
-    assert!(s.has("┌ Sections") && s.cursor_row().contains("▸ Family"), "{}", s.text());
+    assert!(s.has("│ ▸ Font        │") && s.cursor_row().contains("▸ Family"), "{}", s.text());
     s.resize(&mut app, 50, 12);
-    assert!(s.has("┌ Sections"), "{}", s.text());
+    assert!(s.row(0) == " Font 2/6" && s.cursor_row().contains("▸ Family"), "{}", s.text());
     s.resize(&mut app, 12, 4);
     s.resize(&mut app, 11, 3);
     assert!(s.has("too small"));
@@ -539,10 +552,10 @@ fn pins_open_their_own_file_over_yours() {
     let mut app = App::new(&fake, vec![cfg.clone()], 0, false);
     let mut s = Screen::new(&mut app, 80, 24);
     s.send(&mut app, &RIGHT.repeat(4));
-    assert!(s.has("┌ Pins") && s.has("htop"), "{}", s.text());
+    assert!(s.has("┬─ Pins") && s.has("htop"), "{}", s.text());
     s.send(&mut app, ENTER);
     assert!(s.has("editing htop's settings"), "{}", s.text());
-    assert!(s.has("Appearance · htop.toml"), "{}", s.text());
+    assert!(s.row(0).contains("htop.toml (a pin's own settings)"), "{}", s.text());
     assert!(!s.has("Pins"), "no Pins section in a pin's file");
     s.send(&mut app, RIGHT);
     assert!(s.has("16") && s.has("inherited from config.toml"), "{}", s.text());
@@ -559,7 +572,7 @@ fn pins_open_their_own_file_over_yours() {
     assert_eq!(read(&pin), "command = ['htop']\n");
     // Esc goes back to the user's own file.
     s.send(&mut app, ESC);
-    assert!(s.has("back to your own settings") && s.has("┌ Sections"), "{}", s.text());
+    assert!(s.has("back to your own settings") && s.has("│ ▸ Appearance"), "{}", s.text());
     s.send(&mut app, &format!("{}d", RIGHT.repeat(4)));
     assert!(s.has("Remove the pin htop? Its Dock tile stays. (y/n)"), "{}", s.text());
     s.send(&mut app, "y");
@@ -617,6 +630,30 @@ fn theme_lists_preview_live() {
     s.send(&mut app, ENTER);
     assert_eq!(s.sent.last().unwrap(), "\x1b]7771;theme-preview;keep\x1b\\");
     assert_eq!(read(&cfg), "theme = { light = \"tokyo-night\", dark = \"solarized-dark\" }\n");
+    // Each theme in the list shows its colours: `Aa` in its text colour
+    // on its background, then its ANSI colours.
+    s.send(&mut app, &format!("{ESC}/dark theme{ENTER}"));
+    let t = s.text();
+    let y = (0..24).find(|&y| s.row(y).contains("Slope Dark")).expect(&t);
+    let row = s.row(y);
+    assert!(row.contains("Slope Dark") && row.contains(" Aa "), "{t}");
+    let x = row.chars().position(|c| c == 'A').unwrap();
+    let cell = s.term.state.visible_row(y).cell(x).style();
+    assert_eq!(cell.bg.kind(), ColorKind::Rgb(0x09, 0x2d, 0x2b), "Slope Dark's background");
+    // This tab is drawn in the terminal's own colours, so it follows the
+    // preview (and a transition) with every other window: the
+    // selection is the theme's accent colour behind the background's.
+    let y = (0..24).find(|&y| s.row(y).contains("▸ Solarized Dark")).expect(&t);
+    let x = s.row(y).chars().position(|c| c == '▸').unwrap();
+    let sel = s.term.state.visible_row(y).cell(x).style();
+    assert!(sel.attrs.contains(Attrs::INVERSE));
+    assert!(matches!(sel.fg.kind(), ColorKind::Indexed(_)), "{:?}", sel.fg.kind());
+    s.send(&mut app, &format!("{ESC}{ESC}"));
+    // At 20×5 the list still works.
+    s.resize(&mut app, 20, 5);
+    s.send(&mut app, &format!("/dark theme{ENTER}{UP}"));
+    assert!(s.has("❯") && s.cursor_row().contains("❯"), "{}", s.text());
+    s.send(&mut app, ESC);
     // Run by hand (not in the app), nothing is sent.
     let mut app = App::new(&fake, vec![cfg.clone()], 0, false);
     let mut s = Screen::new(&mut app, 80, 24);

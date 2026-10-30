@@ -1,19 +1,26 @@
-//! History search filters, built while a pane is idle (cells design §13.6).
+//! History work done while a pane is idle: search filters (cells design
+//! §13.6), then compressing history blocks (§11.8, roadmap R.7).
 //!
 //! A block of history searches faster once it has a filter, but nothing
-//! needs one: a block without is scanned. So filters are built only in
-//! spare time. Once a window's display link has paused and stayed paused
-//! for [`IDLE_BEFORE`] (no output, no frame), the view hands each pane's
-//! terminal to the one `filters` thread, which takes [`BATCH`] blocks with
-//! `Terminal::filter_job` under the lock, builds their filters off it and
-//! stores them with `Terminal::add_filters` under the lock, until no block
-//! is left or the pane is busy again.
+//! needs one: a block without is scanned. Likewise a block takes less
+//! memory once compressed, but nothing needs it to be. So both are done
+//! only in spare time, never while output is arriving. Once a window's
+//! display link has paused and stayed paused for [`IDLE_BEFORE`] (no
+//! output, no frame), the view hands each pane's terminal to the one
+//! `filters` thread. It takes [`BATCH`] blocks with `Terminal::filter_job`
+//! under the lock, builds their filters off it and stores them with
+//! `Terminal::add_filters` under the lock, until no block is left; then
+//! the same with `Terminal::compress_job`, `CompressJob::run` and
+//! `Terminal::add_compressed`. It stops as soon as the pane is busy again.
+//! Filters go first: a compressed block would have to be decompressed to
+//! build its filter.
 //!
 //! Idle cost: nothing here polls. The only timer is the one the view sets
 //! when its display link pauses (one shot per pause, like the drawable
-//! trim), and the thread sleeps on a channel; with every block filtered a
-//! pause costs one timer and one peek at the history, then nothing runs.
-//! The `nothing_left_wakes_nothing` test checks the loop stops at once.
+//! trim), and the thread sleeps on a channel; with every block filtered
+//! and compressed a pause costs one timer and two peeks at the history,
+//! then nothing runs. The `nothing_left_wakes_nothing` test checks the
+//! loop stops at once.
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -54,17 +61,30 @@ impl Quiet {
     }
 }
 
-/// Build filters for `term`'s history in batches while `idle` holds; the
-/// number of batches done. Only the lock is shared with the pane: the
-/// filters themselves are built without it.
+/// Build filters for `term`'s history, then compress its blocks, in
+/// batches while `idle` holds; the number of batches done. Only the lock
+/// is shared with the pane: the filters are built and the blocks
+/// compressed without it.
 pub fn build(term: &Mutex<Term>, idle: impl Fn() -> bool) -> usize {
     let mut done = 0;
+    let mut filters = true;
     while idle() {
-        let Some(mut job) = session::lock(term).state.filter_job(BATCH) else {
+        if filters {
+            // Bound first: the guard must go before the job runs.
+            let job = session::lock(term).state.filter_job(BATCH);
+            if let Some(mut job) = job {
+                job.run();
+                session::lock(term).state.add_filters(job);
+                done += 1;
+                continue;
+            }
+            filters = false;
+        }
+        let Some(mut job) = session::lock(term).state.compress_job(BATCH) else {
             break;
         };
         job.run();
-        session::lock(term).state.add_filters(job);
+        session::lock(term).state.add_compressed(job);
         done += 1;
     }
     done
@@ -160,6 +180,34 @@ mod tests {
         assert!(unfiltered(&term) > 0, "history has blocks to filter");
         assert!(build(&term, || true) > 0);
         assert!(session::lock(&term).state.filter_job(1).is_none());
+    }
+
+    #[test]
+    fn compresses_every_block_after_the_filters() {
+        let term = term_with_history();
+        let blocks = session::lock(&term).state.history_stats().sealed_blocks;
+        assert!(blocks > BATCH, "history has several batches of blocks");
+        let batches = build(&term, || true);
+        // Every block's filter in batches of BATCH, then (as far as there
+        // is anything to compress) its compression.
+        assert!(batches >= blocks.div_ceil(BATCH), "{batches} batches for {blocks} blocks");
+        let t = session::lock(&term);
+        assert!(t.state.filter_job(1).is_none() && t.state.compress_job(1).is_none());
+    }
+
+    #[test]
+    fn output_between_batches_stops_the_compressing() {
+        let term = term_with_history();
+        // Filters first, then one compression batch at most.
+        let filter_batches = build(&term, || session::lock(&term).state.filter_job(1).is_some());
+        assert!(filter_batches > 0);
+        let allowed = Cell::new(1);
+        let batches = build(&term, || {
+            let ok = allowed.get() > 0;
+            allowed.set(allowed.get() - 1);
+            ok
+        });
+        assert!(batches <= 1);
     }
 
     #[test]

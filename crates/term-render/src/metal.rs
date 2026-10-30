@@ -971,7 +971,7 @@ impl Window {
             [one] if one.pane.frame.clear == clear => one.pane.frame.clear_tag,
             _ => crate::frame::tag_of(crate::transition::slot::BACKGROUND),
         };
-        let backdrop = (blend.kind != 0 && clear >> 24 != 0).then(|| RectInstance {
+        let backdrop = (blend.playing() && clear >> 24 != 0).then(|| RectInstance {
             x: 0,
             y: 0,
             w: width.min(u16::MAX as u32) as u16,
@@ -1113,7 +1113,6 @@ impl Window {
         // SAFETY: `Uniforms` is plain data of the shaders' `Blend` layout.
         unsafe {
             let bytes = NonNull::from(&blend).cast::<c_void>();
-            enc.setVertexBytes_length_atIndex(bytes, size_of::<Uniforms>(), 2);
             enc.setFragmentBytes_length_atIndex(bytes, size_of::<Uniforms>(), 0);
         }
         if let Some(buf) = &rect_buf

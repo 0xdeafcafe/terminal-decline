@@ -295,8 +295,16 @@ window's theme changing (`apply_config`, `appearance_changed`).
   background from Solarized's ANSI 8.) While one plays, the pass is
   cleared to nothing and the window's background drawn as a rect, so it
   blends per pixel too.
-- A change while one plays starts from the colours on screen (the
-  cross-fade part of the blend at that moment), not from the old theme.
+- A change while one plays starts from the colours on screen, pixel by
+  pixel: the one playing goes on under the new one, which blends from
+  wherever it has got to (half way through a wave, the swept corner and
+  the unswept one both carry on from their own colour). The uniforms
+  hold up to 8 transitions over one another (1 KB, was 224 bytes); one
+  is dropped when a later one ends, and past 8 (a key held down in the
+  theme list) the oldest is folded into the colours under it as its
+  cross-fade, the only time anything jumps. (Fixed 30 Oct 2026: a change
+  used to restart as a uniform cross-fade from the blend's cross-fade
+  part, so an interrupted wave jumped to one grey.)
 - The display link ticks only while a transition plays (each tick draws
   without building); when it ends the window is idle again, 0 wakeups. A
   window that can't be seen (a background tab) takes the new theme at

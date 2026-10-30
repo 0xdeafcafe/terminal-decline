@@ -1413,7 +1413,7 @@ impl WindowView {
             [one] => one.pane.frame.clear,
             _ => 0,
         };
-        let blend = win.transition.as_ref().map(|t| t.blend(now)).filter(|b| b.progress < 1.0);
+        let blend = win.transition.as_ref().map(|t| t.blend(now)).filter(|b| !b.finished());
         if blend.is_none() {
             // Ended: this frame is the new theme's own.
             win.transition = None;

@@ -361,12 +361,7 @@ fn fade_draws_the_midpoint_at_half_way() {
 
     let end = render(&mut renderer, &mut t, &new);
     assert_eq!(end.centre(3, 1), [0xff, 0xff, 0xff, 0xff], "the new background, with no transition");
-    let blend = |progress| Blend {
-        kind: Kind::Fade,
-        progress,
-        old: slots(&old, rgb(0x333333)),
-        new: slots(&new, rgb(0x333333)),
-    };
+    let blend = |progress| Blend::single(Kind::Fade, progress, slots(&old, rgb(0x333333)), slots(&new, rgb(0x333333)));
     renderer.set_blend(Some(blend(0.5)));
     let half = draw(&mut renderer, &t);
     close(half.centre(3, 1), [0.5, 0.5, 0.5, 1.0], "background half way");
@@ -407,12 +402,7 @@ fn transitions_start_at_the_old_theme_and_leave_literals_alone() {
     for (old, new) in [(&tokyo, &solarized), (&solarized, &tokyo)] {
         let before = render(&mut renderer, &mut t, old);
         let after = render(&mut renderer, &mut t, new);
-        let blend = |progress| Blend {
-            kind: Kind::Fade,
-            progress,
-            old: slots(old, divider),
-            new: slots(new, divider),
-        };
+        let blend = |progress| Blend::single(Kind::Fade, progress, slots(old, divider), slots(new, divider));
         let (cw, ch) = before.cell;
         let cell_of = |x: usize, y: usize| (x / cw, y / ch);
         let text = [0x96, 0x94, 0x83, 0xff]; // #839496 as BGRA
@@ -477,4 +467,69 @@ fn solarized_dark() -> Theme {
         0x93a1a1,
         0x073642,
     )
+}
+
+/// A wave, glimmer or pulse cut short by another theme change: the frame
+/// drawn just after the change is the frame drawn just before it, pixel
+/// for pixel (the one playing goes on under the new one), on the GPU.
+/// Half way through a wave from black to white the top left is white and
+/// the bottom right still black; they stay so.
+#[test]
+fn an_interrupted_transition_carries_on_from_the_screen() {
+    use std::time::{Duration, Instant};
+    use term_render::transition::{Kind, Transition, slots};
+    if MTLCreateSystemDefaultDevice().is_none() {
+        assert!(std::env::var_os("CI").is_none(), "no Metal device on CI");
+        eprintln!("skipping: no Metal device");
+        return;
+    }
+    let black = Theme::new([0; 16], 0xffffff, 0x000000, 0xffffff, 0x444444);
+    let white = Theme::new([0xffffff; 16], 0x000000, 0xffffff, 0x000000, 0x444444);
+    let red = Theme::new([0x00ff00; 16], 0xffffff, 0xff0000, 0xffffff, 0x444444);
+    let divider = rgb(0x333333);
+    let (t0, ms) = (Instant::now(), Duration::from_millis);
+    let mut renderer = Renderer::new(Fonts::new("Menlo", 24.0));
+    let mut t = Term::new(COLS, LINES, 0, term_core::ImagePool::process());
+    t.advance(b"\x1b[?25lab\x1b[41m c\x1b[0m\r\nd");
+    for kind in [Kind::Wave, Kind::Glimmer, Kind::Pulse] {
+        let first = Transition::start(None, slots(&black, divider), slots(&white, divider), kind, ms(300), t0).unwrap();
+        let half = t0 + ms(150);
+        render(&mut renderer, &mut t, &white);
+        renderer.set_blend(Some(first.blend(half)));
+        let before = draw(&mut renderer, &t);
+        if kind == Kind::Wave {
+            let (w, h) = (before.width, before.data.len() / 4 / before.width);
+            assert_eq!(before.at(0, 0), [0xff, 0xff, 0xff, 0xff], "top left white");
+            assert_eq!(before.at(w - 1, h - 1), [0, 0, 0, 0xff], "bottom right black");
+        }
+        // Red comes in: rows built with it, from where the first got to.
+        let second = Transition::start(
+            Some(&first),
+            slots(&white, divider),
+            slots(&red, divider),
+            Kind::Fade,
+            ms(300),
+            half,
+        )
+        .unwrap();
+        render(&mut renderer, &mut t, &red);
+        renderer.set_blend(Some(second.blend(half)));
+        let after = draw(&mut renderer, &t);
+        let height = before.data.len() / 4 / before.width;
+        for y in 0..height {
+            for x in 0..before.width {
+                let (a, b) = (before.at(x, y), after.at(x, y));
+                assert!(
+                    a.iter().zip(b).all(|(&p, q)| p.abs_diff(q) <= 1),
+                    "{kind:?}: pixel ({x}, {y}) jumped from {a:?} to {b:?}"
+                );
+            }
+        }
+        // And it ends at red, as drawn without a transition.
+        renderer.set_blend(Some(second.blend(half + ms(300))));
+        let end = draw(&mut renderer, &t);
+        renderer.set_blend(None);
+        assert_eq!(end.data, draw(&mut renderer, &t).data, "{kind:?} ends at the new theme");
+        assert_eq!(end.centre(3, 1), [0, 0, 0xff, 0xff], "{kind:?}: red background");
+    }
 }

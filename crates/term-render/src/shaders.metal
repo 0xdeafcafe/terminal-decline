@@ -18,42 +18,29 @@ struct Rect {
     uint tag;   // where the colour comes from: 0 its own, else 1 + a theme slot
 };
 
-// A theme transition (transition.rs, `Uniforms`): the old and new
-// theme's colours, how far along it is and how it moves. `count` is 0
-// while none plays.
+// Theme transitions (transition.rs, `Uniforms`): the colours under every
+// transition playing, and each transition, oldest first, with how far
+// along it is, how it moves and the theme colours it goes to. `count` is
+// 0 while none plays.
 #define SLOTS 24
-struct Blend {
+#define LEVELS 8
+struct Level {
     float progress;
     uint kind; // 0 none, 1 fade, 2 wave, 3 pulse, 4 glimmer
+    uint pad[2];
+};
+
+struct Blend {
     float2 viewport;
     uint count;
-    uint pad[3];
-    uint old_slots[SLOTS];
-    uint new_slots[SLOTS];
+    uint pad;
+    Level levels[LEVELS];
+    uint from[SLOTS];
+    uint to[LEVELS][SLOTS];
 };
 
-// An instance colour as the transition draws it: a colour tagged with a
-// theme slot (frame.rs, `Tag`) comes from the old theme's colour in that
-// slot, keeping its own alpha; an untagged one stays as it is. `matched`
-// says whether it moves at all.
-struct Blended {
-    float4 old_colour;
-    float4 new_colour;
-    float matched;
-};
-
-static Blended blended(uint packed, uint tag, constant Blend &b) {
-    float4 c = unpack_unorm4x8_to_float(packed);
-    Blended o = { c, c, 0.0 };
-    if (tag != 0u && tag <= b.count) {
-        float4 old = unpack_unorm4x8_to_float(b.old_slots[tag - 1u]);
-        o.old_colour = float4(old.rgb, c.a);
-        o.matched = 1.0;
-    }
-    return o;
-}
-
-// Mirrors `ease`, `noise`, `local` and `lift` in transition.rs.
+// Mirrors `ease`, `noise`, `local`, `lift` and `Blend::colour` in
+// transition.rs.
 static float ease(float t) {
     t = clamp(t, 0.0, 1.0);
     return t * t * (3.0 - 2.0 * t);
@@ -66,45 +53,58 @@ static float block_noise(uint bx, uint by) {
     return float(h & 0x00FFFFFFu) / 16777216.0;
 }
 
-static float4 transition_colour(float4 old_colour, float4 new_colour, float matched, float2 pixel, constant Blend &b) {
-    if (b.kind == 0u || matched == 0.0) {
-        return new_colour;
+// `c` moved on by one level at `pixel`.
+static float3 level_colour(float3 c, float3 to, Level l, float2 pixel, float2 viewport) {
+    float p = l.progress;
+    if (l.kind == 0u || p >= 1.0) {
+        return to;
     }
-    float p = b.progress;
-    float2 at = pixel / max(b.viewport, float2(1.0));
+    if (p <= 0.0) {
+        return c;
+    }
+    float2 at = pixel / max(viewport, float2(1.0));
     float d = (at.x + at.y) * 0.5;
     float t;
     float lift = 0.0;
-    if (p >= 1.0) {
-        t = 1.0;
-    } else if (p <= 0.0) {
-        t = 0.0;
-    } else if (b.kind == 2u) {
+    if (l.kind == 2u) {
         const float soft = 0.35;
         t = ease((p * (1.0 + soft) - d) / soft);
-    } else if (b.kind == 4u) {
+    } else if (l.kind == 4u) {
         const float turn = 0.4;
         uint2 block = uint2(pixel / 8.0);
         t = ease((p - block_noise(block.x, block.y) * (1.0 - turn)) / turn);
     } else {
         t = ease(p);
     }
-    if (b.kind == 3u) {
+    if (l.kind == 3u) {
         float k = (p - 0.5) / 0.18;
         lift = 0.22 * exp(-k * k);
-    } else if (b.kind == 4u) {
+    } else if (l.kind == 4u) {
         lift = 0.16 * sin(M_PI_F * p) * max(1.0 - abs(d - p) * 5.0, 0.0);
     }
-    float3 rgb = mix(old_colour.rgb, new_colour.rgb, t);
-    rgb += (1.0 - rgb) * lift;
-    return float4(rgb, new_colour.a);
+    float3 rgb = mix(c, to, t);
+    return rgb + (1.0 - rgb) * lift;
+}
+
+// An instance's colour as drawn: one tagged with a theme slot (frame.rs,
+// `Tag`) comes from that slot's colour under the transitions, moved on
+// by each, keeping its own alpha; an untagged one stays as it is.
+static float4 transition_colour(float4 colour, uint tag, float2 pixel, constant Blend &b) {
+    if (b.count == 0u || tag == 0u || tag > SLOTS) {
+        return colour;
+    }
+    uint k = tag - 1u;
+    float3 c = unpack_unorm4x8_to_float(b.from[k]).rgb;
+    for (uint j = 0; j < b.count && j < LEVELS; j++) {
+        c = level_colour(c, unpack_unorm4x8_to_float(b.to[j][k]).rgb, b.levels[j], pixel, b.viewport);
+    }
+    return float4(c, colour.a);
 }
 
 struct RectOut {
     float4 pos [[position]];
-    float4 old_colour [[flat]];
-    float4 new_colour [[flat]];
-    float matched [[flat]];
+    float4 colour [[flat]];
+    uint tag [[flat]];
 };
 
 static float4 to_clip(float2 p, float2 viewport) {
@@ -113,21 +113,18 @@ static float4 to_clip(float2 p, float2 viewport) {
 
 vertex RectOut rect_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
                            constant Rect *rects [[buffer(0)]],
-                           constant Uniforms &u [[buffer(1)]],
-                           constant Blend &b [[buffer(2)]]) {
+                           constant Uniforms &u [[buffer(1)]]) {
     Rect r = rects[iid];
     float2 corner = float2(vid & 1, vid >> 1);
     RectOut o;
     o.pos = to_clip(u.origin + float2(r.pos) + corner * float2(r.size), u.viewport);
-    Blended c = blended(r.color, r.tag, b);
-    o.old_colour = c.old_colour;
-    o.new_colour = c.new_colour;
-    o.matched = c.matched;
+    o.colour = unpack_unorm4x8_to_float(r.color);
+    o.tag = r.tag;
     return o;
 }
 
 fragment float4 rect_fragment(RectOut in [[stage_in]], constant Blend &b [[buffer(0)]]) {
-    float4 c = transition_colour(in.old_colour, in.new_colour, in.matched, in.pos.xy, b);
+    float4 c = transition_colour(in.colour, in.tag, in.pos.xy, b);
     return float4(c.rgb * c.a, c.a);
 }
 
@@ -142,25 +139,21 @@ struct Glyph {
 struct GlyphOut {
     float4 pos [[position]];
     float2 uv;
-    float4 old_colour [[flat]];
-    float4 new_colour [[flat]];
-    float matched [[flat]];
+    float4 colour [[flat]];
+    uint tag [[flat]];
     uint is_color [[flat]];
 };
 
 vertex GlyphOut glyph_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
                              constant Glyph *glyphs [[buffer(0)]],
-                             constant Uniforms &u [[buffer(1)]],
-                             constant Blend &b [[buffer(2)]]) {
+                             constant Uniforms &u [[buffer(1)]]) {
     Glyph g = glyphs[iid];
     float2 corner = float2(vid & 1, vid >> 1);
     GlyphOut o;
     o.pos = to_clip(u.origin + float2(g.pos) + corner * float2(g.size), u.viewport);
     o.uv = float2(g.uv) + corner * float2(g.size);
-    Blended c = blended(g.color, (g.is_color >> 8) & 0x1Fu, b);
-    o.old_colour = c.old_colour;
-    o.new_colour = c.new_colour;
-    o.matched = c.matched;
+    o.colour = unpack_unorm4x8_to_float(g.color);
+    o.tag = (g.is_color >> 8) & 0x1Fu;
     o.is_color = g.is_color & 1u;
     return o;
 }
@@ -171,9 +164,9 @@ fragment float4 glyph_fragment(GlyphOut in [[stage_in]],
                                constant Blend &b [[buffer(0)]]) {
     constexpr sampler s(coord::pixel, filter::nearest, address::clamp_to_zero);
     if (in.is_color) {
-        return colour.sample(s, in.uv) * in.new_colour.a; // already premultiplied
+        return colour.sample(s, in.uv) * in.colour.a; // already premultiplied
     }
-    float4 c = transition_colour(in.old_colour, in.new_colour, in.matched, in.pos.xy, b);
+    float4 c = transition_colour(in.colour, in.tag, in.pos.xy, b);
     float a = mask.sample(s, in.uv).r * c.a;
     return float4(c.rgb * a, a);
 }

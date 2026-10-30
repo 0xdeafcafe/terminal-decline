@@ -5,6 +5,7 @@
 //! PTY and threads), [`keys`], [`mouse`], [`select`], [`layout`],
 //! [`frame_policy`], [`panes`], [`config`] and [`pin`].
 
+pub mod activity;
 pub mod app;
 mod ascii_layout;
 mod background;

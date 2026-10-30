@@ -233,6 +233,13 @@ pub struct Config {
     /// `[keybind]`: shortcuts remapped, unbound, or sending text; see
     /// [`crate::keybind`].
     pub keybind: KeybindConfig,
+    /// Notify when a command that ran at least `notify_after` seconds
+    /// finishes in a tab or pane you aren't looking at (needs the shell's
+    /// OSC 133 marks; see [`crate::activity`]).
+    pub notify_on_finish: bool,
+    /// How long a command must run, in seconds, for `notify_on_finish`.
+    #[serde(deserialize_with = "notify_after")]
+    pub notify_after: u32,
     /// Check for updates once a day and install them when the app quits
     /// (docs/design/updater.md). Only Terminal Decline.app's own process
     /// reads it; pins never update themselves.
@@ -279,6 +286,8 @@ impl Default for Config {
             colors: Colors::default(),
             palettes: Palettes::default(),
             keybind: KeybindConfig::default(),
+            notify_on_finish: true,
+            notify_after: 10,
             update: true,
             pin_app: None,
         }
@@ -324,6 +333,19 @@ fn image_memory<'de, D: Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
         Err(serde::de::Error::custom(format!(
             "{v} is not a number of MB from 0 to {IMAGE_MEMORY_MAX} (0 is the default)"
         )))
+    }
+}
+
+/// The longest `notify_after`: a day.
+pub const NOTIFY_AFTER_MAX: u32 = 86_400;
+
+fn notify_after<'de, D: Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
+    let v = i64::deserialize(d)?;
+    match u32::try_from(v) {
+        Ok(v) if v <= NOTIFY_AFTER_MAX => Ok(v),
+        _ => Err(serde::de::Error::custom(format!(
+            "{v} is not a number of seconds from 0 to {NOTIFY_AFTER_MAX}"
+        ))),
     }
 }
 
@@ -1119,6 +1141,22 @@ mod tests {
         let (c, errors) = parse("update = 'no'");
         assert!(c.update);
         assert!(errors[0].starts_with("config: update: "), "{errors:?}");
+    }
+
+    #[test]
+    fn finish_notifications_are_on_after_ten_seconds() {
+        let c = Config::default();
+        assert!(c.notify_on_finish);
+        assert_eq!(c.notify_after, 10);
+        let (c, errors) = parse("notify_on_finish = false\nnotify_after = 30");
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(!c.notify_on_finish);
+        assert_eq!(c.notify_after, 30);
+        for bad in ["notify_after = -1", "notify_after = 86401", "notify_after = 'ten'"] {
+            let (c, errors) = parse(bad);
+            assert_eq!(c.notify_after, 10, "{bad}");
+            assert!(errors[0].starts_with("config: notify_after: "), "{errors:?}");
+        }
     }
 
     #[test]

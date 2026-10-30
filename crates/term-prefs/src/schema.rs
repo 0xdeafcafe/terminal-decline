@@ -401,6 +401,20 @@ pub const SETTINGS: &[Setting] = &[
         Editor::Toggle,
         "Ask before closing a window or quitting while a program other than the shell runs",
     ),
+    setting(
+        "notify_on_finish",
+        "Notify when commands finish",
+        Window,
+        Editor::Toggle,
+        "Notify when a long command finishes in a tab or pane you aren't looking at (needs shell integration)",
+    ),
+    setting(
+        "notify_after",
+        "Notify after",
+        Window,
+        integer(0.0, 86_400.0, 5.0),
+        "How many seconds a command must run before its finish is notified",
+    ),
     // Advanced
     new_windows(Setting {
         keep_in_pin: true,
@@ -604,6 +618,8 @@ mod tests {
                 "scrollback",
                 "copy_on_select",
                 "confirm_close",
+                "notify_on_finish",
+                "notify_after",
                 "command",
                 "cwd",
                 "env",

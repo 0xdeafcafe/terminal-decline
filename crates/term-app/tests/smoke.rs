@@ -465,12 +465,14 @@ zle -N zle-line-pre-redraw td-line-pre-redraw
     assert!(!work.join("ran here").exists(), "it ran without Enter");
 }
 
-/// The bare binary (no app bundle) can't use the notification center,
-/// which would throw: OSC 9 and 777 fall back to the bell's Dock bounce,
-/// and OSC 9;4 progress still shows on the Dock icon.
+/// Under the test control notifications go to the dump, not the
+/// notification center: OSC 9 and 777 from a background tab arrive as
+/// one notification (the second replaces the first, as a burst from one
+/// window does), OSC 9;4 progress shows on the Dock icon, and once it is
+/// cleared the badge counts the notification not yet looked at.
 #[test]
 #[ignore = "opens a window; run with --run-ignored"]
-fn smoke_notifications_without_a_bundle() {
+fn smoke_notifications_go_to_the_dump() {
     if !have_metal() {
         return;
     }
@@ -482,11 +484,56 @@ fn smoke_notifications_without_a_bundle() {
     assert_eq!(d.len(), 2, "{d:?}");
     assert_eq!(d[0]["tabs"], 2, "{}", d[0]);
     let n = &d[0]["notifications"];
-    assert_eq!(n["permission"], "unbundled", "{n}");
-    assert_eq!(n["posted"], 0, "{n}");
-    assert_eq!(n["bounced"], 2, "{n}");
+    assert_eq!(n["permission"], "test", "{n}");
+    assert_eq!(n["posted"], 2, "{n}");
+    assert_eq!(n["bounced"], 0, "{n}");
+    let sent = n["sent"].as_array().unwrap();
+    assert_eq!(sent[0]["body"], "Claude Code: done", "{n}");
+    assert_eq!(sent[1]["title"], "Build", "{n}");
+    assert_eq!(sent[1]["body"], "finished · and 1 more", "{n}");
+    assert_eq!(sent[0]["key"], sent[1]["key"], "one burst: {n}");
+    assert!(sent[0]["target"]["pane"].is_object(), "{n}");
     assert_eq!(d[0]["badge"], "42%", "{}", d[0]);
-    assert_eq!(d[1]["badge"], Value::Null, "cleared: {}", d[1]);
+    assert_eq!(d[1]["badge"], "1", "the unseen notification: {}", d[1]);
+}
+
+/// A command (marked with OSC 133, as the shell integration does) that
+/// runs past `notify_after` in a background tab is a notification when
+/// it finishes, with its exit status; a bell from there is one too.
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_a_long_command_finishing_in_a_background_tab_notifies() {
+    if !have_metal() {
+        return;
+    }
+    let dir = TempDir::new("notify-finish");
+    std::fs::write(
+        dir.config_home().join("terminal-decline/config.toml"),
+        "notify_after = 1
+",
+    )
+    .unwrap();
+    let d = dir.path().display();
+    let wait = |cond: String| format!("i=0; while ! {{ {cond}; }} && [ $i -lt 200 ]; do sleep 0.05; i=$((i+1)); done; ");
+    let script = format!(
+        "if mkdir '{d}/first' 2>/dev/null; then            {tab}{wait_two}           printf '\033]133;A\007$ \033]133;B\007make test\r\n\033]133;C\007'; sleep 1.2;            printf '\033]133;D;3\007';            printf '\033]133;A\007$ \033]133;B\007true\r\n\033]133;C\007\033]133;D;0\007';            sleep 11; printf '\007'; sleep 0.2; {dump}{quit}         else touch '{d}/two'; fi; sleep 30",
+        tab = osc("tab"),
+        wait_two = wait(format!("[ -e '{d}/two' ]")),
+        dump = osc("dump"),
+        quit = osc("quit"),
+    );
+    let (status, _) = decline(&dir, &script, true);
+    assert!(status.success(), "{status}");
+    let all = dumps(&dir);
+    let n = &all[0]["notifications"];
+    let sent = n["sent"].as_array().unwrap();
+    // The quick `true` isn't one; the bell, after the burst, is its own.
+    assert_eq!(sent.len(), 2, "{n}");
+    assert_eq!(sent[0]["title"], "✗ make test — exit 3", "{n}");
+    assert!(sent[0]["body"].as_str().unwrap().ends_with("after 1s"), "{n}");
+    assert!(sent[1]["body"].as_str().unwrap().starts_with("Bell"), "{n}");
+    assert_ne!(sent[0]["key"], sent[1]["key"], "{n}");
+    assert_eq!(all[0]["badge"], "2", "{}", all[0]);
 }
 
 /// The bundled app asks for permission on the first notification and
@@ -510,7 +557,7 @@ fn smoke_notifications_from_a_bundle() {
         &format!("Terminal Decline Notify {unique}"),
         &notify_from_a_background_tab(&dir),
     );
-    let d = launch_bundle(&dir, &app);
+    let d = launch_bundle_with(&dir, &app, &["DECLINE_TEST_REAL_NOTIFY=1"]);
     assert_eq!(d.len(), 2, "{d:?}");
     let n = &d[0]["notifications"];
     eprintln!("notifications: {n}");
@@ -610,9 +657,17 @@ fn temp_bundle(dir: &TempDir, name: &str, script: &str) -> PathBuf {
 
 /// Launch `app` as the Dock does and wait for it to quit; its dumps.
 fn launch_bundle(dir: &TempDir, app: &Path) -> Vec<Value> {
+    launch_bundle_with(dir, app, &[])
+}
+
+/// [`launch_bundle`] with more environment (`NAME=value`).
+fn launch_bundle_with(dir: &TempDir, app: &Path, env: &[&str]) -> Vec<Value> {
     let mut open = Command::new("/usr/bin/open");
-    open.args(["-g", "-n", "-W"])
-        .arg("--env")
+    open.args(["-g", "-n", "-W"]);
+    for e in env {
+        open.arg("--env").arg(e);
+    }
+    open.arg("--env")
         .arg(format!("DECLINE_TEST_DUMP={}", dir.dump_file().display()))
         .arg("--env")
         .arg(format!("XDG_CONFIG_HOME={}", dir.config_home().display()))

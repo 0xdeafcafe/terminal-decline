@@ -191,6 +191,9 @@ define_class!(
         #[unsafe(method(applicationDidBecomeActive:))]
         fn did_become_active(&self, _n: &NSNotification) {
             secure_input::apply(self.ivars().secure.borrow_mut().set_active(true));
+            if let Some(v) = self.key_view() {
+                crate::notify::seen(MainThreadMarker::from(self), v.id());
+            }
             let views: Vec<_> = self.ivars().windows.borrow().iter().map(|(_, v)| v.clone()).collect();
             for v in views {
                 v.refresh_shared_find();
@@ -1345,7 +1348,7 @@ pub fn run(
     let mtm = MainThreadMarker::new().expect("must run on the main thread");
     // Under the test control, in the background (see `crate::background`).
     let app = crate::background::shared_application(mtm);
-    crate::notify::on_click(crate::view::bring_to_front);
+    crate::notify::on_click(crate::view::show_pane);
     let menus = build_menus(mtm, app_name, &config.keybinds());
     let delegate = AppDelegate::new(mtm, config, notices, restore, origin, app_name, role);
     app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));

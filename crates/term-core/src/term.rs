@@ -1469,10 +1469,12 @@ impl Terminal {
     /// left for the caller to reuse as the new blank line. Callers also
     /// advance the screen's `top_line`; the scrollback counts the row
     /// whether or not it keeps it, so its line numbers stay the screen's.
+    /// Returns the column from which the row's cells are all
+    /// [`Cell::BLANK`] ([`Scrollback::push_keyed`]).
     #[inline]
-    fn push_scrollback(&mut self, row: &Row) {
+    fn push_scrollback(&mut self, row: &Row) -> usize {
         self.scrollback
-            .push_keyed(row, self.styles.styles(), self.styles.links().as_slice(), self.styles.version());
+            .push_keyed(row, self.styles.styles(), self.styles.links().as_slice(), self.styles.version())
         // The view holds a Point in history: output arriving underneath
         // leaves it where it is.
     }
@@ -1495,9 +1497,12 @@ impl Terminal {
             for _ in 0..n {
                 let mut row = self.screen.pop_front().expect("screen has rows");
                 if to_history {
-                    self.push_scrollback(&row);
+                    // Most rows end in blank cells, which need no clearing.
+                    let zero_from = self.push_scrollback(&row);
+                    row.reset_before(self.cols, blank, zero_from);
+                } else {
+                    row.reset(self.cols, blank);
                 }
-                row.reset(self.cols, blank);
                 snapshot::touch(&mut row, &mut self.counter, self.batch_start);
                 self.screen.push_back(row);
             }

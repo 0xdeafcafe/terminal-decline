@@ -22,6 +22,19 @@ pub struct Command {
     /// load into the shell: see [`crate::integration`]. Only a login
     /// shell (empty `argv`) or a command that is a lone shell takes it.
     pub integration: Option<PathBuf>,
+    /// Have the shell report the command line it is editing (zsh with
+    /// the integration only; see [`crate::integration`]).
+    pub reports: Option<Reports>,
+}
+
+/// What a zsh started with the integration is given to report its
+/// command line (docs/design/completion.md §3.1).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Reports {
+    /// The token its reports carry: 32 hex digits, new for each shell.
+    pub token: String,
+    /// What it reports for, comma-separated: `highlight`, `list`.
+    pub features: String,
 }
 
 /// The environment for the child: `inherited`, then ours, then `extra`.

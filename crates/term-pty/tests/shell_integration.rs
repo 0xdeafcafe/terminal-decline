@@ -13,7 +13,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use term_core::Command as Mark;
-use term_pty::{Command, Pty, Size};
+use term_pty::{Command, Pty, Reports, Size};
 
 const DEADLINE: Duration = Duration::from_secs(20);
 
@@ -90,6 +90,10 @@ struct Session {
 
 impl Session {
     fn start(shell: &str, home: &TempDir, env: &[(&str, &str)]) -> Session {
+        Session::start_with(shell, home, env, None)
+    }
+
+    fn start_with(shell: &str, home: &TempDir, env: &[(&str, &str)], reports: Option<Reports>) -> Session {
         let mut cmd_env = vec![
             ("HOME".to_string(), home.str().to_string()),
             ("BASH_SILENCE_DEPRECATION_WARNING".into(), "1".into()),
@@ -103,6 +107,7 @@ impl Session {
             env: cmd_env,
             shell: Some(shell.into()),
             integration: Some(integration(home)),
+            reports,
             ..Command::default()
         };
         let pty = Pty::spawn(&cmd, SIZE).unwrap();
@@ -145,6 +150,10 @@ impl Session {
                 Err(RecvTimeoutError::Timeout) => panic!("timed out waiting for {what}; output: {:?}", self.text()),
             }
         }
+    }
+
+    fn send(&mut self, bytes: &str) {
+        self.pty.writer().unwrap().write_all(bytes.as_bytes()).unwrap();
     }
 
     /// Type `line` and wait for the prompt after it (the `n`th).
@@ -322,6 +331,84 @@ fn zsh_history_stays_the_users() {
     zsh_files(&home.0, "HISTFILE=$HOME/.my_history\n");
     let probe = check(ZSH, &home, &[], "${HISTFILE-unset}");
     assert_eq!(probe, format!("{}/.my_history", home.str()));
+}
+
+const TOKEN: &str = "0123456789abcdef0123456789abcdef";
+
+/// The output so far, parsed by a terminal that knows the token.
+fn parsed(s: &Session) -> term_core::Term {
+    let mut term = term_core::Term::new(SIZE.cols as usize, SIZE.lines as usize, 1000, term_core::ImagePool::process());
+    term.state.set_report_token(TOKEN.as_bytes().try_into().ok());
+    term.advance(&s.out);
+    term
+}
+
+/// zsh given a token reports the line being edited on every redraw, with
+/// `;`, `%` and controls encoded and the cursor in bytes, and once what it
+/// can run; the token is in no environment and no listing; another
+/// pre-redraw widget the user had still runs.
+#[test]
+fn zsh_reports_the_command_line_with_its_token() {
+    let home = TempDir::new("zsh-reports");
+    let rc = "zle-line-pre-redraw() { echo pre >> \"$HOME/ran\" }\nzle -N zle-line-pre-redraw\nsetopt autocd\nalias ll='ls -l'\n";
+    zsh_files(&home.0, rc);
+    let reports = Reports {
+        token: TOKEN.into(),
+        features: "highlight,list".into(),
+    };
+    let mut s = Session::start_with(ZSH, &home, &[], Some(reports));
+    s.wait_for("the first prompt", |s| s.count("\x1b]133;B\x07") >= 1);
+    s.send("echo \"a;b%\" é");
+    s.wait_for("the line's report", |s| s.text().contains("%3Bb%25\" é\x07"));
+    let term = parsed(&s);
+    let r = term.state.line_report().expect("a line report");
+    assert_eq!(r.text, "echo \"a;b%\" é");
+    assert_eq!((r.cursor, r.keymap), (r.text.len(), term_core::Keymap::Insert));
+    // Ctrl+A: the cursor moves to the start.
+    s.send("\x01");
+    s.wait_for("the cursor's report", |s| s.text().contains(";main;0;echo"));
+    assert_eq!(parsed(&s).state.line_report().unwrap().cursor, 0);
+    // Run it: the report goes with the C mark.
+    s.send("\x05\n");
+    s.wait_for("prompt 2", |s| s.count("\x1b]133;B\x07") >= 2);
+    let mut term = parsed(&s);
+    let env = term.state.take_shell_env().expect("an env report");
+    assert!(env.aliases.contains(&"ll".to_string()), "{env:?}");
+    assert!(env.autocd);
+    assert!(env.builtins.contains(&"cd".to_string()));
+    assert!(env.reserved_words.contains(&"then".to_string()));
+    assert!(!env.functions.iter().any(|f| f.starts_with('_')), "{:?}", env.functions);
+    // macOS's /etc/zshrc sets HISTFILE; without it zsh has none.
+    if std::fs::read_to_string("/etc/zshrc").is_ok_and(|t| t.contains("HISTFILE=")) {
+        assert_eq!(env.histfile, Some(format!("{}/.zsh_history", home.str())));
+    }
+    // Once per change: the second prompt sent no second env report.
+    assert_eq!(s.count("\x1b]7701;env;"), 1);
+    // A continuation line reports nothing of its own.
+    s.send("for x in 1; do\n");
+    s.wait_for("the continuation's report", |s| s.text().contains(";cont;0;\x07"));
+    s.send("\x03");
+    s.wait_for("prompt 3", |s| s.count("\x1b]133;B\x07") >= 3);
+    s.run("printenv DECLINE_TOKEN DECLINE_COMPLETION; echo \"<${+DECLINE_TOKEN}|$(set | grep -c 0123456789abcdef)|$(typeset | grep -c 0123456789abcdef)>\"", 4);
+    std::thread::sleep(Duration::from_millis(200));
+    while let Ok(bytes) = s.rx.try_recv() {
+        s.out.extend_from_slice(&bytes);
+    }
+    assert!(s.text().contains("<0|0|0>"), "{:?}", s.text());
+    assert!(ran_files(&home).contains("pre"), "the user's own pre-redraw widget ran");
+}
+
+/// Without a token (another terminal, or nothing in the app wants the
+/// reports) zsh sends none.
+#[test]
+fn zsh_without_a_token_reports_nothing() {
+    let home = TempDir::new("zsh-no-reports");
+    zsh_files(&home.0, "");
+    let mut s = Session::start(ZSH, &home, &[]);
+    s.wait_for("the first prompt", |s| s.count("\x1b]133;B\x07") >= 1);
+    s.send("echo hi");
+    s.run("", 2);
+    assert_eq!(s.count("\x1b]7701;"), 0, "{:?}", s.text());
 }
 
 /// The bashes there are: macOS's 3.2 and Homebrew's.

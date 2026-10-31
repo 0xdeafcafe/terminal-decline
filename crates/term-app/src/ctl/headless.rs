@@ -331,6 +331,7 @@ impl Plan {
             shell: None,
             direct,
             integration: None,
+            reports: None,
         };
         Ok(Plan {
             command,

@@ -165,8 +165,12 @@ DESIGN.md says the same). So:
   `DECLINE_COMPLETION`. Only zsh started with the integration gets one:
   not bash or fish (they send no reports, §3.3), not agent-API headless
   sessions (their recorder keeps raw output, and replaying it in the
-  same shell would carry a valid token; 7701 is also stripped from
-  recordings), and none when both colours and the list are off.
+  same shell would carry a valid token; with no token there, nothing in
+  a recording is valid anywhere), not a zsh started through the login
+  shell (`command = ["zsh"]`: the login shell would read its own startup
+  files with the token exported, and putting it in `env`'s arguments
+  would show it in `ps`), and none when both colours and the list are
+  off.
 - The top of `shell/zsh/.zshenv`, before the user's own `.zshenv`, does
   `builtin typeset -gH _decline_token=$DECLINE_TOKEN; builtin unset
   DECLINE_TOKEN`. So nothing the user's startup files start inherits it
@@ -179,34 +183,37 @@ DESIGN.md says the same). So:
 ### 3.2 term-core
 
 term-core parses 7701 (no platform code, so it stays there), checks the
-token and keeps the latest of each kind, handed over by the reader
-thread through `Events` like the commands (`take_commands`):
+token and keeps the latest of each kind:
 
 ```rust
-pub fn set_report_token(&mut self, token: Option<[u8; 16]>);
-pub struct LineReport { pub text: String, pub cursor: usize, pub keymap: Keymap, pub at: Point }
-pub fn take_line(&mut self) -> Option<LineReport>;
+pub fn set_report_token(&mut self, token: Option<[u8; TOKEN_LEN]>);
+pub struct LineReport { pub text: String, pub cursor: usize, pub keymap: Keymap, pub too_long: bool, pub at: Point }
+pub fn line_report(&self) -> Option<&LineReport>;
 pub fn take_shell_env(&mut self) -> Option<ShellEnv>;
 pub fn take_matches(&mut self) -> Option<Matches>;   // §7
+pub fn cwd_host(&self) -> Option<&str>;              // §3.4
 ```
 
+- The line report isn't handed over through `Events`: the view reads it
+  from the terminal when it takes the frame's snapshot, with the lock
+  held, which is when it needs it. Handing it over would mean a message
+  to the main thread per keystroke, which wakes it (below).
 - A line report counts only while the prompt is waiting for input
   (`input_at` is set: after a B mark, until the C mark) and the primary
-  screen is shown; otherwise it is dropped. `at` is that B mark's
-  position, so a report always says which line it belongs to.
+  screen is shown; otherwise it is dropped. A B or C mark drops the one
+  held. `at` is the B mark's position, so a report always says which
+  line it belongs to.
 - Ctrl+C at the prompt and `zle reset-prompt` (Powerlevel10k's async
   updates) print PS1 again with new A and B marks: `at` moves with them,
   and a report from before the new B is dropped.
 - The app colours, and keeps the list open, only while the cells from
   `at` read the same text as the report (zle shows a control character
   as `^X`, so that comparison expands controls the same way). This is
-  checked when the frame's snapshot is taken, with the terminal locked,
-  so a report that arrives before zle's redraw (below) shows nothing
-  until the redraw does.
-- The view applies `Events`' commands (a prompt, a command starting)
-  before the line report.
+  checked when the frame's snapshot is taken, so a report that arrives
+  before zle's redraw (below) shows nothing until the redraw does.
 - The 7701 arm doesn't call `touch()`, so a report alone leaves
-  `Terminal::generation()` unchanged.
+  `Terminal::generation()` unchanged. The token survives a reset (RIS)
+  and a terminal replaced after a parse panic.
 
 **Echo timing**: the hook runs before zle redraws, and its print is
 written at once while zle's redraw is buffered, so the reader often
@@ -216,8 +223,8 @@ at once (`session.rs`, `view.rs` `output_arrived`): the frame would
 show nothing new and the real echo would wait for the next tick, up to
 8.3 ms at 120 Hz, which is the delay the October latency fix removed.
 So the reader compares `generation()` before and after each parse: when
-it hasn't changed, the report still goes through `Events` but the
-dirty flag isn't set, the view isn't woken and `awaiting_echo` keeps
+it hasn't changed and a 7701 sequence was parsed (`take_report_seen`),
+the dirty flag isn't set, the view isn't woken and `awaiting_echo` keeps
 waiting for the echo. A pipeline test and a latency run (§11) cover it.
 
 ### 3.3 Other shells: read the screen
@@ -625,51 +632,45 @@ None: all answered on 31 Oct 2026 (§1).
 
 ## 15. Measurements
 
-None yet: each PR adds its numbers here as it lands (machine, `uptime`
-load, before and after).
+### PR 1 (31 Oct 2026): reports from zsh
 
-## 16. Review (Opus, xhigh, 31 Oct 2026)
+What landed: OSC 7701 in term-core (`shell_report`), the token in
+term-pty's integration (`Reports`, zsh only), the zsh hook on
+`line-init` and `line-pre-redraw` and the env report at precmd, the
+reader not waking the view for a report alone, OSC 7's host kept, and
+`highlight_command_line` and `completion` as hidden settings, off: until
+the colours (PR 3) and the list (PR 4) use the reports, no shell is
+given a token, so nothing runs and nothing is sent.
 
-Checked against the code at b864437; all 18 findings folded in above.
+On the M1 Max under heavy load from other builds (`uptime` load 18–48
+throughout, so the numbers are noisy):
 
-| # | Severity | Finding | Where now |
-|---|---|---|---|
-| 1 | blocker | zsh's matches typed as plain text: wrong quoting and suffixes, and an injection path (a git branch named `x$(…)`) | §7, §9: zsh inserts through a private take key |
-| 2 | major | a report read before zle's redraw woke the view and cost the echo a tick | §3.2 echo timing |
-| 3 | major | zsh has no base64; vte drops controls in an OSC and splits at most 16 parameters | §3.1 encoding |
-| 4 | major | reports not reliably valid between B and C (continuation lines, Ctrl+C, reset-prompt) | §3.1, §3.2 |
-| 5 | major | skipping the row cache couldn't work; recolour at draw time like the block cursor | §5 |
-| 6 | major | the list's background drawn under the row glyphs; widths, clipping, ghost text, dump | §2, §12, below |
-| 7 | major | the token leaked to everything the startup files start; threat model unstated | §3.1 the token |
-| 8 | major | binding Tab overrode fzf-tab and others; hooks replaced by later plugins | §7 other plugins |
-| 9 | major | large match lists over 64 KB dropped silently | §7 |
-| 10 | major | `[keybind]` swallows its chords; Ctrl+P/N; vi mode; kitty releases; key encoding | §9, §10 keys |
-| 11 | major | "all live" untrue for what the shell fixes at start | §10 |
-| 12 | major | screen reading off whenever fish shows a suggestion; which source when | §3.3 |
-| 13 | minor | OSC 7's host thrown away, so ssh wasn't really off | §3.4 |
-| 14 | minor | man pages not where `<binary>/../share/man` looks | §6 |
-| 15 | minor | red for reserved words, global aliases, autocd, git aliases | §4 |
-| 16 | minor | memory bounded by count, a thread per window, history read too early and its format | §6, §11 |
-| 17 | minor | latency and pressure scripts have no zsh prompt run | §11 |
-| 18 | minor | `take_matches`, `--help` environment, quoting open quotes, stats, matching rule | §3.2, §8, §9, §6 |
-
-On finding 6, the list is drawn this way:
-- `covered` (today one row, for the cursor) becomes a rectangle, and
-  glyphs whose pixel extent overlaps it are hidden: wide characters,
-  ligatures, italic overflow. Images are left out of it too, since they
-  are drawn over the rects.
-- Its text is measured with term-core's widths (clusters, mode 2027),
-  not `unicode_width` per character as `draw_preedit` does.
-- It stays inside the pane's columns: shifted left at the right edge;
-  when it fits neither below nor above, on the bigger side with fewer
-  rows.
-- The grey text after the cursor shows only while the cells to the end
-  of the row are blank (a right prompt or zsh-autosuggestions' text
-  means they aren't), hides while input-method text shows, and under a
-  block cursor takes the cursor's text colour.
-
-Found fine: printing an OSC from a zle hook; `zle-line-pre-redraw` and
-`add-zle-hook-widget` on zsh 5.3+; 7701 free; parsing in term-core and
-handing over through `Events`; the token's size and turning it off with
-the features; the per-keystroke and list budgets; man pages read only,
-`--help` only on request.
+- **Parse, no reports in the input** (`cargo bench -p term-core --bench
+  parse`, `parse/` group, 64 KB reads; main and branch built into
+  separate target folders, 4 runs each alternating, medians): branch
+  against main plain −3.9%, coloured −8.5%, tui −5.9%, seq −8.1%,
+  unicode −3.2%, clusters −2.9%. Noise at this load (an earlier run of
+  one binary against itself spread ±13%); the change adds one OSC match
+  arm and nothing on the print path.
+- **Typing** (new `typing` group: a prompt, 40 keys each read alone,
+  the command running): 2.16 µs without reports, 21.97 µs with a report
+  before every key: about 0.5 µs per report in term-core.
+- **zsh's side** (`zsh -fic 'source scripts/completion/hook-timing.zsh
+  3000'`, load 19): the line hook 25.5 µs for a 20-byte line, 39.7 µs for
+  a 200-byte line with nothing to encode, 51.7 µs for a 200-byte line
+  with `;`, `%` and a tab, 161.7 µs for 2,000 bytes. Within the 50 µs
+  budget for typical lines; past about 250 bytes it grows with the line
+  (about 80 µs per KB). The env report: 436 µs when it changed, 64 µs
+  per prompt to find it hadn't (once per prompt, not per key). Found
+  on the way: a locale change per key (`local LC_ALL=C`) miscounted
+  `é` and cost more than `+o multibyte`, which is used instead; a match
+  before the encoding substitution saves about 8 µs on lines with
+  nothing to encode.
+- **Waking**: `a_line_report_alone_does_not_wake_the_view` (pipeline)
+  fails with the reader waking on every read and passes with the change.
+- **Not measured yet**: the in-app latency at a zsh prompt
+  (`scripts/latency/run.py --scenarios zsh,zsh-off`, added here). It
+  opens a window that takes the focus to type into, so it waits for
+  Alex to say when. Its `zsh` scenario sets the hidden
+  `highlight_command_line = true` in its own config, so the shell does
+  report, and `zsh-off` doesn't.

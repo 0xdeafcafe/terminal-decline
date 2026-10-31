@@ -15,6 +15,10 @@ the event's own timestamp. Scenarios:
 - idle: `echo.py`, which echoes each key straight back;
 - flood: the same, while a second window of the same app runs `yes`;
 - htop: `htop -d 1` in the same window, typing into its search bar;
+- zsh, zsh-off: the login shell as zsh with the shell integration, under
+  a temporary HOME with an empty .zshrc, typing and deleting a letter at
+  the prompt; `zsh` has the shell report its command line (OSC 7701,
+  docs/design/completion.md), `zsh-off` not (in-app only);
 each at the display link rates given (`DECLINE_LATENCY_HZ`).
 
 External (`--external`): `probe.swift` posts the keys from outside and
@@ -177,11 +181,12 @@ class App:
         raise SystemExit(f"{bundle.name} didn't start")
 
     @staticmethod
-    def decline(bundle, env, program, stderr):
+    def decline(bundle, env, program, stderr, app_args=()):
         open_args = ["--stderr", str(stderr)]
         for k, v in env.items():
             open_args += ["--env", f"{k}={v}"]
-        return App(bundle, str(bundle / "Contents/MacOS/terminal-decline"), open_args, ["-e", *program])
+        command = ["-e", *program] if program else []
+        return App(bundle, str(bundle / "Contents/MacOS/terminal-decline"), open_args, [*app_args, *command])
 
     @staticmethod
     def ghostty(program):
@@ -222,10 +227,29 @@ def keys_for(scenario, n):
     if scenario == "htop":
         # '/' opens htop's search bar; typed letters then show up in it.
         return KEY_SLASH, [KEY_X if i % 2 == 0 else KEY_DELETE for i in range(n)]
+    if scenario in ("zsh", "zsh-off"):
+        # The line stays short: a letter, then Delete.
+        return KEY_A, [KEY_X if i % 2 == 0 else KEY_DELETE for i in range(n)]
     return KEY_A, [KEY_A] * n
 
 
+def zsh_setup(scenario, tmp):
+    """For the zsh scenarios: the environment and app arguments that make
+    the login shell a zsh with the integration, in a HOME of its own, with
+    or without line reports."""
+    home = tmp / "home"
+    home.mkdir()
+    (home / ".zshrc").write_text("PS1='%~ %# '\n")
+    config = tmp / "config.toml"
+    on = "true" if scenario == "zsh" else "false"
+    config.write_text(f"shell_integration = true\nhighlight_command_line = {on}\n")
+    env = {"HOME": str(home), "SHELL": "/bin/zsh", "ZDOTDIR": ""}
+    return env, ["--config", str(config)]
+
+
 def program_for(scenario, marker=None):
+    if scenario in ("zsh", "zsh-off"):
+        return None
     if scenario == "htop":
         return [shutil.which("htop") or "htop", "-d", "1"]
     echo = [sys.executable, str(HERE / "echo.py")]
@@ -245,7 +269,11 @@ def run_inapp(bundle, scenario, hz, n_keys, out_dir):
         "TERM": "xterm-256color",
         **EXTRA_ENV,
     }
-    app = App.decline(bundle, env, program_for(scenario), out_dir / f"inapp-{scenario}-{hz}hz.stderr")
+    app_args = []
+    if scenario in ("zsh", "zsh-off"):
+        zenv, app_args = zsh_setup(scenario, tmp)
+        env.update(zenv)
+    app = App.decline(bundle, env, program_for(scenario), out_dir / f"inapp-{scenario}-{hz}hz.stderr", app_args)
     try:
         ctl = open_fifo(fifo)
         time.sleep(1.5)
@@ -402,6 +430,8 @@ def main():
             if "screen_recording=false" in check or "post_events=false" in check:
                 raise SystemExit(f"probe: {check.strip()}: grant Screen Recording and Accessibility to this terminal")
             for scenario in scenarios:
+                if scenario in ("zsh", "zsh-off"):
+                    continue  # in-app only: the setting is decline's
                 # Interleaved, so a change in the machine's load hits both.
                 for terminal in terminals:
                     r = run_external(probe, bundle, terminal, scenario, args.keys, out_dir)

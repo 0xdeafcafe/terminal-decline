@@ -333,6 +333,14 @@ pub struct Config {
     /// anything: zsh, bash and fish ([`term_pty::integration`]). Off, the
     /// shell is started exactly as it is.
     pub shell_integration: bool,
+    /// Colour the command line at the shell's prompt as it is typed
+    /// (docs/design/completion.md §5). Hidden and off until the colours
+    /// land; for now it only has a zsh started with the integration
+    /// report its command line.
+    pub highlight_command_line: bool,
+    /// The completion list at the prompt (docs/design/completion.md §9).
+    /// Hidden and off until the list lands, as `highlight_command_line`.
+    pub completion: bool,
     /// Window title for a pin; also shown in the Window menu.
     pub title: Option<String>,
     /// Kitty graphics, iTerm2 images and Sixel (docs/design/images.md).
@@ -445,6 +453,8 @@ impl Default for Config {
             cwd: None,
             env: BTreeMap::new(),
             shell_integration: true,
+            highlight_command_line: false,
+            completion: false,
             title: None,
             images: true,
             image_memory: 0,

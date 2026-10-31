@@ -25,8 +25,16 @@
 //! Only a login shell the app starts, or a command that is just a shell
 //! (`["fish"]`); any other command, and shells started from those, are
 //! left alone.
+//!
+//! A login zsh may also be given [`Reports`]: `DECLINE_TOKEN` and
+//! `DECLINE_COMPLETION`, which `.zshenv` there moves into hidden shell
+//! variables before the user's files run, so nothing they start inherits
+//! the token. Not a zsh started through the login shell (`["zsh"]`): the
+//! login shell would read its own startup files with the token exported.
 
 use std::path::Path;
+
+use crate::command::Reports;
 
 /// A shell the integration knows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,11 +60,13 @@ impl Shell {
 
 /// The variables the shells' side reads and removes. Inherited ones (an
 /// app started from a shell that was being set up) are dropped first.
-const OURS: [&str; 4] = [
+const OURS: [&str; 6] = [
     "DECLINE_ZSH_ZDOTDIR",
     "DECLINE_BASH_INJECT",
     "DECLINE_BASH_LOGIN",
     "DECLINE_FISH_XDG_DIR",
+    "DECLINE_TOKEN",
+    "DECLINE_COMPLETION",
 ];
 
 /// XDG_DATA_DIRS when unset, as the XDG spec has it.
@@ -106,8 +116,15 @@ pub fn injection(shell: Shell, dir: &Path, env: &[(String, String)], login: bool
 /// Load the integration in `dir` into what `Pty::spawn` runs: `argv`
 /// (argv[0] first) and `env` as built for `command` (its argv, empty for
 /// the login shell `shell`). A command other than a lone shell is left
-/// as it is.
-pub fn apply(dir: &Path, shell: &str, command: &[String], argv: &mut Vec<String>, env: &mut Vec<(String, String)>) {
+/// as it is. `reports` go to a login zsh only.
+pub fn apply(
+    dir: &Path,
+    shell: &str,
+    command: &[String],
+    reports: Option<&Reports>,
+    argv: &mut Vec<String>,
+    env: &mut Vec<(String, String)>,
+) {
     let (kind, hop) = match command {
         [] => (Shell::of(shell), false),
         // Run through the login shell (`shell -c 'exec "$0" "$@"' bash`).
@@ -119,6 +136,10 @@ pub fn apply(dir: &Path, shell: &str, command: &[String], argv: &mut Vec<String>
     let Some((args, mut set)) = injection(kind, dir, env, !hop) else {
         return;
     };
+    if let (Shell::Zsh, false, Some(r)) = (kind, hop, reports) {
+        set.push(("DECLINE_TOKEN".into(), r.token.clone()));
+        set.push(("DECLINE_COMPLETION".into(), r.features.clone()));
+    }
     if kind == Shell::Bash
         && !hop
         && let Some(name) = argv.first_mut()
@@ -166,11 +187,51 @@ mod tests {
     /// argv and env for `command` run by the login shell `shell`, from
     /// `inherited`, with the integration in `/App/Res/si`.
     fn run(shell: &str, command: &[&str], inherited: &[(&str, &str)]) -> (Vec<String>, Vec<(String, String)>) {
+        run_with(shell, command, inherited, None)
+    }
+
+    fn run_with(
+        shell: &str,
+        command: &[&str],
+        inherited: &[(&str, &str)],
+        reports: Option<&Reports>,
+    ) -> (Vec<String>, Vec<(String, String)>) {
         let command = s(command);
         let mut argv = build_argv(shell, &command);
         let mut env = build_env(kv(inherited).into_iter(), &[]);
-        apply(Path::new("/App/Res/si/"), shell, &command, &mut argv, &mut env);
+        apply(Path::new("/App/Res/si/"), shell, &command, reports, &mut argv, &mut env);
         (argv, env)
+    }
+
+    #[test]
+    fn only_a_login_zsh_gets_the_report_token() {
+        let r = Reports {
+            token: "ab".repeat(16),
+            features: "highlight,list".into(),
+        };
+        let (argv, env) = run_with("/bin/zsh", &[], &[], Some(&r));
+        assert_eq!(argv, s(&["-zsh"]));
+        assert_eq!(get(&env, "DECLINE_TOKEN"), Some(r.token.as_str()));
+        assert_eq!(get(&env, "DECLINE_COMPLETION"), Some("highlight,list"));
+        // Not through the login shell, not bash or fish, and never an
+        // inherited one.
+        for (shell, command) in [
+            ("/bin/zsh", &["zsh"][..]),
+            ("/bin/bash", &[][..]),
+            ("/opt/homebrew/bin/fish", &[][..]),
+        ] {
+            let (argv, env) = run_with(
+                shell,
+                command,
+                &[("DECLINE_TOKEN", "stale"), ("DECLINE_COMPLETION", "list")],
+                Some(&r),
+            );
+            assert_eq!(get(&env, "DECLINE_TOKEN"), None, "{shell} {command:?}");
+            assert_eq!(get(&env, "DECLINE_COMPLETION"), None, "{shell} {command:?}");
+            assert!(!argv.iter().any(|a| a.contains(&r.token)), "never in argv, where ps shows it");
+        }
+        let (_, env) = run("/bin/zsh", &[], &[("DECLINE_TOKEN", "stale")]);
+        assert_eq!(get(&env, "DECLINE_TOKEN"), None);
     }
 
     #[test]

@@ -150,6 +150,7 @@ fn command(argv: &[&str], home: &Path) -> Command {
         shell: Some("/bin/sh".into()),
         direct: false,
         integration: None,
+        reports: None,
     }
 }
 
@@ -449,6 +450,7 @@ fn login_shell(shell: &str, home: &Path) -> Command {
         shell: Some(shell.into()),
         direct: false,
         integration: None,
+        reports: None,
     }
 }
 
@@ -1195,6 +1197,46 @@ fn no_lost_wake_up() {
     finish(session);
 }
 
+/// The shell's line report (OSC 7701) comes just before zle's redraw and
+/// is often read on its own: that read doesn't wake the view (it would
+/// draw nothing new and stop the wait for the echo), but the report is
+/// there for the frame the echo brings (docs/design/completion.md §3.2).
+#[test]
+fn a_line_report_alone_does_not_wake_the_view() {
+    const TOKEN: &str = "0123456789abcdef0123456789abcdef";
+    let script = format!(
+        "stty -echo; printf '\\033]133;A\\007$ \\033]133;B\\007'; read x; \
+         printf '\\033]7701;line;{TOKEN};main;2;go\\007'; sleep 0.5; printf 'go'; sleep 30"
+    );
+    let h = Harness::start("line-report", &["sh", "-c", &script], |_| {});
+    h.session()
+        .term()
+        .lock()
+        .unwrap()
+        .state
+        .set_report_token(TOKEN.as_bytes().try_into().ok());
+    h.wait_term("the prompt", |t| {
+        t.marks_at(0).iter().any(|m| m.kind == term_core::MarkKind::Input).then_some(())
+    });
+    // Settle, then type: `read` takes it without an echo.
+    std::thread::sleep(Duration::from_millis(200));
+    let seen = h.signal.wakes();
+    h.session().take_dirty();
+    h.type_text("x\n");
+    let until = Instant::now() + DEADLINE;
+    while h.session().term().lock().unwrap().state.line_report().is_none() {
+        assert!(Instant::now() < until, "no line report");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(h.signal.wakes(), seen, "a report alone woke the view");
+    assert!(!h.session().take_dirty(), "a report alone set the dirty flag");
+    // The echo that follows does wake it, and the report is still there.
+    h.signal.wait_past(seen, Instant::now() + DEADLINE);
+    assert!(h.signal.wakes() > seen, "the echo didn't wake the view");
+    let t = h.session().term().lock().unwrap();
+    assert_eq!(t.state.line_report().map(|r| r.text.as_str()), Some("go"));
+}
+
 /// Under a flood, the reader wakes the main thread only when no redraw is
 /// pending, so there is at most one wake per frame drawn (plus the one in
 /// flight).
@@ -1381,6 +1423,7 @@ fn prefs(home: TempDir, config: &Path, recorded: Arc<AtomicU64>) -> Harness {
         shell: Some("/nonexistent/shell".into()),
         direct: true,
         integration: None,
+        reports: None,
     };
     let signal = Arc::new(Signal::default());
     let mut hooks = signal.hooks();

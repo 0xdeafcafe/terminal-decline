@@ -431,6 +431,11 @@ impl Terminal {
     /// View row `line`, which may be past the view's last (as if it were
     /// taller).
     pub(super) fn view_row_at(&self, line: usize) -> ViewRow {
+        if self.view.is_none() {
+            // Following output: the view is the screen, with no need to
+            // lock and copy the cached rows.
+            return ViewRow::Screen(line);
+        }
         if line < self.lines {
             return self.view_rows()[line];
         }

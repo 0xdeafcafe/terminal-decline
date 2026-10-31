@@ -2717,6 +2717,27 @@ and where it differs from the plan above:
   instead helps only when the screen doesn't scroll (a TUI's status
   line): a scroll changes the top line, and the lines that scrolled
   into history would need their text compared all the same.
+  **Landed** (selection-cost-2): the check is made as cells are written
+  (`term/watch.rs`). During a parse call the selection's lines on the
+  screen are watched by buffer line number, which stays with the text
+  as it scrolls; the print paths, erases, ICH/DCH, scrolls, REP,
+  cluster growth, DECALN and image placement check whether their row is
+  one of them (a subtraction and a compare). A plain character written
+  over a plain one, an erase and a soft wrap changing tell on the spot;
+  wide characters, clusters and scroll regions moving rows past the
+  selection read its text once and compare at the end of the call. A
+  selection on rows a region moves stays on its lines and is cleared
+  when other text moves under it (following the text would cut it at
+  the region's edge). `cpubench` with `CPUBENCH_SELECT=10` against
+  no selection, medians of 8 interleaved rounds, load average 16–33:
+  every input at both chunk sizes 0.997–1.009 (before: `parse_1k`
+  plain 3.08, coloured 2.14, `tui` 5.46, `seq` 1.20, unicode 1.58,
+  clusters 1.55; 64 KB plain 1.05, `tui` 1.08). Without a selection
+  against 31a1cbe: 0.95–1.03, within this Mac's noise. `point_at`
+  while following output no longer locks and copies the cached view
+  rows: selecting the top 10 rows took 120 ns, now 3 ns, and an
+  `advance` after a new selection 9–19 µs (reading its text), now
+  10 ns.
 
 ---
 

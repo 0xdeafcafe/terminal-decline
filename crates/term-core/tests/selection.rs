@@ -217,6 +217,159 @@ fn output_that_scrolls_the_selection_into_history_keeps_it() {
     assert_eq!(copied(&t), "first\nsecond\nthi");
 }
 
+/// A flood scrolling a selected line into history keeps it, as does a
+/// flood that changes nothing under it; one chunk overwriting or erasing
+/// it clears it, whether the selection is on the screen's first row or
+/// in the middle of a chunk that also scrolls.
+#[test]
+fn a_selected_line_is_kept_scrolled_cleared_overwritten_or_erased() {
+    let mut t = Term::new(20, 4, 100, term_core::ImagePool::process());
+    t.advance(b"keep me\r\n");
+    select(&mut t, (0, 0), (0, 6));
+    let mut flood = Vec::new();
+    for i in 0..50 {
+        flood.extend_from_slice(format!("line {i}\r\n").as_bytes());
+    }
+    t.advance(&flood);
+    assert_eq!(copied(&t), "keep me", "scrolled into history");
+
+    // Overwritten in the same chunk that scrolls it a little.
+    t.advance(b"\x1b[2J\x1b[Hold text\r\nb\r\nc");
+    select(&mut t, (0, 0), (0, 7));
+    assert_eq!(copied(&t), "old text");
+    t.advance(b"\x1b[1;1Hnew text\r\n\r\n\r\nmore");
+    assert_eq!(t.state.selection(), None, "overwritten");
+
+    // Erased: by EL, ECH, DCH and ICH, each in the middle of other output.
+    for erase in [&b"\x1b[1;3H\x1b[K"[..], b"\x1b[1;4H\x1b[2X", b"\x1b[1;1H\x1b[P", b"\x1b[1;2H\x1b[@"] {
+        t.advance(b"\x1b[2J\x1b[Hold text\r\nb");
+        select(&mut t, (0, 0), (0, 7));
+        let mut chunk = b"\x1b[3;1Hbefore".to_vec();
+        chunk.extend_from_slice(erase);
+        chunk.extend_from_slice(b"\x1b[4;1Hafter");
+        t.advance(&chunk);
+        assert_eq!(t.state.selection(), None, "erased by {erase:?}");
+    }
+
+    // Blank cells erased, or the same text written again in another
+    // colour, change nothing.
+    t.advance(b"\x1b[2J\x1b[Hsame");
+    select(&mut t, (0, 0), (0, 9));
+    t.advance(b"\x1b[1;5H\x1b[K\x1b[1;1H\x1b[31msame\x1b[m\x1b[1;7H\x1b[2X");
+    assert_eq!(copied(&t), "same");
+}
+
+/// A scroll region (a TUI's scrolling list, IL/DL) moves rows past fixed
+/// line numbers: the selection stays on its lines, so text moving under
+/// it clears it. Following the text instead would leave a selection cut
+/// at the region's edge, half of it on rows that left the region.
+/// Rows outside the region, and a region scroll that leaves the selected
+/// text as it was, keep it.
+#[test]
+fn a_scroll_region_moving_text_under_the_selection_clears_it() {
+    let mut t = Term::new(20, 5, 100, term_core::ImagePool::process());
+    let draw = b"\x1b[2J\x1b[Htitle\r\none\r\ntwo\r\nthree\r\nstatus";
+    t.advance(draw);
+    // Rows 2-4 scroll; the title above and the status line below stay.
+    select(&mut t, (2, 0), (2, 2));
+    t.advance(b"\x1b[2;4r\x1b[4;1H\n\x1b[r");
+    assert_eq!(t.state.selection(), None, "moved up by a region scroll");
+
+    t.advance(draw);
+    select(&mut t, (1, 0), (1, 2));
+    t.advance(b"\x1b[2;1H\x1b[L");
+    assert_eq!(t.state.selection(), None, "moved down by IL");
+
+    t.advance(draw);
+    select(&mut t, (2, 0), (2, 2));
+    t.advance(b"\x1b[2;1H\x1b[M");
+    assert_eq!(t.state.selection(), None, "moved up by DL");
+
+    // Rows outside the region keep it, at the top or the bottom.
+    for row in [0, 4] {
+        t.advance(draw);
+        select(&mut t, (row, 0), (row, 3));
+        let before = copied(&t);
+        t.advance(b"\x1b[2;4r\x1b[4;1H\n\n\x1b[2;1H\x1b[L\x1b[M\x1b[r");
+        assert_eq!(copied(&t), before, "row {row} outside the region");
+    }
+
+    // A region at the top of the primary screen sends its lines to
+    // history: the selection there goes with them and is kept.
+    t.advance(draw);
+    select(&mut t, (0, 0), (0, 4));
+    t.advance(b"\x1b[1;3r\x1b[3;1H\n\n\x1b[r");
+    assert_eq!(copied(&t), "title");
+
+    // A region scrolled by blank rows over blank ones changes nothing.
+    t.advance(b"\x1b[2J\x1b[Htop");
+    select(&mut t, (2, 0), (3, 5));
+    t.advance(b"\x1b[2;5r\x1b[5;1H\n\x1b[r");
+    assert_eq!(copied(&t), "\n");
+}
+
+/// On the alternate screen rows scrolling off the top aren't kept: a
+/// selection on them goes, one below them is kept as long as its text
+/// is. Switching screens clears it.
+#[test]
+fn alternate_screen_selection() {
+    let mut t = Term::new(20, 4, 100, term_core::ImagePool::process());
+    t.advance(b"primary");
+    select(&mut t, (0, 0), (0, 6));
+    t.advance(b"\x1b[?1049h");
+    assert_eq!(t.state.selection(), None, "switching screens");
+
+    t.advance(b"\x1b[Ha\r\nb\r\nc\r\nd");
+    select(&mut t, (3, 0), (3, 0));
+    t.advance(b"\x1b[3;1Hc");
+    assert_eq!(copied(&t), "d", "drawn again unchanged");
+    t.advance(b"\x1b[4;1Hx");
+    assert_eq!(t.state.selection(), None, "overwritten");
+
+    t.advance(b"\x1b[Ha\r\nb\r\nc\r\nd");
+    select(&mut t, (0, 0), (0, 0));
+    t.advance(b"\x1b[4;1H\n");
+    assert_eq!(t.state.selection(), None, "scrolled off the alternate screen");
+
+    t.advance(b"\x1b[Ha\r\nb\r\nc\r\nd");
+    select(&mut t, (1, 0), (1, 0));
+    t.advance(b"\x1b[?1049l");
+    assert_eq!(t.state.selection(), None, "back to the primary screen");
+    assert_eq!(t.state.text_between(t.state.point_at(0, 0), t.state.point_at(0, 6)), "primary");
+}
+
+/// A resize reflows the selection with its text; output after it is
+/// checked against the selection's new lines.
+#[test]
+fn the_selection_check_follows_reflow() {
+    let mut t = Term::new(10, 4, 100, term_core::ImagePool::process());
+    t.advance(b"abcdefghij\r\nsecond");
+    select(&mut t, (1, 0), (1, 5));
+    assert_eq!(copied(&t), "second");
+    // The first line wraps onto two rows at 5 columns: the selection
+    // moves down to rows 2 and 3.
+    t.state.resize(5, 4);
+    assert_eq!(copied(&t), "second");
+    // Its old row now holds the first line's second half: changing
+    // that leaves the selection alone.
+    t.advance(b"\x1b[2;1HFGHIJ");
+    assert_eq!(copied(&t), "second");
+    // Scrolling keeps it, and then writing over it clears it.
+    t.advance(b"\x1b[4;1H\r\n\r\n");
+    assert_eq!(copied(&t), "second");
+    let row = (0..t.state.lines())
+        .find(|&r| t.state.point_at(r, 0) == t.state.selection().unwrap().ordered().0)
+        .expect("still on the screen");
+    t.advance(format!("\x1b[{};1Hthird", row + 1).as_bytes());
+    assert_eq!(t.state.selection(), None);
+
+    // A resize on the alternate screen (no reflow) clears it.
+    t.advance(b"\x1b[?1049hxyz");
+    select(&mut t, (0, 0), (0, 2));
+    t.state.resize(8, 4);
+    assert_eq!(t.state.selection(), None);
+}
+
 #[test]
 fn selection_stays_put_while_the_view_scrolls() {
     let mut t = Term::new(10, 2, 100, term_core::ImagePool::process());

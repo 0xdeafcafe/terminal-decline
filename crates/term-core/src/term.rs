@@ -968,6 +968,15 @@ impl Terminal {
         }
     }
 
+    /// Where the cursor is as a buffer line and column, wherever the
+    /// view is scrolled.
+    pub fn cursor_point(&self) -> Point {
+        Point {
+            line: self.top_line + self.cursor.row as u64,
+            col: self.cursor.col,
+        }
+    }
+
     /// Where the cursor is in the view (row, column), if it is in view.
     pub fn cursor_in_view(&self) -> Option<(usize, usize)> {
         let history = self

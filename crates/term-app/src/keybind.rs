@@ -85,6 +85,10 @@ pub enum MenuAction {
     /// Select the output of the command at the top of the view, or the
     /// last command's when the view is at the bottom.
     SelectOutput,
+    /// Put the last command's output, or its command line, on the
+    /// clipboard, whatever the view shows.
+    CopyOutput,
+    CopyCommand,
     /// Scroll the view to the prompt above or below its top line whose
     /// command exited non-zero.
     PreviousFailed,
@@ -95,7 +99,7 @@ pub enum MenuAction {
 }
 
 impl MenuAction {
-    pub const ALL: [MenuAction; 40] = [
+    pub const ALL: [MenuAction; 42] = [
         MenuAction::NewWindow,
         MenuAction::NewTab,
         MenuAction::Close,
@@ -133,6 +137,8 @@ impl MenuAction {
         MenuAction::PreviousPrompt,
         MenuAction::NextPrompt,
         MenuAction::SelectOutput,
+        MenuAction::CopyOutput,
+        MenuAction::CopyCommand,
         MenuAction::PreviousFailed,
         MenuAction::NextFailed,
         MenuAction::CheckForUpdates,
@@ -178,6 +184,8 @@ impl MenuAction {
             MenuAction::PreviousPrompt => "previous_prompt",
             MenuAction::NextPrompt => "next_prompt",
             MenuAction::SelectOutput => "select_output",
+            MenuAction::CopyOutput => "copy_output",
+            MenuAction::CopyCommand => "copy_command",
             MenuAction::PreviousFailed => "previous_failed",
             MenuAction::NextFailed => "next_failed",
             MenuAction::CheckForUpdates => "check_for_updates",
@@ -224,6 +232,8 @@ impl MenuAction {
             MenuAction::PreviousPrompt => "Jump to Previous Prompt",
             MenuAction::NextPrompt => "Jump to Next Prompt",
             MenuAction::SelectOutput => "Select Command Output",
+            MenuAction::CopyOutput => "Copy Last Command's Output",
+            MenuAction::CopyCommand => "Copy Last Command",
             MenuAction::PreviousFailed => "Jump to Previous Failed Command",
             MenuAction::NextFailed => "Jump to Next Failed Command",
             MenuAction::CheckForUpdates => "Check for Updates…",
@@ -272,6 +282,8 @@ impl MenuAction {
             MenuAction::PreviousPrompt => c"jumpToPreviousPrompt:",
             MenuAction::NextPrompt => c"jumpToNextPrompt:",
             MenuAction::SelectOutput => c"selectCommandOutput:",
+            MenuAction::CopyOutput => c"copyLastCommandOutput:",
+            MenuAction::CopyCommand => c"copyLastCommand:",
             MenuAction::PreviousFailed => c"jumpToPreviousFailedCommand:",
             MenuAction::NextFailed => c"jumpToNextFailedCommand:",
             MenuAction::CheckForUpdates => c"checkForUpdates:",
@@ -285,9 +297,10 @@ impl MenuAction {
 }
 
 /// The menus' shortcuts with no config. The pane ones are iTerm2's and
-/// Ghostty's; the prompt ones Terminal.app's and iTerm2's. No terminal
-/// has a chord for failed commands: Option-Shift with the prompt ones.
-pub const DEFAULTS: [(&str, MenuAction); 40] = [
+/// Ghostty's; the prompt ones Terminal.app's and iTerm2's; the copies
+/// Warp's (its Copy Command and Copy Output). No terminal has a chord
+/// for failed commands: Option-Shift with the prompt ones.
+pub const DEFAULTS: [(&str, MenuAction); 42] = [
     ("cmd+n", MenuAction::NewWindow),
     ("cmd+t", MenuAction::NewTab),
     ("cmd+w", MenuAction::Close),
@@ -323,6 +336,8 @@ pub const DEFAULTS: [(&str, MenuAction); 40] = [
     ("cmd+up", MenuAction::PreviousPrompt),
     ("cmd+down", MenuAction::NextPrompt),
     ("shift+cmd+a", MenuAction::SelectOutput),
+    ("alt+shift+cmd+c", MenuAction::CopyOutput),
+    ("shift+cmd+c", MenuAction::CopyCommand),
     ("alt+shift+cmd+up", MenuAction::PreviousFailed),
     ("alt+shift+cmd+down", MenuAction::NextFailed),
     ("cmd+f", MenuAction::Find),

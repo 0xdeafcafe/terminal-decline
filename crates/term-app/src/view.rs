@@ -285,6 +285,9 @@ struct TestControl {
     seq: u64,
     /// Links that would have been opened.
     opened: Vec<String>,
+    /// Text that would have been put on the clipboard by the copies
+    /// that don't select (Copy Last Command and its output).
+    copied: Vec<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -744,6 +747,7 @@ impl WindowView {
             dump: DumpState::Idle,
             seq: 0,
             opened: Vec::new(),
+            copied: Vec::new(),
         });
         let spawn = |n: NewPane| spawn_pane(id, &config, &theme, m, test.is_some(), n);
         let mut panes = HashMap::new();
@@ -3225,6 +3229,19 @@ impl WindowView {
         .unwrap_or(false)
     }
 
+    /// Under test control, text that would be put on the clipboard is
+    /// listed in the dump (`copied`) instead. False otherwise.
+    pub(crate) fn copied_in_test(&self, text: &str) -> bool {
+        self.with_state(|st| match &mut st.win.test {
+            Some(test) => {
+                test.copied.push(text.to_string());
+                true
+            }
+            None => false,
+        })
+        .unwrap_or(false)
+    }
+
     /// Resize the window to show `cols` × `lines` (in its one pane).
     fn set_grid(&self, cols: usize, lines: usize) {
         let Some(window) = self.window() else { return };
@@ -3453,6 +3470,7 @@ fn write_dump(st: &mut State, window: Window) {
         panes: every,
         hovered_link,
         opened: test.opened.clone(),
+        copied: test.copied.clone(),
         failed_rows: p.render.frame.last_snapshot().failed.clone(),
         view_offset,
         selection,

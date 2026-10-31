@@ -1331,6 +1331,8 @@ pub fn build_menus(mtm: MainThreadMarker, app_name: &str, binds: &Keybinds) -> R
         b("Paste", MenuAction::Paste),
         b("Select All", MenuAction::SelectAll),
         b(MenuAction::SelectOutput.label(), MenuAction::SelectOutput),
+        b(MenuAction::CopyCommand.label(), MenuAction::CopyCommand),
+        b(MenuAction::CopyOutput.label(), MenuAction::CopyOutput),
         vec![NSMenuItem::separatorItem(mtm)],
         b("Clear Scrollback", MenuAction::ClearScrollback),
         vec![NSMenuItem::separatorItem(mtm)],

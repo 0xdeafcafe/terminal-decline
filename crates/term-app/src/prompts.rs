@@ -50,26 +50,54 @@ fn jump_to(t: &mut Terminal, prompt: Option<Point>) -> bool {
 
 /// Select a command's output: with the view scrolled back, the command
 /// at its top line (where a jump leaves its prompt); at the bottom, the
-/// one running, else the last one with output. False if there is none.
+/// one running, else the last one with output ([`last_output`]). False
+/// if there is none.
 pub fn select_output(t: &mut Terminal) -> bool {
     if t.view_top() != ViewTop::Bottom {
         return t.select_output(t.point_at(0, 0));
     }
-    let Some((row, col)) = t.cursor_in_view() else { return false };
-    let cursor = t.point_at(row, col);
-    if t.select_output(cursor) {
-        return true;
-    }
-    // The cursor is at a new prompt: the command before it. Further back
-    // only if that one printed nothing.
-    let mut line = cursor.line;
-    while let Some(prompt) = t.previous_prompt(line) {
-        if t.select_output(prompt) {
-            return true;
-        }
-        line = prompt.line;
-    }
-    false
+    let Some((a, b)) = last_output(t) else { return false };
+    t.set_selection(Some(term_core::Selection::new(a, b)));
+    true
+}
+
+/// The prompts from the cursor's up, nearest first: the one the cursor
+/// is at or after, then those above.
+fn prompts_from_cursor(t: &Terminal) -> impl Iterator<Item = Point> + '_ {
+    let cursor = t.cursor_point();
+    let first = t.previous_prompt(cursor.line + 1).filter(|p| *p <= cursor);
+    std::iter::successors(first, move |p| t.previous_prompt(p.line))
+}
+
+/// The last command's output, first and last cell, wherever the view
+/// is: the command running, else the last one that printed something.
+pub fn last_output(t: &Terminal) -> Option<(Point, Point)> {
+    // The cursor in a running command's output: that one. At a new
+    // prompt: the command before it, further back only if that one
+    // printed nothing.
+    t.command_output(t.cursor_point())
+        .or_else(|| prompts_from_cursor(t).find_map(|p| t.command_output(p)))
+}
+
+/// The last command line run (the one running, or the last finished),
+/// first and last cell, wherever the view is. A prompt being typed at
+/// hasn't run yet, so it is the one before it.
+pub fn last_command(t: &Terminal) -> Option<(Point, Point)> {
+    prompts_from_cursor(t).find_map(|p| t.command_line(p))
+}
+
+/// Copy Last Command's Output: its text, as copying it selected gives.
+pub fn last_output_text(t: &Terminal) -> Option<String> {
+    last_output(t).map(|(a, b)| t.text_between(a, b))
+}
+
+/// Copy Last Command: its command line, without the blanks after it
+/// (where the shell's cursor went on to the next line).
+pub fn last_command_text(t: &Terminal) -> Option<String> {
+    let (a, b) = last_command(t)?;
+    let text = t.text_between(a, b);
+    let text = text.trim_end();
+    (!text.is_empty()).then(|| text.to_string())
 }
 
 /// The output of the command at `p`, for the right-click menu: whether
@@ -308,6 +336,46 @@ mod tests {
         ended(&mut t, "ok", "1\r\n2\r\n3\r\n4\r\n", 0);
         t.advance(b"\x1b]133;A\x07$ ");
         assert!(!jump_to_failed(&mut t.state, true));
+    }
+
+    #[test]
+    fn copies_the_last_command_and_its_output() {
+        let mut t = Term::new(20, 4, 100, term_core::ImagePool::process());
+        ended(&mut t, "first", "1\r\n", 0);
+        ended(&mut t, "echo two", "2\r\n22\r\n", 0);
+        ended(&mut t, "quiet", "", 0);
+        // At a new prompt, being typed at: the last command run, and the
+        // last output there was (`quiet` printed none).
+        t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07half-typ");
+        assert_eq!(last_command_text(&t.state).as_deref(), Some("quiet"));
+        assert_eq!(last_output_text(&t.state).as_deref(), Some("2\n22"));
+        // Scrolled back to the first: still the last ones, and nothing
+        // selected.
+        while top_text(&t) != "$ first" {
+            assert!(jump(&mut t.state, true));
+        }
+        assert_eq!(last_command_text(&t.state).as_deref(), Some("quiet"));
+        assert_eq!(last_output_text(&t.state).as_deref(), Some("2\n22"));
+        assert_eq!(t.state.selection(), None);
+        // A command running: it and its output so far.
+        t.state.scroll_view_to_bottom();
+        t.advance(b"\r\n\x1b]133;C\x07so\r\nfar");
+        assert_eq!(last_command_text(&t.state).as_deref(), Some("half-typ"));
+        assert_eq!(last_output_text(&t.state).as_deref(), Some("so\nfar"));
+        // A command line that wraps, read back at another width.
+        let mut t = Term::new(10, 3, 100, term_core::ImagePool::process());
+        ended(&mut t, "echo 0123456789abc", "x\r\n", 0);
+        t.advance(b"\x1b]133;A\x07$ ");
+        // (Not at 7, where the space ends a wrapped row: copying drops a
+        // blank there, as it does for selections.)
+        t.state.resize(8, 3);
+        assert_eq!(last_command_text(&t.state).as_deref(), Some("echo 0123456789abc"));
+        assert_eq!(last_output_text(&t.state).as_deref(), Some("x"));
+        // No shell integration: nothing to copy.
+        let mut plain = Term::new(20, 4, 100, term_core::ImagePool::process());
+        plain.advance(b"$ ls\r\na b\r\n$ ");
+        assert_eq!(last_command_text(&plain.state), None);
+        assert_eq!(last_output_text(&plain.state), None);
     }
 
     /// A prompt `$ ` with its marks, then `input` typed after it.

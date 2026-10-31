@@ -2638,3 +2638,37 @@ fn smoke_failed_commands_are_marked_and_jumped_to() {
     assert_eq!(offset(&d[2]), 63, "{}", d[2]);
     assert_eq!(offset(&d[3]), 63, "{}", d[3]);
 }
+
+/// Copy Last Command and Copy Last Command's Output put the last
+/// command line run and its output on the clipboard (listed in the dump
+/// under test control), wherever the view is scrolled, selecting nothing.
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_copy_last_command_and_its_output() {
+    if !have_metal() {
+        return;
+    }
+    let dir = TempDir::new("copylast");
+    let wait = "i=0; while [ \"$(stty size)\" != '20 80' ] && [ $i -lt 100 ]; do sleep 0.05; i=$((i+1)); done; ";
+    let session = "s() { printf '\\033]133;A\\007$ \\033]133;B\\007%s\\n\\033]133;C\\007' \"$1\"; \
+                   i=0; while [ $i -lt 30 ]; do echo \"$1 $i\"; i=$((i+1)); done; printf '\\033]133;D;0\\007'; }; \
+                   s 'echo one'; s 'echo two'; printf '\\033]133;A\\007$ \\033]133;B\\007typing'; ";
+    let script = format!(
+        "{resize}{wait}{session}{command}{output}{up}{output}{dump}{quit}sleep 20",
+        resize = osc("resize 80 20"),
+        command = osc("menu copy_command"),
+        output = osc("menu copy_output"),
+        up = osc("key 126 cmd"),
+        dump = osc("dump"),
+        quit = osc("quit"),
+    );
+    let (status, _) = decline(&dir, &script, true);
+    assert!(status.success(), "{status}");
+    let d = dumps(&dir);
+    assert_eq!(d.len(), 1, "{d:?}");
+    let output: Vec<String> = (0..30).map(|i| format!("echo two {i}")).collect();
+    let output = output.join("\n");
+    assert_eq!(d[0]["copied"], serde_json::json!(["echo two", output, output]), "{}", d[0]);
+    assert!(num(&d[0], "view_offset") > 0.0, "{}", d[0]);
+    assert!(d[0]["selection"].is_null(), "{}", d[0]);
+}

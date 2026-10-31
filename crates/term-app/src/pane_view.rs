@@ -239,6 +239,19 @@ define_class!(
             self.jump_to_failed(false);
         }
 
+        /// Edit > Copy Last Command's Output: on the clipboard without
+        /// selecting it.
+        #[unsafe(method(copyLastCommandOutput:))]
+        fn copy_last_command_output(&self, _sender: Option<&AnyObject>) {
+            self.copy_from(crate::prompts::last_output_text);
+        }
+
+        /// Edit > Copy Last Command: the command line last run.
+        #[unsafe(method(copyLastCommand:))]
+        fn copy_last_command(&self, _sender: Option<&AnyObject>) {
+            self.copy_from(crate::prompts::last_command_text);
+        }
+
         /// The right-click menu's Select Command Output: the command
         /// clicked.
         #[unsafe(method(selectClickedOutput:))]
@@ -926,6 +939,22 @@ impl PaneView {
             Some(true) => self.request_redraw(),
             _ => NSBeep(),
         }
+    }
+
+    /// Put the text `text` finds in the terminal on the clipboard (under
+    /// test control, in the dump instead), or beep if it finds none.
+    fn copy_from(&self, text: impl FnOnce(&term_core::Terminal) -> Option<String>) {
+        let text = self.with(|_, p| text(&p.session.lock_term().state)).flatten();
+        let Some(text) = text.filter(|t| !t.is_empty()) else {
+            NSBeep();
+            return;
+        };
+        if self.window_view().is_some_and(|w| w.copied_in_test(&text)) {
+            return;
+        }
+        let pb = NSPasteboard::generalPasteboard();
+        pb.clearContents();
+        pb.setString_forType(&NSString::from_str(&text), unsafe { NSPasteboardTypeString });
     }
 
     /// Select the output of the command at `at`, or with `None` the one

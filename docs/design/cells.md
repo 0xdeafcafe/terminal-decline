@@ -1638,8 +1638,46 @@ rasterising new glyphs.
   dump waits for the complete frame. Main-thread time per frame for
   glyphs-30k: max 167–181 ms → 29–32 ms, total unchanged (248–268 →
   221–233 ms).
+- **The glyph thread.** Then finding and rasterising moved off the
+  main thread (`term-render/src/glyph_thread.rs`):
+  - `Fonts` keeps its registry behind a mutex in a core it shares
+    with `GlyphFinder`s (`Fonts::finder`), held only for lookups and
+    inserts, never while Core Text searches or draws. One registry
+    for both threads, so a fallback font gets one id whichever thread
+    met it first: nothing to adopt or translate.
+  - With a waker set (`Renderer::set_glyph_waker`, which the app
+    does), a build meeting a glyph it hasn't drawn asks the font set's
+    glyph thread for it, once, and draws the cell without it
+    (`glyphs_deferred`). Printable ASCII, sprites, and glyphs whose
+    key the lookup cache has and whose bitmap is in the textures stay
+    synchronous (`Fonts::cached_glyph_key`). Without a waker (tests,
+    headless screenshots) the budget path above is unchanged.
+  - The thread starts with the first request, sleeps on its channel,
+    works newest first, and wakes the app at once after a quiet spell,
+    then at most every 16 ms, and once when it runs out. The app
+    queues one main-queue call at a time (`view::glyph_waker`), which
+    marks the panes drawn without glyphs dirty; such a pane doesn't
+    tick until then.
+  - Bitmaps are put in the textures by the first build that draws
+    them, not as they come back. Each pane's build says what it went
+    without; what no pane's last build wants any more is skipped by
+    the thread and dropped if it comes back. Without this a flood
+    found and uploaded every glyph any frame asked for, though most
+    rows scrolled away first: the coverage texture grew to 2048 (base
+    1024) and the footprint was 9–11 MB higher.
+  - Measured (glyphs-30k three times, background window, release,
+    interleaved with the base, 4 rounds, load 9–42): main-thread time
+    in draws 35–53 ms against 203–224 ms in total, draws over 1 ms
+    3–6 against 21–24; the longest draw 17–22 ms against 17–20 ms, an
+    early frame of the flood in both, not spent on glyphs; idle
+    wakeups after 0; footprint 42–45 against 42–44 MB. The ASCII path
+    is unchanged (renderer bench `prepare` 60.1 against 59.8 µs).
 - **Not measured:** key latency under the flood (the latency harness
-  opens windows in front). Left: rasterising off the main thread.
+  opens windows in front). Left: shaping clusters (emoji sequences,
+  combining marks) and ligature runs on the glyph thread, which
+  still happens on the main thread for rows not shaped before; the
+  upload's wait for the GPU (`Atlas::insert` waits for frames in
+  flight before `replaceRegion`).
 
 ### 9.3 The renderer's row cache (R.2)
 

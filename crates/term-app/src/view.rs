@@ -61,6 +61,29 @@ pub(crate) const BLINK_INTERVAL: Duration = Duration::from_millis(530);
 pub(crate) const GLYPH_BUDGET_TYPING: Duration = Duration::from_millis(3);
 pub(crate) const GLYPH_BUDGET: Duration = Duration::from_millis(8);
 
+/// A call to [`glyphs_ready`] is queued on the main queue.
+static GLYPHS_READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// What the glyph thread calls when glyphs a frame went without are ready
+/// (roadmap R.1): every window builds again the panes drawn without some,
+/// once, on the main queue. Calls while one is queued add nothing, so a
+/// screenful of new glyphs wakes the main thread a few times, and nothing
+/// polls while the thread works.
+pub(crate) fn glyph_waker() -> term_render::GlyphWaker {
+    use std::sync::atomic::Ordering;
+    Arc::new(|| {
+        if !GLYPHS_READY.swap(true, Ordering::AcqRel) {
+            DispatchQueue::main().exec_async(|| {
+                // Cleared first: glyphs sent from now on queue another call.
+                GLYPHS_READY.store(false, Ordering::Release);
+                for v in all_views() {
+                    v.glyphs_ready();
+                }
+            });
+        }
+    })
+}
+
 /// What the window keeps: its layer's renderer and display link, and what
 /// is the same for all its panes (splits design §2.2).
 pub(crate) struct Win {
@@ -1107,6 +1130,24 @@ impl WindowView {
         }
     }
 
+    /// The glyph thread has glyphs for panes drawn without them: build
+    /// those again.
+    fn glyphs_ready(&self) {
+        self.with_state(|st| {
+            let mut waiting = false;
+            for p in st.panes.values().filter(|p| p.render.glyphs_deferred()) {
+                p.session.mark_dirty();
+                waiting = true;
+            }
+            if waiting {
+                st.win.idle_ticks = 0;
+                st.win.link.setPaused(false);
+            } else {
+                st.win.renderer.drop_unused_glyphs();
+            }
+        });
+    }
+
     pub(crate) fn unpause(&self) {
         let was_paused = self.with_state(|st| {
             st.win.idle_ticks = 0;
@@ -1574,8 +1615,10 @@ impl WindowView {
             if !ok {
                 p.render.forget();
                 crashed.push(id);
-            } else if p.render.glyphs_deferred() {
-                // Drawn without some new glyphs: built again next tick.
+            } else if p.render.glyphs_deferred() && !win.renderer.glyphs_pending() {
+                // Drawn without some new glyphs, and none on their way
+                // from the glyph thread (which wakes the window when they
+                // are, `glyph_waker`): built again next tick.
                 p.session.mark_dirty();
                 win.link.setPaused(false);
             }

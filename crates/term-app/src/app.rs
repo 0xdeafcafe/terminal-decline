@@ -1188,6 +1188,7 @@ impl AppDelegate {
         // Shared with every window whose fonts are the same.
         let mut renderer = Renderer::with_font_config(&config.font_config(config.font_size), scale);
         renderer.set_glyph_budget(Some(crate::view::GLYPH_BUDGET));
+        renderer.set_glyph_waker(Some(crate::view::glyph_waker()));
         let metrics = renderer.metrics();
         if !self.ivars().fonts_checked.replace(true) && config.names_fonts() {
             // Fonts the config names but that aren't installed: shown with

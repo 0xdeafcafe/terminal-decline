@@ -48,6 +48,9 @@ pub type CommandBuffer = ProtocolObject<dyn MTLCommandBuffer>;
 pub type Texture = ProtocolObject<dyn MTLTexture>;
 
 const FRAMES_IN_FLIGHT: usize = 2;
+/// Drawables a `CAMetalLayer` holds at most (its default
+/// `maximumDrawableCount`), so the surfaces a window may have shown.
+const SURFACES: usize = 3;
 /// Starting sizes of the glyph textures, pixels.
 const MASK_ATLAS: u32 = 1024;
 const COLOR_ATLAS: u32 = 256;
@@ -1252,16 +1255,19 @@ pub struct Renderer {
     /// The full-window pane [`prepare`](Self::prepare) builds and
     /// [`present`](Self::present) draws, until windows hold panes (B2.3).
     pub pane: PaneRender,
-    /// The surfaces of the last two frames presented, so they can be
-    /// marked purgeable while the window is hidden: the last one, and the
-    /// one before, which is the one on screen when the window was put
-    /// away before its last frame was shown (a tab switch that drew once
-    /// more). The window server keeps the surface it showed last, counted
-    /// in this process's footprint, for as long as the window lives. The
-    /// one before is let go with the spare drawable
+    /// The surfaces of the last frames presented, newest first, one for
+    /// each drawable the layer may hold, so they can be marked purgeable
+    /// while the window is hidden. The window server keeps the surface it
+    /// showed last, counted in this process's footprint, for as long as
+    /// the window lives, and that isn't always the last one presented: a
+    /// window behind others (a tab, or a window in the background test
+    /// mode) may show an older one, even its first frame. All but the
+    /// newest are let go with the spare drawable
     /// ([`forget_spare`](Self::forget_spare)).
-    surfaces: [Option<Retained<objc2_io_surface::IOSurfaceRef>>; 2],
+    surfaces: [Option<Retained<objc2_io_surface::IOSurfaceRef>>; SURFACES],
     hidden: bool,
+    /// Hidden with its surface kept (minimised).
+    keep_surface: bool,
     /// The time each pane's build may spend on new glyphs; `None`: no limit.
     glyph_budget: Option<Duration>,
     /// The theme transition the next frames draw, if one plays.
@@ -1310,8 +1316,9 @@ impl Renderer {
                 completed: Arc::new(AtomicU64::new(0)),
             },
             pane: PaneRender::default(),
-            surfaces: [None, None],
+            surfaces: [None, None, None],
             hidden: false,
+            keep_surface: false,
             glyph_budget: None,
             blend: None,
         }
@@ -1327,6 +1334,7 @@ impl Renderer {
         }
         self.window.in_flight.wait_idle();
         self.hidden = true;
+        self.keep_surface = keep_surface;
         self.window.textures.clear();
         {
             let mut cache = self.shared.glyphs.borrow_mut();
@@ -1346,19 +1354,53 @@ impl Renderer {
     /// The layer let its spare drawable go: so does this renderer, keeping
     /// only the surface on screen.
     pub fn forget_spare(&mut self) {
-        self.surfaces[1] = None;
+        for s in &mut self.surfaces[1..] {
+            *s = None;
+        }
     }
 
     /// Note the surface of a frame about to be presented.
     fn presenting(&mut self, texture: &Texture) {
         let Some(s) = texture.iosurface() else { return };
-        if self.surfaces[0]
-            .as_ref()
-            .is_some_and(|last| std::ptr::eq::<objc2_io_surface::IOSurfaceRef>(&**last, &*s))
-        {
+        let at = self.surfaces.iter().position(|k| {
+            k.as_ref()
+                .is_some_and(|k| std::ptr::eq::<objc2_io_surface::IOSurfaceRef>(&**k, &*s))
+        });
+        if at == Some(0) {
             return;
         }
-        self.surfaces[1] = self.surfaces[0].replace(s);
+        // Surfaces of another size are the layer's no longer: it never
+        // hands them out again. A hidden window drawn at 1×1 (only under
+        // the test control) leaves those it showed before purgeable, as
+        // `hide` did, which a `show` for that frame undid.
+        let (w, h) = (s.width(), s.height());
+        for k in &mut self.surfaces {
+            if k.as_ref().is_some_and(|k| (k.width(), k.height()) != (w, h)) {
+                if (w, h) == (1, 1) {
+                    // kIOSurfacePurgeableVolatile
+                    unsafe { k.as_ref().expect("checked").set_purgeable(1, std::ptr::null_mut()) };
+                }
+                *k = None;
+            }
+        }
+        // Newest first: a surface the layer hands out again moves to the
+        // front, a new one pushes the oldest out.
+        self.surfaces[..=at.unwrap_or(SURFACES - 1)].rotate_right(1);
+        self.surfaces[0] = Some(s);
+    }
+
+    /// Mark the hidden window's surfaces purgeable again. Marking one the
+    /// window server is still taking up (a frame presented just before
+    /// the window was hidden) can leave its pages counted; once it has
+    /// settled, marking it again lets them go.
+    pub fn hide_again(&mut self) {
+        if !self.hidden || self.keep_surface {
+            return;
+        }
+        for s in self.surfaces.iter().flatten() {
+            // kIOSurfacePurgeableVolatile
+            unsafe { s.set_purgeable(1, std::ptr::null_mut()) };
+        }
     }
 
     /// Undo `hide`. Must run before the next frame is built or drawn.

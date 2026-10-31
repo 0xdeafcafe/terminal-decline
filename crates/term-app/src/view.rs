@@ -1233,9 +1233,25 @@ impl WindowView {
                 // Nothing of it can be seen: let both drawables go, not
                 // only the spare one, until it is shown again.
                 layer.setDrawableSize(NSSize::new(1.0, 1.0));
+                self.hide_again_soon();
             }
         }
         visible
+    }
+
+    /// Mark a hidden window's surfaces purgeable again once the window
+    /// server has taken up its last frame: one presented just before the
+    /// window was hidden (a tab switch that drew once more) stays counted
+    /// when marked while it is still on its way to the screen.
+    fn hide_again_soon(&self) {
+        let id = self.ivars().id;
+        for after in [Duration::from_millis(500), Duration::from_secs(3)] {
+            let _ = DispatchQueue::main().after(DispatchTime::NOW.time(after.as_nanos() as i64), move || {
+                with_view(id, |v| {
+                    v.with_state(|st| st.win.renderer.hide_again());
+                })
+            });
+        }
     }
 
     /// One display-link tick (or a draw asked for at once): each shown
@@ -1262,6 +1278,7 @@ impl WindowView {
         let dividers: &[RectInstance] = if tree.zoomed().is_some() { &[] } else { dividers };
         // Under test control, draw even when covered by other windows, so a
         // dump never waits forever for a frame.
+        let seen = visible;
         let visible = visible || win.test.is_some();
         let terms: Vec<(PaneId, Arc<Mutex<Term>>)> = shown
             .iter()
@@ -1593,6 +1610,11 @@ impl WindowView {
             _ => win.renderer.present_panes(&self.ivars().layer, clear, &draws, dividers),
         }
         drop(draws);
+        if !seen && !win.shown {
+            // Drawn only for the test control while hidden: hidden again,
+            // so its surfaces don't stay counted.
+            win.renderer.hide(minimised);
+        }
         win.frames += 1;
         let mut poll_dump = false;
         // A dump shows every glyph: it waits for the frame that has them.

@@ -1418,3 +1418,124 @@ fn search(t: &mut Term, query: term_core::Query) -> Vec<term_core::Hit> {
     }
     t.state.search_hits()
 }
+
+// ---------------------------------------------------------------------------
+// The selection check (cells §11): output clears the selection when it
+// changes the text under it, found as cells are written, against reading
+// the text before and after every parse call.
+
+/// One piece of output, of the kinds that write and move cells most.
+fn watch_piece() -> impl Strategy<Value = Vec<u8>> {
+    let region = (0u16..8, 0u16..8).prop_map(|(t, b)| format!("\x1b[{t};{b}r").into_bytes());
+    let same = select(vec!["menu", "ab", "a", " ", "  ", "漢", "漢字", "e\u{301}", "😀"]).prop_map(|s| s.as_bytes().to_vec());
+    prop_oneof![
+        5 => ascii(),
+        4 => same,
+        3 => unicode(),
+        3 => cluster(),
+        5 => movement(),
+        2 => c0(),
+        5 => csi(),
+        2 => region,
+        1 => esc(),
+    ]
+}
+
+#[derive(Clone, Debug)]
+enum WatchStep {
+    /// One piece: the selection goes exactly when its text changed.
+    One(Vec<u8>),
+    /// Several in one parse call: text changed and put back may lose
+    /// it, but a change that stays always clears it.
+    Many(Vec<Vec<u8>>),
+    Select((usize, usize), (usize, usize)),
+    SelectAll,
+    Resize(usize, usize),
+}
+
+fn watch_step() -> impl Strategy<Value = WatchStep> {
+    let point = (0usize..100, 0usize..250);
+    prop_oneof![
+        10 => watch_piece().prop_map(WatchStep::One),
+        3 => prop::collection::vec(watch_piece(), 2..8).prop_map(WatchStep::Many),
+        4 => (point.clone(), point).prop_map(|(a, b)| WatchStep::Select(a, b)),
+        1 => Just(WatchStep::SelectAll),
+        1 => (1usize..=30, 1usize..=10).prop_map(|(c, l)| WatchStep::Resize(c, l)),
+    ]
+}
+
+/// The first buffer line still kept (in history or on the screen).
+fn first_kept(t: &Term) -> u64 {
+    let top = t.state.point_at(0, 0).line;
+    if t.state.alt_screen_active() {
+        top
+    } else {
+        top - t.state.scrollback_len() as u64
+    }
+}
+
+/// A cluster in `s` may grow wide after its first character was
+/// written, moving to the next row in the last column: one piece of
+/// output then changes a cell and puts it back.
+fn widens(s: &str) -> bool {
+    s.chars()
+        .any(|c| matches!(c, '\u{FE0F}' | '\u{200D}' | '\u{20E3}' | '\u{1F1E6}'..='\u{1F1FF}' | '\u{1F3FB}'..='\u{1F3FF}'))
+}
+
+proptest! {
+    #![proptest_config(config())]
+
+    #[test]
+    fn the_selection_goes_when_output_changes_its_text(
+        cols in 2usize..=12,
+        lines in 1usize..=6,
+        limit in select(vec![0usize, 2, 1000]),
+        steps in prop::collection::vec(watch_step(), 1..60),
+    ) {
+        let mut t = Term::new(cols, lines, limit, term_core::ImagePool::new(32 << 20));
+        // Once a scroll region may be set, a run of text can write a
+        // selected cell and then scroll another row under it.
+        let mut region = false;
+        for step in &steps {
+            let (bytes, exact) = match step {
+                WatchStep::One(b) => (b.clone(), true),
+                WatchStep::Many(bs) => (bs.concat(), false),
+                WatchStep::Select(a, b) => {
+                    let (lines, cols) = (t.state.lines(), t.state.cols());
+                    let anchor = t.state.point_at(a.0 % lines, a.1 % cols);
+                    let head = t.state.point_at(b.0 % lines, b.1 % cols);
+                    t.state.set_selection(Some(Selection::new(anchor, head)));
+                    continue;
+                }
+                WatchStep::SelectAll => {
+                    t.state.select_all();
+                    continue;
+                }
+                WatchStep::Resize(c, l) => {
+                    t.state.resize(*c, *l);
+                    continue;
+                }
+            };
+            let s = String::from_utf8_lossy(&bytes).into_owned();
+            region |= s.contains("\x1b[") && s.contains('r');
+            let Some(sel) = t.state.selection() else {
+                t.advance(&bytes);
+                continue;
+            };
+            let (a, b) = sel.ordered();
+            let before = t.state.text_between(a, b);
+            t.advance(&bytes);
+            let after = t.state.text_between(a, b);
+            let changed = after != before || a.line < first_kept(&t);
+            let kept = t.state.selection() == Some(sel);
+            if changed {
+                prop_assert!(!kept, "{:?}: {:?} became {:?}, but the selection stayed", s, before, after);
+            } else if exact && !kept && !widens(&s) && !region {
+                // Only the parser's own clearing (a reset, the other
+                // screen, history erased) may take an unchanged one.
+                let own = s.contains("\x1bc") || s.contains("\x1b[?") || (s.contains("\x1b[3") && s.contains('J'));
+                prop_assert!(own, "{:?}: the text {:?} didn't change, but the selection went", s, before);
+            }
+        }
+    }
+}

@@ -26,6 +26,7 @@ mod replies;
 mod saved;
 mod search;
 mod snapshot;
+mod watch;
 
 pub use graphics::HeadRead;
 pub use replies::DynamicColor;
@@ -276,21 +277,6 @@ pub struct Selection {
     pub kind: SelectionKind,
 }
 
-/// What a selection covers on the screen, kept while output is parsed:
-/// output that changes the text under the selection clears it, as xterm
-/// and Alacritty do, so what is shown selected is still what Cmd+C copies.
-/// Only screen lines can change: history is kept as it was written, so
-/// lines that were history when the selection was made aren't read.
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct SelectionWatch {
-    selection: Selection,
-    /// The first point read: the selection's start, or the screen's top
-    /// if it starts in history.
-    from: Point,
-    /// The text from `from` to the selection's end.
-    text: String,
-}
-
 /// Where the view is: following output, or showing history from a fixed
 /// place.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -433,9 +419,9 @@ pub struct Terminal {
     title_changed: bool,
     bell: bool,
     selection: Option<Selection>,
-    /// The selection's text on the screen as parsing last found it, so
-    /// output that changes it clears the selection ([`SelectionWatch`]).
-    selection_watch: Option<SelectionWatch>,
+    /// The selection's lines on the screen while output is parsed, so
+    /// output that changes its text clears it ([`watch`]).
+    watch: watch::SelectionWatch,
     /// Text a program asked to put on the clipboard (OSC 52).
     clipboard: Option<String>,
     /// A notification (OSC 9 / OSC 777) and progress (OSC 9;4) not yet taken.
@@ -593,7 +579,7 @@ impl Terminal {
             title_changed: false,
             bell: false,
             selection: None,
-            selection_watch: None,
+            watch: Default::default(),
             clipboard: None,
             notification: None,
             progress: None,
@@ -1424,51 +1410,6 @@ impl Terminal {
         Some(self.text_between(a, b))
     }
 
-    /// Before parsing: what the selection covers on the screen, kept
-    /// (and read again) only when the selection is new. Whether there is
-    /// one to watch.
-    pub(crate) fn watch_selection(&mut self) -> bool {
-        let Some(sel) = self.selection else {
-            self.selection_watch = None;
-            return false;
-        };
-        if self.selection_watch.as_ref().is_some_and(|w| w.selection == sel) {
-            return true;
-        }
-        let (a, b) = sel.ordered();
-        let from = a.max(Point {
-            line: self.top_line,
-            col: 0,
-        });
-        let text = if from <= b { self.text_between(from, b) } else { String::new() };
-        self.selection_watch = Some(SelectionWatch {
-            selection: sel,
-            from,
-            text,
-        });
-        true
-    }
-
-    /// After parsing: clear the selection if the output changed the text
-    /// under it.
-    pub(crate) fn check_selection(&mut self) {
-        let Some(w) = self.selection_watch.take() else { return };
-        if self.selection != Some(w.selection) {
-            // The parser itself moved or cleared it.
-            return;
-        }
-        let (_, b) = w.selection.ordered();
-        if w.from > b {
-            self.selection_watch = Some(w);
-            return;
-        }
-        if self.text_between(w.from, b) == w.text {
-            self.selection_watch = Some(w);
-        } else {
-            self.selection = None;
-        }
-    }
-
     /// The text from `a` to `b` (both included, `a` first), on the
     /// screen or in history, as copying a selection of it gives.
     pub fn text_between(&self, a: Point, b: Point) -> String {
@@ -1737,6 +1678,19 @@ impl Terminal {
         let n = n.min(bottom - top + 1);
         let blank = self.blank();
         let to_history = top == 0 && !self.alt_active;
+        if self.watching() {
+            if top > 0 {
+                // The region's rows move to other lines.
+                self.watch_rows(top..bottom + 1);
+            } else if bottom != self.lines - 1 {
+                // The rows below the region keep their place as the
+                // screen's top line moves on: they move to other lines, as
+                // do the blank ones the region gets. (Rows leaving the top
+                // go to history, or are lost, which the end of the parse
+                // call sees.)
+                self.watch_rows(bottom + 1 - n..self.lines);
+            }
+        }
         let old_top = self.top_line;
         if top == 0 {
             self.top_line += n as u64;
@@ -1776,6 +1730,7 @@ impl Terminal {
     fn scroll_down(&mut self, n: usize) {
         let (top, bottom) = (self.scroll_top, self.scroll_bottom);
         let n = n.min(bottom - top + 1);
+        self.watch_rows(top..bottom + 1);
         if self.graphics.has_placements() {
             self.scroll_placements(self.top_line, (top, bottom), n, false, false);
         }
@@ -1855,9 +1810,16 @@ impl Terminal {
     }
 
     fn erase_cells(&mut self, row: usize, range: std::ops::Range<usize>) {
+        self.erase_cells_as(row, range, true);
+    }
+
+    /// [`Terminal::erase_cells`], `watch`ing the selection or not (for a
+    /// caller that has checked already).
+    #[inline]
+    fn erase_cells_as(&mut self, row: usize, range: std::ops::Range<usize>, watch: bool) {
         let blank = self.blank();
         self.touch_row(row);
-        let r = &mut self.screen[row];
+        let r = &self.screen[row];
         let len = r.cells.len();
         let mut end = range.end.min(len);
         let mut start = range.start.min(end);
@@ -1868,6 +1830,10 @@ impl Terminal {
         if end < len && r.cells[end].width() == Width::Spacer {
             end += 1;
         }
+        if watch && self.watched(row) {
+            self.watch_erase(row, start, end);
+        }
+        let r = &mut self.screen[row];
         r.free_clusters(start..end);
         r.cells[start..end].fill(blank);
         if start == 0 && end == len {
@@ -1992,6 +1958,7 @@ impl Terminal {
     #[inline(never)]
     fn insert_chars(&mut self, n: usize) {
         let (row, col) = (self.cursor.row, self.cursor.col);
+        self.watch_row(row);
         let n = n.min(self.cols - col);
         let blank = self.blank();
         let r = &mut self.screen[row];
@@ -2008,6 +1975,7 @@ impl Terminal {
     #[inline(never)]
     fn delete_chars(&mut self, n: usize) {
         let (row, col) = (self.cursor.row, self.cursor.col);
+        self.watch_row(row);
         let n = n.min(self.cols - col);
         let blank = self.blank();
         let r = &mut self.screen[row];
@@ -2347,6 +2315,7 @@ impl Terminal {
     /// high byte, its row and column. A column guessed past 511 stores a
     /// blank in the same style.
     fn set_placeholder_cell(&mut self, row: usize, col: usize, piece: Piece) {
+        self.watch_row(row);
         let cell = self.screen[row].cells[col];
         let mut style = *self.styles.get(cell.style_id());
         let template = if style.image_id_high != piece.high {
@@ -2393,6 +2362,7 @@ impl Terminal {
         if self.placeholder.is_some() && self.placeholder_diacritic(row, col, c) {
             return;
         }
+        self.watch_row(row);
         if !self.screen[row].push_to_cell(col, c) {
             // Past the caps (32 scalars, 128 bytes, 8 KB a row): dropped.
             return;
@@ -2436,6 +2406,9 @@ impl Terminal {
     #[inline(never)]
     fn widen(&mut self, row: usize, col: usize) {
         let cols = self.cols;
+        // The cluster and the cell after it change width, or the cluster
+        // moves to the next row.
+        self.watch_row(row);
         if col + 1 < cols {
             if self.modes.insert {
                 // Make room rather than overwrite what follows.
@@ -2482,6 +2455,7 @@ impl Terminal {
         if let Some((r, c)) = self.grapheme.at
             && text.len() > first.len_utf8()
         {
+            self.watch_row(r);
             self.screen[r].set_cluster(c, &text);
         }
         self.last_char = None;
@@ -2493,6 +2467,7 @@ impl Terminal {
     #[cold]
     #[inline(never)]
     fn narrow(&mut self, row: usize, col: usize) {
+        self.watch_row(row);
         let cells = &mut self.screen[row].cells;
         let cell = cells[col];
         cells[col] = cell.with_width(Width::Narrow);
@@ -2517,6 +2492,7 @@ impl Terminal {
         for _ in 0..n {
             let at = self.put_char(first, width);
             if let Some((r, c)) = at {
+                self.watch_row(r);
                 self.screen[r].set_cluster(c, &text);
             }
             self.grapheme = GraphemeState { at, seg: self.last_seg };
@@ -2532,7 +2508,7 @@ impl Terminal {
     #[inline(always)]
     fn put_char(&mut self, c: char, width: usize) -> Option<(usize, usize)> {
         if self.cursor.pending_wrap && self.modes.autowrap {
-            self.screen[self.cursor.row].wrapped = true;
+            self.set_wrapped(self.cursor.row, true);
             self.cursor.col = 0;
             self.linefeed();
         }
@@ -2541,6 +2517,7 @@ impl Terminal {
                 return None;
             }
             let row = self.cursor.row;
+            self.watch_row(row);
             self.erase_cells(row, self.cursor.col..self.cols);
             // The last column is padding: an edge spacer.
             let last = &mut self.screen[row].cells[self.cols - 1];
@@ -2552,9 +2529,13 @@ impl Terminal {
 
         let (row, col) = (self.cursor.row, self.cursor.col);
         if self.modes.insert {
+            self.watch_row(row);
             let cells = &mut self.screen[row].cells;
             cells[col..].rotate_right(width.min(self.cols - col));
             self.repair_wide(row);
+        }
+        if self.watched(row) {
+            self.watch_char(row, col, c, width);
         }
         let cells = &mut self.screen[row].cells;
         // Only overwriting part of a wide character, or a cluster, needs
@@ -2562,7 +2543,8 @@ impl Terminal {
         const PARTS: u64 = Cell::WIDTH | Cell::KIND;
         let touches_wide = cells[col].bits() & PARTS != 0 || (width == 2 && cells[col + 1].bits() & PARTS != 0);
         if touches_wide {
-            self.erase_cells(row, col..col + width);
+            // The selection was checked for the whole write just above.
+            self.erase_cells_as(row, col..col + width, false);
         }
         // After the erase: interning the erase style may renumber ids.
         let pen = self.pen_template();
@@ -2608,7 +2590,7 @@ impl Terminal {
         let mut rest = bytes;
         while !rest.is_empty() {
             if self.cursor.pending_wrap {
-                self.screen[self.cursor.row].wrapped = true;
+                self.set_wrapped(self.cursor.row, true);
                 self.cursor.col = 0;
                 self.linefeed();
             }
@@ -2619,6 +2601,9 @@ impl Terminal {
             // Taken per segment: a linefeed's scroll may have interned the
             // erase style, and that may have renumbered the ids.
             let pen = self.pen_template().bits();
+            if self.watched(row) {
+                self.watch_ascii(row, col, segment);
+            }
             // Touched through the borrow the cells are written through:
             // a separate `touch_row` call here made `seq` 30% slower.
             let line = &mut self.screen[row];
@@ -3269,6 +3254,7 @@ impl Perform for Terminal {
             }
             // DECALN: fill with `E`, reset the margins, cursor home.
             ([b'#'], b'8') => {
+                self.watch_rows(0..self.lines);
                 for row in &mut self.screen {
                     row.fill(Cell::BLANK.with_char('E'));
                 }
@@ -3426,10 +3412,10 @@ impl Terminal {
                 match arg(0) {
                     0 => {
                         self.erase_cells(row, col..self.cols);
-                        self.screen[row].wrapped = false;
+                        self.set_wrapped(row, false);
                         for r in row + 1..self.lines {
                             self.erase_cells(r, 0..self.cols);
-                            self.screen[r].wrapped = false;
+                            self.set_wrapped(r, false);
                         }
                         if (row, col) == (0, 0) {
                             self.screen_cleared();
@@ -3444,7 +3430,7 @@ impl Terminal {
                     2 => {
                         for r in 0..self.lines {
                             self.erase_cells(r, 0..self.cols);
-                            self.screen[r].wrapped = false;
+                            self.set_wrapped(r, false);
                         }
                         self.screen_cleared();
                         if self.graphics.has_placements() {
@@ -3471,12 +3457,12 @@ impl Terminal {
                 match arg(0) {
                     0 => {
                         self.erase_cells(row, col..self.cols);
-                        self.screen[row].wrapped = false;
+                        self.set_wrapped(row, false);
                     }
                     1 => self.erase_cells(row, 0..col + 1),
                     2 => {
                         self.erase_cells(row, 0..self.cols);
-                        self.screen[row].wrapped = false;
+                        self.set_wrapped(row, false);
                     }
                     _ => {}
                 }
@@ -3971,6 +3957,7 @@ impl Terminal {
     fn scroll_up_no_history(&mut self, n: usize) {
         let (top, bottom) = (self.scroll_top, self.scroll_bottom);
         let n = n.min(bottom - top + 1);
+        self.watch_rows(top..bottom + 1);
         self.screen.make_contiguous()[top..=bottom].rotate_left(n);
         let blank = self.blank();
         for row in self.screen.range_mut(bottom + 1 - n..=bottom) {

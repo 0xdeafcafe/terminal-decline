@@ -108,11 +108,16 @@ watch a run.
   selection gestures (`select_word`, `select_line`, `select_all`,
   `extend_selection`) and the word rule (`term_core::word`).
 - Output that changes the text under the selection clears it (as xterm
-  and Alacritty do): before a parse the selection's text on the screen is
-  kept (read again only for a new selection), and after it compared
-  (`SelectionWatch`). Text drawn again unchanged, writes beside it and
-  scrolling into history keep it; with no selection it costs a branch
-  per parse call.
+  and Alacritty do). It is found as cells are written (`term/watch.rs`):
+  during a parse call the selection's lines on the screen are watched by
+  buffer line number, and the places that change cells check whether
+  their row is one of them; most writes tell on the spot whether the
+  text changed, the rest (wide characters, clusters, scroll regions
+  moving rows) read the text once and compare it at the end of the call.
+  Text drawn again unchanged, writes beside it and scrolling into
+  history keep it; a scroll region moving other text under it clears
+  it. A flood with 10 rows selected parses as fast as one without
+  (cells §11).
 - Parsing: `vte` is vendored (`vendor/vte`, through `[patch.crates-io]`)
   with `Perform::print_ascii`, which hands over each run of printable ASCII
   whole; the end of a run is found 8 bytes at a time. `Terminal::write_ascii`

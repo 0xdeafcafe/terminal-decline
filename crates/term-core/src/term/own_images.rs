@@ -539,6 +539,8 @@ impl Terminal {
     /// (cells §8.3).
     fn place_own(&mut self, image: Image, cols: u16, rows: u16, fit: Fit, after: After) {
         self.clear_grapheme();
+        // Its cells may go anywhere on the screen.
+        self.watch_rows(0..self.lines);
         let key = image.key;
         let n = match key {
             ImageKey::Own(n) => n,

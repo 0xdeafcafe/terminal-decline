@@ -270,6 +270,14 @@ pub fn build_log(home: &Path) -> PathBuf {
 /// `install_dir`, with all output in `log`. Blocks for the whole build:
 /// run it off the main thread. Checks the tree again first.
 pub fn run_update(src: &Source, install_dir: &Path, log: &Path) -> Result<(), String> {
+    run_update_at(src, install_dir, log, true)
+}
+
+/// [`run_update`], with the build at background priority or not. The
+/// tests turn it off: macOS starves a background process on a loaded Mac
+/// (CPU and disk), which made a build of a two-line fake script take
+/// a minute.
+fn run_update_at(src: &Source, install_dir: &Path, log: &Path, background: bool) -> Result<(), String> {
     let t = tree(&src.repo)?;
     if !t.clean {
         return Err("the checkout has uncommitted changes".into());
@@ -286,7 +294,7 @@ pub fn run_update(src: &Source, install_dir: &Path, log: &Path) -> Result<(), St
     let script = src.repo.join("scripts/dogfood.sh");
     // Background QoS: throttled CPU and disk, so the Mac stays quick.
     let taskpolicy = Path::new("/usr/sbin/taskpolicy");
-    let mut cmd = if taskpolicy.exists() {
+    let mut cmd = if background && taskpolicy.exists() {
         let mut c = Command::new(taskpolicy);
         c.arg("-b").arg("/bin/bash").arg(&script);
         c
@@ -566,7 +574,7 @@ mod tests {
         assert!(!tree(&work).unwrap().clean);
         let install = dir.join("Applications");
         let log = dir.join("logs/update-build.log");
-        assert!(run_update(&src, &install, &log).unwrap_err().contains("uncommitted"));
+        assert!(run_update_at(&src, &install, &log, false).unwrap_err().contains("uncommitted"));
         sh(&work, "git checkout -q scripts/dogfood.sh");
         // Untracked files don't count.
         sh(&work, "touch untracked");
@@ -574,15 +582,15 @@ mod tests {
         // Another branch: no update.
         sh(&work, "git checkout -q -b other");
         assert_eq!(tree(&work).unwrap().branch.as_deref(), Some("other"));
-        assert!(run_update(&src, &install, &log).is_err());
+        assert!(run_update_at(&src, &install, &log, false).is_err());
         sh(&work, "git checkout -q main");
-        run_update(&src, &install, &log).unwrap();
+        run_update_at(&src, &install, &log, false).unwrap();
         assert_eq!(sh(&work, "git rev-parse HEAD"), r.head, "fast-forwarded");
         let text = std::fs::read_to_string(&log).unwrap();
         assert_eq!(text.trim(), format!("built {}", install.display()));
         // A failing build says so.
         sh(&work, "touch fail");
-        assert!(run_update(&src, &install, &log).unwrap_err().contains("build failed"));
+        assert!(run_update_at(&src, &install, &log, false).unwrap_err().contains("build failed"));
         let _ = std::fs::remove_dir_all(dir);
     }
 }

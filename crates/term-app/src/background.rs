@@ -14,7 +14,9 @@
 //!   actions go where they go when the app is in front, and the window
 //!   is told it became key as AppKit would tell it.
 //!
-//! `DECLINE_TEST_BACKGROUND=1` does this without the test control.
+//! `DECLINE_TEST_BACKGROUND=1` does this without the test control, and so
+//! does an app `ctl` started to host windows (`ctl spawn --window` with no
+//! app running).
 //! `DECLINE_TEST_FOREGROUND=1` turns this off, to watch a test run: the
 //! app then activates and orders its windows front as usual.
 
@@ -45,7 +47,7 @@ pub fn on() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| {
         let set = |name: &str| std::env::var_os(name).is_some_and(|v| !v.is_empty() && v != "0");
-        (set(crate::control::ENV) || set(BACKGROUND_ENV)) && !set(FOREGROUND_ENV)
+        (set(crate::control::ENV) || set(BACKGROUND_ENV) || crate::ctl::window::hosted()) && !set(FOREGROUND_ENV)
     })
 }
 
@@ -146,6 +148,17 @@ pub fn make_key_and_order_front(window: &NSWindow) {
         None => {}
     }
     make_key(window);
+}
+
+/// Show `window` behind every other window without making it key or
+/// bringing the app forward: a session's window for the agent API
+/// (`ctl spawn --window`), in the app in front or in the background.
+/// In the background it is transparent as well.
+pub fn order_back(window: &NSWindow) {
+    hide(window);
+    if !window.isVisible() {
+        window.orderBack(None);
+    }
 }
 
 /// A local event monitor's handler.

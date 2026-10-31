@@ -405,3 +405,19 @@ fn screenshots_draw_images() {
     assert!(green >= 1000, "the image drew ({green} green pixels)");
     env.ok(&["kill", "i"]);
 }
+
+/// Windows need the app to host them: a headless server refuses
+/// `--window` and says why (the app's side is in the smoke tests).
+#[test]
+fn a_headless_server_refuses_windows() {
+    let env = Env::new(CONFIG);
+    let hello = env.ok(&["hello"]);
+    assert_eq!(
+        (hello["server"].as_str(), hello["windows"].as_bool()),
+        (Some("headless"), Some(false))
+    );
+    let (code, text) = env.run(&["spawn", "--window", "--name", "w", "--", "/bin/sh"]);
+    assert_eq!(code, 1, "{text}");
+    assert!(text.contains("--window needs the app"), "{text}");
+    assert_eq!(env.ok(&["list"])["sessions"].as_array().unwrap().len(), 0);
+}

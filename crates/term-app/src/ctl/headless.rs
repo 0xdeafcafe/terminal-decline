@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufWriter, Write};
+use std::sync::mpsc::Sender;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -14,6 +15,7 @@ use term_pty::{Child, Command, Size};
 use term_render::Theme;
 
 use super::protocol::{Action, Mouse, Spawn, WaitFor};
+use super::window::{Observer, Opener, Ready, WindowControl, WindowRequest};
 use crate::config::Config;
 use crate::session::{Hooks, Session};
 use crate::theme::Appearance;
@@ -257,12 +259,22 @@ fn utf8_prefix(b: &[u8]) -> usize {
     b.len()
 }
 
+/// How a session is served: the app's own [`Session`] with no view, or
+/// a window's (`--window`), reached through what its pane gave.
+enum Link {
+    Own(Session),
+    Window {
+        input: Option<Sender<Vec<u8>>>,
+        control: Arc<dyn WindowControl>,
+    },
+}
+
 pub struct Headless {
     pub name: String,
     pub argv: Vec<String>,
     pub look: Look,
     term_name: String,
-    session: Mutex<Option<Session>>,
+    link: Mutex<Option<Link>>,
     term: Arc<Mutex<Term>>,
     child: Option<Child>,
     pid: Option<i32>,
@@ -271,11 +283,23 @@ pub struct Headless {
     spawn_time: Duration,
     /// The shell has the integration, so its commands are marked.
     integrated: bool,
+    /// Shown in a window.
+    window: bool,
 }
 
-impl Headless {
-    /// Start `spawn`'s program. `env` is the request's environment.
-    pub fn spawn(name: String, spawn: &Spawn, look: Look) -> Result<Headless, String> {
+/// What `spawn` asks of the program, worked out from the request.
+struct Plan {
+    command: Command,
+    argv: Vec<String>,
+    term_name: String,
+    /// The shell gets the integration (as a window's does), so its
+    /// commands are marked with where they start and end.
+    integration: Option<std::path::PathBuf>,
+}
+
+impl Plan {
+    /// `env` is the request's environment.
+    fn new(spawn: &Spawn, look: &Look) -> Result<Plan, String> {
         if spawn.cols == 0 || spawn.rows == 0 || spawn.cols > 1000 || spawn.rows > 1000 {
             return Err(format!("size {}x{}: 1 to 1000 each", spawn.cols, spawn.rows));
         }
@@ -295,22 +319,118 @@ impl Headless {
                 .unwrap_or_default();
             argv[0] = which(&argv[0], &path, spawn.cwd.as_deref()).ok_or_else(|| format!("{:?}: not found on PATH", argv[0]))?;
         }
+        let integration = if !direct && config.shell_integration {
+            crate::Paths::current().shell_integration_dir()
+        } else {
+            None
+        };
         let command = Command {
             argv: argv.clone(),
             cwd: spawn.cwd.clone(),
             env,
             shell: None,
             direct,
-            // A program run directly gets exactly what it prints; a shell
-            // (`--shell`) gets the integration, as a window's does, so its
-            // commands are marked with where they start and end.
-            integration: if !direct && config.shell_integration {
-                crate::Paths::current().shell_integration_dir()
-            } else {
-                None
-            },
+            integration: None,
         };
-        let integrated = command.integration.is_some();
+        Ok(Plan {
+            command,
+            argv,
+            term_name,
+            integration,
+        })
+    }
+}
+
+/// What the reader thread of a session updates, however it is served.
+struct Watch {
+    shared: Arc<Shared>,
+    child: Arc<OnceLock<Child>>,
+    started: Instant,
+}
+
+impl Watch {
+    fn new(spawn: &Spawn, plan: &Plan) -> Result<Watch, String> {
+        let shared = Arc::new(Shared {
+            counts: Mutex::new(Counts::default()),
+            changed: Condvar::new(),
+        });
+        if let Some(path) = &spawn.record {
+            lock(&shared.counts).recorder = Some(Recorder::start(path, spawn.cols, spawn.rows, &plan.term_name, false)?);
+        }
+        Ok(Watch {
+            shared,
+            child: Arc::default(),
+            started: Instant::now(),
+        })
+    }
+
+    /// The callbacks the session's hooks are given.
+    fn observer(&self) -> Observer {
+        let (s1, s2, s3, slot, started) = (
+            self.shared.clone(),
+            self.shared.clone(),
+            self.shared.clone(),
+            self.child.clone(),
+            self.started,
+        );
+        Observer {
+            child: self.child.clone(),
+            on_exit: Box::new(move || {
+                // The output has ended; the status follows soon after.
+                let mut status = None;
+                let until = Instant::now() + Duration::from_secs(2);
+                while status.is_none() && Instant::now() < until {
+                    // The slot is set as the session starts: a program
+                    // that exits at once can beat it.
+                    status = slot.get().and_then(|child| child.try_wait());
+                    if status.is_none() {
+                        std::thread::sleep(Duration::from_millis(2));
+                    }
+                }
+                use std::os::unix::process::ExitStatusExt;
+                let mut c = lock(&s1.counts);
+                c.exit = Some(Exit {
+                    code: status.and_then(|s| s.code()),
+                    signal: status.and_then(|s| s.signal()),
+                    after: started.elapsed(),
+                });
+                drop(c);
+                s1.changed.notify_all();
+            }),
+            on_events: Box::new(move |events| {
+                if !events.commands.is_empty() {
+                    lock(&s3.counts).commands.apply(&events.commands, Instant::now());
+                    s3.changed.notify_all();
+                }
+            }),
+            on_output: Box::new(move |bytes, took| {
+                let mut c = lock(&s2.counts);
+                c.bytes_in += bytes.len() as u64;
+                c.batches += 1;
+                c.parse += took;
+                c.parse_max = c.parse_max.max(took);
+                let now = Instant::now();
+                c.last_output = Some(now);
+                c.first_output.get_or_insert(now - started);
+                if let Some(r) = &mut c.recorder {
+                    r.output(bytes);
+                }
+                drop(c);
+                s2.changed.notify_all();
+            }),
+        }
+    }
+}
+
+impl Headless {
+    /// Start `spawn`'s program, with no window.
+    pub fn spawn(name: String, spawn: &Spawn, look: Look) -> Result<Headless, String> {
+        let mut plan = Plan::new(spawn, &look)?;
+        let config = &look.config;
+        // A program run directly gets exactly what it prints; a shell
+        // (`--shell`) gets the integration, as a window's does.
+        let integrated = plan.integration.is_some();
+        plan.command.integration = plan.integration.take();
         let scrollback = spawn.scrollback.unwrap_or(config.scrollback);
         let mut t = Term::new(
             spawn.cols as usize,
@@ -324,69 +444,23 @@ impl Headless {
             .set_cell_pixels((look.metrics.cell_width as u16, look.metrics.cell_height as u16));
         t.state.set_image_scale(look.scale as f32);
 
-        let shared = Arc::new(Shared {
-            counts: Mutex::new(Counts::default()),
-            changed: Condvar::new(),
-        });
-        if let Some(path) = &spawn.record {
-            lock(&shared.counts).recorder = Some(Recorder::start(path, spawn.cols, spawn.rows, &term_name, false)?);
-        }
-        let started = Instant::now();
-        let child_slot: Arc<OnceLock<Child>> = Arc::default();
-        let (s1, s2, s3, slot) = (shared.clone(), shared.clone(), shared.clone(), child_slot.clone());
-        let mut hooks = Hooks::new(
-            Arc::new(|| {}),
-            Box::new(move |_| {
-                // The output has ended; the status follows soon after.
-                let mut status = None;
-                if let Some(child) = slot.get() {
-                    let until = Instant::now() + Duration::from_secs(2);
-                    while status.is_none() && Instant::now() < until {
-                        status = child.try_wait();
-                        if status.is_none() {
-                            std::thread::sleep(Duration::from_millis(2));
-                        }
-                    }
-                }
-                use std::os::unix::process::ExitStatusExt;
-                let mut c = lock(&s1.counts);
-                c.exit = Some(Exit {
-                    code: status.and_then(|s| s.code()),
-                    signal: status.and_then(|s| s.signal()),
-                    after: started.elapsed(),
-                });
-                drop(c);
-                s1.changed.notify_all();
-            }),
-        );
+        let watch = Watch::new(spawn, &plan)?;
+        let Observer {
+            on_exit,
+            on_events,
+            on_output,
+            ..
+        } = watch.observer();
+        let mut hooks = Hooks::new(Arc::new(|| {}), Box::new(move |_| on_exit()));
         hooks.quiet_exit = true;
-        hooks.on_events = Some(Box::new(move |events| {
-            if !events.commands.is_empty() {
-                lock(&s3.counts).commands.apply(&events.commands, Instant::now());
-                s3.changed.notify_all();
-            }
-        }));
-        hooks.on_output = Some(Box::new(move |bytes, took| {
-            let mut c = lock(&s2.counts);
-            c.bytes_in += bytes.len() as u64;
-            c.batches += 1;
-            c.parse += took;
-            c.parse_max = c.parse_max.max(took);
-            let now = Instant::now();
-            c.last_output = Some(now);
-            c.first_output.get_or_insert(now - started);
-            if let Some(r) = &mut c.recorder {
-                r.output(bytes);
-            }
-            drop(c);
-            s2.changed.notify_all();
-        }));
+        hooks.on_events = Some(Box::new(move |events| on_events(&events)));
+        hooks.on_output = Some(on_output);
         let size = look.size(spawn.cols, spawn.rows);
-        let session = Session::spawn(&command, size, t, hooks).map_err(|e| format!("couldn't start the session: {e}"))?;
-        let spawn_time = started.elapsed();
+        let session = Session::spawn(&plan.command, size, t, hooks).map_err(|e| format!("couldn't start the session: {e}"))?;
+        let spawn_time = watch.started.elapsed();
         let child = session.child();
         if let Some(c) = &child {
-            let _ = child_slot.set(c.clone());
+            let _ = watch.child.set(c.clone());
         }
         let pid = session.pid();
         if pid.is_none() {
@@ -395,17 +469,56 @@ impl Headless {
         }
         Ok(Headless {
             name,
-            argv,
+            argv: plan.argv,
             look,
-            term_name,
+            term_name: plan.term_name,
             term: session.term().clone(),
-            session: Mutex::new(Some(session)),
+            link: Mutex::new(Some(Link::Own(session))),
             child,
             pid,
-            shared,
-            started,
+            shared: watch.shared,
+            started: watch.started,
             spawn_time,
             integrated,
+            window: false,
+        })
+    }
+
+    /// Start `spawn`'s program in a window of the app, through `open`.
+    /// `look` is what the window is made with and what screenshots draw.
+    pub fn spawn_window(name: String, spawn: &Spawn, look: Look, open: &Opener) -> Result<Headless, String> {
+        let plan = Plan::new(spawn, &look)?;
+        let integrated = plan.integration.is_some();
+        let watch = Watch::new(spawn, &plan)?;
+        let opened = open(WindowRequest {
+            config: look.config.clone(),
+            command: plan.command.clone(),
+            cols: spawn.cols,
+            rows: spawn.rows,
+            observer: watch.observer(),
+        })?;
+        let spawn_time = watch.started.elapsed();
+        let Ready { term, input, child, pid } = opened.ready;
+        if let Some(c) = &child {
+            let _ = watch.child.set(c.clone());
+        }
+        Ok(Headless {
+            name,
+            argv: plan.argv,
+            look,
+            term_name: plan.term_name,
+            term,
+            link: Mutex::new(Some(Link::Window {
+                input,
+                control: opened.control,
+            })),
+            child,
+            pid,
+            shared: watch.shared,
+            started: watch.started,
+            spawn_time,
+            integrated,
+            window: true,
         })
     }
 
@@ -428,9 +541,15 @@ impl Headless {
         }
         c.bytes_out += n;
         drop(c);
-        match &*lock(&self.session) {
-            Some(s) => {
+        match &*lock(&self.link) {
+            Some(Link::Own(s)) => {
                 s.send(bytes);
+                Ok(())
+            }
+            Some(Link::Window { input, .. }) => {
+                if let Some(tx) = input {
+                    let _ = tx.send(bytes);
+                }
                 Ok(())
             }
             None => Err("the session was killed".into()),
@@ -629,8 +748,18 @@ impl Headless {
             return Err(format!("size {cols}x{rows}: 1 to 1000 each"));
         }
         let size = self.look.size(cols, rows);
-        if let Some(s) = &*lock(&self.session) {
-            s.resize(size).map_err(|e| format!("resize: {e}"))?;
+        // The window is told outside the lock: it answers from the main
+        // thread.
+        let window = match &*lock(&self.link) {
+            Some(Link::Own(s)) => {
+                s.resize(size).map_err(|e| format!("resize: {e}"))?;
+                None
+            }
+            Some(Link::Window { control, .. }) => Some(control.clone()),
+            None => None,
+        };
+        if let Some(control) = window {
+            control.resize(cols, rows)?;
         }
         if let Some(r) = &mut lock(&self.shared.counts).recorder {
             r.event("r", &format!("{cols}x{rows}"));
@@ -663,6 +792,7 @@ impl Headless {
             "ok": true,
             "session": self.name,
             "pid": self.pid,
+            "window": self.window,
             "running": c.exit.is_none(),
             "exit": exit_json(c.exit),
             "uptime_ms": self.started.elapsed().as_millis() as u64,
@@ -689,6 +819,7 @@ impl Headless {
             "session": self.name,
             "argv": self.argv,
             "pid": self.pid,
+            "window": self.window,
             "running": c.exit.is_none(),
             "exit": exit_json(c.exit),
             "cols": t.state.cols(),
@@ -706,9 +837,7 @@ impl Headless {
             }
             return Ok(json!({ "ok": true, "signal": sig }));
         }
-        if let Some(s) = lock(&self.session).take() {
-            drop(s.hang_up());
-        }
+        self.hang_up();
         // A moment for the status, which most programs give at once.
         let mut c = lock(&self.shared.counts);
         let until = Instant::now() + Duration::from_millis(500);
@@ -728,11 +857,22 @@ impl Headless {
     }
 }
 
+impl Headless {
+    /// Hang up on the program: an own session's, or by closing the
+    /// window it is shown in.
+    fn hang_up(&self) {
+        let link = lock(&self.link).take();
+        match link {
+            Some(Link::Own(s)) => drop(s.hang_up()),
+            Some(Link::Window { control, .. }) => control.close(),
+            None => {}
+        }
+    }
+}
+
 impl Drop for Headless {
     fn drop(&mut self) {
-        if let Some(s) = lock(&self.session).take() {
-            drop(s.hang_up());
-        }
+        self.hang_up();
     }
 }
 

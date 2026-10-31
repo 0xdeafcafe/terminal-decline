@@ -170,11 +170,17 @@ impl Server {
                 "server": match self.kind { Kind::App => "app", Kind::Headless => "headless" },
                 "pid": std::process::id(),
                 "version": env!("CARGO_PKG_VERSION"),
+                "windows": super::window::opener().is_some(),
                 "socket": protocol::socket_path(&self.dir),
             })),
             Request::Spawn(spawn) => {
-                if spawn.window {
-                    return Err("--window isn't there yet: sessions are headless (docs/design/agent-api.md §6)".into());
+                if spawn.window && super::window::opener().is_none() {
+                    return Err(
+                        "--window needs the app to host the window, and a headless server serves this socket \
+                         (it leaves once its sessions have ended and it is idle; or set TERMINAL_DECLINE_CTL_DIR \
+                         to a directory of your own)"
+                            .into(),
+                    );
                 }
                 let name = match &spawn.name {
                     Some(n) if n.is_empty() || n.len() > 64 || n.contains(char::is_whitespace) => {
@@ -197,7 +203,11 @@ impl Server {
                 }
                 let look = Look::new(config, &spawn, &self.source.themes_dir)?;
                 let t0 = Instant::now();
-                let h = Arc::new(Headless::spawn(name.clone(), &spawn, look)?);
+                let h = match super::window::opener() {
+                    Some(open) if spawn.window => Headless::spawn_window(name.clone(), &spawn, look, open)?,
+                    _ => Headless::spawn(name.clone(), &spawn, look)?,
+                };
+                let h = Arc::new(h);
                 let took = t0.elapsed();
                 let pid = h.summary()["pid"].clone();
                 let mut sessions = lock(&self.sessions);

@@ -103,7 +103,8 @@ pub struct Spawn {
     /// Run the program through the login shell, as a window does,
     /// rather than exec'ing it directly (found on the env's PATH).
     pub shell: bool,
-    /// Show it in a window (not done yet: refused).
+    /// Show it in a window of the app, in the background; closing the
+    /// window kills the session. Refused by a headless server.
     pub window: bool,
     pub font: Option<String>,
     pub font_size: Option<f64>,

@@ -2598,3 +2598,146 @@ fn smoke_edit_config_opens_a_tab_running_the_editor() {
     check_dump(last);
     assert_eq!(num(last, "tabs"), 2.0, "the editor has its own tab: {last}");
 }
+
+/// `ctl` against an app started to host windows: a socket directory and
+/// HOME of the test's own, a short path (a socket's path must fit in 104
+/// bytes).
+struct CtlApp {
+    root: PathBuf,
+}
+
+impl CtlApp {
+    fn new(name: &str) -> CtlApp {
+        let root = PathBuf::from(format!("/tmp/tdw-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("home/.config/terminal-decline")).unwrap();
+        std::fs::write(
+            root.join("home/.config/terminal-decline/config.toml"),
+            "padding = 0\nfont_size = 13\n",
+        )
+        .unwrap();
+        CtlApp { root }
+    }
+
+    /// Run `ctl args`: its exit status and JSON.
+    fn run(&self, args: &[&str]) -> (i32, Value) {
+        let out = Command::new(APP)
+            .arg("ctl")
+            .args(args)
+            .env("TERMINAL_DECLINE_CTL_DIR", self.root.join("s"))
+            .env("TERMINAL_DECLINE_CTL_IDLE_MS", "4000")
+            .env("HOME", self.root.join("home"))
+            .env_remove("XDG_CONFIG_HOME")
+            .env_remove("DECLINE_TEST_DUMP")
+            .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        let v = serde_json::from_str(&text).unwrap_or_else(|e| panic!("ctl {args:?}: {e}: {text}"));
+        (out.status.code().unwrap_or(-1), v)
+    }
+
+    fn ok(&self, args: &[&str]) -> Value {
+        let (code, v) = self.run(args);
+        assert_eq!((code, &v["ok"]), (0, &Value::Bool(true)), "ctl {args:?}: {v}");
+        v
+    }
+}
+
+impl Drop for CtlApp {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+fn process_exists(pid: u64) -> bool {
+    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+}
+
+/// `ctl spawn --window` with no app running starts one in the background
+/// that hosts the window and serves every `ctl` command, headless sessions
+/// too; killing the session closes the window, a program that exits ends
+/// the session, and the app leaves once it is idle
+/// (docs/design/agent-api.md §6).
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_ctl_windows_are_sessions_in_a_background_app() {
+    if !have_metal() {
+        return;
+    }
+    let ctl = CtlApp::new("win");
+    let w = ctl.ok(&["spawn", "--window", "--name", "w", "--size", "60x10", "--", "/bin/sh"]);
+    assert_eq!(w["session"], "w");
+    let hello = ctl.ok(&["hello"]);
+    assert_eq!(
+        (hello["server"].as_str(), hello["windows"].as_bool()),
+        (Some("app"), Some(true)),
+        "{hello}"
+    );
+    let app = hello["pid"].as_u64().unwrap();
+    assert_ne!(app, std::process::id() as u64);
+    assert_eq!(ctl.ok(&["list"])["sessions"][0]["window"], true);
+
+    // Driven like a headless session.
+    ctl.ok(&["send", "w", "--text", "PS1='$ '; echo $((6*7)); stty size\n"]);
+    ctl.ok(&["wait-for", "w", "--regex", "(?m)^42$", "--timeout", "10000"]);
+    ctl.ok(&["wait-for", "w", "--text", "10 60", "--timeout", "10000"]);
+    let screen = ctl.ok(&["screen", "w", "--json"]);
+    assert_eq!((screen["cols"].as_u64(), screen["rows"].as_u64()), (Some(60), Some(10)), "{screen}");
+    ctl.ok(&["resize", "w", "50x8"]);
+    ctl.ok(&["send", "w", "--text", "stty size\n"]);
+    ctl.ok(&["wait-for", "w", "--text", "8 50", "--timeout", "10000"]);
+    let png = ctl.root.join("w.png");
+    ctl.ok(&["screenshot", "w", png.to_str().unwrap()]);
+    assert!(std::fs::metadata(&png).unwrap().len() > 100);
+
+    // The same app serves headless sessions beside it.
+    let h = ctl.ok(&["spawn", "--name", "h", "--", "/bin/sh"]);
+    assert_eq!(h["session"], "h");
+    assert_eq!(ctl.ok(&["list"])["sessions"].as_array().unwrap().len(), 2);
+
+    // A program that exits ends the session with its status.
+    ctl.ok(&["send", "w", "--text", "exit 7\n"]);
+    let done = ctl.ok(&["wait-for", "w", "--exit", "--timeout", "10000"]);
+    assert_eq!(done["exit"]["code"], 7, "{done}");
+
+    // Killing a session closes its window and hangs up on the program.
+    ctl.ok(&["spawn", "--window", "--name", "k", "--", "/bin/sh"]);
+    let pid = ctl.ok(&["stats", "k"])["pid"].as_u64().unwrap();
+    ctl.ok(&["kill", "k"]);
+    let until = Instant::now() + Duration::from_secs(10);
+    while process_exists(pid) && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(!process_exists(pid), "the program is still running");
+
+    // A program that can't start is an error, not a window.
+    let (code, v) = ctl.run(&["spawn", "--window", "--name", "bad", "--", "/no/such/program"]);
+    assert_eq!(code, 1, "{v}");
+
+    // Nothing running and nobody asking: the app leaves.
+    ctl.ok(&["kill", "h"]);
+    let until = Instant::now() + Duration::from_secs(20);
+    while process_exists(app) && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(!process_exists(app), "the hosting app is still running");
+}
+
+/// A window session with `--shell` marks its commands as a headless one
+/// does: `wait-for --command` gets the status and duration.
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_ctl_window_sessions_mark_commands() {
+    if !have_metal() {
+        return;
+    }
+    let ctl = CtlApp::new("cmd");
+    ctl.ok(&["spawn", "--window", "--name", "sh", "--shell", "--env", "SHELL=/bin/zsh"]);
+    ctl.ok(&["wait-for", "sh", "--idle", "700", "--timeout", "15000"]);
+    ctl.ok(&["send", "sh", "--text", "sleep 1; (exit 4)\n"]);
+    let w = ctl.ok(&["wait-for", "sh", "--command", "--timeout", "10000"]);
+    assert_eq!(w["status"], 4, "{w}");
+    assert!(w["duration_ms"].as_u64().unwrap() >= 800, "{w}");
+    ctl.ok(&["kill", "sh"]);
+}

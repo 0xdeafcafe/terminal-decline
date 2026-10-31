@@ -98,7 +98,8 @@ terminal-decline settings     # the Settings screen, in any terminal (also `decl
 ## Driving it from agents and tests
 
 `terminal-decline ctl` runs programs in real Terminal Decline terminals
-without windows, for agents and tests to type into, read and measure:
+without windows (or in background windows, with `--window`), for agents
+and tests to type into, read and measure:
 
 ```sh
 terminal-decline ctl spawn --name top --size 100x30 -- htop
@@ -106,6 +107,11 @@ terminal-decline ctl wait-for top --text "Load average" --timeout 5000
 terminal-decline ctl screen top            # the screen as text; --json for cells, colours, cursor, modes
 terminal-decline ctl screenshot top top.png   # drawn on the GPU with your fonts and theme
 terminal-decline ctl kill top
+
+# Watchable: a real window of the app, opened in the background (no focus
+# taken); every command above works on it, and closing it ends the session
+terminal-decline ctl spawn --window --name vim --size 100x30 -- vim
+terminal-decline ctl kill vim
 
 # A shell session: wait for the next command to finish, and get its status
 terminal-decline ctl spawn --name sh --shell

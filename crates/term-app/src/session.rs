@@ -593,6 +593,13 @@ impl Session {
         &self.term
     }
 
+    /// A way to send bytes to the program from another thread, as
+    /// [`Session::send`] does (without clearing a command waiting for
+    /// the prompt): the agent API's windows use it.
+    pub fn input(&self) -> Option<Sender<Vec<u8>>> {
+        self.input.clone()
+    }
+
     /// The terminal, locked (see [`lock`]).
     pub fn lock_term(&self) -> MutexGuard<'_, Term> {
         lock(&self.term)

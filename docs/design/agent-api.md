@@ -25,6 +25,7 @@ terminal-decline ctl wait-for top --text "Load average" --timeout 5000
 terminal-decline ctl send top --key F6 --text "q"
 terminal-decline ctl screen top --json
 terminal-decline ctl screenshot top /tmp/top.png
+terminal-decline ctl spawn --window --name vim --size 100x30 -- vim   # in a real window, in the background
 ```
 
 Each call is a client: it connects to the server's Unix socket, sends one
@@ -95,8 +96,46 @@ A program that exits quickly with a failure leaves the app's usual
 "[process exited with status N]" in a window; a headless session doesn't
 write it (the exit status is in `stats` and `wait-for --exit`).
 
-`--window` (watching a session in a real background window) is left for
-later (§6).
+### 3.1 `--window`: a session in a real window
+
+`spawn --window` runs the session in a window of the app: the app's own
+window and pane, drawn as any other, so what is seen is what a user would
+see. The window opens in the background, as `background.rs` does for the
+smoke tests: it takes no focus and doesn't bring the app forward, and it
+opens behind the other windows. Every `ctl` command works on it as on a
+headless session: the server reaches the pane's terminal and its input
+through what the pane hands back when it starts the session (the
+terminal, a sender into the PTY's writer, the process), `resize` sets the
+window's size to show the grid, `screen` and `wait-for` read the same
+terminal, and `screenshot` draws it headlessly as for any session (so it
+is the session's fonts and scale, not the window's pixels).
+
+- **Who serves.** Windows need the app. The running app serves them, in
+  its normal foreground state (the window opens behind the others, and
+  isn't made key). With no app serving, the client starts one: the same
+  executable, with `TERMINAL_DECLINE_CTL_HOSTED=1`, which makes it a
+  host: a background (accessory) app with no Dock icon, no window of its
+  own, no updater and no restart into a new build, that serves the
+  socket and leaves once it is idle, like the headless server. In the
+  background, its windows are transparent and behind everything, as the
+  smoke tests' are; `DECLINE_TEST_FOREGROUND=1` in the client's
+  environment turns that off, to watch (the app then comes to the front
+  once as it starts). Headless sessions can be spawned in the same app.
+- **A headless server** (one that an earlier headless `spawn` started
+  and which is still running) can't host a window: `spawn --window` is
+  refused, with the reason. `hello` says whether the server hosts
+  windows (`"windows": true`).
+- **Closing and exiting.** Closing the window (by hand, or `kill`) hangs
+  up on the program, and the session shows as exited like any other
+  (`wait-for --exit` works; `kill` forgets it). A program that exits
+  closes its window as in any window, except that one that fails within
+  a second leaves the window open with its status, until a key is
+  pressed. A program that can't be started is an error from `spawn`, with
+  no window left behind.
+- The window takes the app's config with the request's font, theme,
+  appearance and size on top (`--size` is the window's grid). The
+  program, directory and environment are the request's, as for a
+  headless session; `--shell` gets the shell integration.
 
 ## 4. Protocol and exit codes
 
@@ -129,11 +168,20 @@ so medians), headless server, release build, 30 Oct 2026:
 
 ## 6. Left for later
 
-- `--window`: a background window (as `background.rs` does under the
-  test control) showing a session, for watching. In the app, sessions
-  are headless too until then.
+- A window opened by hand can't be turned into a session, and a session
+  can't be given a window afterwards; `--window` is a choice at `spawn`.
 
 ## 7. Landed
+
+31 Oct 2026: `--window` (§3.1) and `wait-for --command` (§3). The
+`window` module in `ctl` (the app's way of opening a window, the hooks
+that watch a window's session, the hosting app's environment), a
+`Launch::adopt` in the window view, and `Session::input`. Tests: a
+headless server refuses windows (`tests/ctl.rs`); the smoke tests
+`smoke_ctl_windows_are_sessions_in_a_background_app` and
+`smoke_ctl_window_sessions_mark_commands` run an app that hosts windows
+(CI only: they open windows). `wait-for --command` is tested against a
+headless `--shell` session.
 
 30 Oct 2026: everything above but `--window`. The `ctl` module in
 term-app (`protocol`, `client`, `server`, `headless`, `keys`, `screen`,

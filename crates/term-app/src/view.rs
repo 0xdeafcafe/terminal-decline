@@ -668,6 +668,9 @@ pub struct Launch {
     /// The panes to open, as saved for a restart; `None` for one pane
     /// running `command`.
     pub layout: Option<SavedPanes>,
+    /// The agent API's session this window shows (`ctl spawn --window`):
+    /// its first pane's program is the session's.
+    pub adopt: Option<crate::ctl::window::Adopt>,
 }
 
 /// The renderer's theme for a window: the Settings tab stays opaque
@@ -729,6 +732,7 @@ impl WindowView {
         let renderer = launch.renderer;
         let settings = launch.settings;
         let scale = launch.scale;
+        let mut adopt = launch.adopt;
         let opaque = config.opacity >= 1.0 || settings;
         term_render::configure_layer(layer, renderer.device(), opaque);
         layer.setContentsScale(scale);
@@ -760,6 +764,7 @@ impl WindowView {
                     notices: &launch.notices,
                     program: true,
                     settings,
+                    adopt: adopt.take(),
                 })?;
                 panes.insert(pane_id, pane);
                 first_tree
@@ -793,6 +798,7 @@ impl WindowView {
                         notices: if focused { &launch.notices } else { &[] },
                         program: saved.program,
                         settings: false,
+                        adopt: None,
                     });
                     match made {
                         Ok(pane) => {
@@ -2098,6 +2104,7 @@ impl WindowView {
                     notices: &[],
                     program: false,
                     settings: false,
+                    adopt: None,
                 },
             );
             match pane {
@@ -2806,6 +2813,8 @@ struct NewPane<'a> {
     program: bool,
     /// It runs the preferences.
     settings: bool,
+    /// It is the agent API's session: see [`Launch::adopt`].
+    adopt: Option<crate::ctl::window::Adopt>,
 }
 
 /// Start pane `n` of window `window`: its terminal and program.
@@ -2819,7 +2828,8 @@ fn spawn_pane(window: usize, config: &Config, theme: &Theme, m: term_font::Metri
     for notice in n.notices {
         crate::session::write_notice(&mut t, notice);
     }
-    let hooks = pane_hooks(window, n.id, test, n.settings);
+    let mut hooks = pane_hooks(window, n.id, test, n.settings);
+    let adopted = n.adopt.map(|a| a.attach(&mut hooks));
     // The login shell (or a command that is just a shell) gets the shell
     // integration; Settings and other programs don't.
     let mut command = n.command.clone();
@@ -2827,6 +2837,9 @@ fn spawn_pane(window: usize, config: &Config, theme: &Theme, m: term_font::Metri
         command.integration = crate::Paths::current().shell_integration_dir();
     }
     let session = Session::spawn(&command, pty_size(cols, lines, m), t, hooks)?;
+    if let Some(ready) = adopted {
+        ready(&session);
+    }
     Ok(Pane {
         view: n.view,
         session,
@@ -3226,7 +3239,7 @@ impl WindowView {
     }
 
     /// Resize the window to show `cols` × `lines` (in its one pane).
-    fn set_grid(&self, cols: usize, lines: usize) {
+    pub(crate) fn set_grid(&self, cols: usize, lines: usize) {
         let Some(window) = self.window() else { return };
         let titlebar = self.titlebar_height();
         let size = self.with_state(|st| {

@@ -77,6 +77,46 @@ pub struct AppIvars {
     preview: RefCell<Previewing>,
 }
 
+/// A window for a session of the agent API (`ctl spawn --window`): the
+/// config it is opened with, the program it runs, and the session's
+/// observer.
+struct Hosted {
+    config: Config,
+    command: Command,
+    adopt: crate::ctl::window::Adopt,
+}
+
+/// A session's window, as the agent API's server drives it from its own
+/// threads: each call waits for the main thread.
+struct HostedWindow {
+    id: usize,
+}
+
+impl crate::ctl::window::WindowControl for HostedWindow {
+    fn resize(&self, cols: u16, rows: u16) -> Result<(), String> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let id = self.id;
+        dispatch2::DispatchQueue::main().exec_async(move || {
+            let mut found = false;
+            crate::view::with_view(id, |v| {
+                v.set_grid(cols as usize, rows as usize);
+                found = true;
+            });
+            let _ = tx.send(found);
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err("the window has been closed".into()),
+            Err(_) => Err("the app didn't answer".into()),
+        }
+    }
+
+    fn close(&self) {
+        let id = self.id;
+        dispatch2::DispatchQueue::main().exec_async(move || crate::view::with_view(id, |v| v.close_window()));
+    }
+}
+
 /// The live theme preview from Settings (see [`term_prefs::Preview`]).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 enum Previewing {
@@ -106,7 +146,9 @@ define_class!(
             let restore = std::mem::take(&mut *self.ivars().restore.borrow_mut());
             let folders = std::mem::take(&mut *self.ivars().opened_at_launch.borrow_mut());
             self.ivars().launched.set(true);
-            if restore.is_empty() && folders.is_empty() {
+            // An app started to host the agent API's windows opens none of
+            // its own.
+            if restore.is_empty() && folders.is_empty() && !crate::ctl::window::hosted() {
                 self.open_window(None, Place::Cascade, None);
             }
             self.restore(restore);
@@ -120,8 +162,20 @@ define_class!(
             crate::memory::listen();
             // The agent API's socket (docs/design/agent-api.md §2): the
             // app only, not pins nor the smoke tests' app.
-            if self.ivars().role == crate::entry::Role::App && self.ivars().config.borrow().agent_api && !crate::background::on() {
+            let hosted = crate::ctl::window::hosted();
+            if self.ivars().config.borrow().agent_api
+                && (hosted || (self.ivars().role == crate::entry::Role::App && !crate::background::on()))
+            {
+                crate::ctl::window::set_opener(Box::new(open_for_ctl));
                 crate::ctl::serve_in_app();
+            } else if hosted {
+                eprintln!("terminal-decline: the agent API is off (agent_api = false)");
+                std::process::exit(1);
+            }
+            if hosted {
+                // A host for windows only: no updater, no restart into a
+                // new build, nothing in front.
+                return;
             }
             // The updater (docs/design/updater.md): off in pins, dogfood,
             // nightly and ad-hoc builds; on, the app menu gains Check for
@@ -202,7 +256,8 @@ define_class!(
 
         #[unsafe(method(applicationShouldTerminateAfterLastWindowClosed:))]
         fn should_terminate_after_last_window_closed(&self, _app: &NSApplication) -> bool {
-            true
+            // A host for the agent API's windows leaves when idle instead.
+            !crate::ctl::window::hosted()
         }
 
         #[unsafe(method(applicationDidBecomeActive:))]
@@ -467,6 +522,11 @@ impl AppDelegate {
 
     /// Dogfood builds: restart into a newer build when one is installed.
     fn watch_for_new_build(&self) {
+        // A host for the agent API's windows doesn't restart into a new
+        // build: that would open an app of the user's.
+        if crate::ctl::window::hosted() {
+            return;
+        }
         let Some(bundle) = crate::reload::own_bundle() else { return };
         if !crate::reload::is_dogfood_bundle(&bundle) {
             return;
@@ -613,7 +673,7 @@ impl AppDelegate {
                 };
                 // With panes, each pane types its own command.
                 let command = w.command.filter(|_| w.panes.is_none());
-                let opened = self.open_window_as(w.cwd, place, None, false, w.panes);
+                let opened = self.open_window_as(w.cwd, place, None, false, w.panes, None);
                 if let (Some(command), Some(view)) = (command, opened.as_ref().and_then(|o| self.view_of(o))) {
                     view.type_at_prompt(command);
                 }
@@ -749,7 +809,7 @@ impl AppDelegate {
             Some(window) => Place::TabOf(window),
             None => Place::Cascade,
         };
-        let opened = self.open_window_as(None, place, None, true, None);
+        let opened = self.open_window_as(None, place, None, true, None, None);
         *self.ivars().settings.borrow_mut() = opened;
     }
 
@@ -824,7 +884,7 @@ impl AppDelegate {
     /// Open a window in `cwd` (else the configured one) at `place`, running
     /// `argv` (else the configured program).
     fn open_window(&self, cwd: Option<String>, place: Place, argv: Option<Vec<String>>) -> Option<Retained<NSWindow>> {
-        self.open_window_as(cwd, place, argv, false, None)
+        self.open_window_as(cwd, place, argv, false, None, None)
     }
 
     /// [`Self::open_window`], or with `settings` the Settings tab: the
@@ -838,9 +898,16 @@ impl AppDelegate {
         argv: Option<Vec<String>>,
         settings: bool,
         layout: Option<crate::reload::SavedPanes>,
+        hosted: Option<Hosted>,
     ) -> Option<Retained<NSWindow>> {
         let mtm = MainThreadMarker::from(self);
-        let config = self.ivars().config.borrow().clone();
+        let (config, hosted_command, adopt) = match hosted {
+            Some(h) => (Rc::new(h.config), Some(h.command), Some(h.adopt)),
+            None => (self.ivars().config.borrow().clone(), None, None),
+        };
+        // A session of the agent API opens behind the other windows and
+        // takes no focus.
+        let quiet = adopt.is_some();
         let scale = NSScreen::mainScreen(mtm).map(|s| s.backingScaleFactor()).unwrap_or(2.0);
         // Shared with every window whose fonts are the same.
         let mut renderer = Renderer::with_font_config(&config.font_config(config.font_size), scale);
@@ -911,8 +978,9 @@ impl AppDelegate {
         // own would send them all to the first responder, wherever the
         // pointer is.
 
-        let mut command = match settings {
-            true => Command {
+        let mut command = match (hosted_command, settings) {
+            (Some(command), _) => command,
+            (None, true) => Command {
                 argv: std::iter::once(prefs_binary().display().to_string())
                     .chain(self.ivars().origin.prefs_args())
                     .collect(),
@@ -921,7 +989,7 @@ impl AppDelegate {
                 direct: true,
                 ..Command::default()
             },
-            false => Command {
+            (None, false) => Command {
                 argv: argv.unwrap_or_else(|| config.command.clone()),
                 cwd: cwd.or_else(|| config.cwd.clone()),
                 env: config.env.clone().into_iter().collect(),
@@ -950,7 +1018,11 @@ impl AppDelegate {
                 parent.addTabbedWindow_ordered(&window, NSWindowOrderingMode::Above);
             }
         }
-        crate::background::make_key_and_order_front(&window);
+        if quiet {
+            crate::background::order_back(&window);
+        } else {
+            crate::background::make_key_and_order_front(&window);
+        }
         // A new tab puts the one in front behind it, without key
         // notifications while the app is inactive.
         crate::view::sync_visibility_soon();
@@ -972,6 +1044,7 @@ impl AppDelegate {
                 },
                 settings,
                 layout,
+                adopt,
             },
         ) {
             eprintln!("terminal-decline: could not open a window: {e}");
@@ -994,6 +1067,62 @@ impl AppDelegate {
         };
         self.ivars().windows.borrow_mut().push((window.clone(), view));
         Some(window)
+    }
+}
+
+/// The agent API's server, on one of its threads, asks for a window: the
+/// main thread opens it, and this waits.
+fn open_for_ctl(req: crate::ctl::window::WindowRequest) -> Result<crate::ctl::window::Opened, String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    dispatch2::DispatchQueue::main().exec_async(move || {
+        let delegate = DELEGATE.with(|d| d.borrow().as_ref().and_then(|w| w.load()));
+        let _ = tx.send(match delegate {
+            Some(d) => d.open_ctl_window(req),
+            None => Err("the app is quitting".into()),
+        });
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(30))
+        .unwrap_or_else(|_| Err("the app didn't open the window in time".into()))
+}
+
+impl AppDelegate {
+    /// A window around the agent API's session `req` describes, in the
+    /// background: the size asked for, no focus taken.
+    fn open_ctl_window(&self, req: crate::ctl::window::WindowRequest) -> Result<crate::ctl::window::Opened, String> {
+        let mut config = req.config;
+        config.columns = req.cols;
+        config.lines = req.rows;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let adopt = crate::ctl::window::Adopt {
+            observer: req.observer,
+            ready: Box::new(move |ready| {
+                let _ = tx.send(ready);
+            }),
+        };
+        let hosted = Hosted {
+            config,
+            command: req.command,
+            adopt,
+        };
+        let window = self
+            .open_window_as(None, Place::Cascade, None, false, None, Some(hosted))
+            .ok_or("couldn't open a window")?;
+        let Some(view) = self.view_of(&window) else {
+            window.close();
+            return Err("couldn't open a window".into());
+        };
+        // The pane started its session while the window opened.
+        let ready = rx.try_recv().map_err(|_| "the window started no session".to_string())?;
+        if ready.pid.is_none() {
+            // The program couldn't start: the pane says why.
+            let why = crate::session::lock(&ready.term).state.dump();
+            window.close();
+            return Err(why.trim().to_string());
+        }
+        Ok(crate::ctl::window::Opened {
+            ready,
+            control: std::sync::Arc::new(HostedWindow { id: view.id() }),
+        })
     }
 }
 
@@ -1414,6 +1543,11 @@ pub fn run(
     let mtm = MainThreadMarker::new().expect("must run on the main thread");
     // Under the test control, in the background (see `crate::background`).
     let app = crate::background::shared_application(mtm);
+    if crate::ctl::window::hosted() {
+        // Not for the programs of the sessions to inherit: an app started
+        // from one would host windows too.
+        unsafe { std::env::remove_var(crate::ctl::window::HOSTED_ENV) };
+    }
     crate::notify::on_click(crate::view::show_pane);
     crate::notify::on_button(|b| match b {
         crate::notify::Button::Update => crate::update::dogfood::update_now(),

@@ -8,7 +8,8 @@
 //! - `server`: the socket, who may connect, the sessions;
 //! - `headless`: a session without a view;
 //! - `keys`, `screen`, `shot`: keys through the app's encoding, the
-//!   screen read back, screenshots on the GPU.
+//!   screen read back, screenshots on the GPU;
+//! - [`window`]: sessions shown in a window of the app (`spawn --window`).
 
 mod client;
 mod headless;
@@ -17,6 +18,7 @@ pub mod protocol;
 mod screen;
 mod server;
 mod shot;
+pub mod window;
 
 use std::time::Duration;
 
@@ -24,6 +26,15 @@ pub use client::{HELP, request};
 
 /// How long the headless server stays with nothing running.
 const IDLE: Duration = Duration::from_secs(10);
+
+/// How long a server that leaves when idle stays with nothing running.
+fn idle() -> Duration {
+    std::env::var(protocol::IDLE_ENV)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(IDLE)
+}
 
 /// `terminal-decline ctl ARGS…`: its exit status.
 pub fn run(args: &[String]) -> i32 {
@@ -60,25 +71,25 @@ fn serve_headless() -> i32 {
             return protocol::exit::FAILED;
         }
     };
-    let idle = std::env::var(protocol::IDLE_ENV)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .map(Duration::from_millis)
-        .unwrap_or(IDLE);
     let server = server::Server::new(server::Kind::Headless, &dir, source(), lock);
-    server.exit_when_idle(idle);
+    server.exit_when_idle(idle());
     server.serve(listener);
     protocol::exit::FAILED
 }
 
-/// Serve from the app (role App with `agent_api` on), on a thread of
-/// its own. Nothing happens when a headless server already serves: its
-/// clients keep it until it exits.
+/// Serve from the app (role App with `agent_api` on, or an app `ctl`
+/// started to host windows), on a thread of its own. Nothing happens
+/// when a headless server already serves: its clients keep it until it
+/// exits. A hosting app leaves once it is idle, as the headless server
+/// does.
 pub fn serve_in_app() {
     let dir = protocol::dir();
     match server::bind(&dir) {
         Ok(Some((listener, lock))) => {
             let server = server::Server::new(server::Kind::App, &dir, source(), lock);
+            if window::hosted() {
+                server.exit_when_idle(idle());
+            }
             let _ = std::thread::Builder::new()
                 .name("ctl-accept".into())
                 .spawn(move || server.serve(listener));

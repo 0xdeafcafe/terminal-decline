@@ -15,8 +15,10 @@ usage: terminal-decline ctl COMMAND [ARGS...]
 
 Drive terminals from agents and tests (docs/design/agent-api.md). Each
 command prints one line of JSON (`screen` prints text unless --json).
-Sessions are headless: no windows. Served by the running app, or by a
-headless server started on demand that exits when idle.
+Sessions are headless: no windows, unless spawned with --window. Served
+by the running app, or by a headless server started on demand that exits
+when idle (for --window, by an app started in the background instead,
+with no window of its own, that exits when idle).
 
   socket                        print the socket's path
   hello                         who serves (app or headless)
@@ -30,7 +32,9 @@ headless server started on demand that exits when idle.
         --font FAMILY --font-size PT --theme NAME --appearance light|dark
         --scale N               pixels per point for screenshots (default 2)
         --scrollback LINES      --record FILE.cast
-        --window                (not yet) show it in a window
+        --window                show it in a real window of the app, in the
+                                background (no focus taken, behind the other
+                                windows); closing it kills the session
   send ID ACTION...             in order:
         --text TEXT             typed key by key (\\n is Enter)
         --key KEY               ctrl+c, enter, shift+tab, alt+left, f5, ...
@@ -108,7 +112,10 @@ pub fn run(args: &[String]) -> i32 {
 /// Send `req` to the server in `dir`, starting a headless one if none
 /// answers.
 pub fn request(dir: &Path, req: &Request) -> Result<Value, String> {
-    let stream = connect(dir)?;
+    // A window needs the app to host it, so that is what starts if
+    // nothing serves yet.
+    let windows = matches!(req, Request::Spawn(s) if s.window);
+    let stream = connect(dir, windows)?;
     let mut out = stream.try_clone().map_err(|e| e.to_string())?;
     let line = serde_json::to_string(req).map_err(|e| e.to_string())?;
     writeln!(out, "{line}").map_err(|e| format!("sending: {e}"))?;
@@ -119,7 +126,7 @@ pub fn request(dir: &Path, req: &Request) -> Result<Value, String> {
     serde_json::from_str(&reply).map_err(|e| format!("a bad reply ({e}): {reply:?}"))
 }
 
-fn connect(dir: &Path) -> Result<UnixStream, String> {
+fn connect(dir: &Path, windows: bool) -> Result<UnixStream, String> {
     let path = protocol::socket_path(dir);
     let missing = |e: &std::io::Error| matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused);
     match UnixStream::connect(&path) {
@@ -128,8 +135,9 @@ fn connect(dir: &Path) -> Result<UnixStream, String> {
         Err(e) => return Err(format!("{}: {e}", path.display())),
     }
     protocol::ensure_dir(dir).map_err(|e| e.to_string())?;
-    let mut child = start_server(dir)?;
-    let until = Instant::now() + Duration::from_secs(10);
+    let mut child = start_server(dir, windows)?;
+    // An app takes longer to come up than the headless server.
+    let until = Instant::now() + Duration::from_secs(if windows { 30 } else { 10 });
     loop {
         match UnixStream::connect(&path) {
             Ok(s) => {
@@ -152,7 +160,8 @@ fn connect(dir: &Path) -> Result<UnixStream, String> {
                         .unwrap_or("")
                         .trim_start_matches("terminal-decline ctl: ")
                         .to_string();
-                    return Err(format!("the headless server stopped: {last}"));
+                    let which = if windows { "the app" } else { "the headless server" };
+                    return Err(format!("{which} stopped: {last}"));
                 }
                 std::thread::sleep(Duration::from_millis(5));
             }
@@ -168,8 +177,9 @@ fn connect(dir: &Path) -> Result<UnixStream, String> {
 }
 
 /// Start `terminal-decline ctl serve` on its own: a session of its own,
-/// stdio to the log.
-fn start_server(dir: &Path) -> Result<std::process::Child, String> {
+/// stdio to the log. With `windows`, the app itself instead, in the
+/// background and hosting windows ([`super::window::HOSTED_ENV`]).
+fn start_server(dir: &Path, windows: bool) -> Result<std::process::Child, String> {
     use std::os::unix::process::CommandExt;
     let exe = std::env::current_exe().map_err(|e| format!("can't find this program: {e}"))?;
     let log = std::fs::OpenOptions::new()
@@ -178,8 +188,12 @@ fn start_server(dir: &Path) -> Result<std::process::Child, String> {
         .open(dir.join("server.log"))
         .map_err(|e| e.to_string())?;
     let mut cmd = std::process::Command::new(exe);
-    cmd.args(["ctl", "serve"])
-        .env(protocol::DIR_ENV, dir)
+    if windows {
+        cmd.env(super::window::HOSTED_ENV, "1");
+    } else {
+        cmd.args(["ctl", "serve"]);
+    }
+    cmd.env(protocol::DIR_ENV, dir)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(log);
@@ -497,6 +511,10 @@ mod tests {
                 ..
             }))
         ));
+        let Ok(Request::Spawn(s)) = p(&["spawn", "--window", "--name", "w", "--", "vim"]) else {
+            panic!()
+        };
+        assert!(s.window && s.argv == ["vim"]);
         let Ok(Request::Screenshot { path, .. }) = p(&["screenshot", "1", "a.png"]) else {
             panic!()
         };

@@ -584,6 +584,44 @@ impl OpenBlock {
         false
     }
 
+    /// The style runs of `cells` into `runs`: (cells, slot), neighbours
+    /// with the same slot merged. Cells of one style id, then their slot
+    /// once. (Two ids can share a slot: styles differing only in a link
+    /// that isn't kept.) Where the id changes is found 64 cells at a time
+    /// as a bit mask, with no branch per cell: scanning each run to its
+    /// end mispredicted once a run, and styled lines have many short
+    /// ones. Not inlined, so the plain lines' path in `encode` stays small.
+    #[inline(never)]
+    fn style_runs(&mut self, cells: &[Cell], styles: &[Style], links: &[Option<Arc<LinkValue>>], runs: &mut Vec<(u32, u32)>) {
+        let mut add_run = |block: &mut OpenBlock, start: usize, end: usize| {
+            let slot = block.slot(cells[start].style_id(), styles, links);
+            let n = (end - start) as u32;
+            match runs.last_mut() {
+                Some((m, s)) if *s == slot => *m += n,
+                _ => runs.push((n, slot)),
+            }
+        };
+        let mut start = 0;
+        let mut base = 1;
+        while base < cells.len() {
+            let end = (base + 64).min(cells.len());
+            let mut changes = 0u64;
+            for (j, pair) in cells[base - 1..end].windows(2).enumerate() {
+                changes |= ((pair[0].style_id() != pair[1].style_id()) as u64) << j;
+            }
+            while changes != 0 {
+                let at = base + changes.trailing_zeros() as usize;
+                changes &= changes - 1;
+                add_run(self, start, at);
+                start = at;
+            }
+            base = end;
+        }
+        if !cells.is_empty() {
+            add_run(self, start, cells.len());
+        }
+    }
+
     fn encode(&mut self, row: &Row, styles: &[Style], links: &[Option<Arc<LinkValue>>], scratch: &mut Scratch) {
         let cells = &row.cells[..];
         let cols = cells.len();
@@ -681,23 +719,10 @@ impl OpenBlock {
         // Runs, by column, merged when neighbours share a slot; the
         // default tail needs none.
         scratch.runs.clear();
-        let cells_run = &cells[..run_end];
-        let mut i = 0;
-        while i < cells_run.len() {
-            // Cells of one style id, then their slot once. (Two ids can
-            // share a slot: styles differing only in a link that
-            // isn't kept.)
-            let id = cells_run[i].style_id();
-            let n = cells_run[i..]
-                .iter()
-                .position(|c| c.style_id() != id)
-                .unwrap_or(cells_run.len() - i);
-            let slot = self.slot(id, styles, links);
-            match scratch.runs.last_mut() {
-                Some((m, s)) if *s == slot => *m += n as u32,
-                _ => scratch.runs.push((n as u32, slot)),
-            }
-            i += n;
+        // Every cell in the default style (unstyled text with wide
+        // characters or clusters) has no runs.
+        if or >> 32 != 0 || cells[len..run_end].iter().any(|c| c.style_id() != 0) {
+            self.style_runs(&cells[..run_end], styles, links, &mut scratch.runs);
         }
         while scratch.runs.last().is_some_and(|r| r.1 == 0) {
             scratch.runs.pop();

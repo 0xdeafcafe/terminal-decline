@@ -2673,6 +2673,21 @@ and where it differs from the plan above:
   the history encoder. Decoding (10k lines, against 05c198b, the last
   commit with the v1 store and the `history` bench): plain 1.07, `ls`
   1.14, CJK 1.23, emoji 2.37, background 0.50.
+- **R.4, rest.** After the ground state an `ESC [` goes into the CSI
+  fast path on the same turn of vte's loop; that path keeps the number
+  being read in a local and reads a whole run of digits at once (SWAR,
+  no branch per digit); CSIs other than SGR are dispatched from a
+  function of their own, so an SGR doesn't pay for their stack frame;
+  the style table hashes a style with one multiply instead of three in
+  a chain; storing a styled row in history finds where its style
+  changes 64 cells at a time as a bit mask (scanning to each run's end
+  mispredicted once a run), and rows all in the default style skip it.
+  `cpubench`, best / median of 6 interleaved runs, load average 26–35,
+  against the commit before R.4 (84a9a1a^): coloured 0.670 / 0.677
+  (`parse_1k` 0.649 / 0.686), so 1.48–1.54×, at R.4's 1.5× within the
+  noise of a loaded Mac (main before this: 0.762 / 0.748); `tui` 0.682 /
+  0.661 (0.780 / 0.746 before). Plain, `seq`, unicode and clusters
+  within noise of main before this.
 
 ---
 

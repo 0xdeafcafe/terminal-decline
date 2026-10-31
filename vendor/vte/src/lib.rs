@@ -121,7 +121,16 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
 
         while i != bytes.len() {
             match self.state {
-                State::Ground => i += self.advance_ground(performer, &bytes[i..]),
+                State::Ground => {
+                    i += self.advance_ground(performer, &bytes[i..]);
+                    // Most escapes are CSIs: take one straight away
+                    // rather than on the loop's next turn.
+                    if self.state == State::Escape && bytes.get(i) == Some(&b'[') {
+                        self.state = State::CsiEntry;
+                        i += 1;
+                        i += self.advance_csi_run(performer, &bytes[i..]);
+                    }
+                },
                 State::ApcString | State::DcsPassthrough | State::OscString => {
                     i += self.advance_string(performer, &bytes[i..])
                 },
@@ -179,22 +188,53 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
     /// (a private marker, an intermediate, a control) for the state
     /// machine to handle. Returns the bytes used; the state is left as the
     /// state machine would leave it.
+    ///
+    /// The parameter being read is kept in a local and the state written
+    /// once at the end: stored to `self` on every byte, as the actions do,
+    /// they made the loop a chain of stores.
     #[inline(always)]
     fn advance_csi_run<P: Perform>(&mut self, performer: &mut P, bytes: &[u8]) -> usize {
+        let mut param = self.param;
         let mut i = 0;
         while let Some(&byte) = bytes.get(i) {
             match byte {
-                b'0'..=b'9' => self.action_paramnext(byte),
-                b':' => self.action_subparam(),
-                b';' => self.action_param(),
+                b'0'..=b'9' => {
+                    if self.params.is_full() {
+                        self.ignoring = true;
+                    } else if let Some((n, v)) = bytes.get(i..i + 8).and_then(digit_run) {
+                        // The whole number at once: a branch per digit
+                        // mispredicted where each number ends.
+                        param = (param as u64 * POW10[n] + v).min(u16::MAX as u64) as u16;
+                        i += n;
+                        continue;
+                    } else {
+                        param = param.saturating_mul(10).saturating_add((byte - b'0') as u16);
+                    }
+                },
+                b':' | b';' => {
+                    if self.params.is_full() {
+                        self.ignoring = true;
+                    } else {
+                        if byte == b':' {
+                            self.params.extend(param);
+                        } else {
+                            self.params.push(param);
+                        }
+                        param = 0;
+                    }
+                },
                 0x40..=0x7E => {
+                    self.param = param;
                     self.action_csi_dispatch(performer, byte);
                     return i + 1;
                 },
-                _ => return i,
+                _ => break,
             }
-            self.state = State::CsiParam;
             i += 1;
+        }
+        self.param = param;
+        if i > 0 {
+            self.state = State::CsiParam;
         }
         i
     }
@@ -1050,6 +1090,34 @@ pub enum OscLarge {
     Stream,
     /// Throw the string away.
     Drop,
+}
+
+/// Powers of ten up to 10⁷, for [`digit_run`]'s numbers.
+const POW10: [u64; 8] = [1, 10, 100, 1_000, 10_000, 100_000, 1_000_000, 10_000_000];
+
+/// The run of ASCII digits `bytes` (8 of them) starts with, with no branch
+/// per digit: its length (1 to 7) and value, or `None` if all 8 are digits.
+#[inline(always)]
+fn digit_run(bytes: &[u8]) -> Option<(usize, u64)> {
+    const ONES: u64 = 0x0101_0101_0101_0101;
+    let word = u64::from_le_bytes(bytes.try_into().ok()?);
+    // Digits become 0-9; a byte is flagged if it is above 9 (adding 0x76
+    // sets its top bit) or has its top bit set already. Carries only go
+    // into later bytes, so the first flagged byte is the first non-digit.
+    let t = word ^ (0x30 * ONES);
+    let flagged = (t.wrapping_add(0x76 * ONES) | t) & (0x80 * ONES);
+    let n = (flagged.trailing_zeros() / 8) as usize;
+    if n == 0 || n == 8 {
+        return None;
+    }
+    // The digits to the top, the first one highest after the zeros left
+    // in front; then pairs, fours and eights of digits combined (the
+    // usual SWAR conversion).
+    let v = t << (64 - 8 * n);
+    let v = (v.wrapping_mul(10 << 8 | 1) >> 8) & 0x00FF_00FF_00FF_00FF;
+    let v = (v.wrapping_mul(100 << 16 | 1) >> 16) & 0x0000_FFFF_0000_FFFF;
+    let v = v.wrapping_mul(10_000 << 32 | 1) >> 32;
+    Some((n, v))
 }
 
 #[derive(PartialEq, Eq, Debug, Default, Copy, Clone)]
@@ -2069,6 +2137,31 @@ mod tests {
                 parser.advance(&mut split, &[*b]);
             }
             assert_eq!(reference.dispatched, split.dispatched, "{input:?}");
+        }
+    }
+
+    /// `digit_run` agrees with reading the digits one at a time, for every
+    /// run length and digit, with any byte after them.
+    #[test]
+    fn digit_run_matches_a_byte_loop() {
+        let mut x = 0x9e37_79b9_7f4a_7c15u64;
+        let mut cases: Vec<[u8; 8]> = vec![*b"0m......", *b"65535;..", *b"65536m..", *b"9999999m", *b"12345678", *b";1m....."];
+        for _ in 0..20000 {
+            let mut c = [0u8; 8];
+            for b in c.iter_mut() {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                // Mostly digits, with every other byte now and then.
+                *b = if x % 4 != 0 { b'0' + (x >> 8) as u8 % 10 } else { (x >> 16) as u8 };
+            }
+            cases.push(c);
+        }
+        for c in &cases {
+            let n = c.iter().position(|b| !b.is_ascii_digit()).unwrap_or(8);
+            let v = c[..n].iter().fold(0u64, |v, &b| v * 10 + (b - b'0') as u64);
+            let expected = (n != 0 && n != 8).then_some((n, v));
+            assert_eq!(digit_run(c), expected, "{c:?}");
         }
     }
 

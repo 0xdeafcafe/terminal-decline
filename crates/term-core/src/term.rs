@@ -2847,6 +2847,7 @@ fn apply_sgr(pen: &mut Style, params: &Params) {
 }
 
 /// Parse `38;5;n`, `38;2;r;g;b` and their colon forms (`38:2::r:g:b`).
+#[inline]
 fn extended_color(first: &[u16], rest: &mut vte::ParamsIter<'_>) -> Option<Color> {
     if first.len() > 1 {
         return match first[1] {
@@ -3122,18 +3123,148 @@ impl Perform for Terminal {
         self.touch();
     }
 
+    #[inline]
     fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], ignore: bool, action: char) {
         self.clear_grapheme();
         if ignore {
             return;
         }
         // SGR, the most common sequence by far, needs none of the argument
-        // handling below.
+        // handling the others do.
         if action == 'm' && intermediates.is_empty() {
             self.sgr(params);
             self.touch();
             return;
         }
+        self.csi_other(params, intermediates, action);
+    }
+
+    fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, byte: u8) {
+        self.clear_grapheme();
+        match (intermediates, byte) {
+            ([], b'7') => self.save_cursor(),
+            ([], b'8') => self.restore_cursor(),
+            ([], b'D') => self.linefeed(),
+            ([], b'E') => {
+                self.linefeed();
+                self.cursor.col = 0;
+            }
+            ([], b'H') => self.tabs[self.cursor.col] = true,
+            ([], b'M') => self.reverse_index(),
+            ([], b'c') => self.reset(),
+            ([], b'=') => self.modes.app_keypad = true,
+            ([], b'>') => self.modes.app_keypad = false,
+            ([b'(' | b')'], b) => {
+                let g = (intermediates[0] == b')') as usize;
+                self.charsets[g] = match b {
+                    b'0' => Charset::DecGraphics,
+                    b'A' => Charset::British,
+                    _ => Charset::Ascii,
+                };
+                self.charset = self.charsets[self.active_charset];
+            }
+            // DECALN: fill with `E`, reset the margins, cursor home.
+            ([b'#'], b'8') => {
+                for row in &mut self.screen {
+                    row.fill(Cell::BLANK.with_char('E'));
+                }
+                self.touch_screen_rows();
+                self.scroll_top = 0;
+                self.scroll_bottom = self.lines - 1;
+                self.cursor.row = 0;
+                self.cursor.col = 0;
+                self.cursor.pending_wrap = false;
+            }
+            // DECID: answered as primary DA.
+            ([], b'Z') => self.primary_da(),
+            _ => return,
+        }
+        self.touch();
+    }
+
+    fn osc_large(&mut self, prefix: &[u8]) -> OscLarge {
+        if prefix.starts_with(b"1337;File")
+            && let Some(answer) = self.iterm_osc_large(prefix)
+        {
+            return answer;
+        }
+        osc_size_policy(prefix)
+    }
+
+    fn osc_put(&mut self, data: &[u8]) {
+        self.iterm_osc_put(data);
+    }
+
+    fn osc_end(&mut self, complete: bool) {
+        self.iterm_osc_end(complete);
+    }
+
+    fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
+        self.clear_grapheme();
+        if self.osc_color(params) {
+            return;
+        }
+        if params.first() == Some(&&b"1337"[..]) && self.iterm_osc_dispatch(params) {
+            return;
+        }
+        match params {
+            [b"52", _target, data] if *data != b"?" => {
+                if let Some(bytes) = base64_decode(data) {
+                    self.clipboard = Some(String::from_utf8_lossy(&bytes).into_owned());
+                }
+            }
+            // ConEmu's progress: `9;4;state;percent`.
+            [b"9", b"4", state, rest @ ..] => {
+                let pct = || {
+                    rest.first()
+                        .and_then(|p| std::str::from_utf8(p).ok()?.parse::<u8>().ok())
+                        .unwrap_or(0)
+                        .min(100)
+                };
+                self.progress = match *state {
+                    b"0" => Some(Progress::Clear),
+                    b"1" => Some(Progress::Normal(pct())),
+                    b"2" => Some(Progress::Error(pct())),
+                    b"3" => Some(Progress::Indeterminate),
+                    b"4" => Some(Progress::Paused(pct())),
+                    _ => self.progress,
+                };
+            }
+            [b"9", body @ ..] | [b"777", b"notify", _, body @ ..] => {
+                let body = body.iter().map(|p| String::from_utf8_lossy(p)).collect::<Vec<_>>().join(";");
+                let title = match params {
+                    [b"777", _, title, ..] => Some(String::from_utf8_lossy(title).into_owned()),
+                    _ => None,
+                };
+                if !body.is_empty() || title.as_deref().is_some_and(|t| !t.is_empty()) {
+                    self.notification = Some(Notification { title, body });
+                }
+            }
+            [b"8", ..] => self.set_link(crate::links::parse_osc8(params)),
+            [b"133", kind, rest @ ..] => self.prompt_mark(kind, rest),
+            [b"7", url, ..] => {
+                let url = String::from_utf8_lossy(url);
+                if let Some(rest) = url.strip_prefix("file://") {
+                    // Skip the host name.
+                    let path = rest.find('/').map_or("", |i| &rest[i..]);
+                    self.cwd = Some(percent_decode(path));
+                }
+            }
+            [b"0" | b"2", title @ ..] => {
+                let title = title.iter().map(|p| String::from_utf8_lossy(p)).collect::<Vec<_>>().join(";");
+                self.title = Some(title);
+                self.title_changed = true;
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Terminal {
+    /// Every CSI but SGR: kept out of `csi_dispatch`, so an SGR doesn't
+    /// pay for the stack frame all of these need.
+    #[inline(never)]
+    fn csi_other(&mut self, params: &Params, intermediates: &[u8], action: char) {
         let mut args = [0u16; 16];
         let mut n = 0;
         for p in params.iter() {
@@ -3439,126 +3570,6 @@ impl Perform for Terminal {
             _ => return,
         }
         self.touch();
-    }
-
-    fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, byte: u8) {
-        self.clear_grapheme();
-        match (intermediates, byte) {
-            ([], b'7') => self.save_cursor(),
-            ([], b'8') => self.restore_cursor(),
-            ([], b'D') => self.linefeed(),
-            ([], b'E') => {
-                self.linefeed();
-                self.cursor.col = 0;
-            }
-            ([], b'H') => self.tabs[self.cursor.col] = true,
-            ([], b'M') => self.reverse_index(),
-            ([], b'c') => self.reset(),
-            ([], b'=') => self.modes.app_keypad = true,
-            ([], b'>') => self.modes.app_keypad = false,
-            ([b'(' | b')'], b) => {
-                let g = (intermediates[0] == b')') as usize;
-                self.charsets[g] = match b {
-                    b'0' => Charset::DecGraphics,
-                    b'A' => Charset::British,
-                    _ => Charset::Ascii,
-                };
-                self.charset = self.charsets[self.active_charset];
-            }
-            // DECALN: fill with `E`, reset the margins, cursor home.
-            ([b'#'], b'8') => {
-                for row in &mut self.screen {
-                    row.fill(Cell::BLANK.with_char('E'));
-                }
-                self.touch_screen_rows();
-                self.scroll_top = 0;
-                self.scroll_bottom = self.lines - 1;
-                self.cursor.row = 0;
-                self.cursor.col = 0;
-                self.cursor.pending_wrap = false;
-            }
-            // DECID: answered as primary DA.
-            ([], b'Z') => self.primary_da(),
-            _ => return,
-        }
-        self.touch();
-    }
-
-    fn osc_large(&mut self, prefix: &[u8]) -> OscLarge {
-        if prefix.starts_with(b"1337;File")
-            && let Some(answer) = self.iterm_osc_large(prefix)
-        {
-            return answer;
-        }
-        osc_size_policy(prefix)
-    }
-
-    fn osc_put(&mut self, data: &[u8]) {
-        self.iterm_osc_put(data);
-    }
-
-    fn osc_end(&mut self, complete: bool) {
-        self.iterm_osc_end(complete);
-    }
-
-    fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
-        self.clear_grapheme();
-        if self.osc_color(params) {
-            return;
-        }
-        if params.first() == Some(&&b"1337"[..]) && self.iterm_osc_dispatch(params) {
-            return;
-        }
-        match params {
-            [b"52", _target, data] if *data != b"?" => {
-                if let Some(bytes) = base64_decode(data) {
-                    self.clipboard = Some(String::from_utf8_lossy(&bytes).into_owned());
-                }
-            }
-            // ConEmu's progress: `9;4;state;percent`.
-            [b"9", b"4", state, rest @ ..] => {
-                let pct = || {
-                    rest.first()
-                        .and_then(|p| std::str::from_utf8(p).ok()?.parse::<u8>().ok())
-                        .unwrap_or(0)
-                        .min(100)
-                };
-                self.progress = match *state {
-                    b"0" => Some(Progress::Clear),
-                    b"1" => Some(Progress::Normal(pct())),
-                    b"2" => Some(Progress::Error(pct())),
-                    b"3" => Some(Progress::Indeterminate),
-                    b"4" => Some(Progress::Paused(pct())),
-                    _ => self.progress,
-                };
-            }
-            [b"9", body @ ..] | [b"777", b"notify", _, body @ ..] => {
-                let body = body.iter().map(|p| String::from_utf8_lossy(p)).collect::<Vec<_>>().join(";");
-                let title = match params {
-                    [b"777", _, title, ..] => Some(String::from_utf8_lossy(title).into_owned()),
-                    _ => None,
-                };
-                if !body.is_empty() || title.as_deref().is_some_and(|t| !t.is_empty()) {
-                    self.notification = Some(Notification { title, body });
-                }
-            }
-            [b"8", ..] => self.set_link(crate::links::parse_osc8(params)),
-            [b"133", kind, rest @ ..] => self.prompt_mark(kind, rest),
-            [b"7", url, ..] => {
-                let url = String::from_utf8_lossy(url);
-                if let Some(rest) = url.strip_prefix("file://") {
-                    // Skip the host name.
-                    let path = rest.find('/').map_or("", |i| &rest[i..]);
-                    self.cwd = Some(percent_decode(path));
-                }
-            }
-            [b"0" | b"2", title @ ..] => {
-                let title = title.iter().map(|p| String::from_utf8_lossy(p)).collect::<Vec<_>>().join(";");
-                self.title = Some(title);
-                self.title_changed = true;
-            }
-            _ => {}
-        }
     }
 }
 

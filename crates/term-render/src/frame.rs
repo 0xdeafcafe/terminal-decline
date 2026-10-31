@@ -1315,6 +1315,9 @@ impl Frame {
                 }
             }
         }
+        for &line in &snap.failed {
+            over.push(failed_mark(line as usize, input));
+        }
         kept.over = out.put(*over == kept.over_rects, Some(kept.over), over);
         std::mem::swap(over, &mut kept.over_rects);
 
@@ -1521,6 +1524,19 @@ impl Frame {
         };
         self.written_whole();
     }
+}
+
+/// The mark beside a prompt whose command exited non-zero (view row
+/// `line`): a thin bar the row's height in the theme's red (ANSI 1),
+/// in the middle of the left padding, or at the grid's left edge when
+/// there is too little padding for it.
+pub(crate) fn failed_mark(line: usize, input: &FrameInput) -> RectInstance {
+    let m = input.metrics;
+    let pad = input.padding.0;
+    let w = (m.cell_width / 5).max(1);
+    let x = if pad > w { (pad - w) / 2 } else { 0 };
+    let y = input.padding.1 as i32 + line as i32 * m.cell_height as i32;
+    RectInstance::painted(s16(x as i32), s16(y), w as u16, m.cell_height as u16, input.theme.paint(1))
 }
 
 /// A cursor other than a focused block: a bar, an underline or (when

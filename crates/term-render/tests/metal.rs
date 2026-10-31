@@ -143,9 +143,14 @@ fn render(renderer: &mut Renderer, t: &mut Term, theme: &Theme) -> Pixels {
 
 /// Draw the frame `renderer` has prepared for `t` and read it back.
 fn draw(renderer: &mut Renderer, t: &Term) -> Pixels {
+    draw_padded(renderer, t, (0, 0))
+}
+
+/// [`draw`], for a frame prepared with `padding` around the grid.
+fn draw_padded(renderer: &mut Renderer, t: &Term, padding: (usize, usize)) -> Pixels {
     let m = renderer.metrics();
     let (cw, ch) = (m.cell_width as usize, m.cell_height as usize);
-    let (width, height) = (t.state.cols() * cw, t.state.lines() * ch);
+    let (width, height) = (t.state.cols() * cw + 2 * padding.0, t.state.lines() * ch + 2 * padding.1);
     let desc = unsafe {
         MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(MTLPixelFormat::BGRA8Unorm, width, height, false)
     };
@@ -532,4 +537,58 @@ fn an_interrupted_transition_carries_on_from_the_screen() {
         assert_eq!(end.data, draw(&mut renderer, &t).data, "{kind:?} ends at the new theme");
         assert_eq!(end.centre(3, 1), [0, 0, 0xff, 0xff], "{kind:?}: red background");
     }
+}
+
+/// A prompt whose command exited non-zero gets a thin bar in the
+/// theme's red in the left padding beside its row, and only that one:
+/// not the prompt of a command that succeeded, nor the cells.
+#[test]
+fn failed_commands_are_marked_in_the_padding() {
+    if MTLCreateSystemDefaultDevice().is_none() {
+        assert!(std::env::var_os("CI").is_none(), "no Metal device on CI");
+        eprintln!("skipping: no Metal device");
+        return;
+    }
+    let mut ansi = [0; 16];
+    ansi[1] = 0xff0000;
+    let theme = Theme::new(ansi, 0xffffff, 0x000000, 0xffffff, 0x444444);
+    let mut renderer = Renderer::new(Fonts::new("Menlo", 24.0));
+    let m = renderer.metrics();
+    let (cw, ch) = (m.cell_width as usize, m.cell_height as usize);
+    let pad = (cw, 4);
+    let mut t = Term::new(6, 5, 0, term_core::ImagePool::process());
+    let session = |cmd: &str, status: u32| format!("\x1b]133;A\x07$ \x1b]133;B\x07{cmd}\r\n\x1b]133;C\x07out\r\n\x1b]133;D;{status}\x07");
+    t.advance(format!("\x1b[?25l{}{}\x1b]133;A\x07$ ", session("ok", 0), session("no", 1)).as_bytes());
+    let input = FrameInput {
+        theme: &theme,
+        metrics: m,
+        padding: (pad.0 as u32, pad.1 as u32),
+        cursor_on: true,
+        focused: true,
+        preedit: None,
+    };
+    renderer.prepare(&mut t.state, &input);
+    let px = draw_padded(&mut renderer, &t, pad);
+    let red = |p: [u8; 4]| p[2] > 200 && p[1] < 40 && p[0] < 40;
+    // Red pixels in the left padding, by view row.
+    let reds = |line: usize| {
+        (pad.1 + line * ch..pad.1 + (line + 1) * ch)
+            .flat_map(|y| (0..pad.0).map(move |x| (x, y)))
+            .filter(|&(x, y)| red(px.at(x, y)))
+            .count()
+    };
+    // Rows: `$ ok`, out, `$ no`, out, `$ `.
+    assert_eq!(reds(0), 0, "a command that succeeded");
+    assert!(reds(2) >= ch, "the failed command's prompt: {} red pixels", reds(2));
+    for line in [1, 3, 4] {
+        assert_eq!(reds(line), 0, "row {line}");
+    }
+    // The bar is the row's full height and stays out of the cells.
+    let x = (0..pad.0).find(|&x| red(px.at(x, pad.1 + 2 * ch + ch / 2))).expect("a red column");
+    assert!((pad.1 + 2 * ch..pad.1 + 3 * ch).all(|y| red(px.at(x, y))));
+    let in_cells = (pad.1..pad.1 + 5 * ch)
+        .flat_map(|y| (pad.0..pad.0 + 6 * cw).map(move |x| (x, y)))
+        .filter(|&(x, y)| red(px.at(x, y)))
+        .count();
+    assert_eq!(in_cells, 0);
 }

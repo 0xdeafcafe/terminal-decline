@@ -605,6 +605,44 @@ impl OpenBlock {
         false
     }
 
+    /// The style runs of `cells` into `runs`: (cells, slot), neighbours
+    /// with the same slot merged. Cells of one style id, then their slot
+    /// once. (Two ids can share a slot: styles differing only in a link
+    /// that isn't kept.) Where the id changes is found 64 cells at a time
+    /// as a bit mask, with no branch per cell: scanning each run to its
+    /// end mispredicted once a run, and styled lines have many short
+    /// ones. Not inlined, so the plain lines' path in `encode` stays small.
+    #[inline(never)]
+    fn style_runs(&mut self, cells: &[Cell], styles: &[Style], links: &[Option<Arc<LinkValue>>], runs: &mut Vec<(u32, u32)>) {
+        let mut add_run = |block: &mut OpenBlock, start: usize, end: usize| {
+            let slot = block.slot(cells[start].style_id(), styles, links);
+            let n = (end - start) as u32;
+            match runs.last_mut() {
+                Some((m, s)) if *s == slot => *m += n,
+                _ => runs.push((n, slot)),
+            }
+        };
+        let mut start = 0;
+        let mut base = 1;
+        while base < cells.len() {
+            let end = (base + 64).min(cells.len());
+            let mut changes = 0u64;
+            for (j, pair) in cells[base - 1..end].windows(2).enumerate() {
+                changes |= ((pair[0].style_id() != pair[1].style_id()) as u64) << j;
+            }
+            while changes != 0 {
+                let at = base + changes.trailing_zeros() as usize;
+                changes &= changes - 1;
+                add_run(self, start, at);
+                start = at;
+            }
+            base = end;
+        }
+        if !cells.is_empty() {
+            add_run(self, start, cells.len());
+        }
+    }
+
     fn encode(&mut self, row: &Row, styles: &[Style], links: &[Option<Arc<LinkValue>>], scratch: &mut Scratch) {
         let cells = &row.cells[..];
         let cols = cells.len();
@@ -702,23 +740,10 @@ impl OpenBlock {
         // Runs, by column, merged when neighbours share a slot; the
         // default tail needs none.
         scratch.runs.clear();
-        let cells_run = &cells[..run_end];
-        let mut i = 0;
-        while i < cells_run.len() {
-            // Cells of one style id, then their slot once. (Two ids can
-            // share a slot: styles differing only in a link that
-            // isn't kept.)
-            let id = cells_run[i].style_id();
-            let n = cells_run[i..]
-                .iter()
-                .position(|c| c.style_id() != id)
-                .unwrap_or(cells_run.len() - i);
-            let slot = self.slot(id, styles, links);
-            match scratch.runs.last_mut() {
-                Some((m, s)) if *s == slot => *m += n as u32,
-                _ => scratch.runs.push((n as u32, slot)),
-            }
-            i += n;
+        // Every cell in the default style (unstyled text with wide
+        // characters or clusters) has no runs.
+        if or >> 32 != 0 || cells[len..run_end].iter().any(|c| c.style_id() != 0) {
+            self.style_runs(&cells[..run_end], styles, links, &mut scratch.runs);
         }
         while scratch.runs.last().is_some_and(|r| r.1 == 0) {
             scratch.runs.pop();
@@ -1266,11 +1291,16 @@ impl<'a> View<'a> {
     fn text_span_from(&self, n: usize, start: Option<usize>) -> (usize, usize) {
         let at = start.unwrap_or_else(|| {
             let k = n / CHECKPOINT;
-            let mut at = self.checkpoints[k] as usize;
-            for j in k * CHECKPOINT..n {
-                at += self.stored_len(j, at);
+            let first = k * CHECKPOINT;
+            let at = self.checkpoints[k] as usize;
+            // Short lines that aren't wrapped each end in the one end byte
+            // their text has: count those, 32 bytes at a time, rather than
+            // walk line by line (a third of reading a line). Long ones
+            // know their length (`tlen`, behind EXTRA): walk those.
+            if (first..n).all(|j| self.flags(j) & (flag::WRAPPED | flag::EXTRA) == 0) {
+                return skip_ends(self.text, at, n - first);
             }
-            at
+            (first..n).fold(at, |at, j| at + self.stored_len(j, at))
         });
         let len = self.stored_len(n, at);
         let ends = self.flags(n) & flag::WRAPPED == 0;
@@ -1701,6 +1731,48 @@ fn place(row: &mut Row, col: usize, cell: Cell) {
         Some(c) => *c = Cell::from_bits(c.bits() | cell.bits()),
         None => row.cells.push(cell),
     }
+}
+
+/// Where the text after the `count`th end byte from `at` starts (the
+/// text's end if there are fewer). 32 bytes at a time, as [`find_end`]:
+/// the end bytes in each word are found exactly (no carries between
+/// bytes) and counted.
+fn skip_ends(text: &[u8], mut at: usize, mut count: usize) -> usize {
+    const LO7: u64 = 0x7F7F_7F7F_7F7F_7F7F;
+    const HI: u64 = 0x8080_8080_8080_8080;
+    const PAT: u64 = 0x0101_0101_0101_0101 * END as u64;
+    #[inline(always)]
+    fn ends(chunk: &[u8]) -> u64 {
+        let w = u64::from_le_bytes(chunk.try_into().unwrap_or_default()) ^ PAT;
+        !(((w & LO7) + LO7) | w) & HI
+    }
+    while count > 0 {
+        let Some(block) = text.get(at..at + 32) else { break };
+        let words = [ends(&block[..8]), ends(&block[8..16]), ends(&block[16..24]), ends(&block[24..])];
+        let found = words.iter().map(|w| w.count_ones() as usize).sum::<usize>();
+        if found < count {
+            count -= found;
+            at += 32;
+            continue;
+        }
+        for (k, mut w) in words.into_iter().enumerate() {
+            let n = w.count_ones() as usize;
+            if n < count {
+                count -= n;
+                continue;
+            }
+            for _ in 1..count {
+                w &= w - 1;
+            }
+            return at + k * 8 + w.trailing_zeros() as usize / 8 + 1;
+        }
+    }
+    // The last few bytes, one at a time.
+    while count > 0 && at < text.len() {
+        count -= (text[at] == END) as usize;
+        at += 1;
+    }
+    at
 }
 
 /// The first 0x0A in `text`. Walking from a checkpoint skips up to 15

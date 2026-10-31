@@ -121,7 +121,16 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
 
         while i != bytes.len() {
             match self.state {
-                State::Ground => i += self.advance_ground(performer, &bytes[i..]),
+                State::Ground => {
+                    i += self.advance_ground(performer, &bytes[i..]);
+                    // Most escapes are CSIs: take one straight away
+                    // rather than on the loop's next turn.
+                    if self.state == State::Escape && bytes.get(i) == Some(&b'[') {
+                        self.state = State::CsiEntry;
+                        i += 1;
+                        i += self.advance_csi_run(performer, &bytes[i..]);
+                    }
+                },
                 State::ApcString | State::DcsPassthrough | State::OscString => {
                     i += self.advance_string(performer, &bytes[i..])
                 },
@@ -179,22 +188,53 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
     /// (a private marker, an intermediate, a control) for the state
     /// machine to handle. Returns the bytes used; the state is left as the
     /// state machine would leave it.
+    ///
+    /// The parameter being read is kept in a local and the state written
+    /// once at the end: stored to `self` on every byte, as the actions do,
+    /// they made the loop a chain of stores.
     #[inline(always)]
     fn advance_csi_run<P: Perform>(&mut self, performer: &mut P, bytes: &[u8]) -> usize {
+        let mut param = self.param;
         let mut i = 0;
         while let Some(&byte) = bytes.get(i) {
             match byte {
-                b'0'..=b'9' => self.action_paramnext(byte),
-                b':' => self.action_subparam(),
-                b';' => self.action_param(),
+                b'0'..=b'9' => {
+                    if self.params.is_full() {
+                        self.ignoring = true;
+                    } else if let Some((n, v)) = bytes.get(i..i + 8).and_then(digit_run) {
+                        // The whole number at once: a branch per digit
+                        // mispredicted where each number ends.
+                        param = (param as u64 * POW10[n] + v).min(u16::MAX as u64) as u16;
+                        i += n;
+                        continue;
+                    } else {
+                        param = param.saturating_mul(10).saturating_add((byte - b'0') as u16);
+                    }
+                },
+                b':' | b';' => {
+                    if self.params.is_full() {
+                        self.ignoring = true;
+                    } else {
+                        if byte == b':' {
+                            self.params.extend(param);
+                        } else {
+                            self.params.push(param);
+                        }
+                        param = 0;
+                    }
+                },
                 0x40..=0x7E => {
+                    self.param = param;
                     self.action_csi_dispatch(performer, byte);
                     return i + 1;
                 },
-                _ => return i,
+                _ => break,
             }
-            self.state = State::CsiParam;
             i += 1;
+        }
+        self.param = param;
+        if i > 0 {
+            self.state = State::CsiParam;
         }
         i
     }
@@ -859,6 +899,19 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
     /// with a byte >= 0x80, and the stretch ends at the next ASCII byte.
     #[inline(never)]
     fn advance_ground_utf8<P: Perform>(&mut self, performer: &mut P, bytes: &[u8]) -> usize {
+        // Whole, valid characters are decoded and dispatched in one pass;
+        // validating the run first and decoding it again cost a pass
+        // more. The first byte that isn't the start of one (ASCII, an
+        // invalid or a cut-off sequence) ends it, and is handled below on
+        // the next call, as it would have been after the valid prefix.
+        let mut i = 0;
+        while let Some((c, len)) = decode_utf8(&bytes[i..]) {
+            Self::dispatch_char(performer, c);
+            i += len;
+        }
+        if i > 0 {
+            return i;
+        }
         let num_bytes = bytes.len();
         let plain_chars = bytes.iter().position(|&b| b < 0x80).unwrap_or(num_bytes);
 
@@ -1050,6 +1103,72 @@ pub enum OscLarge {
     Stream,
     /// Throw the string away.
     Drop,
+}
+
+/// The non-ASCII character `bytes` starts with, whole and valid UTF-8
+/// (what `str::from_utf8` accepts), and its length; `None` for ASCII, an
+/// invalid sequence or one cut off by the end of `bytes`.
+#[inline(always)]
+fn decode_utf8(bytes: &[u8]) -> Option<(char, usize)> {
+    let cont = |b: u8| (b & 0xC0 == 0x80).then_some((b & 0x3F) as u32);
+    let (c, len) = match *bytes.first()? {
+        b0 @ 0xC2..=0xDF => ((b0 as u32 & 0x1F) << 6 | cont(*bytes.get(1)?)?, 2),
+        b0 @ 0xE0..=0xEF => {
+            let b1 = *bytes.get(1)?;
+            let ok = match b0 {
+                0xE0 => b1 >= 0xA0,
+                0xED => b1 <= 0x9F,
+                _ => true,
+            };
+            if !ok {
+                return None;
+            }
+            ((b0 as u32 & 0x0F) << 12 | cont(b1)? << 6 | cont(*bytes.get(2)?)?, 3)
+        },
+        b0 @ 0xF0..=0xF4 => {
+            let b1 = *bytes.get(1)?;
+            let ok = match b0 {
+                0xF0 => b1 >= 0x90,
+                0xF4 => b1 <= 0x8F,
+                _ => true,
+            };
+            if !ok {
+                return None;
+            }
+            let c = (b0 as u32 & 0x07) << 18 | cont(b1)? << 12 | cont(*bytes.get(2)?)? << 6 | cont(*bytes.get(3)?)?;
+            (c, 4)
+        },
+        _ => return None,
+    };
+    Some((char::from_u32(c)?, len))
+}
+
+/// Powers of ten up to 10⁷, for [`digit_run`]'s numbers.
+const POW10: [u64; 8] = [1, 10, 100, 1_000, 10_000, 100_000, 1_000_000, 10_000_000];
+
+/// The run of ASCII digits `bytes` (8 of them) starts with, with no branch
+/// per digit: its length (1 to 7) and value, or `None` if all 8 are digits.
+#[inline(always)]
+fn digit_run(bytes: &[u8]) -> Option<(usize, u64)> {
+    const ONES: u64 = 0x0101_0101_0101_0101;
+    let word = u64::from_le_bytes(bytes.try_into().ok()?);
+    // Digits become 0-9; a byte is flagged if it is above 9 (adding 0x76
+    // sets its top bit) or has its top bit set already. Carries only go
+    // into later bytes, so the first flagged byte is the first non-digit.
+    let t = word ^ (0x30 * ONES);
+    let flagged = (t.wrapping_add(0x76 * ONES) | t) & (0x80 * ONES);
+    let n = (flagged.trailing_zeros() / 8) as usize;
+    if n == 0 || n == 8 {
+        return None;
+    }
+    // The digits to the top, the first one highest after the zeros left
+    // in front; then pairs, fours and eights of digits combined (the
+    // usual SWAR conversion).
+    let v = t << (64 - 8 * n);
+    let v = (v.wrapping_mul(10 << 8 | 1) >> 8) & 0x00FF_00FF_00FF_00FF;
+    let v = (v.wrapping_mul(100 << 16 | 1) >> 16) & 0x0000_FFFF_0000_FFFF;
+    let v = v.wrapping_mul(10_000 << 32 | 1) >> 32;
+    Some((n, v))
 }
 
 #[derive(PartialEq, Eq, Debug, Default, Copy, Clone)]
@@ -2069,6 +2188,73 @@ mod tests {
                 parser.advance(&mut split, &[*b]);
             }
             assert_eq!(reference.dispatched, split.dispatched, "{input:?}");
+        }
+    }
+
+    /// `decode_utf8` takes exactly the characters `str::from_utf8` does:
+    /// every lead byte with every first and second continuation byte,
+    /// and random four-byte sequences.
+    #[test]
+    fn decode_utf8_matches_std() {
+        let check = |b: &[u8]| {
+            let expected = (b[0] >= 0x80)
+                .then(|| {
+                    let len = match b[0] {
+                        0xC0..=0xDF => 2,
+                        0xE0..=0xEF => 3,
+                        0xF0..=0xF7 => 4,
+                        _ => return None,
+                    };
+                    let s = str::from_utf8(b.get(..len)?).ok()?;
+                    Some((s.chars().next()?, len))
+                })
+                .flatten();
+            assert_eq!(decode_utf8(b), expected, "{b:x?}");
+        };
+        for b0 in 0..=255u8 {
+            for b1 in 0..=255u8 {
+                check(&[b0]);
+                check(&[b0, b1]);
+                for b2 in [0x00, 0x7F, 0x80, 0x9F, 0xA0, 0xBF, 0xC0, 0xFF] {
+                    check(&[b0, b1, b2]);
+                    check(&[b0, b1, b2, 0x80]);
+                    check(&[b0, b1, b2, 0xC0]);
+                }
+            }
+        }
+        let mut x = 0x2545_f491_4f6c_dd1du64;
+        for _ in 0..200_000 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            let b = x.to_le_bytes();
+            check(&[0xF0 | b[0] & 0x07, 0x80 | b[1] & 0x3F, b[2], b[3]]);
+            check(&[0xE0 | b[0] & 0x0F, b[1], b[2]]);
+        }
+    }
+
+    /// `digit_run` agrees with reading the digits one at a time, for every
+    /// run length and digit, with any byte after them.
+    #[test]
+    fn digit_run_matches_a_byte_loop() {
+        let mut x = 0x9e37_79b9_7f4a_7c15u64;
+        let mut cases: Vec<[u8; 8]> = vec![*b"0m......", *b"65535;..", *b"65536m..", *b"9999999m", *b"12345678", *b";1m....."];
+        for _ in 0..20000 {
+            let mut c = [0u8; 8];
+            for b in c.iter_mut() {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                // Mostly digits, with every other byte now and then.
+                *b = if x % 4 != 0 { b'0' + (x >> 8) as u8 % 10 } else { (x >> 16) as u8 };
+            }
+            cases.push(c);
+        }
+        for c in &cases {
+            let n = c.iter().position(|b| !b.is_ascii_digit()).unwrap_or(8);
+            let v = c[..n].iter().fold(0u64, |v, &b| v * 10 + (b - b'0') as u64);
+            let expected = (n != 0 && n != 8).then_some((n, v));
+            assert_eq!(digit_run(c), expected, "{c:?}");
         }
     }
 

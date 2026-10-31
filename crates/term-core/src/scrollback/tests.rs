@@ -568,6 +568,34 @@ fn find_end_finds_the_first_end_byte() {
     assert_eq!(find_end(&[0x8A, 0x0B, 0x09, 0x1A, 0x0A]), Some(4));
 }
 
+/// `skip_ends` agrees with counting end bytes one at a time, from every
+/// start, for every count, among bytes just around 0x0A.
+#[test]
+fn skip_ends_counts_end_bytes() {
+    let mut x = 0x9e37_79b9_7f4a_7c15u64;
+    for len in 0..80 {
+        let text: Vec<u8> = (0..len)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                [END, END, b'x', 0x0B, 0x09, 0x8A, 0xE6, 0x00][(x % 8) as usize]
+            })
+            .collect();
+        for at in 0..=len {
+            for count in 0..12 {
+                let mut want = at;
+                let mut left = count;
+                while left > 0 && want < len {
+                    left -= (text[want] == END) as usize;
+                    want += 1;
+                }
+                assert_eq!(skip_ends(&text, at, count), want, "{len} {at} {count}");
+            }
+        }
+    }
+}
+
 /// What a row reads back as, cell by cell: content (clusters whole,
 /// spaces as empty), width, style by value; trailing blank cells dropped
 /// (never half of a wide character).

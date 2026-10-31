@@ -2673,6 +2673,50 @@ and where it differs from the plan above:
   the history encoder. Decoding (10k lines, against 05c198b, the last
   commit with the v1 store and the `history` bench): plain 1.07, `ls`
   1.14, CJK 1.23, emoji 2.37, background 0.50.
+- **R.4, rest.** After the ground state an `ESC [` goes into the CSI
+  fast path on the same turn of vte's loop; that path keeps the number
+  being read in a local and reads a whole run of digits at once (SWAR,
+  no branch per digit); CSIs other than SGR are dispatched from a
+  function of their own, so an SGR doesn't pay for their stack frame;
+  the style table hashes a style with one multiply instead of three in
+  a chain; storing a styled row in history finds where its style
+  changes 64 cells at a time as a bit mask (scanning to each run's end
+  mispredicted once a run), and rows all in the default style skip it.
+  `cpubench`, best / median of 6 interleaved runs, load average 26–35,
+  against the commit before R.4 (84a9a1a^): coloured 0.670 / 0.677
+  (`parse_1k` 0.649 / 0.686), so 1.48–1.54×, at R.4's 1.5× within the
+  noise of a loaded Mac (main before this: 0.762 / 0.748); `tui` 0.682 /
+  0.661 (0.780 / 0.746 before). Plain, `seq`, unicode and clusters
+  within noise of main before this.
+- **R.9, more of it.** vte decodes and dispatches a run of non-ASCII
+  characters in one pass (it validated the run with `str::from_utf8`
+  and then decoded it again); reading a stored line walks from its
+  checkpoint by counting end bytes 32 at a time when the lines before
+  it are short and unwrapped. `cpubench` against 21c1e89, best /
+  median of 6 interleaved runs, load average 21–32: plain 1.02 / 1.01
+  (8 runs: 0.98–1.05 between rounds), `seq` 0.94 / 0.96, unicode 0.97
+  / 0.98 (1.05 / 1.06 before), clusters 1.04 / 1.01; `parse_1k` the
+  same within two points. `histbench` (10k lines read one by one, as
+  the `history` bench does) against 05c198b, load average 30–32: plain
+  0.85 / 0.88, `ls` 1.07 / 1.11 (1.13 / 1.14 before), CJK 1.11 / 1.16
+  (1.20 / 1.21), emoji 2.21 / 2.27, gradient 1.55 / 1.58, background
+  0.44 / 0.43. What is left of CJK's is per-scalar decoding and
+  width lookup in `decode_scalars`, emoji's the cluster store; sizing
+  the row up front instead of pushing cells was slower (1.17).
+  Reading lines one after another with a `HistoryReader` (as the
+  snapshot does) needs no walk at all: search, reflow and the history
+  dump still read with `get_into`, line by line.
+- **The selection check** (245a2c7): with no selection, parsing with
+  and without it is the same within noise (`parse_1k`, 0.98–1.04 over
+  4 rounds). With one, every `advance` reads the selection's text on
+  the screen again and compares it; `CPUBENCH_SELECT=10` (the top 10
+  rows, selected again whenever output cleared them) at 1 KB chunks:
+  plain 3.7× slower, `seq` 1.35×, coloured 2.5×, unicode 1.8×, `tui`
+  7× (cleared and selected again nearly every chunk); at 64 KB chunks
+  plain +8%, `tui` +14%. Comparing the rows' change counters (§9.1)
+  instead helps only when the screen doesn't scroll (a TUI's status
+  line): a scroll changes the top line, and the lines that scrolled
+  into history would need their text compared all the same.
 
 ---
 

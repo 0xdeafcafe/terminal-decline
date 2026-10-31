@@ -123,15 +123,17 @@ pub struct StyleUpdates {
 
 #[inline]
 fn hash(s: &Style) -> u64 {
-    // FxHash over the style's 20 bytes, as three words.
+    // The style's 20 bytes as three words, folded into one and multiplied
+    // once (three multiplies in a chain, one per word, were a fifth of a
+    // lookup), then the high bits folded down for the tag in the low
+    // byte. The words are rotated apart so the common styles, which
+    // differ in the colours alone, fold without overlapping.
     const K: u64 = 0xf135_7aea_2e62_a9c5;
     let a = s.fg.0 as u64 | (s.bg.0 as u64) << 32;
     let b = s.underline_color.0 as u64 | (s.link as u64) << 32;
     let c = s.attrs.bits() as u64 | (s.underline as u64) << 16 | (s.image_id_high as u64) << 24;
-    let mut h = a.wrapping_mul(K);
-    h = (h.rotate_left(26) ^ b).wrapping_mul(K);
-    h = (h.rotate_left(26) ^ c).wrapping_mul(K);
-    h
+    let h = (a ^ b.rotate_left(21) ^ c.rotate_left(43)).wrapping_mul(K);
+    h ^ h >> 29
 }
 
 #[inline]

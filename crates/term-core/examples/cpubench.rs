@@ -8,7 +8,10 @@
 //! Prints, per input of the `parse` bench and chunk size, the best and
 //! median of `runs` (15) passes over 4 MB, in µs. `scrollback` (10000
 //! lines) of 0 keeps no history, leaving the cost of writing the screen
-//! alone.
+//! alone. With `CPUBENCH_SELECT=n` in the environment, the top `n` rows of
+//! the screen are selected before each chunk whenever nothing is (output
+//! clears a selection whose text it changes), to measure the selection
+//! check.
 
 use term_core::Term;
 
@@ -44,6 +47,17 @@ fn main() {
     let filter = args.get(1).cloned().unwrap_or_default();
     let runs: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(15).max(1);
     let limit: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(10_000);
+    let select: Option<usize> = std::env::var("CPUBENCH_SELECT").ok().and_then(|s| s.parse().ok());
+    let advance = |t: &mut Term, piece: &[u8]| {
+        if let Some(rows) = select
+            && t.state.selection().is_none()
+        {
+            let anchor = t.state.point_at(0, 0);
+            let head = t.state.point_at(rows.saturating_sub(1), 159);
+            t.state.set_selection(Some(term_core::Selection::new(anchor, head)));
+        }
+        t.advance(std::hint::black_box(piece));
+    };
     let inputs = inputs::all(4 << 20);
     for (group, chunk) in [("parse", 64 * 1024), ("parse_1k", 1024)] {
         for (name, data) in &inputs {
@@ -56,14 +70,14 @@ fn main() {
             // lines are being dropped, as in a long session.
             for _ in 0..2 {
                 for piece in data.chunks(chunk) {
-                    t.advance(std::hint::black_box(piece));
+                    advance(&mut t, piece);
                 }
             }
             let mut times = Vec::with_capacity(runs);
             for _ in 0..runs {
                 let start = cpu_us();
                 for piece in data.chunks(chunk) {
-                    t.advance(std::hint::black_box(piece));
+                    advance(&mut t, piece);
                 }
                 times.push(cpu_us() - start);
             }

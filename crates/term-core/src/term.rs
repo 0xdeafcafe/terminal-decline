@@ -52,10 +52,15 @@ pub struct Notification {
 pub enum Command {
     /// `133;A`: the shell shows its prompt.
     Prompt,
-    /// `133;C`: the command line was run. Its text, from the B mark to
-    /// the cursor (its first line, trimmed), if the B mark was seen and
-    /// is still on the screen.
+    /// `133;C`: the command line was run. Its text (its first line,
+    /// trimmed, at most 200 characters): the shell's own if it sent one
+    /// (`cmdline_url=`), else read from the B mark to the cursor, if
+    /// the B mark was seen and is still on the screen.
     Started(Option<String>),
+    /// `133;C;cmdline_url=…` (kitty's form, percent-encoded): the whole
+    /// command line as the shell had it, every line, untrimmed (at most
+    /// 64 KB). Comes just before its [`Command::Started`].
+    CommandLine(String),
     /// `133;D`: the command finished, with its exit status if the shell
     /// gave one.
     Finished(Option<u32>),
@@ -66,6 +71,10 @@ const COMMANDS_KEPT: usize = 16;
 
 /// The longest command text kept, in characters.
 const COMMAND_TEXT_MAX: usize = 200;
+
+/// The longest whole command line kept ([`Command::CommandLine`]), in
+/// bytes.
+const COMMAND_LINE_MAX: usize = 64 * 1024;
 
 /// Progress a program reported with OSC 9;4 (ConEmu's form): a percentage
 /// from 0 to 100 where the state has one.
@@ -1897,6 +1906,14 @@ impl Terminal {
             MarkKind::End => rest.first().and_then(|p| std::str::from_utf8(p).ok()?.parse::<u32>().ok()),
             _ => None,
         };
+        let line = match kind {
+            MarkKind::Output => rest
+                .iter()
+                .find_map(|p| p.strip_prefix(b"cmdline_url="))
+                .and_then(|p| String::from_utf8(percent_bytes(p)).ok())
+                .filter(|l| l.len() <= COMMAND_LINE_MAX),
+            _ => None,
+        };
         let col = self.cursor.col.min(u16::MAX as usize) as u16;
         self.screen[self.cursor.row].set_mark(Mark { kind, col, status });
         let here = (self.top_line + self.cursor.row as u64, self.cursor.col);
@@ -1905,18 +1922,33 @@ impl Terminal {
                 self.input_at = Some(here);
                 None
             }
-            MarkKind::Output => Some(Command::Started(
-                self.input_at.take().and_then(|from| self.command_text(from, here)),
-            )),
+            MarkKind::Output => {
+                let from = self.input_at.take();
+                let shown = match &line {
+                    Some(l) => {
+                        let first = l.trim_start().lines().next().unwrap_or("").trim_end();
+                        (!first.is_empty()).then(|| first.chars().take(COMMAND_TEXT_MAX).collect())
+                    }
+                    None => from.and_then(|from| self.command_text(from, here)),
+                };
+                if let Some(l) = line {
+                    self.push_command(Command::CommandLine(l));
+                }
+                Some(Command::Started(shown))
+            }
             MarkKind::End => Some(Command::Finished(status)),
             MarkKind::Prompt => Some(Command::Prompt),
         };
         if let Some(c) = command {
-            if self.commands.len() == COMMANDS_KEPT {
-                self.commands.remove(0);
-            }
-            self.commands.push(c);
+            self.push_command(c);
         }
+    }
+
+    fn push_command(&mut self, c: Command) {
+        if self.commands.len() == COMMANDS_KEPT {
+            self.commands.remove(0);
+        }
+        self.commands.push(c);
     }
 
     /// The command line typed between `from` (the B mark) and `to` (the
@@ -3035,7 +3067,11 @@ fn base64_decode(input: &[u8]) -> Option<Vec<u8>> {
 }
 
 fn percent_decode(s: &str) -> String {
-    let b = s.as_bytes();
+    String::from_utf8_lossy(&percent_bytes(s.as_bytes())).into_owned()
+}
+
+/// `%XX` escapes decoded, anything else as it is.
+fn percent_bytes(b: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
     while i < b.len() {
@@ -3053,7 +3089,7 @@ fn percent_decode(s: &str) -> String {
             i += 1;
         }
     }
-    String::from_utf8_lossy(&out).into_owned()
+    out
 }
 
 fn dec_line_drawing(c: char) -> char {

@@ -174,7 +174,8 @@ fn check(shell: &str, home: &TempDir, env: &[(&str, &str)], probe: &str) -> Stri
     for (mark, n) in [
         ("\x1b]133;A\x07", 4),
         ("\x1b]133;B\x07", 4),
-        ("\x1b]133;C\x07", 3),
+        // With the command line (zsh, fish) or without (bash).
+        ("\x1b]133;C", 3),
         ("\x1b]133;D;0\x07", 2),
         ("\x1b]133;D;1\x07", 1),
         ("\x1b]7;file://", 4),
@@ -202,6 +203,21 @@ fn check(shell: &str, home: &TempDir, env: &[(&str, &str)], probe: &str) -> Stri
         ],
         "{shell}: {commands:?}"
     );
+    // zsh and fish send each command line whole (`cmdline_url`); bash
+    // has none to send.
+    let lines: Vec<&str> = commands
+        .iter()
+        .filter_map(|c| match c {
+            Mark::CommandLine(l) => Some(l.as_str()),
+            _ => None,
+        })
+        .collect();
+    if shell.contains("bash") {
+        assert!(lines.is_empty(), "{shell}: {lines:?}");
+    } else {
+        let probe_line = format!("echo \"<{probe}>\"");
+        assert_eq!(lines, ["cd 'sub dir'", "false", probe_line.as_str()], "{shell}");
+    }
     let finished: Vec<&Mark> = commands.iter().filter(|c| matches!(c, Mark::Finished(_))).collect();
     assert_eq!(
         finished,
@@ -232,6 +248,32 @@ fn zsh_files(dir: &Path, zshrc_extra: &str) {
     write(dir.join(".zprofile"), &ran("zprofile"));
     write(dir.join(".zshrc"), &format!("{}{zshrc_extra}PS1='READY> '\n", ran("zshrc")));
     write(dir.join(".zlogin"), &ran("zlogin"));
+}
+
+/// zsh's command line arrives whole and as typed, whatever is in it: a
+/// `;` (which would end the parameter), a `%` and what looks like an
+/// escape, an alias as typed.
+#[test]
+fn zsh_sends_the_command_line_as_typed() {
+    let home = TempDir::new("zsh-cmdline");
+    zsh_files(&home.0, "alias hi='echo hello'\n");
+    let mut s = Session::start(ZSH, &home, &[]);
+    s.wait_for("the first prompt", |s| s.count("\x1b]133;B\x07") >= 1);
+    let line = "hi 'a;b' 100% %41 é";
+    s.run(line, 2);
+    let mut term = term_core::Term::new(SIZE.cols as usize, SIZE.lines as usize, 1000, term_core::ImagePool::process());
+    term.advance(&s.out);
+    let lines: Vec<String> = term
+        .state
+        .take_commands()
+        .into_iter()
+        .filter_map(|c| match c {
+            Mark::CommandLine(l) => Some(l),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(lines, [line]);
+    assert!(s.text().contains("hello a;b 100%"), "{:?}", s.text());
 }
 
 #[test]

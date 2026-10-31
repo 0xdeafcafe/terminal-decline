@@ -18,8 +18,10 @@ status is-interactive; or exit 0
 set -q __decline_integration; and exit 0
 set -g __decline_integration 1
 
+# C carries the command line ($argv[1]), kitty's way (cmdline_url,
+# percent-encoded), which the terminal types again after a restart.
 function __decline_preexec --on-event fish_preexec
-    printf '\e]133;C\a'
+    printf '\e]133;C;cmdline_url=%s\a' (string escape --style=url -- "$argv[1]")
 end
 
 function __decline_postexec --on-event fish_postexec

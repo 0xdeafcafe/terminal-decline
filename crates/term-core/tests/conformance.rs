@@ -1627,6 +1627,35 @@ fn osc133_reports_commands_starting_and_finishing() {
     assert_eq!(t.state.take_commands(), [Command::Started(None)]);
 }
 
+/// The shell's own command line (`133;C;cmdline_url=`, kitty's form)
+/// comes whole, and is the text shown in place of what the screen has
+/// (a right prompt, say, after the command).
+#[test]
+fn osc133_takes_the_command_line_the_shell_sends() {
+    use term_core::Command;
+    let mut t = new(40, 4);
+    t.advance(b"\x1b]133;B\x07FOO=1 rush        12:00\r\n\x1b]133;C;cmdline_url=FOO%3D1%20rush\x07");
+    assert_eq!(
+        t.state.take_commands(),
+        [
+            Command::CommandLine("FOO=1 rush".into()),
+            Command::Started(Some("FOO=1 rush".into()))
+        ]
+    );
+    // Every line, with UTF-8 and a stray % kept.
+    t.advance(b"\x1b]133;C;cmdline_url=echo%20%C3%A9%0Aecho%20100%\x07");
+    assert_eq!(
+        t.state.take_commands(),
+        [
+            Command::CommandLine("echo é\necho 100%".into()),
+            Command::Started(Some("echo é".into()))
+        ]
+    );
+    // Not UTF-8: as if it hadn't been sent.
+    t.advance(b"\x1b]133;C;cmdline_url=%FF\x07");
+    assert_eq!(t.state.take_commands(), [Command::Started(None)]);
+}
+
 #[test]
 fn osc133_marks_where_the_cursor_is() {
     use term_core::{Mark, MarkKind};

@@ -63,8 +63,18 @@ _decline_precmd() {
   fi
 }
 
+# C carries the command line as typed ($1), kitty's way (cmdline_url,
+# percent-encoded): % ; and control characters escaped, so it can't end
+# the sequence early. The terminal shows it in titles and types it again
+# after a restart.
 _decline_preexec() {
-  printf '\e]133;C\a'
+  emulate -L zsh
+  local c=${1//\%/%25}
+  c=${c//;/%3B}
+  c=${c//$'\n'/%0A}
+  c=${c//$'\t'/%09}
+  c=${c//[[:cntrl:]]/}
+  printf '\e]133;C;cmdline_url=%s\a' "$c"
   typeset -g _decline_ran=1
 }
 

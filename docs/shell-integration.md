@@ -12,6 +12,13 @@ WezTerm and Ghostty also read:
 | `ESC ] 133 ; C BEL` | when a command runs | its output starts |
 | `ESC ] 133 ; D ; status BEL` | before the next prompt | the command ended, with its exit status |
 
+The zsh and fish snippets send C as `ESC ] 133 ; C ; cmdline_url=… BEL`
+(kitty's form): the command line as typed, percent-encoded. The app
+shows its first line in titles, and after a restart into a new build
+types it again at the new shell's prompt (an alias stays an alias,
+`FOO=1 cmd` keeps its `FOO=1`). bash has no hook that sees the line, so
+its C has none, and the app reads the command from the process instead.
+
 The app loads the marks into the shell by itself, the way Ghostty and
 kitty do: nothing to source. `shell/` in this repository has the snippet
 for each of zsh, bash and fish that sends them (and reports the folder

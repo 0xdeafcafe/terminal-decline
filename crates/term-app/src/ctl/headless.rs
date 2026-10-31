@@ -133,7 +133,7 @@ impl Commands {
         use term_core::Command;
         for mark in marks {
             match mark {
-                Command::Prompt => {}
+                Command::Prompt | Command::CommandLine(_) => {}
                 Command::Started(text) => self.running = Some((now, text.clone())),
                 Command::Finished(status) => {
                     let (since, command) = self.running.take().unwrap_or((now, None));

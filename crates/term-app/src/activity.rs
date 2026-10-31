@@ -18,8 +18,12 @@ use term_core::Command;
 /// A command the shell started.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Running {
-    /// What was typed, if the shell's marks showed it.
+    /// What was typed, if the shell's marks showed it (its first line).
     pub command: Option<String>,
+    /// The whole command line, if the shell sent it
+    /// ([`Command::CommandLine`]: zsh and fish do), typed again after a
+    /// restart.
+    pub line: Option<String>,
     pub since: Instant,
     /// The program set the title (OSC 0/2) since it started: its title
     /// is shown as it is.
@@ -50,6 +54,8 @@ pub struct Activity {
     pub running: Option<Running>,
     /// The last command that finished.
     pub finished: Option<Finished>,
+    /// The command line sent with the next command's start.
+    next_line: Option<String>,
 }
 
 impl Activity {
@@ -58,10 +64,18 @@ impl Activity {
     pub fn apply(&mut self, c: Command, now: Instant) -> Option<Finished> {
         self.marks = true;
         match c {
-            Command::Prompt => None,
+            Command::Prompt => {
+                self.next_line = None;
+                None
+            }
+            Command::CommandLine(line) => {
+                self.next_line = Some(line);
+                None
+            }
             Command::Started(command) => {
                 self.running = Some(Running {
                     command,
+                    line: self.next_line.take(),
                     since: now,
                     titled: false,
                 });
@@ -377,6 +391,21 @@ mod tests {
         ] {
             assert_eq!(elapsed(secs(s)), want, "{s}");
         }
+    }
+
+    #[test]
+    fn the_shells_command_line_goes_with_its_command() {
+        let t0 = Instant::now();
+        let mut a = Activity::default();
+        a.apply(Command::CommandLine("rush --resume".into()), t0);
+        a.apply(Command::Started(Some("rush --resume".into())), t0);
+        assert_eq!(a.running.as_ref().unwrap().line.as_deref(), Some("rush --resume"));
+        a.apply(Command::Finished(Some(0)), t0);
+        // A shell that sends none (bash): no line, and none left over.
+        a.apply(Command::CommandLine("stale".into()), t0);
+        a.apply(Command::Prompt, t0);
+        a.apply(Command::Started(Some("ls".into())), t0);
+        assert_eq!(a.running.as_ref().unwrap().line, None);
     }
 
     #[test]

@@ -330,14 +330,18 @@ pub fn busy(pane: &PaneNow) -> Option<String> {
     }
 }
 
+/// How often a new build waiting for programs to end looks again by
+/// itself (a command finishing in a pane with marks, or a window
+/// closing, looks sooner).
+pub const BUSY_LOOK_AGAIN: Duration = Duration::from_secs(120);
+
 /// When a new build waiting to take over restarts the app: `None` for
 /// now (no pane runs anything and nobody has used the app for `wait`),
-/// else look again after the time given: with a program running, `wait`
-/// (a command finishing in a pane with marks looks again sooner); else
-/// the rest of `wait` since the last input.
+/// else look again after the time given: with a program running,
+/// [`BUSY_LOOK_AGAIN`]; else the rest of `wait` since the last input.
 pub fn when_to_restart(busy: &[String], idle: Duration, wait: Duration) -> Option<Duration> {
     if !busy.is_empty() {
-        return Some(wait);
+        return Some(BUSY_LOOK_AGAIN);
     }
     (idle < wait).then(|| wait - idle)
 }
@@ -455,8 +459,12 @@ mod tests {
         assert_eq!(when_to_restart(&[], secs(30), wait), Some(wait - secs(30)));
         // A program runs: not now, however idle; look again later.
         let busy = ["rush".to_string()];
-        assert_eq!(when_to_restart(&busy, wait * 10, wait), Some(wait));
-        assert_eq!(when_to_restart(&busy, Duration::ZERO, wait), Some(wait));
+        assert_eq!(when_to_restart(&busy, wait * 10, wait), Some(BUSY_LOOK_AGAIN));
+        assert_eq!(when_to_restart(&busy, Duration::ZERO, wait), Some(BUSY_LOOK_AGAIN));
+        // An update asked for (no idle wait): now once nothing runs, and
+        // while something does, not in a loop.
+        assert_eq!(when_to_restart(&[], Duration::ZERO, Duration::ZERO), None);
+        assert_eq!(when_to_restart(&busy, Duration::ZERO, Duration::ZERO), Some(BUSY_LOOK_AGAIN));
     }
 
     #[test]

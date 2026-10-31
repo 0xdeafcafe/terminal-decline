@@ -377,6 +377,24 @@ pub struct Config {
     /// How long a command must run, in seconds, for `notify_on_finish`.
     #[serde(deserialize_with = "notify_after")]
     pub notify_after: u32,
+    /// The quick terminal's system-wide hotkey (see [`crate::quick`]),
+    /// spelled as in `[keybind]`; `""` turns the quick terminal off. Not
+    /// in pins.
+    #[serde(deserialize_with = "quick_terminal_hotkey")]
+    pub quick_terminal_hotkey: String,
+    /// Where it slides in from: `"top"` (the default), `"bottom"`,
+    /// `"left"`, `"right"`, or `"center"` (where it fades in).
+    pub quick_terminal_position: crate::quick::Position,
+    /// How much of the screen it takes, from 0.1 to 1: its depth from its
+    /// edge, or in the centre each side.
+    #[serde(deserialize_with = "quick_terminal_size")]
+    pub quick_terminal_size: f64,
+    /// How long it takes to slide in or out, in milliseconds; 0 for no
+    /// animation (as with Reduce Motion on).
+    #[serde(deserialize_with = "quick_terminal_animation_ms")]
+    pub quick_terminal_animation_ms: u32,
+    /// Slide it away once another window or app takes the focus.
+    pub quick_terminal_autohide: bool,
     /// Updates (docs/design/updater.md): `"notify"` (the default),
     /// `"auto"` or `"off"`. Release builds check once a day and install on
     /// quit unless off; builds from source say when `main` is ahead, and
@@ -441,6 +459,11 @@ impl Default for Config {
             title_status: true,
             notify_on_finish: true,
             notify_after: 10,
+            quick_terminal_hotkey: crate::quick::DEFAULT_HOTKEY.into(),
+            quick_terminal_position: crate::quick::Position::Top,
+            quick_terminal_size: crate::quick::DEFAULT_SIZE,
+            quick_terminal_animation_ms: 150,
+            quick_terminal_autohide: true,
             update: UpdateMode::Notify,
             editor: None,
             agent_api: true,
@@ -500,6 +523,35 @@ fn notify_after<'de, D: Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
         Ok(v) if v <= NOTIFY_AFTER_MAX => Ok(v),
         _ => Err(serde::de::Error::custom(format!(
             "{v} is not a number of seconds from 0 to {NOTIFY_AFTER_MAX}"
+        ))),
+    }
+}
+
+fn quick_terminal_hotkey<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    let v = String::deserialize(d)?;
+    crate::quick::Hotkey::parse(&v).map_err(serde::de::Error::custom)?;
+    Ok(v)
+}
+
+fn quick_terminal_size<'de, D: Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
+    let v = f64::deserialize(d)?;
+    if (crate::quick::MIN_SIZE..=1.0).contains(&v) {
+        Ok(v)
+    } else {
+        Err(serde::de::Error::custom(format!(
+            "{v} is not between {} and 1",
+            crate::quick::MIN_SIZE
+        )))
+    }
+}
+
+fn quick_terminal_animation_ms<'de, D: Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
+    let v = i64::deserialize(d)?;
+    match u32::try_from(v) {
+        Ok(v) if v <= crate::quick::MAX_ANIMATION_MS => Ok(v),
+        _ => Err(serde::de::Error::custom(format!(
+            "{v} is not a number of milliseconds from 0 to {}",
+            crate::quick::MAX_ANIMATION_MS
         ))),
     }
 }
@@ -1318,6 +1370,39 @@ mod tests {
         assert!(!c.copy_on_select);
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert!(errors[0].starts_with("config: copy_on_select: "), "{errors:?}");
+    }
+
+    #[test]
+    fn quick_terminal_settings() {
+        let c = Config::default();
+        assert_eq!(c.quick_terminal_hotkey, "ctrl+`");
+        assert_eq!(c.quick_terminal_position, crate::quick::Position::Top);
+        assert_eq!((c.quick_terminal_size, c.quick_terminal_animation_ms), (0.4, 150));
+        assert!(c.quick_terminal_autohide);
+        let (c, errors) = parse(
+            "quick_terminal_hotkey = 'cmd+shift+space'\nquick_terminal_position = 'left'\n\
+             quick_terminal_size = 0.25\nquick_terminal_animation_ms = 0\nquick_terminal_autohide = false",
+        );
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(c.quick_terminal_hotkey, "cmd+shift+space");
+        assert_eq!(c.quick_terminal_position, crate::quick::Position::Left);
+        assert_eq!((c.quick_terminal_size, c.quick_terminal_animation_ms), (0.25, 0));
+        assert!(!c.quick_terminal_autohide);
+        assert_eq!(parse("quick_terminal_hotkey = ''").0.quick_terminal_hotkey, "");
+        for bad in [
+            "quick_terminal_hotkey = 'k'",
+            "quick_terminal_hotkey = 'ctrl+nope'",
+            "quick_terminal_position = 'middle'",
+            "quick_terminal_size = 0",
+            "quick_terminal_size = 1.5",
+            "quick_terminal_animation_ms = -1",
+            "quick_terminal_animation_ms = 5000",
+        ] {
+            let (c, errors) = parse(bad);
+            assert_eq!(c.quick_terminal_hotkey, "ctrl+`", "{bad}");
+            assert_eq!((c.quick_terminal_size, c.quick_terminal_animation_ms), (0.4, 150), "{bad}");
+            assert!(errors[0].starts_with("config: quick_terminal_"), "{bad}: {errors:?}");
+        }
     }
 
     #[test]

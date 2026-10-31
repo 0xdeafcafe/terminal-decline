@@ -33,6 +33,8 @@
 //!   without the feature, nothing;
 //! - `save`: write what a restart would save (every window, its tabs and
 //!   panes) to the dump file's path with `.saved` added, as JSON;
+//! - `quick`: show or hide the quick terminal, as its hotkey does (the
+//!   hotkey itself isn't registered under this control);
 //! - `settings`: Terminal Decline > Settings… (Cmd+,);
 //! - `edit-config`: Terminal Decline > Edit config.toml (a tab running the
 //!   editor);
@@ -90,6 +92,21 @@ pub struct FindDump {
     pub highlights: usize,
     /// The bar's field has the keys.
     pub focused: bool,
+}
+
+/// The quick terminal, in its window's [`Dump`].
+#[derive(Clone, Debug, Serialize)]
+pub struct QuickDump {
+    /// Shown (or sliding in), not hidden.
+    pub shown: bool,
+    /// Ordered in (`isVisible`).
+    pub on_screen: bool,
+    /// Its frame, and the usable area of its screen: x, y, width, height
+    /// in points, origin bottom left.
+    pub frame: [f64; 4],
+    pub screen: [f64; 4],
+    /// Its window level (3: floating).
+    pub level: i64,
 }
 
 /// The OSC number.
@@ -236,6 +253,8 @@ pub enum Control {
     FindClick(usize),
     /// Write the windows as a restart saves them.
     Save,
+    /// Show or hide the quick terminal, as its hotkey does.
+    Quick,
     /// Terminal Decline > Settings….
     Settings,
     /// Terminal Decline > Edit config.toml.
@@ -360,6 +379,7 @@ impl Control {
                 _ => return None,
             }),
             "save" => Control::Save,
+            "quick" => Control::Quick,
             "split" => Control::Split(match words.next()? {
                 "right" => Dir::Right,
                 "down" => Dir::Down,
@@ -529,6 +549,8 @@ pub struct Dump {
     /// `memory-pressure` command), for the whole app.
     pub memory_reliefs: u64,
     pub images: ImagesDump,
+    /// Set for the quick terminal's window.
+    pub quick: Option<QuickDump>,
 }
 
 /// The `images` section of a dump (images.md §11): this window's panes'

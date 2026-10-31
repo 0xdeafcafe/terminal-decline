@@ -622,6 +622,9 @@ define_class!(
             // recorded is cancelled.
             self.finish_recording(None);
             self.set_focus(false);
+            if let Some(window) = self.window() {
+                crate::app::quick_resigned_key(&window);
+            }
             // The tab put behind resigns key before its group selects
             // another tab; look again once that has happened.
             sync_visibility_soon();
@@ -1196,7 +1199,9 @@ impl WindowView {
             let behind = crate::background::tab_group(&w)
                 .and_then(|g| g.selectedWindow())
                 .is_some_and(|front| !std::ptr::eq::<NSWindow>(&*front, &*w));
-            !behind
+            // Ordered out: the quick terminal while hidden.
+            w.isVisible()
+                && !behind
                 && (crate::background::is_key(&w)
                     || crate::background::on()
                     || w.occlusionState().contains(objc2_app_kit::NSWindowOcclusionState::Visible))
@@ -1207,7 +1212,7 @@ impl WindowView {
     /// behind or brought to the front. Hiding frees what can be rebuilt
     /// while nothing can be seen; showing draws at once, so the window
     /// never shows a stale frame. Returns whether the window can be seen.
-    fn sync_visibility(&self) -> bool {
+    pub(crate) fn sync_visibility(&self) -> bool {
         let visible = self.visible();
         let minimised = self.window().is_some_and(|w| w.isMiniaturized());
         let changed = self.with_state(|st| {
@@ -3218,6 +3223,7 @@ impl WindowView {
                         None => NSBeep(),
                     }
                 }
+                Some(Control::Quick) => crate::app::toggle_quick_now(),
                 Some(Control::Save) => {
                     let path = self.with_state(|st| st.win.test.as_ref().map(|t| t.path.clone())).flatten();
                     if let Some(path) = path {
@@ -3309,6 +3315,7 @@ impl WindowView {
                     // Read before this window's state is borrowed: it may
                     // be the Settings tab.
                     settings: crate::app::settings_status(),
+                    quick: self.window().and_then(|w| crate::app::quick_status(&w)),
                 };
                 self.with_state(|st| write_dump(st, window));
                 self.run_controls();
@@ -3379,6 +3386,7 @@ struct Window {
     active: bool,
     secure_input: bool,
     settings: (bool, bool),
+    quick: Option<control::QuickDump>,
 }
 
 /// One line of JSON about the window, its focused pane and every pane.
@@ -3507,6 +3515,7 @@ fn write_dump(st: &mut State, window: Window) {
         phys_footprint: control::phys_footprint(),
         memory_reliefs: crate::memory::reliefs(),
         images,
+        quick: window.quick,
     };
     let line = serde_json::to_string(&dump).expect("dump serialises");
     let written = std::fs::OpenOptions::new()

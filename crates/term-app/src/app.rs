@@ -24,6 +24,9 @@ use crate::reload::SavedWindow;
 use crate::secure_input::{self, SecureInput};
 use crate::view::{Launch, WindowView, content_size, delegate_of};
 
+mod quick;
+pub(crate) use quick::{resigned_key as quick_resigned_key, status as quick_status, toggle_quick_now};
+
 /// Every Terminal Decline window shares this, so any two can be tabs of one
 /// window.
 const TABBING_ID: &str = "red.forbes.terminal-decline.terminal";
@@ -36,6 +39,8 @@ enum Place {
     Frame(NSRect),
     /// A new tab of this window, after its current tab.
     TabOf(Retained<NSWindow>),
+    /// The quick terminal's window, at this frame (where it slides from).
+    Quick(NSRect),
 }
 
 pub struct AppIvars {
@@ -78,6 +83,10 @@ pub struct AppIvars {
     role: crate::entry::Role,
     /// The theme Settings is previewing in every window, if any.
     preview: RefCell<Previewing>,
+    /// The quick terminal, once the hotkey made it.
+    quick: RefCell<Option<quick::QuickTerminal>>,
+    /// Its hotkey, while registered.
+    hotkey: RefCell<Option<crate::hotkey::Registration>>,
 }
 
 /// The live theme preview from Settings (see [`term_prefs::Preview`]).
@@ -137,6 +146,7 @@ define_class!(
             unsafe { NSApplication::sharedApplication(mtm).setServicesProvider(Some(self)) };
             self.watch_for_new_build();
             self.watch_config();
+            self.register_hotkey();
             crate::memory::listen();
             // The agent API's socket (docs/design/agent-api.md §2): the
             // app only, not pins nor the smoke tests' app.
@@ -356,6 +366,12 @@ define_class!(
             let closed = n.object();
             let is_closed = |w: &NSWindow| closed.as_deref().is_some_and(|o| std::ptr::eq(o, w as &AnyObject));
             self.ivars().windows.borrow_mut().retain(|(w, _)| !is_closed(w));
+            let mut quick = self.ivars().quick.borrow_mut();
+            if quick.as_ref().is_some_and(|q| is_closed(&q.window)) {
+                // Its shell exited or it was closed: the hotkey makes a new one.
+                *quick = None;
+            }
+            drop(quick);
             if let Some(window) = closed.as_deref().and_then(|o| o.downcast_ref::<NSWindow>()) {
                 let open = self.ivars().windows.borrow().iter().map(|(w, _)| w.clone()).collect();
                 crate::background::closed(window, open);
@@ -399,6 +415,8 @@ impl AppDelegate {
             restarting: Cell::new(false),
             settings: RefCell::new(None),
             preview: RefCell::new(Previewing::Off),
+            quick: RefCell::new(None),
+            hotkey: RefCell::new(None),
             errors: RefCell::new(notices.clone()),
             role,
             notices: RefCell::new(notices.into()),
@@ -464,6 +482,9 @@ impl AppDelegate {
             apply_appearance(MainThreadMarker::from(self), config.appearance);
         }
         crate::images::apply_config(config.images, config.image_memory, config.image_file_transfer);
+        if old.quick_terminal_hotkey != config.quick_terminal_hotkey {
+            self.register_hotkey();
+        }
         if old.keybind != config.keybind || old.update != config.update {
             let mtm = MainThreadMarker::from(self);
             let menus = build_menus(mtm, &self.ivars().app_name, &config.keybinds());
@@ -514,9 +535,13 @@ impl AppDelegate {
         };
         let store = crate::saved_history::Store::current();
         let saved = self.saved_windows(self.history_to_save(&store, false).as_ref().map(|(s, l)| (*s, *l)));
+        // The new build registers the quick terminal's hotkey as it starts:
+        // this one lets it go first.
+        self.ivars().hotkey.borrow_mut().take();
         let restored = crate::reload::save(&saved).and_then(|file| crate::reload::relaunch(&bundle, &file));
         if let Err(e) = restored {
             eprintln!("terminal-decline: couldn't start the new build: {e}");
+            self.register_hotkey();
             return;
         }
         self.ivars().restarting.set(true);
@@ -638,7 +663,8 @@ impl AppDelegate {
         let mut done: Vec<*const NSWindow> = Vec::new();
         let mut groups = 0;
         for (w, _) in windows.iter() {
-            if done.contains(&Retained::as_ptr(w)) {
+            // The quick terminal isn't reopened as a window.
+            if done.contains(&Retained::as_ptr(w)) || self.is_quick(w) {
                 continue;
             }
             match w.tabbedWindows().filter(|t| t.len() > 1) {
@@ -693,7 +719,7 @@ impl AppDelegate {
 
     /// A tab of the window in front, else a window.
     fn new_tab_in_front(&self) {
-        match self.key_window() {
+        match self.key_window().filter(|w| !self.is_quick(w)) {
             Some(window) => self.open_tab(&window),
             None => {
                 self.open_window(None, Place::Cascade, None);
@@ -825,7 +851,12 @@ impl AppDelegate {
     /// A new tab after `window`'s current one, in its directory.
     pub(crate) fn open_tab(&self, window: &NSWindow) {
         let cwd = self.view_of(window).and_then(|v| v.foreground_cwd());
-        self.open_window(cwd, Place::TabOf(objc2::Message::retain(window)), None);
+        // The quick terminal has no tabs (its splits it keeps): a window.
+        let place = match self.is_quick(window) {
+            true => Place::Cascade,
+            false => Place::TabOf(objc2::Message::retain(window)),
+        };
+        self.open_window(cwd, place, None);
     }
 
     /// A command from the latency harness (see [`crate::latency`]).
@@ -929,13 +960,23 @@ impl AppDelegate {
             | NSWindowStyleMask::Resizable
             | NSWindowStyleMask::FullSizeContentView;
         let probe = NSRect::new(NSPoint::new(0.0, 0.0), objc2_foundation::NSSize::new(400.0, 300.0));
-        let window = unsafe {
-            NSWindow::initWithContentRect_styleMask_backing_defer(NSWindow::alloc(mtm), probe, style, NSBackingStoreType::Buffered, false)
+        let is_quick = matches!(place, Place::Quick(_));
+        let window = match is_quick {
+            true => quick::QuickWindow::create(mtm, probe),
+            false => unsafe {
+                NSWindow::initWithContentRect_styleMask_backing_defer(
+                    NSWindow::alloc(mtm),
+                    probe,
+                    style,
+                    NSBackingStoreType::Buffered,
+                    false,
+                )
+            },
         };
         unsafe { window.setReleasedWhenClosed(false) };
         window.setTitlebarAppearsTransparent(true);
         window.setTitleVisibility(NSWindowTitleVisibility::Hidden);
-        window.setTabbingIdentifier(&NSString::from_str(TABBING_ID));
+        window.setTabbingIdentifier(&NSString::from_str(if is_quick { quick::TABBING_ID } else { TABBING_ID }));
         // A new window stays a window even when System Settings prefers
         // tabs (Cmd+T is for tabs); tabbing is allowed again once it is on
         // screen, for Merge All Windows and dragging tabs together.
@@ -1000,7 +1041,8 @@ impl AppDelegate {
         // a tab takes its window's frame.
         match &place {
             Place::Frame(frame) => window.setFrame_display(*frame, false),
-            Place::Cascade => match self.ivars().windows.borrow().last() {
+            Place::Quick(frame) => window.setFrame_display(*frame, false),
+            Place::Cascade => match self.ivars().windows.borrow().iter().rfind(|(w, _)| !self.is_quick(w)) {
                 Some((prev, _)) => {
                     let f = prev.frame();
                     window.cascadeTopLeftFromPoint(NSPoint::new(f.origin.x, f.origin.y + f.size.height));
@@ -1017,7 +1059,9 @@ impl AppDelegate {
         // A new tab puts the one in front behind it, without key
         // notifications while the app is inactive.
         crate::view::sync_visibility_soon();
-        window.setTabbingMode(NSWindowTabbingMode::Automatic);
+        if !is_quick {
+            window.setTabbingMode(NSWindowTabbingMode::Automatic);
+        }
         if std::env::var_os("DECLINE_DEBUG").is_some() {
             // Test tooling uses this to screenshot the window.
             eprintln!("terminal-decline: window {}", window.windowNumber());

@@ -464,6 +464,34 @@ start, which reopening every window would change. There is no crash
 relaunch: a crash can't save at quit time, and saving while running
 (periodically) is what this avoids.
 
+The quick terminal (`quick`, `app/quick.rs`), as Ghostty's quick
+terminal and iTerm2's hotkey window: a system-wide hotkey
+(`quick_terminal_hotkey`, default ``ctrl+` ``, a chord in `[keybind]`'s
+spelling with Cmd, Ctrl or Alt unless it is an F key; `""` turns it
+off) slides a terminal window in from the top of the screen the mouse
+is on (`quick_terminal_position = top | bottom | left | right |
+center`, the centre fading in), `quick_terminal_size` (0.4) of the
+screen's usable area deep, over `quick_terminal_animation_ms` (150; 0,
+Reduce Motion and the test control: at once). The hotkey again, or with
+`quick_terminal_autohide` (on) the focus going to another window or
+app, slides it away and gives the focus back to the app that had it.
+The hotkey is Carbon's `RegisterEventHotKey` (`hotkey`): no
+Accessibility permission, and the window server sends one event per
+press, so idle stays at 0 wakeups; the slide is an `NSAnimationContext`
+group, which runs only while it lasts. The window is made on the first
+press: borderless (its own `NSWindow` subclass, which may become key
+and may be placed past the screen's edge), floating, moving to the
+active Space and allowed over full-screen apps (`MoveToActiveSpace |
+FullScreenAuxiliary`), out of Cmd+` cycling, with a tabbing identifier
+of its own. Hidden, it is ordered out: its view counts a window that
+isn't `isVisible` as not seen, so it gives back its drawables as a
+covered window does, while its session and panes keep running. It has
+splits but no tabs (Cmd+T there opens a window), isn't saved for a
+restart, and its shell exiting closes it (the next press makes a new
+one). Pins have none, and under the test control the hotkey isn't
+registered (the test-only `quick` command toggles it), so a test run
+leaves the keys alone.
+
 Splits (docs/design/splits.md) are being built. In place so far, with no
 AppKit yet: the pane tree (`panes`: layout in whole device pixels with a
 1 pt divider and a minimum pane size, focus by direction and in order,

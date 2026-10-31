@@ -180,7 +180,16 @@ define_class!(
 
         #[unsafe(method(copy:))]
         fn copy(&self, _sender: Option<&AnyObject>) {
-            self.copy_selection();
+            if !self.copy_selection() {
+                NSBeep();
+            }
+        }
+
+        /// Edit > Copy is greyed out while nothing is selected. Cmd+C
+        /// then reaches `keyDown`, which sends `copy:` and beeps.
+        #[unsafe(method(validateMenuItem:))]
+        fn validate_menu_item(&self, item: &NSMenuItem) -> bool {
+            if item.action() == Some(sel!(copy:)) { self.copy_text().is_some() } else { true }
         }
 
         #[unsafe(method(paste:))]
@@ -1319,8 +1328,9 @@ impl PaneView {
         }
     }
 
-    /// Put the selection (or the rectangle being shown) on the clipboard.
-    fn copy_selection(&self) {
+    /// The text a copy would put on the clipboard: the selection, or the
+    /// rectangle being shown. `None` with nothing selected.
+    fn copy_text(&self) -> Option<String> {
         let text = self
             .with(|_, p| {
                 let mut t = p.session.lock_term();
@@ -1330,11 +1340,17 @@ impl PaneView {
                 }
             })
             .flatten();
-        if let Some(text) = text.filter(|t| !t.is_empty()) {
-            let pb = NSPasteboard::generalPasteboard();
-            pb.clearContents();
-            pb.setString_forType(&NSString::from_str(&text), unsafe { NSPasteboardTypeString });
-        }
+        select::copyable(text)
+    }
+
+    /// Put the selection (or the rectangle being shown) on the clipboard.
+    /// False when there was nothing to copy.
+    fn copy_selection(&self) -> bool {
+        let Some(text) = self.copy_text() else { return false };
+        let pb = NSPasteboard::generalPasteboard();
+        pb.clearContents();
+        pb.setString_forType(&NSString::from_str(&text), unsafe { NSPasteboardTypeString });
+        true
     }
 
     /// One selection per window: this pane's is starting, so the other

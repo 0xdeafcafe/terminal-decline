@@ -50,6 +50,12 @@ pub fn gesture_over_program(clicks: isize, option: bool) -> Gesture {
     gesture(clicks, false, option)
 }
 
+/// The selection text worth putting on the clipboard: none when there is
+/// no selection or it is empty (Copy is then greyed out, and beeps).
+pub fn copyable(text: Option<String>) -> Option<String> {
+    text.filter(|t| !t.is_empty())
+}
+
 /// Whether letting go of the button copies the selection (with
 /// `copy_on_select` on): a word, line or Shift-click always made one; a
 /// plain or rectangular click only if the mouse was dragged.
@@ -241,6 +247,13 @@ mod tests {
             assert_eq!(gesture_over_program(clicks, option), want, "clicks={clicks} option={option}");
             assert_eq!(gesture(clicks, true, option), Extend, "elsewhere Shift extends");
         }
+    }
+
+    #[test]
+    fn only_text_is_copyable() {
+        assert_eq!(copyable(None), None);
+        assert_eq!(copyable(Some(String::new())), None);
+        assert_eq!(copyable(Some("a".into())), Some("a".into()));
     }
 
     #[test]

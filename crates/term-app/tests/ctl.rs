@@ -230,11 +230,15 @@ fn keys_go_through_the_apps_encoding() {
         "--",
         "/bin/sh",
         "-c",
-        "printf '\\033[>1u'; stty raw -echo; dd bs=1 count=13 2>/dev/null | od -An -c; sleep 10",
+        "printf '\\033[>1u'; stty raw -echo; printf READY; dd bs=1 count=13 2>/dev/null | od -An -c; sleep 10",
     ]);
-    env.ok(&["wait-for", "k", "--idle", "300", "--timeout", "5000"]);
+    // Keys only go out once the program says it is in raw mode with kitty
+    // level 1 on. A quiet screen proves nothing: a slow start looks the
+    // same, and then Ctrl+C reaches the tty in cooked mode and kills the
+    // shell with SIGINT.
+    env.ok(&["wait-for", "k", "--text", "READY", "--timeout", "30000"]);
     env.ok(&["send", "k", "--key", "esc", "--key", "ctrl+c", "--key", "a"]);
-    let w = env.ok(&["wait-for", "k", "--text", "u", "--timeout", "5000"]);
+    let w = env.ok(&["wait-for", "k", "--regex", "5\\s+u\\s+a", "--timeout", "30000"]);
     assert_eq!(w["matched"], true);
     let text = env.run(&["screen", "k"]).1;
     let flat: String = text.split_whitespace().collect();

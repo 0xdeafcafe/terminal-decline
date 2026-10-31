@@ -76,8 +76,14 @@ fonts, theme and scale (default: the config's, scale 2).
 - **Screen** reads the visible rows (and history with `--scrollback N`);
   `--json` adds each cell's text, resolved colours and attributes, the
   cursor, title, alternate screen and modes.
-- **Wait** for text, a regex, the output to settle (`--idle MS`) or the
-  program to exit, each with a timeout. It sleeps on a condition the
+- **Wait** for text, a regex, the output to settle (`--idle MS`), the
+  program to exit, or (`--command`, `--shell` sessions only) the next
+  command the shell finishes, each with a timeout. `--command` reads the
+  shell integration's OSC 133 marks (term-core `take_commands`) and
+  returns the command's exit `status` (null if the shell gave none), its
+  `duration_ms` (from its start mark to its end mark, as the terminal saw
+  them, to a batch of output's precision) and its text; it waits for the
+  command running now, if one is, else the next one to start. It sleeps on a condition the
   reader thread signals after each batch: no polling.
 - **Record** writes asciicast v2 (output, resizes, and input with
   `--input`) as it happens.

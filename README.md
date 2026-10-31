@@ -106,6 +106,11 @@ terminal-decline ctl wait-for top --text "Load average" --timeout 5000
 terminal-decline ctl screen top            # the screen as text; --json for cells, colours, cursor, modes
 terminal-decline ctl screenshot top top.png   # drawn on the GPU with your fonts and theme
 terminal-decline ctl kill top
+
+# A shell session: wait for the next command to finish, and get its status
+terminal-decline ctl spawn --name sh --shell
+terminal-decline ctl send sh --text "make test\n"
+terminal-decline ctl wait-for sh --command --timeout 600000   # {"status":0,"duration_ms":41873,...}
 ```
 
 Each command prints a line of JSON and exits 0 when done (3 when

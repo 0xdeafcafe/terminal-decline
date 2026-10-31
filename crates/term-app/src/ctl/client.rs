@@ -40,7 +40,9 @@ headless server started on demand that exits when idle.
                                 move, scroll (0-based cells)
         --sleep MS
   screen ID [--json] [--scrollback N]
-  wait-for ID (--text T | --regex RE | --idle MS | --exit) [--timeout MS]
+  wait-for ID (--text T | --regex RE | --idle MS | --exit | --command)
+        [--timeout MS]   --command: the next command a --shell session
+                         finishes; its status and duration come back
   resize ID COLSxROWS
   screenshot ID FILE.png
   stats ID
@@ -374,16 +376,17 @@ pub fn parse(args: &[String]) -> Result<Request, String> {
                     "--regex" => w.regex = Some(value(a, &mut rest)?),
                     "--idle" => w.idle_ms = Some(number(a, value(a, &mut rest)?)?),
                     "--exit" => w.exit = true,
+                    "--command" => w.command = true,
                     "--timeout" => w.timeout_ms = Some(number(a, value(a, &mut rest)?)?),
                     other => return Err(format!("wait-for: unknown option {other}")),
                 }
             }
-            let given = [w.text.is_some(), w.regex.is_some(), w.idle_ms.is_some(), w.exit]
+            let given = [w.text.is_some(), w.regex.is_some(), w.idle_ms.is_some(), w.exit, w.command]
                 .iter()
                 .filter(|&&b| b)
                 .count();
             if given != 1 {
-                return Err("wait-for: one of --text, --regex, --idle or --exit".into());
+                return Err("wait-for: one of --text, --regex, --idle, --exit or --command".into());
             }
             Request::WaitFor(w)
         }
@@ -486,6 +489,14 @@ mod tests {
             p(&["wait-for", "1", "--idle", "200"]),
             Ok(Request::WaitFor(WaitFor { idle_ms: Some(200), .. }))
         ));
+        assert!(matches!(
+            p(&["wait-for", "1", "--command", "--timeout", "500"]),
+            Ok(Request::WaitFor(WaitFor {
+                command: true,
+                timeout_ms: Some(500),
+                ..
+            }))
+        ));
         let Ok(Request::Screenshot { path, .. }) = p(&["screenshot", "1", "a.png"]) else {
             panic!()
         };
@@ -497,6 +508,7 @@ mod tests {
             &["send", "1", "--key", "hyper+x"],
             &["wait-for", "1"],
             &["wait-for", "1", "--text", "a", "--exit"],
+            &["wait-for", "1", "--command", "--exit"],
             &["resize", "1", "80"],
             &["spawn", "--size", "0x3"],
             &["record", "1"],

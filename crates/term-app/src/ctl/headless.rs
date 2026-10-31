@@ -101,6 +101,63 @@ pub struct Exit {
     pub after: Duration,
 }
 
+/// A command a shell finished, from its OSC 133 marks.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Done {
+    /// Its exit status, if the shell gave one.
+    pub status: Option<u32>,
+    /// From the mark that started it to the mark that finished it, as the
+    /// terminal saw them (to a batch of output's precision).
+    pub duration: Duration,
+    /// Its text, when the shell integration could read it off the screen.
+    pub command: Option<String>,
+}
+
+/// The most finished commands kept for `wait-for --command` to find.
+const DONE_KEPT: usize = 16;
+
+/// The commands a shell session ran: the one running, and the ones
+/// finished, numbered from 1.
+#[derive(Debug, Default)]
+struct Commands {
+    running: Option<(Instant, Option<String>)>,
+    finished: u64,
+    done: std::collections::VecDeque<(u64, Done)>,
+}
+
+impl Commands {
+    /// Take in the marks of one batch of output, seen at `now`.
+    fn apply(&mut self, marks: &[term_core::Command], now: Instant) {
+        use term_core::Command;
+        for mark in marks {
+            match mark {
+                Command::Prompt => {}
+                Command::Started(text) => self.running = Some((now, text.clone())),
+                Command::Finished(status) => {
+                    let (since, command) = self.running.take().unwrap_or((now, None));
+                    self.finished += 1;
+                    if self.done.len() == DONE_KEPT {
+                        self.done.pop_front();
+                    }
+                    self.done.push_back((
+                        self.finished,
+                        Done {
+                            status: *status,
+                            duration: now.saturating_duration_since(since),
+                            command,
+                        },
+                    ));
+                }
+            }
+        }
+    }
+
+    /// The first command to finish after `seen` commands had.
+    fn after(&self, seen: u64) -> Option<&Done> {
+        self.done.iter().find(|(n, _)| *n > seen).map(|(_, d)| d)
+    }
+}
+
 /// The last screenshot's times.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ShotTimes {
@@ -124,6 +181,7 @@ struct Counts {
     exit: Option<Exit>,
     recorder: Option<Recorder>,
     shot: Option<ShotTimes>,
+    commands: Commands,
 }
 
 struct Shared {
@@ -211,6 +269,8 @@ pub struct Headless {
     shared: Arc<Shared>,
     started: Instant,
     spawn_time: Duration,
+    /// The shell has the integration, so its commands are marked.
+    integrated: bool,
 }
 
 impl Headless {
@@ -250,6 +310,7 @@ impl Headless {
                 None
             },
         };
+        let integrated = command.integration.is_some();
         let scrollback = spawn.scrollback.unwrap_or(config.scrollback);
         let mut t = Term::new(
             spawn.cols as usize,
@@ -272,7 +333,7 @@ impl Headless {
         }
         let started = Instant::now();
         let child_slot: Arc<OnceLock<Child>> = Arc::default();
-        let (s1, s2, slot) = (shared.clone(), shared.clone(), child_slot.clone());
+        let (s1, s2, s3, slot) = (shared.clone(), shared.clone(), shared.clone(), child_slot.clone());
         let mut hooks = Hooks::new(
             Arc::new(|| {}),
             Box::new(move |_| {
@@ -299,6 +360,12 @@ impl Headless {
             }),
         );
         hooks.quiet_exit = true;
+        hooks.on_events = Some(Box::new(move |events| {
+            if !events.commands.is_empty() {
+                lock(&s3.counts).commands.apply(&events.commands, Instant::now());
+                s3.changed.notify_all();
+            }
+        }));
         hooks.on_output = Some(Box::new(move |bytes, took| {
             let mut c = lock(&s2.counts);
             c.bytes_in += bytes.len() as u64;
@@ -338,6 +405,7 @@ impl Headless {
             shared,
             started,
             spawn_time,
+            integrated,
         })
     }
 
@@ -457,12 +525,15 @@ impl Headless {
 
     /// Wait until `w` holds or its timeout runs out.
     pub fn wait_for(&self, w: &WaitFor) -> Result<Value, String> {
-        let given = [w.text.is_some(), w.regex.is_some(), w.idle_ms.is_some(), w.exit]
+        let given = [w.text.is_some(), w.regex.is_some(), w.idle_ms.is_some(), w.exit, w.command]
             .iter()
             .filter(|&&b| b)
             .count();
         if given != 1 {
-            return Err("wait-for takes one of text, regex, idle_ms or exit".into());
+            return Err("wait-for takes one of text, regex, idle_ms, exit or command".into());
+        }
+        if w.command && !self.integrated {
+            return Err("wait-for --command needs a --shell session with shell_integration on: nothing else marks commands".into());
         }
         let regex = match &w.regex {
             Some(r) => Some(regex_lite::Regex::new(r).map_err(|e| format!("regex: {e}"))?),
@@ -479,6 +550,8 @@ impl Headless {
             v
         };
         let mut c = lock(&self.shared.counts);
+        // The next command to finish is the one running now, if any.
+        let finished_before = c.commands.finished;
         loop {
             let exited = c.exit;
             let seen = c.batches;
@@ -511,6 +584,10 @@ impl Headless {
                 && let Some(e) = exited
             {
                 return Ok(reply(true, "exit", json!({ "exit": exit_json(Some(e)) })));
+            } else if w.command
+                && let Some(done) = c.commands.after(finished_before)
+            {
+                return Ok(reply(true, "command", command_json(done)));
             }
             let now = Instant::now();
             if let Some(ms) = w.idle_ms {
@@ -659,6 +736,11 @@ impl Drop for Headless {
     }
 }
 
+/// `wait-for --command`'s result: how the command ended.
+fn command_json(d: &Done) -> Value {
+    json!({ "status": d.status, "duration_ms": d.duration.as_millis() as u64, "command": d.command })
+}
+
 fn exit_json(e: Option<Exit>) -> Value {
     match e {
         None => Value::Null,
@@ -718,6 +800,38 @@ mod tests {
         let check = "✓".as_bytes();
         assert_eq!(utf8_prefix(&check[..2]), 0);
         assert_eq!(utf8_prefix(check), 3);
+    }
+
+    #[test]
+    fn commands_finish_with_status_and_duration() {
+        use term_core::Command::{Finished, Prompt, Started};
+        let t0 = Instant::now();
+        let mut c = Commands::default();
+        c.apply(&[Prompt], t0);
+        assert!(c.after(0).is_none());
+        // Running, not finished.
+        c.apply(&[Started(Some("make".into()))], t0);
+        assert!(c.after(0).is_none());
+        c.apply(&[Finished(Some(2)), Prompt], t0 + Duration::from_millis(1500));
+        assert_eq!(
+            c.after(0),
+            Some(&Done {
+                status: Some(2),
+                duration: Duration::from_millis(1500),
+                command: Some("make".into())
+            })
+        );
+        // A wait that began after it sees only later ones.
+        assert!(c.after(1).is_none());
+        c.apply(&[Started(None), Finished(None)], t0 + Duration::from_secs(3));
+        let d = c.after(1).unwrap();
+        assert_eq!((d.status, d.duration, d.command.clone()), (None, Duration::ZERO, None));
+        // Only the last few are kept, and a wait still finds the oldest after it.
+        for i in 0..DONE_KEPT as u32 + 2 {
+            c.apply(&[Started(None), Finished(Some(i))], t0);
+        }
+        assert_eq!(c.done.len(), DONE_KEPT);
+        assert_eq!(c.after(c.finished - 1).map(|d| d.status), Some(Some(DONE_KEPT as u32 + 1)));
     }
 
     #[test]

@@ -177,7 +177,8 @@ pub struct Mouse {
     pub lines: Option<i32>,
 }
 
-/// `wait-for`: exactly one of `text`, `regex`, `idle_ms`, `exit`.
+/// `wait-for`: exactly one of `text`, `regex`, `idle_ms`, `exit`,
+/// `command`.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WaitFor {
@@ -187,6 +188,9 @@ pub struct WaitFor {
     /// The output has been quiet this long.
     pub idle_ms: Option<u64>,
     pub exit: bool,
+    /// The next command the shell finishes (OSC 133 marks, `--shell`
+    /// sessions): its exit status and duration come back.
+    pub command: bool,
     pub timeout_ms: Option<u64>,
 }
 

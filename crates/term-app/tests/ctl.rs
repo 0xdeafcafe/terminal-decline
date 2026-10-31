@@ -172,6 +172,35 @@ fn headless_sessions_end_to_end() {
     not_an_app(server);
 }
 
+/// `wait-for --command`: the next command a shell finishes, with its
+/// status and duration from the OSC 133 marks.
+#[test]
+fn wait_for_the_next_command_to_finish() {
+    let env = Env::new(CONFIG);
+    env.ok(&["spawn", "--name", "sh", "--shell", "--env", "SHELL=/bin/zsh", "--size", "80x10"]);
+    // The first prompt has been drawn once the output is quiet.
+    env.ok(&["wait-for", "sh", "--idle", "700", "--timeout", "15000"]);
+    env.ok(&["send", "sh", "--text", "sleep 1; (exit 3)\n"]);
+    let w = env.ok(&["wait-for", "sh", "--command", "--timeout", "10000"]);
+    assert_eq!((w["matched"].clone(), w["reason"].clone()), (true.into(), "command".into()), "{w}");
+    assert_eq!(w["status"], 3, "{w}");
+    let ms = w["duration_ms"].as_u64().unwrap();
+    assert!((800..8000).contains(&ms), "{w}");
+    assert_eq!(w["command"], "sleep 1; (exit 3)", "{w}");
+    // The next one, a success.
+    env.ok(&["send", "sh", "--text", "sleep 1; true\n"]);
+    let w = env.ok(&["wait-for", "sh", "--command", "--timeout", "10000"]);
+    assert_eq!(w["status"], 0, "{w}");
+    // Nothing finishes: a timeout (3).
+    let (code, _) = env.run(&["wait-for", "sh", "--command", "--timeout", "300"]);
+    assert_eq!(code, 3);
+    // A program run directly has no marks to wait on.
+    env.ok(&["spawn", "--name", "plain", "--", "/bin/sh"]);
+    let (code, text) = env.run(&["wait-for", "plain", "--command", "--timeout", "300"]);
+    assert_eq!(code, 1, "{text}");
+    assert!(text.contains("--shell"), "{text}");
+}
+
 #[test]
 fn keys_go_through_the_apps_encoding() {
     let env = Env::new(CONFIG);

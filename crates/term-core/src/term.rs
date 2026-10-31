@@ -11,7 +11,7 @@ use crate::cell::{Cell, Color, Mark, MarkKind, Row, Width};
 use crate::image::placeholder::{self, PLACEHOLDER, Piece};
 use crate::image::{Graphics, ImageHost, ImageJob, ImageKey, ImagePool, ImageState, JobDone, RustHost};
 pub use crate::links::LinkValue;
-use crate::rows::{Content, RowRef};
+use crate::rows::RowRef;
 use crate::scrollback::{HistoryStats, Scrollback};
 use crate::style::{Attrs, LinkId, Style, Underline};
 use crate::style_table::{StyleStats, StyleTable};
@@ -1329,13 +1329,10 @@ impl Terminal {
 
     fn line_span(&self, p: Point) -> (Point, Point) {
         let (start, end) = self.logical_line(p.line);
-        (
-            Point { line: start, col: 0 },
-            Point {
-                line: end,
-                col: self.cols - 1,
-            },
-        )
+        // A history row keeps the width it was written at, which may be
+        // wider than the screen's now: to its last cell.
+        let width = self.row_at(end).map_or(0, |r| r.len()).max(self.cols);
+        (Point { line: start, col: 0 }, Point { line: end, col: width - 1 })
     }
 
     /// The first and last cell of the word at `p` on its logical line, or
@@ -1370,15 +1367,10 @@ impl Terminal {
         let mut at = None;
         for line in start..=end {
             let Some(row) = self.row_at(line) else { continue };
-            // A wrapped row's trailing empty cells (where a wide character
-            // didn't fit) don't break the line's text.
-            let len = if row.wrapped() {
-                row.cells()
-                    .rposition(|c| c.content() != Content::Empty || c.is_spacer())
-                    .map_or(0, |i| i + 1)
-            } else {
-                row.len().max(self.cols)
-            };
+            // A wrapped row's text runs to where it wrapped: an empty cell
+            // there is a space in the line (history stores typed spaces as
+            // empty cells), and only padding a resize added is left out.
+            let len = if row.wrapped() { row.text_len() } else { row.len().max(self.cols) };
             for col in 0..len {
                 let cell = row.cell(col);
                 let here = Point { line, col };
@@ -1477,35 +1469,39 @@ impl Terminal {
     /// screen or in history, as copying a selection of it gives.
     pub fn text_between(&self, a: Point, b: Point) -> String {
         let mut out = String::new();
+        // Where the logical line being copied starts in `out`.
+        let mut line_start = 0;
         for line in a.line..=b.line {
             let Some(row) = self.row_at(line) else { continue };
             let start = if line == a.line { a.col } else { 0 };
             let wrapped = row.wrapped() && line != b.line;
             // History rows keep the width they were written at, which may
             // be wider than the screen's now.
-            let mut end = if line == b.line { b.col + 1 } else { self.cols.max(row.len()) };
-            if wrapped {
-                // Empty cells at the end of a wrapped row (where a wide
-                // character didn't fit) aren't part of the line's text.
-                end = end.min(
-                    row.cells()
-                        .rposition(|c| c.content() != Content::Empty || c.is_spacer())
-                        .map_or(0, |i| i + 1),
-                );
-            }
-            let mut text = String::new();
+            let end = if line == b.line {
+                b.col + 1
+            } else if wrapped {
+                // To where it wrapped, empty cells included: a typed space
+                // there (stored in history as an empty cell) is part of
+                // the line. Only padding a resize without reflow added is
+                // left out; an edge spacer is skipped below.
+                row.text_len()
+            } else {
+                self.cols.max(row.len())
+            };
             for col in start..end.min(row.len().max(start)) {
                 let cell = row.cell(col);
                 if !cell.is_spacer() {
-                    cell.push_text(&mut text);
+                    cell.push_text(&mut out);
                 }
             }
             if !wrapped {
-                text.truncate(text.trim_end_matches(' ').len());
-            }
-            out.push_str(&text);
-            if line != b.line && !wrapped {
-                out.push('\n');
+                // The line's trailing spaces, back across the rows it
+                // wrapped from.
+                out.truncate(line_start + out[line_start..].trim_end_matches(' ').len());
+                if line != b.line {
+                    out.push('\n');
+                }
+                line_start = out.len();
             }
         }
         out

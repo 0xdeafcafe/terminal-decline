@@ -58,7 +58,9 @@ impl Flat {
     /// Append `row` (the next row of the line) at `self.cells.len()`.
     pub(super) fn push_row(&mut self, row: &Row) -> usize {
         let start = self.cells.len();
-        let mut n = row.cells.len();
+        // A wrapped row's text, without padding a resize without reflow
+        // added (the line goes on in the next row).
+        let mut n = row.text_len();
         if row.wrapped && n > 0 && row.cells[n - 1].width() == Width::EdgeSpacer {
             n -= 1;
         }

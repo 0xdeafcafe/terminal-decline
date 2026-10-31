@@ -189,6 +189,13 @@ impl<'a> RowRef<'a> {
         self.row.wrapped
     }
 
+    /// Where a wrapped row's text ends: [`Row::text_len`]. Every cell
+    /// before it is part of the line's text, a space where it is empty.
+    #[inline]
+    pub fn text_len(&self) -> usize {
+        self.row.text_len()
+    }
+
     /// The OSC 8 hyperlink of the cell at `col` (a wide character's
     /// spacer has its link too), if it has one.
     pub fn link(&self, col: usize) -> Option<&LinkValue> {

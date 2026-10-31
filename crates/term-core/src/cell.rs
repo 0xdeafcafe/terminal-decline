@@ -244,6 +244,11 @@ pub struct Row {
     pub cells: Vec<Cell>,
     /// The line continues onto the next row (soft wrap).
     pub wrapped: bool,
+    /// A wrapped row made wider without reflow (the alternate screen, a
+    /// row pulled back from history): the width it wrapped at. Cells past
+    /// it were never written, unless written since: padding, not text
+    /// ([`Row::text_len`]). 0 for every other row.
+    wrap_width: u16,
     /// Only rows with clusters or prompt marks have one (§6.1).
     extra: Option<Box<RowExtra>>,
 }
@@ -290,8 +295,26 @@ impl Row {
             seq: 0,
             cells: vec![fill; cols],
             wrapped: false,
+            wrap_width: 0,
             extra: None,
         }
+    }
+
+    /// Where the row's text ends: its cells, less the padding that a
+    /// wrapped row made wider without reflow has past the width it
+    /// wrapped at. Every cell before that is text, empty or not (an empty
+    /// cell reads as the space history stores it as).
+    #[inline]
+    pub fn text_len(&self) -> usize {
+        let w = self.wrap_width as usize;
+        if w == 0 || w >= self.cells.len() || !self.wrapped {
+            return self.cells.len();
+        }
+        // Padding is empty narrow cells; anything else was written there.
+        self.cells[w..]
+            .iter()
+            .rposition(|c| c.bits() & (Cell::CONTENT | Cell::KIND | Cell::WIDTH) != 0)
+            .map_or(w, |i| w + i + 1)
     }
 
     pub fn reset(&mut self, cols: usize, fill: Cell) {
@@ -303,6 +326,7 @@ impl Row {
             self.cells.resize(cols, fill);
         }
         self.wrapped = false;
+        self.wrap_width = 0;
         if self.extra.is_some() {
             self.clear_extra();
         }
@@ -317,6 +341,7 @@ impl Row {
             debug_assert!(self.cells[zero_from..].iter().all(|&c| c == Cell::BLANK));
             self.cells[..zero_from].fill(Cell::BLANK);
             self.wrapped = false;
+            self.wrap_width = 0;
             if self.extra.is_some() {
                 self.clear_extra();
             }
@@ -467,7 +492,18 @@ impl Row {
 
     /// Make the row `cols` cells wide: cells past it are dropped (and their
     /// clusters freed), new ones are blank.
+    /// Make the row `cols` wide, without reflow: cells past `cols` are
+    /// dropped, and a wider row is padded with blanks, which a wrapped
+    /// row's text doesn't take in ([`Row::text_len`]).
     pub fn resize_cells(&mut self, cols: usize) {
+        let old = self.cells.len();
+        if cols > old && self.wrapped && self.wrap_width == 0 && old > 0 {
+            // An edge spacer ending it is padding too.
+            let edge = self.cells[old - 1].width() == Width::EdgeSpacer;
+            self.wrap_width = u16::try_from(old - edge as usize).unwrap_or(0);
+        } else if cols <= self.wrap_width as usize {
+            self.wrap_width = 0;
+        }
         if cols < self.cells.len() {
             let len = self.cells.len();
             self.free_clusters(cols..len);

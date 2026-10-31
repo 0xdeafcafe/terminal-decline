@@ -1921,6 +1921,16 @@ impl Scrollback {
     /// which the row's cells are all [`Cell::BLANK`] (as far as storing it
     /// found out), so the caller can clear only the cells before it.
     pub fn push_keyed(&mut self, row: &Row, styles: &[Style], links: &[Option<Arc<LinkValue>>], key: [u64; 2]) -> usize {
+        let text_len = row.text_len();
+        if text_len < row.cells.len() {
+            // A wrapped row made wider without reflow: stored as wide as
+            // it wrapped, so its padding doesn't read as spaces in the
+            // line. The caller clears all of its cells.
+            let mut cut = row.clone();
+            cut.resize_cells(text_len);
+            self.push_keyed(&cut, styles, links, key);
+            return row.cells.len();
+        }
         self.end += 1;
         if self.limit == 0 {
             // Nothing is kept, but the count goes on: line numbers are the

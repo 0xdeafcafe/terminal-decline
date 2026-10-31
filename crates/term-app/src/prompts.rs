@@ -366,11 +366,12 @@ mod tests {
         let mut t = Term::new(10, 3, 100, term_core::ImagePool::process());
         ended(&mut t, "echo 0123456789abc", "x\r\n", 0);
         t.advance(b"\x1b]133;A\x07$ ");
-        // (Not at 7, where the space ends a wrapped row: copying drops a
-        // blank there, as it does for selections.)
-        t.state.resize(8, 3);
-        assert_eq!(last_command_text(&t.state).as_deref(), Some("echo 0123456789abc"));
-        assert_eq!(last_output_text(&t.state).as_deref(), Some("x"));
+        // At 7 the space ends a wrapped row, and is copied all the same.
+        for cols in [8, 7] {
+            t.state.resize(cols, 3);
+            assert_eq!(last_command_text(&t.state).as_deref(), Some("echo 0123456789abc"), "at {cols}");
+            assert_eq!(last_output_text(&t.state).as_deref(), Some("x"), "at {cols}");
+        }
         // No shell integration: nothing to copy.
         let mut plain = Term::new(20, 4, 100, term_core::ImagePool::process());
         plain.advance(b"$ ls\r\na b\r\n$ ");

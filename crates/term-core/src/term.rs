@@ -1672,10 +1672,8 @@ impl Terminal {
     /// left for the caller to reuse as the new blank line. Callers also
     /// advance the screen's `top_line`; the scrollback counts the row
     /// whether or not it keeps it, so its line numbers stay the screen's.
-    /// Returns the column from which the row's cells are all
-    /// [`Cell::BLANK`] ([`Scrollback::push_keyed`]).
     #[inline]
-    fn push_scrollback(&mut self, row: &Row) -> usize {
+    fn push_scrollback(&mut self, row: &Row) {
         self.scrollback
             .push_keyed(row, self.styles.styles(), self.styles.links().as_slice(), self.styles.version())
         // The view holds a Point in history: output arriving underneath
@@ -1713,12 +1711,10 @@ impl Terminal {
             for _ in 0..n {
                 let mut row = self.screen.pop_front().expect("screen has rows");
                 if to_history {
-                    // Most rows end in blank cells, which need no clearing.
-                    let zero_from = self.push_scrollback(&row);
-                    row.reset_before(self.cols, blank, zero_from);
-                } else {
-                    row.reset(self.cols, blank);
+                    self.push_scrollback(&row);
                 }
+                // Most rows end in blank cells, which need no clearing.
+                row.reset(self.cols, blank);
                 snapshot::touch(&mut row, &mut self.counter, self.batch_start);
                 self.screen.push_back(row);
             }
@@ -1844,7 +1840,7 @@ impl Terminal {
         }
         let r = &mut self.screen[row];
         r.free_clusters(start..end);
-        r.cells[start..end].fill(blank);
+        r.cells.fill_range(start..end, blank);
         if start == 0 && end == len {
             // The whole row erased: its prompt marks go with it.
             r.clear_marks();
@@ -2357,11 +2353,12 @@ impl Terminal {
         } else {
             cell.style_part()
         };
-        self.screen[row].cells[col] = if piece.col > placeholder::MAX_COL {
+        let cell = if piece.col > placeholder::MAX_COL {
             template
         } else {
             template.with_placeholder(piece.row, piece.col)
         };
+        self.screen[row].cells.set(col, cell);
         self.touch_row(row);
     }
 
@@ -2456,10 +2453,10 @@ impl Terminal {
                 self.erase_cells(row, col + 1..col + 2);
             }
             // Read again: the erase may have renumbered the ids.
-            let cells = &mut self.screen[row].cells;
-            let cell = cells[col];
-            cells[col] = cell.with_width(Width::Wide);
-            cells[col + 1] = cell.style_part().with_width(Width::Spacer);
+            let cells = self.screen[row].cells.written(col..col + 2);
+            let cell = cells[0];
+            cells[0] = cell.with_width(Width::Wide);
+            cells[1] = cell.style_part().with_width(Width::Spacer);
             if col + 2 >= cols {
                 self.cursor.col = cols - 1;
                 self.cursor.pending_wrap = self.modes.autowrap;
@@ -2478,7 +2475,7 @@ impl Terminal {
         let blank = self.blank();
         let r = &mut self.screen[row];
         r.free_clusters(col..col + 1);
-        r.cells[col] = blank.with_width(Width::EdgeSpacer);
+        r.cells.set(col, blank.with_width(Width::EdgeSpacer));
         r.wrapped = true;
         self.cursor.col = 0;
         self.cursor.pending_wrap = false;
@@ -2583,12 +2580,12 @@ impl Terminal {
         // The erase and repair above touch the row themselves.
         let line = &mut self.screen[row];
         snapshot::touch(line, &mut self.counter, self.batch_start);
-        let cells = &mut line.cells;
+        let cells = line.cells.written(col..col + width);
         if width == 2 {
-            cells[col] = pen.with_char(c).with_width(Width::Wide);
-            cells[col + 1] = pen.with_width(Width::Spacer);
+            cells[0] = pen.with_char(c).with_width(Width::Wide);
+            cells[1] = pen.with_width(Width::Spacer);
         } else {
-            cells[col] = pen.with_char(c);
+            cells[0] = pen.with_char(c);
         }
 
         if col + width >= self.cols {
@@ -2640,15 +2637,14 @@ impl Terminal {
             // a separate `touch_row` call here made `seq` 30% slower.
             let line = &mut self.screen[row];
             snapshot::touch(line, &mut self.counter, self.batch_start);
-            let cells = &mut line.cells[col..col + n];
-            if cells.iter().fold(0, |a, c| a | c.bits()) & (Cell::WIDTH | Cell::KIND) != 0 {
+            if line.cells[col..col + n].iter().fold(0, |a, c| a | c.bits()) & (Cell::WIDTH | Cell::KIND) != 0 {
                 // Overwriting part of a wide character: put_char cleans up.
                 for &b in segment {
                     self.put_char(b as char, 1);
                 }
                 continue;
             }
-            for (cell, &b) in cells.iter_mut().zip(segment) {
+            for (cell, &b) in line.cells.written(col..col + n).iter_mut().zip(segment) {
                 *cell = Cell::from_bits(pen | b as u64);
             }
             if col + n == cols {
@@ -3861,6 +3857,7 @@ impl Terminal {
                 if row.cells.len() != cols {
                     return Err(format!("{name} row {r} has {} cells, expected {cols}", row.cells.len()));
                 }
+                row.cells.check().map_err(|e| format!("{name} row {r}: {e}"))?;
                 for (c, &cell) in row.cells.iter().enumerate() {
                     check_cell(cell, styles).map_err(|e| format!("{name} row {r} col {c}: {e}"))?;
                     let next = row.cells.get(c + 1);

@@ -650,15 +650,12 @@ impl OpenBlock {
 
         // The cells up to the last that draws anything: blank cells after
         // it are dropped (a wrapped row keeps them all). Most rows end in
-        // blanks, so this one backward scan is most of the work for short
-        // lines; everything after looks at these cells only.
+        // blanks; the scan starts where the row's written part ends, so
+        // a short line in a wide window costs its own length only.
         let len = if wrapped {
-            scratch.zero_from = cols;
             cols
         } else {
-            let (len, zero_from) = blank_tail(cells);
-            scratch.zero_from = zero_from;
-            len
+            blank_tail(&cells[..row.cells.blank_from()])
         };
 
         // Common case: every cell is narrow ASCII (or empty) in the
@@ -967,9 +964,6 @@ struct Scratch {
     /// of placeholders.
     placeholders: Vec<(u32, u32, u16, u16)>,
     memo: WidthMemo,
-    /// Where the last row stored ends in cells that are all
-    /// [`Cell::BLANK`] (its length if unknown).
-    zero_from: usize,
     /// Every single-scalar cell has the width the Unicode table gives at
     /// the open block's setting ([`Scrollback::set_widths_as_written`]),
     /// so storing skips the check.
@@ -1058,21 +1052,14 @@ fn trim_spaces(cells: &[Cell]) -> usize {
     len
 }
 
-/// Cells up to and including the last that isn't blank ([`Cell::is_blank`]),
-/// and where the tail of cells that are all [`Cell::BLANK`] starts (found
-/// 16 cells at a time, so it may start later than it could).
+/// Cells up to and including the last that isn't blank ([`Cell::is_blank`]).
 #[inline]
-fn blank_tail(cells: &[Cell]) -> (usize, usize) {
+fn blank_tail(cells: &[Cell]) -> usize {
     // Skip trailing blanks 16 at a time (an OR over 128 bytes, which
     // vectorises, with no bounds checks), then one at a time.
     let mut len = cells.len();
-    let mut zero_from = cells.len();
     for chunk in cells.rchunks_exact(16) {
-        let or = chunk.iter().fold(0, |a, c| a | c.bits());
-        if or == 0 && zero_from == len {
-            zero_from -= 16;
-        }
-        if or & Cell::NOT_BLANK != 0 {
+        if chunk.iter().fold(0, |a, c| a | c.bits()) & Cell::NOT_BLANK != 0 {
             break;
         }
         len -= 16;
@@ -1080,7 +1067,7 @@ fn blank_tail(cells: &[Cell]) -> (usize, usize) {
     while len > 0 && cells[len - 1].is_blank() {
         len -= 1;
     }
-    (len, zero_from)
+    len
 }
 
 /// Columns of text to store for an unwrapped row: up to the last cell with
@@ -2013,19 +2000,17 @@ impl Scrollback {
     /// [`Scrollback::push`] for rows of one screen's style table, whose
     /// styles' `link`s index `links` (the screen's link table), named by
     /// `key` (the table's epoch and sweep count): while it stays the same,
-    /// the slot cache is kept from line to line. Returns the column from
-    /// which the row's cells are all [`Cell::BLANK`] (as far as storing it
-    /// found out), so the caller can clear only the cells before it.
-    pub fn push_keyed(&mut self, row: &Row, styles: &[Style], links: &[Option<Arc<LinkValue>>], key: [u64; 2]) -> usize {
+    /// the slot cache is kept from line to line.
+    pub fn push_keyed(&mut self, row: &Row, styles: &[Style], links: &[Option<Arc<LinkValue>>], key: [u64; 2]) {
         let text_len = row.text_len();
         if text_len < row.cells.len() {
             // A wrapped row made wider without reflow: stored as wide as
             // it wrapped, so its padding doesn't read as spaces in the
-            // line. The caller clears all of its cells.
+            // line.
             let mut cut = row.clone();
             cut.resize_cells(text_len);
             self.push_keyed(&cut, styles, links, key);
-            return row.cells.len();
+            return;
         }
         self.end += 1;
         if self.limit == 0 {
@@ -2033,7 +2018,7 @@ impl Scrollback {
             // screen's.
             self.start = self.end;
             self.open.first = self.end;
-            return row.cells.len();
+            return;
         }
         if key != self.cache_key || key == [0, 0] {
             self.open.reset_cache();
@@ -2060,13 +2045,10 @@ impl Scrollback {
                     debug_assert!(false, "a 4096-cell row fits in an empty block");
                     self.open.push(&Row::default(), styles, links, &mut self.scratch);
                 }
-                // The cells past the cut weren't looked at.
-                self.scratch.zero_from = row.cells.len();
             }
         }
         self.last_wrapped = row.wrapped;
         self.trim();
-        self.scratch.zero_from.min(row.cells.len())
     }
 
     /// Seal the open block, if it holds any lines.

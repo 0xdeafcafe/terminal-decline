@@ -2789,6 +2789,21 @@ and where it differs from the plan above:
   rows: selecting the top 10 rows took 120 ns, now 3 ns, and an
   `advance` after a new selection 9–19 µs (reading its text), now
   10 ns.
+- **Rows know where their written part ends.** A row's cells
+  (`cell::Cells`) carry a column from which every cell is
+  `Cell::BLANK`. The writers (`write_ascii`, `put_char`, `widen`, the
+  erase helpers, cluster and placeholder cells) move it with what they
+  write; any other write through `DerefMut` moves it to the end, so the
+  bound can be loose but never wrong (`check_invariants` checks it).
+  Storing a row in history scans for its last drawn cell from there,
+  and a reset clears only the cells before it: a short line in a wide
+  window costs its own length, not the window's. Before, that backward
+  scan over the blank tail was 30% of `seq` and 15% of plain text
+  (samply, 160 columns). `cpubench` against 5e93e27, best of 3
+  interleaved rounds, load average 36–66, `parse_1k` / `parse`: plain
+  1.25 / 1.25, `seq` 1.35 / 1.35, coloured 1.04 / 1.08, unicode 1.06
+  / 0.97, clusters 1.04 / 1.00, `tui` the same (6 more rounds:
+  medians 11464 and 11453 µs). `Row` grows from 48 to 56 bytes.
 
 ---
 

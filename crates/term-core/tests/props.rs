@@ -778,7 +778,7 @@ fn row() -> impl Strategy<Value = (Row, Vec<Style>)> {
     styles().prop_flat_map(|styles| {
         (prop::collection::vec(cells(styles.clone()), 0..60), any::<bool>(), Just(styles)).prop_map(|(cells, wrapped, styles)| {
             let mut row = Row::new(0, Cell::BLANK);
-            row.cells = cells.concat();
+            row.cells = cells.concat().into();
             row.wrapped = wrapped;
             (row, styles)
         })

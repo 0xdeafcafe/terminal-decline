@@ -75,8 +75,9 @@ pub enum Width {
 pub struct Cell(u64);
 
 const _: () = assert!(std::mem::size_of::<Cell>() == 8);
-// A row: its change counter, cells, `wrapped` and the boxed extras (§6.1).
-const _: () = assert!(std::mem::size_of::<Row>() == 48);
+// A row: its change counter, cells and where their written part ends,
+// `wrapped` and the boxed extras (§6.1).
+const _: () = assert!(std::mem::size_of::<Row>() == 56);
 
 impl Cell {
     pub const BLANK: Cell = Cell(0);
@@ -234,6 +235,189 @@ impl Cell {
     }
 }
 
+/// A row's cells, with where its written part ends: every cell from
+/// [`Cells::blank_from`] on is [`Cell::BLANK`]. Most rows hold a short
+/// line in a wide window, and storing one in history or clearing it for
+/// reuse then looks at the written cells only, not all of them.
+///
+/// Reading goes through `Deref`. Writing through `DerefMut` can put
+/// anything anywhere, so it moves the mark to the end; only
+/// [`Cells::written`], [`Cells::fill_range`] and the resets keep it
+/// short. Length changes go through methods that do the same.
+#[derive(Clone, Default)]
+pub struct Cells {
+    v: Vec<Cell>,
+    blank_from: u32,
+}
+
+impl Cells {
+    pub fn new(len: usize, fill: Cell) -> Cells {
+        Cells {
+            v: vec![fill; len],
+            blank_from: if fill == Cell::BLANK { 0 } else { len as u32 },
+        }
+    }
+
+    /// Every cell from here on is [`Cell::BLANK`] (it may have been
+    /// cleared further back: this is a bound, not the exact end).
+    #[inline]
+    pub fn blank_from(&self) -> usize {
+        self.blank_from as usize
+    }
+
+    /// The cells of `range`, for the caller to write; cells outside it
+    /// must stay as they are.
+    #[inline]
+    pub fn written(&mut self, range: std::ops::Range<usize>) -> &mut [Cell] {
+        self.blank_from = self.blank_from.max(range.end as u32);
+        &mut self.v[range]
+    }
+
+    /// Write one cell.
+    #[inline]
+    pub fn set(&mut self, col: usize, cell: Cell) {
+        self.written(col..col + 1)[0] = cell;
+    }
+
+    /// Fill `range` with `fill`.
+    #[inline]
+    pub fn fill_range(&mut self, range: std::ops::Range<usize>, fill: Cell) {
+        let (start, end) = (range.start as u32, range.end as u32);
+        self.v[range].fill(fill);
+        if fill != Cell::BLANK {
+            self.blank_from = self.blank_from.max(end);
+        } else if end >= self.blank_from {
+            self.blank_from = self.blank_from.min(start);
+        }
+    }
+
+    /// Fill every cell; for [`Cell::BLANK`], only those that may not be
+    /// blank already.
+    #[inline]
+    pub fn fill_all(&mut self, fill: Cell) {
+        if fill == Cell::BLANK {
+            self.v[..self.blank_from as usize].fill(Cell::BLANK);
+            self.blank_from = 0;
+        } else {
+            self.v.fill(fill);
+            self.blank_from = self.v.len() as u32;
+        }
+    }
+
+    pub fn resize(&mut self, len: usize, fill: Cell) {
+        self.v.resize(len, fill);
+        self.blank_from = if fill == Cell::BLANK {
+            self.blank_from.min(len as u32)
+        } else {
+            len as u32
+        };
+    }
+
+    pub fn truncate(&mut self, len: usize) {
+        self.v.truncate(len);
+        self.blank_from = self.blank_from.min(len as u32);
+    }
+
+    pub fn clear(&mut self) {
+        self.v.clear();
+        self.blank_from = 0;
+    }
+
+    pub fn push(&mut self, cell: Cell) {
+        self.v.push(cell);
+        self.blank_from = self.v.len() as u32;
+    }
+
+    pub fn extend(&mut self, cells: impl IntoIterator<Item = Cell>) {
+        self.v.extend(cells);
+        self.blank_from = self.v.len() as u32;
+    }
+
+    pub fn reserve(&mut self, additional: usize) {
+        self.v.reserve(additional);
+    }
+
+    pub fn as_vec(&self) -> &Vec<Cell> {
+        &self.v
+    }
+
+    /// Check the mark: every cell from it on blank.
+    pub fn check(&self) -> Result<(), String> {
+        let from = self.blank_from as usize;
+        if from > self.v.len() {
+            return Err(format!("blank_from {from} past {} cells", self.v.len()));
+        }
+        match self.v[from..].iter().position(|&c| c != Cell::BLANK) {
+            Some(i) => Err(format!("cell {} is written, past blank_from {from}", from + i)),
+            None => Ok(()),
+        }
+    }
+}
+
+impl From<Vec<Cell>> for Cells {
+    fn from(v: Vec<Cell>) -> Cells {
+        let blank_from = v.len() as u32;
+        Cells { v, blank_from }
+    }
+}
+
+impl std::ops::Deref for Cells {
+    type Target = [Cell];
+
+    #[inline]
+    fn deref(&self) -> &[Cell] {
+        &self.v
+    }
+}
+
+impl std::ops::DerefMut for Cells {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut [Cell] {
+        self.blank_from = self.v.len() as u32;
+        &mut self.v
+    }
+}
+
+/// Equal when the cells are: the mark is only a bound.
+impl PartialEq for Cells {
+    fn eq(&self, other: &Cells) -> bool {
+        self.v == other.v
+    }
+}
+
+impl Eq for Cells {}
+
+impl PartialEq<Vec<Cell>> for Cells {
+    fn eq(&self, other: &Vec<Cell>) -> bool {
+        &self.v == other
+    }
+}
+
+impl std::fmt::Debug for Cells {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.v.fmt(f)
+    }
+}
+
+impl<'a> IntoIterator for &'a Cells {
+    type Item = &'a Cell;
+    type IntoIter = std::slice::Iter<'a, Cell>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.v.iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a mut Cells {
+    type Item = &'a mut Cell;
+    type IntoIter = std::slice::IterMut<'a, Cell>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.blank_from = self.v.len() as u32;
+        self.v.iter_mut()
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Row {
     /// The row's change counter (§9.1): changes whenever its content does,
@@ -241,7 +425,7 @@ pub struct Row {
     pub seq: u64,
     /// The cells. Overwriting a cluster cell must free its slot first
     /// ([`Row::free_clusters`]); moving cells within the row keeps them.
-    pub cells: Vec<Cell>,
+    pub cells: Cells,
     /// The line continues onto the next row (soft wrap).
     pub wrapped: bool,
     /// A wrapped row made wider without reflow (the alternate screen, a
@@ -293,7 +477,7 @@ impl Row {
     pub fn new(cols: usize, fill: Cell) -> Row {
         Row {
             seq: 0,
-            cells: vec![fill; cols],
+            cells: Cells::new(cols, fill),
             wrapped: false,
             wrap_width: 0,
             extra: None,
@@ -319,8 +503,9 @@ impl Row {
 
     pub fn reset(&mut self, cols: usize, fill: Cell) {
         if self.cells.len() == cols && fill == Cell::BLANK {
-            // The usual case: the all-zero blank, which fills as a memset.
-            self.cells.fill(Cell::BLANK);
+            // The usual case: the all-zero blank, which fills as a memset
+            // of the written cells only.
+            self.cells.fill_all(Cell::BLANK);
         } else {
             self.cells.clear();
             self.cells.resize(cols, fill);
@@ -329,24 +514,6 @@ impl Row {
         self.wrap_width = 0;
         if self.extra.is_some() {
             self.clear_extra();
-        }
-    }
-
-    /// [`Row::reset`], for a row whose cells from `zero_from` on are known
-    /// to be [`Cell::BLANK`] already: with that fill, only the cells
-    /// before it are cleared.
-    #[inline]
-    pub fn reset_before(&mut self, cols: usize, fill: Cell, zero_from: usize) {
-        if self.cells.len() == cols && fill == Cell::BLANK && zero_from <= cols {
-            debug_assert!(self.cells[zero_from..].iter().all(|&c| c == Cell::BLANK));
-            self.cells[..zero_from].fill(Cell::BLANK);
-            self.wrapped = false;
-            self.wrap_width = 0;
-            if self.extra.is_some() {
-                self.clear_extra();
-            }
-        } else {
-            self.reset(cols, fill);
         }
     }
 
@@ -366,7 +533,7 @@ impl Row {
     /// Fill every cell with `fill` (not a cluster), freeing all clusters
     /// and dropping the row's marks.
     pub fn fill(&mut self, fill: Cell) {
-        self.cells.fill(fill);
+        self.cells.fill_all(fill);
         if self.extra.is_some() {
             self.clear_extra();
         }
@@ -453,12 +620,12 @@ impl Row {
         let cell = self.cells[col];
         match x.clusters.insert(text) {
             Some(slot) => {
-                self.cells[col] = cell.with_cluster(slot);
+                self.cells.set(col, cell.with_cluster(slot));
                 true
             }
             None => {
                 let first = text.chars().next().unwrap_or(' ');
-                self.cells[col] = cell.style_part().with_char(first).with_width(cell.width());
+                self.cells.set(col, cell.style_part().with_char(first).with_width(cell.width()));
                 false
             }
         }
@@ -483,7 +650,7 @@ impl Row {
         let x = self.extra.get_or_insert_with(Default::default);
         match x.clusters.insert(text) {
             Some(slot) => {
-                self.cells[col] = cell.with_cluster(slot);
+                self.cells.set(col, cell.with_cluster(slot));
                 true
             }
             None => false,
@@ -526,6 +693,44 @@ impl Row {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cells_know_where_their_written_part_ends() {
+        let x = Cell::BLANK.with_char('x');
+        let mut c = Cells::new(10, Cell::BLANK);
+        assert_eq!(c.blank_from(), 0);
+        c.written(2..4).fill(x);
+        assert_eq!(c.blank_from(), 4);
+        c.set(1, x);
+        assert_eq!(c.blank_from(), 4, "a write before the mark keeps it");
+        c.fill_range(3..10, Cell::BLANK);
+        assert_eq!(c.blank_from(), 3, "erasing to the end brings it back");
+        c.fill_range(0..2, Cell::BLANK);
+        assert_eq!(c.blank_from(), 3, "erasing before it leaves it");
+        let styled = Cell::template(1, true);
+        c.fill_range(5..7, styled);
+        assert_eq!(c.blank_from(), 7, "a styled blank is written");
+        c.check().unwrap();
+        c[9] = x;
+        assert_eq!(c.blank_from(), 10, "any other write moves it to the end");
+        c.check().unwrap();
+        c.fill_all(Cell::BLANK);
+        assert_eq!((c.blank_from(), c.iter().all(|&c| c == Cell::BLANK)), (0, true));
+        c.resize(12, styled);
+        assert_eq!(c.blank_from(), 12);
+        c.truncate(4);
+        assert_eq!(c.blank_from(), 4);
+        c.check().unwrap();
+        #[allow(clippy::manual_slice_fill)] // through `&mut Cells`, on purpose
+        for cell in &mut c {
+            *cell = Cell::BLANK;
+        }
+        c.check().unwrap();
+        c.fill_all(Cell::BLANK);
+        c.resize(8, Cell::BLANK);
+        assert_eq!(c.blank_from(), 0);
+        assert_eq!(c, vec![Cell::BLANK; 8]);
+    }
 
     #[test]
     fn color_kinds_round_trip() {

@@ -229,6 +229,16 @@ define_class!(
             self.select_output_at(None);
         }
 
+        #[unsafe(method(jumpToPreviousFailedCommand:))]
+        fn jump_to_previous_failed_command(&self, _sender: Option<&AnyObject>) {
+            self.jump_to_failed(true);
+        }
+
+        #[unsafe(method(jumpToNextFailedCommand:))]
+        fn jump_to_next_failed_command(&self, _sender: Option<&AnyObject>) {
+            self.jump_to_failed(false);
+        }
+
         /// The right-click menu's Select Command Output: the command
         /// clicked.
         #[unsafe(method(selectClickedOutput:))]
@@ -904,6 +914,15 @@ impl PaneView {
     /// there is none that way ([`crate::prompts::jump`]).
     fn jump_to_prompt(&self, up: bool) {
         match self.with(|_, p| crate::prompts::jump(&mut p.session.lock_term().state, up)) {
+            Some(true) => self.request_redraw(),
+            _ => NSBeep(),
+        }
+    }
+
+    /// Jump to Previous / Next Failed Command, or beep if there is none
+    /// that way ([`crate::prompts::jump_to_failed`]).
+    fn jump_to_failed(&self, up: bool) {
+        match self.with(|_, p| crate::prompts::jump_to_failed(&mut p.session.lock_term().state, up)) {
             Some(true) => self.request_redraw(),
             _ => NSBeep(),
         }

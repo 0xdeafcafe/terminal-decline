@@ -1003,6 +1003,11 @@ impl Frame {
         self.snapped_with = generation;
     }
 
+    /// The last [`snapshot`](Frame::snapshot) taken.
+    pub fn last_snapshot(&self) -> &term_core::Snapshot {
+        &self.rows.snap
+    }
+
     /// The last [`snapshot`](Frame::snapshot), for adding to its
     /// highlights before it is built (the app's search hits, until
     /// term-core's search puts them in itself).

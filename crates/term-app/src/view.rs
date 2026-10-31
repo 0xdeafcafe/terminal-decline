@@ -3453,6 +3453,7 @@ fn write_dump(st: &mut State, window: Window) {
         panes: every,
         hovered_link,
         opened: test.opened.clone(),
+        failed_rows: p.render.frame.last_snapshot().failed.clone(),
         view_offset,
         selection,
         find,

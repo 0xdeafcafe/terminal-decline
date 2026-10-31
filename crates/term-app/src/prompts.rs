@@ -10,8 +10,22 @@ use term_core::{MarkKind, Point, Terminal, ViewTop, Width};
 /// screen below the top can only bring the view to the bottom). False if
 /// the view didn't move: no prompt that way.
 pub fn jump(t: &mut Terminal, up: bool) -> bool {
+    let target = prompts_from_top(t, up).next();
+    jump_to(t, target)
+}
+
+/// Jump to Previous / Next Failed Command: [`jump`], to the nearest
+/// prompt that way whose command exited non-zero.
+pub fn jump_to_failed(t: &mut Terminal, up: bool) -> bool {
+    let target = prompts_from_top(t, up).find(|p| t.command_failed(*p));
+    jump_to(t, target)
+}
+
+/// The prompts above the view's top line (`up`), or below it, nearest
+/// first.
+fn prompts_from_top(t: &Terminal, up: bool) -> impl Iterator<Item = Point> + '_ {
     let top = t.point_at(0, 0);
-    let target = if up {
+    let first = if up {
         // The top row may start partway through a line (history laid out
         // at another width): a prompt earlier on that line is above it.
         t.previous_prompt(top.line + 1)
@@ -20,7 +34,13 @@ pub fn jump(t: &mut Terminal, up: bool) -> bool {
     } else {
         t.next_prompt(top.line)
     };
-    let Some(prompt) = target else { return false };
+    std::iter::successors(first, move |p| if up { t.previous_prompt(p.line) } else { t.next_prompt(p.line) })
+}
+
+/// Scroll the view so `prompt` is at its top. False if the view didn't
+/// move, or there is no prompt.
+fn jump_to(t: &mut Terminal, prompt: Option<Point>) -> bool {
+    let Some(prompt) = prompt else { return false };
     // The prompt's row at the top of the view; a prompt on the screen
     // brings the view to the bottom.
     let before = t.view_top();
@@ -256,6 +276,38 @@ mod tests {
         plain.advance(b"text");
         assert!(!select_output(&mut plain.state));
         assert!(!has_output(&plain.state, plain.state.point_at(0, 0)));
+    }
+
+    /// [`session`] with an exit status.
+    fn ended(t: &mut Term, cmd: &str, output: &str, status: u32) {
+        t.advance(format!("\x1b]133;A\x07$ \x1b]133;B\x07{cmd}\r\n\x1b]133;C\x07{output}\x1b]133;D;{status}\x07").as_bytes());
+    }
+
+    #[test]
+    fn jumps_to_failed_commands_only() {
+        for cols in [20, 9, 40] {
+            let mut t = Term::new(20, 4, 100, term_core::ImagePool::process());
+            ended(&mut t, "bad1", "a\r\na\r\na\r\n", 1);
+            ended(&mut t, "ok", "b\r\nb\r\nb\r\n", 0);
+            ended(&mut t, "bad2", "c\r\nc\r\nc\r\n", 2);
+            ended(&mut t, "ok2", "d\r\nd\r\nd\r\n", 0);
+            t.advance(b"\x1b]133;A\x07$ ");
+            t.state.resize(cols, 4);
+            assert!(jump_to_failed(&mut t.state, true), "at {cols}");
+            assert_eq!(top_text(&t), "$ bad2", "at {cols}");
+            assert!(jump_to_failed(&mut t.state, true));
+            assert_eq!(top_text(&t), "$ bad1", "at {cols}");
+            assert!(!jump_to_failed(&mut t.state, true), "no failed command above the first");
+            assert!(jump_to_failed(&mut t.state, false));
+            assert_eq!(top_text(&t), "$ bad2", "at {cols}");
+            assert!(!jump_to_failed(&mut t.state, false), "none below: the view stays");
+            assert_eq!(top_text(&t), "$ bad2");
+        }
+        // All succeeded: nowhere to go.
+        let mut t = Term::new(20, 4, 100, term_core::ImagePool::process());
+        ended(&mut t, "ok", "1\r\n2\r\n3\r\n4\r\n", 0);
+        t.advance(b"\x1b]133;A\x07$ ");
+        assert!(!jump_to_failed(&mut t.state, true));
     }
 
     /// A prompt `$ ` with its marks, then `input` typed after it.

@@ -85,13 +85,17 @@ pub enum MenuAction {
     /// Select the output of the command at the top of the view, or the
     /// last command's when the view is at the bottom.
     SelectOutput,
+    /// Scroll the view to the prompt above or below its top line whose
+    /// command exited non-zero.
+    PreviousFailed,
+    NextFailed,
     /// Terminal Decline > Check for Updates… (only while the updater is
     /// on; unbound by default).
     CheckForUpdates,
 }
 
 impl MenuAction {
-    pub const ALL: [MenuAction; 38] = [
+    pub const ALL: [MenuAction; 40] = [
         MenuAction::NewWindow,
         MenuAction::NewTab,
         MenuAction::Close,
@@ -129,6 +133,8 @@ impl MenuAction {
         MenuAction::PreviousPrompt,
         MenuAction::NextPrompt,
         MenuAction::SelectOutput,
+        MenuAction::PreviousFailed,
+        MenuAction::NextFailed,
         MenuAction::CheckForUpdates,
     ];
 
@@ -172,6 +178,8 @@ impl MenuAction {
             MenuAction::PreviousPrompt => "previous_prompt",
             MenuAction::NextPrompt => "next_prompt",
             MenuAction::SelectOutput => "select_output",
+            MenuAction::PreviousFailed => "previous_failed",
+            MenuAction::NextFailed => "next_failed",
             MenuAction::CheckForUpdates => "check_for_updates",
         }
     }
@@ -216,6 +224,8 @@ impl MenuAction {
             MenuAction::PreviousPrompt => "Jump to Previous Prompt",
             MenuAction::NextPrompt => "Jump to Next Prompt",
             MenuAction::SelectOutput => "Select Command Output",
+            MenuAction::PreviousFailed => "Jump to Previous Failed Command",
+            MenuAction::NextFailed => "Jump to Next Failed Command",
             MenuAction::CheckForUpdates => "Check for Updates…",
         }
     }
@@ -262,6 +272,8 @@ impl MenuAction {
             MenuAction::PreviousPrompt => c"jumpToPreviousPrompt:",
             MenuAction::NextPrompt => c"jumpToNextPrompt:",
             MenuAction::SelectOutput => c"selectCommandOutput:",
+            MenuAction::PreviousFailed => c"jumpToPreviousFailedCommand:",
+            MenuAction::NextFailed => c"jumpToNextFailedCommand:",
             MenuAction::CheckForUpdates => c"checkForUpdates:",
         }
     }
@@ -273,8 +285,9 @@ impl MenuAction {
 }
 
 /// The menus' shortcuts with no config. The pane ones are iTerm2's and
-/// Ghostty's; the prompt ones Terminal.app's and iTerm2's.
-pub const DEFAULTS: [(&str, MenuAction); 38] = [
+/// Ghostty's; the prompt ones Terminal.app's and iTerm2's. No terminal
+/// has a chord for failed commands: Option-Shift with the prompt ones.
+pub const DEFAULTS: [(&str, MenuAction); 40] = [
     ("cmd+n", MenuAction::NewWindow),
     ("cmd+t", MenuAction::NewTab),
     ("cmd+w", MenuAction::Close),
@@ -310,6 +323,8 @@ pub const DEFAULTS: [(&str, MenuAction); 38] = [
     ("cmd+up", MenuAction::PreviousPrompt),
     ("cmd+down", MenuAction::NextPrompt),
     ("shift+cmd+a", MenuAction::SelectOutput),
+    ("alt+shift+cmd+up", MenuAction::PreviousFailed),
+    ("alt+shift+cmd+down", MenuAction::NextFailed),
     ("cmd+f", MenuAction::Find),
     ("cmd+g", MenuAction::FindNext),
     ("shift+cmd+g", MenuAction::FindPrevious),

@@ -1354,6 +1354,8 @@ pub fn build_menus(mtm: MainThreadMarker, app_name: &str, binds: &Keybinds) -> R
         vec![NSMenuItem::separatorItem(mtm)],
         b(MenuAction::PreviousPrompt.label(), MenuAction::PreviousPrompt),
         b(MenuAction::NextPrompt.label(), MenuAction::NextPrompt),
+        b(MenuAction::PreviousFailed.label(), MenuAction::PreviousFailed),
+        b(MenuAction::NextFailed.label(), MenuAction::NextFailed),
         vec![NSMenuItem::separatorItem(mtm)],
         b("Enter Full Screen", MenuAction::ToggleFullScreen),
     ];

@@ -497,6 +497,9 @@ pub struct Dump {
     /// Links opened so far in this window, as they would be opened
     /// (opening is stubbed under test control).
     pub opened: Vec<String>,
+    /// The focused pane's view rows marked as a failed command's prompt
+    /// in its last frame.
+    pub failed_rows: Vec<u16>,
     /// How many lines the focused pane's view is scrolled back.
     pub view_offset: usize,
     /// The focused pane's selected text.

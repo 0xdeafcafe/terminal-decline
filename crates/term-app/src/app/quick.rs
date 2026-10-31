@@ -186,7 +186,8 @@ impl AppDelegate {
             None => {
                 // Opened where it slides from, made key and ordered front.
                 crate::background::activate(mtm);
-                let Some(window) = self.open_window_as(None, super::Place::Quick(to_rect(from)), None, false, None, None, None) else {
+                let Some(window) = self.open_window_as(None, super::Place::Quick(to_rect(from)), None, false, None, None, None, None)
+                else {
                     return;
                 };
                 window

@@ -611,7 +611,13 @@ zle -N zle-line-pre-redraw td-line-pre-redraw
     let all = dumps(&dir);
     assert_eq!(all.len(), 1, "{all:?}");
     let shown = screen(&all[0]);
-    assert!(shown.starts_with("READY> touch 'ran here'|"), "{shown}");
+    // The faint line says what was running (there is no history to
+    // show above it), then the prompt with the command typed.
+    assert!(shown.starts_with("restored from "), "{shown}");
+    assert!(
+        shown.contains(" — was running: touch 'ran here'|\nREADY> touch 'ran here'|"),
+        "{shown}"
+    );
     assert!(!work.join("ran here").exists(), "it ran without Enter");
 }
 
@@ -698,6 +704,50 @@ fn smoke_a_new_build_waits_for_the_program_to_end() {
     let saved: Value = serde_json::from_str(&restart).unwrap();
     assert_eq!(saved.as_array().map(Vec::len), Some(1), "{saved}");
     assert!(saved[0]["frame"].is_array(), "{saved}");
+}
+
+/// With shell integration on, a restart saves the command a tab runs as
+/// it was typed, from the shell's OSC 133 mark: an alias stays one and
+/// `FOO=1` stays in, which the process's own arguments (`/bin/sh …`)
+/// would lose. Needs zsh as the login shell.
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_restart_saves_the_command_as_typed() {
+    if !have_metal() {
+        return;
+    }
+    if !term_pty::login_shell().ends_with("/zsh") {
+        eprintln!("skipped: the login shell isn't zsh");
+        return;
+    }
+    let dir = TempDir::new("saved-as-typed");
+    let d = dir.path().display();
+    let saved_file = format!("{}.saved", dir.dump_file().display());
+    // The program, as a restart finds it: running. It asks for the
+    // windows as a restart saves them, then quits.
+    let program = format!(
+        "{save}{wait}{quit}sleep 20\n",
+        save = osc("save"),
+        wait = wait_for(&format!("[ -s '{saved_file}' ]")),
+        quit = osc("quit"),
+    );
+    std::fs::write(dir.path().join("program.sh"), program).unwrap();
+    std::fs::write(
+        dir.path().join(".zshrc"),
+        format!(
+            "PS1='READY> '\nalias td-prog=\"/bin/sh '{d}/program.sh'\"\ntd_ran=\ntd-line-init() {{ [[ -z $td_ran ]] || return 0; td_ran=1; BUFFER='FOO=1 td-prog --flag'; zle accept-line; }}\nzle -N zle-line-init td-line-init\n"
+        ),
+    )
+    .unwrap();
+    let mut cmd = Command::new(APP);
+    cmd.env("XDG_CONFIG_HOME", dir.config_home())
+        .env("ZDOTDIR", dir.path())
+        .env("DECLINE_TEST_DUMP", dir.dump_file())
+        .current_dir(dir.path());
+    let (status, _) = run(&mut cmd);
+    assert!(status.success(), "{status}");
+    let saved: Value = serde_json::from_str(&std::fs::read_to_string(&saved_file).expect("not saved")).unwrap();
+    assert_eq!(saved[0]["command"], "FOO=1 td-prog --flag", "{saved}");
 }
 
 /// Under the test control notifications go to the dump, not the

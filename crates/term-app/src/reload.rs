@@ -342,10 +342,58 @@ pub fn when_to_restart(busy: &[String], idle: Duration, wait: Duration) -> Optio
     (idle < wait).then(|| wait - idle)
 }
 
+/// The command to type at a restored pane's prompt, from what was known
+/// as the restart saved it:
+///
+/// 1. `line`, the command line the shell sent with its OSC 133 mark
+///    (zsh and fish do): as typed, so an alias or a function stays one
+///    and `FOO=1 cmd` keeps its `FOO=1`, which the process's arguments
+///    lose;
+/// 2. else `foreground`, the foreground process's command line
+///    ([`crate::running::foreground_command`]);
+/// 3. else `shown`, the text the marks showed on the screen (bash, or a
+///    program whose arguments can't be read): only its first line,
+///    read back from the screen, so not when it fills
+///    [`SHOWN_MAX`] and may have been cut.
+///
+/// Text with control characters (the line feed of a multi-line command)
+/// isn't typed: it could run before Enter.
+pub fn command_to_type(line: Option<&str>, foreground: Option<String>, shown: Option<&str>) -> Option<String> {
+    let usable = |c: &&str| !c.is_empty() && c.len() <= crate::running::MAX_COMMAND && !c.chars().any(char::is_control);
+    let line = line.map(str::trim).filter(usable);
+    let shown = shown.map(str::trim).filter(usable).filter(|c| c.chars().count() < SHOWN_MAX);
+    line.map(str::to_string).or(foreground).or(shown.map(str::to_string))
+}
+
+/// The most characters of a command's first line the OSC 133 marks show
+/// (term-core's `COMMAND_TEXT_MAX`).
+pub const SHOWN_MAX: usize = 200;
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::mpsc;
+
+    #[test]
+    fn the_command_typed_is_the_shells_line_first() {
+        let fg = || Some("/opt/homebrew/bin/rush".to_string());
+        assert_eq!(command_to_type(Some("rush"), fg(), Some("rush")).as_deref(), Some("rush"));
+        assert_eq!(command_to_type(Some(" FOO=1 rush "), fg(), None).as_deref(), Some("FOO=1 rush"));
+        // No line from the shell (bash): the process's command line, then
+        // what the screen showed.
+        assert_eq!(command_to_type(None, fg(), Some("rush")), fg());
+        assert_eq!(command_to_type(None, None, Some("sudo rush")).as_deref(), Some("sudo rush"));
+        // Shown text that may have been cut isn't typed.
+        let long = "x".repeat(SHOWN_MAX);
+        assert_eq!(command_to_type(None, None, Some(&long)), None);
+        // A line that could run before Enter isn't typed.
+        assert_eq!(command_to_type(Some("echo a\nrm x"), fg(), None), fg());
+        assert_eq!(command_to_type(Some("a\x1bb"), None, None), None);
+        assert_eq!(command_to_type(Some("   "), None, None), None);
+        // Backslashes are only text.
+        assert_eq!(command_to_type(Some(r"echo a\nb"), None, None).as_deref(), Some(r"echo a\nb"));
+        assert_eq!(command_to_type(None, None, None), None);
+    }
 
     fn pane(marks: Option<Option<&str>>, foreground: Option<&str>) -> PaneNow {
         PaneNow {

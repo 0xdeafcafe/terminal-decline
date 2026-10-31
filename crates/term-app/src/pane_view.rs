@@ -528,7 +528,7 @@ impl PaneView {
             }
         }
         if report {
-            self.send_raw(b"\x1b[O".to_vec());
+            self.report_raw(b"\x1b[O".to_vec());
         }
         self.request_redraw();
     }
@@ -592,6 +592,13 @@ impl PaneView {
 
     pub(crate) fn send_raw(&self, bytes: Vec<u8>) {
         self.with(|_, p| p.session.send(bytes));
+    }
+
+    /// A report the terminal makes by itself (focus in or out), not
+    /// typing: a command waiting to be typed at a restored tab's prompt
+    /// stays ([`crate::session::Session::report`]).
+    pub(crate) fn report_raw(&self, bytes: Vec<u8>) {
+        self.with(|_, p| p.session.report(bytes));
     }
 
     /// Type `text` as a paste: bracketed when the program asked for it.

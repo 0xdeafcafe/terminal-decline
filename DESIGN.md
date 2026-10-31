@@ -421,7 +421,15 @@ running the login shell save one: not a window started with `-e PROGRAM`,
 a pin's or one with `command` in the config (they run their program again
 anyway), nor the Settings tab.
 
-- What is saved (`running::foreground_command`): the arguments of the
+- What is saved (`reload::command_to_type`): first the command line the
+  shell sent with its OSC 133 C mark (`cmdline_url=`, kitty's form; the
+  zsh and fish snippets send it, bash's can't), as typed, so an alias or
+  function stays one and `FOO=1 cmd` keeps its `FOO=1`
+  (`smoke_restart_saves_the_command_as_typed`); else the foreground
+  process's command line, below; else the first line the marks showed on
+  the screen, unless it may have been cut at 200 characters. Text with
+  control characters (a multi-line command) isn't typed.
+- The foreground process's command line (`running::foreground_command`): the arguments of the
   terminal's foreground process group's programs, read with sysctl
   `KERN_PROCARGS2`. A pipeline is its programs that the shell started, in
   the order they started, joined with ` | `. A script run through its
@@ -445,7 +453,8 @@ anyway), nor the Settings tab.
   prompt; OSC 133 isn't needed. It is sent as a paste when the shell has
   bracketed paste on (zsh, bash 5.1+, fish), so key bindings and fish
   abbreviations don't act on it; Enter runs a paste as it does typed text.
-  Anything typed into the tab first cancels it. Tested on a PTY with zsh
+  Anything typed into the tab first cancels it (focus reports the
+  terminal sends by itself don't). Tested on a PTY with zsh
   5.9, bash 3.2 and bash 5 (fish isn't installed here, so its test is
   skipped), with oh-my-zsh's `.zshrc` (shown after about 0.8 s), and in
   the app (`smoke_restore_types_the_command_at_the_prompt`).
@@ -453,7 +462,10 @@ anyway), nor the Settings tab.
 Each pane's history comes back too (`restore_scrollback`,
 `saved_history`): above the new shell it shows what it showed before,
 its screen's rows on the screen and the rest in history, then a faint
-`restored from Sat 31 Oct 14:05` line. As the app restarts, each pane's
+`restored from Sat 31 Oct 14:05` line, which also names the command the
+shell was running then, if any (`restored from Sat 31 Oct 17:12 — was
+running: rush`; written alone when there is no history, as for a pane
+that was on the alternate screen). As the app restarts, each pane's
 newest `restore_scrollback_limit` lines (default 10,000; whole blocks, the
 lines over it hidden again) are written to a file of their own in
 `~/Library/Application Support/terminal-decline/restore/` (folder 0700,

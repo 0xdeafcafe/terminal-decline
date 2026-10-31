@@ -113,16 +113,22 @@ impl Store {
     /// Put the history saved as `name` back into `term`, a new pane's
     /// terminal nothing has been written to, with a faint line saying
     /// when it is from below it. Whatever goes wrong, the pane opens as
-    /// it would have without it.
-    pub fn restore(&self, term: &mut Term, name: &str) {
-        let Some(bytes) = self.take(name) else { return };
-        match term.state.restore_history(&bytes) {
-            Ok(r) if r.lines > 0 => {
-                term.advance(format!("\x1b[0;2m{}\x1b[0m\r\n", restored_line(r.saved_at)).as_bytes());
-                term.state.take_replies();
+    /// it would have without it. With `was_running`, the line says what
+    /// the shell was running then; without history to show, the line is
+    /// still written for it.
+    pub fn restore(&self, term: &mut Term, name: &str, was_running: Option<&str>) {
+        let saved_at = match self.take(name).map(|b| term.state.restore_history(&b)) {
+            Some(Ok(r)) if r.lines > 0 => Some(r.saved_at),
+            Some(Err(e)) => {
+                eprintln!("terminal-decline: restoring scrollback: {e}");
+                None
             }
-            Ok(_) => {}
-            Err(e) => eprintln!("terminal-decline: restoring scrollback: {e}"),
+            _ => None,
+        };
+        match (saved_at, was_running) {
+            (Some(at), command) => write_restored_line(term, at, command),
+            (None, Some(command)) => write_restored_line(term, now(), Some(command)),
+            (None, None) => {}
         }
     }
 
@@ -183,6 +189,39 @@ pub fn restored_line(saved_at: u64) -> String {
     )
 }
 
+/// The most characters of the command [`restored_note`] names.
+const NOTE_COMMAND_MAX: usize = 80;
+
+/// [`restored_line`], and what the shell was running then:
+/// `restored from Sat 31 Oct 17:12 — was running: rush` (its first line,
+/// cut to 80 characters).
+pub fn restored_note(saved_at: u64, was_running: Option<&str>) -> String {
+    let line = restored_line(saved_at);
+    let command = was_running.and_then(|c| c.lines().next()).map(str::trim).filter(|c| !c.is_empty());
+    match command {
+        Some(c) if c.chars().count() > NOTE_COMMAND_MAX => {
+            format!(
+                "{line} — was running: {}…",
+                c.chars().take(NOTE_COMMAND_MAX - 1).collect::<String>()
+            )
+        }
+        Some(c) => format!("{line} — was running: {c}"),
+        None => line,
+    }
+}
+
+/// Write [`restored_note`] into `term`, faint, on a line of its own.
+pub fn write_restored_line(term: &mut Term, saved_at: u64, was_running: Option<&str>) {
+    let note: String = restored_note(saved_at, was_running).chars().filter(|c| !c.is_control()).collect();
+    term.advance(format!("\x1b[0;2m{note}\x1b[0m\r\n").as_bytes());
+    term.state.take_replies();
+}
+
+/// Now, in seconds since 1970.
+pub fn now() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -213,17 +252,56 @@ mod tests {
         assert_eq!(mode(&path), 0o600);
         assert_eq!(mode(s.dir()), 0o700);
         let mut back = Term::new(40, 5, 10_000, term_core::ImagePool::process());
-        s.restore(&mut back, &name);
+        s.restore(&mut back, &name, None);
         assert!(!path.exists(), "deleted once read");
         let dump = back.state.dump();
         assert!(dump.contains("line 99"), "{dump}");
         assert!(dump.contains("restored from "), "{dump}");
+        assert!(!dump.contains("was running"), "{dump}");
         assert_eq!(back.state.scrollback_len(), 100 - 3);
         // Again: nothing there, nothing restored.
         let mut again = Term::new(40, 5, 10_000, term_core::ImagePool::process());
-        s.restore(&mut again, &name);
+        s.restore(&mut again, &name, None);
         assert_eq!(again.state.scrollback_len(), 0);
+        assert!(!again.state.dump().contains("restored from"));
         let _ = std::fs::remove_dir_all(s.dir().parent().unwrap());
+    }
+
+    /// The line says what the shell was running, with history or (none
+    /// saved, as on the alternate screen) without.
+    #[test]
+    fn the_line_says_what_was_running() {
+        let s = store("running");
+        let name = s.save(&term_with_lines(10), 10_000).expect("saved");
+        let mut back = Term::new(80, 5, 10_000, term_core::ImagePool::process());
+        s.restore(&mut back, &name, Some("rush --resume"));
+        let dump = back.state.dump();
+        assert!(dump.contains(" — was running: rush --resume|"), "{dump}");
+        let mut none = Term::new(80, 5, 10_000, term_core::ImagePool::process());
+        s.restore(&mut none, "1-2-3.hist", Some("nvim"));
+        let dump = none.state.dump();
+        assert!(
+            dump.starts_with("restored from ") && dump.contains(" — was running: nvim|"),
+            "{dump}"
+        );
+        let _ = std::fs::remove_dir_all(s.dir().parent().unwrap());
+    }
+
+    #[test]
+    fn the_note_names_the_command_briefly() {
+        let at = 1_700_000_000;
+        assert_eq!(restored_note(at, None), restored_line(at));
+        assert_eq!(restored_note(at, Some("  ")), restored_line(at));
+        assert_eq!(
+            restored_note(at, Some("rush")),
+            format!("{} — was running: rush", restored_line(at))
+        );
+        let long = "x".repeat(200);
+        let note = restored_note(at, Some(&long));
+        assert!(
+            note.ends_with('…') && note.chars().count() == restored_line(at).chars().count() + " — was running: ".chars().count() + 80,
+            "{note}"
+        );
     }
 
     #[test]

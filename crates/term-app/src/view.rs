@@ -680,6 +680,9 @@ pub struct Launch {
     /// One pane's history saved for a restart, shown again above its new
     /// shell ([`crate::saved_history`]); with `layout`, each pane's own.
     pub history: Option<String>,
+    /// The command its shell was running before the restart, said in
+    /// the faint line under that history; with `layout`, each pane's own.
+    pub was_running: Option<String>,
 }
 
 /// The renderer's theme for a window: the Settings tab stays opaque
@@ -776,6 +779,7 @@ impl WindowView {
                     settings,
                     adopt: adopt.take(),
                     history: launch.history.as_deref(),
+                    was_running: launch.was_running.as_deref(),
                 })?;
                 panes.insert(pane_id, pane);
                 first_tree
@@ -811,6 +815,7 @@ impl WindowView {
                         settings: false,
                         adopt: None,
                         history: saved.history.as_deref(),
+                        was_running: saved.command.as_deref().filter(|_| !saved.program),
                     });
                     match made {
                         Ok(pane) => {
@@ -2028,7 +2033,7 @@ impl WindowView {
         });
         if let Some(Some((id, report, view))) = report {
             if report {
-                view.send_raw(if focused { b"\x1b[I".to_vec() } else { b"\x1b[O".to_vec() });
+                view.report_raw(if focused { b"\x1b[I".to_vec() } else { b"\x1b[O".to_vec() });
             }
             self.request_redraw(id);
         }
@@ -2124,6 +2129,7 @@ impl WindowView {
                     settings: false,
                     adopt: None,
                     history: None,
+                    was_running: None,
                 },
             );
             match pane {
@@ -2288,7 +2294,7 @@ impl WindowView {
             self.redraw_all();
         }
         if report {
-            view.send_raw(b"\x1b[I".to_vec());
+            view.report_raw(b"\x1b[I".to_vec());
         }
         self.refresh_title();
         self.request_redraw(pane);
@@ -2507,15 +2513,10 @@ impl WindowView {
         crate::running::foreground_program(pid)
     }
 
-    /// The command line of the program in the focused pane's shell's
-    /// foreground, to save for a restart (see
-    /// [`crate::running::foreground_command`]). Only for a pane running
-    /// the login shell.
+    /// The command the focused pane's shell was running, to save for a
+    /// restart ([`command_to_restore`]).
     pub fn command_to_restore(&self) -> Option<String> {
-        let pid = self
-            .with_state(|st| st.focused().and_then(|p| p.runs_shell.then(|| p.session.pid()).flatten()))
-            .flatten()?;
-        crate::running::foreground_command(pid)
+        self.with_state(|st| st.focused().and_then(|p| command_to_restore(p))).flatten()
     }
 
     /// The panes to save for a restart, when there are several: the tree
@@ -2529,20 +2530,14 @@ impl WindowView {
                 return None;
             }
             let panes = &st.panes;
-            Some(st.tree.save(|id| {
-                match panes.get(&id) {
-                    Some(p) => SavedPane {
-                        cwd: pane_cwd(p),
-                        command: p
-                            .runs_shell
-                            .then(|| p.session.pid())
-                            .flatten()
-                            .and_then(crate::running::foreground_command),
-                        program: p.program,
-                        history: history.and_then(|(store, limit)| save_history(p, store, limit)),
-                    },
-                    None => SavedPane::default(),
-                }
+            Some(st.tree.save(|id| match panes.get(&id) {
+                Some(p) => SavedPane {
+                    cwd: pane_cwd(p),
+                    command: command_to_restore(p),
+                    program: p.program,
+                    history: history.and_then(|(store, limit)| save_history(p, store, limit)),
+                },
+                None => SavedPane::default(),
             }))
         })
         .flatten()
@@ -2889,6 +2884,8 @@ struct NewPane<'a> {
     adopt: Option<crate::ctl::window::Adopt>,
     /// Its history from before a restart, to show again.
     history: Option<&'a str>,
+    /// The command its shell was running then.
+    was_running: Option<&'a str>,
 }
 
 /// Start pane `n` of window `window`: its terminal and program.
@@ -2899,8 +2896,15 @@ fn spawn_pane(window: usize, config: &Config, theme: &Theme, m: term_font::Metri
     t.state.set_cursor_default(config.cursor_style.shape(), config.cursor_blink);
     // Before the program starts: nothing to report yet.
     crate::config::set_term_colors(&mut t.state, theme);
-    if let Some(name) = n.history {
-        crate::saved_history::Store::current().restore(&mut t, name);
+    match n.history {
+        Some(name) => crate::saved_history::Store::current().restore(&mut t, name, n.was_running),
+        // No history to show (the alternate screen, or none saved): the
+        // line alone, so the tab still says what it was running.
+        None => {
+            if let Some(command) = n.was_running {
+                crate::saved_history::write_restored_line(&mut t, crate::saved_history::now(), Some(command));
+            }
+        }
     }
     for notice in n.notices {
         crate::session::write_notice(&mut t, notice);
@@ -2971,6 +2975,24 @@ fn shell_command(config: &Config) -> Command {
 
 /// A pane's working directory: the one its shell reported (OSC 7), else
 /// its foreground program's.
+/// The command pane `p`'s shell was running, to type at the new shell's
+/// prompt after a restart ([`crate::reload::command_to_type`]): the
+/// command line its OSC 133 marks sent, else its foreground process's,
+/// else the text the marks showed. Only for a pane running the login
+/// shell, and only while a command runs: at the prompt, nothing.
+fn command_to_restore(p: &Pane) -> Option<String> {
+    if !p.runs_shell {
+        return None;
+    }
+    let pid = p.session.pid()?;
+    let running = p.activity.running.as_ref();
+    crate::reload::command_to_type(
+        running.and_then(|r| r.line.as_deref()),
+        crate::running::foreground_command(pid),
+        running.and_then(|r| r.command.as_deref()),
+    )
+}
+
 /// Save `p`'s history in `store`, as [`crate::saved_history::Store::save`]
 /// does; not the Settings pane's.
 fn save_history(p: &Pane, store: &crate::saved_history::Store, limit: usize) -> Option<String> {

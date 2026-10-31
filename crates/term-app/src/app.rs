@@ -938,7 +938,7 @@ impl AppDelegate {
                 };
                 // With panes, each pane types its own command.
                 let command = w.command.filter(|_| w.panes.is_none());
-                let opened = self.open_window_as(w.cwd, place, None, false, w.panes, None, w.history);
+                let opened = self.open_window_as(w.cwd, place, None, false, w.panes, None, w.history, command.clone());
                 if let (Some(command), Some(view)) = (command, opened.as_ref().and_then(|o| self.view_of(o))) {
                     view.type_at_prompt(command);
                 }
@@ -1074,7 +1074,7 @@ impl AppDelegate {
             Some(window) => Place::TabOf(window),
             None => Place::Cascade,
         };
-        let opened = self.open_window_as(None, place, None, true, None, None, None);
+        let opened = self.open_window_as(None, place, None, true, None, None, None, None);
         *self.ivars().settings.borrow_mut() = opened;
     }
 
@@ -1154,14 +1154,15 @@ impl AppDelegate {
     /// Open a window in `cwd` (else the configured one) at `place`, running
     /// `argv` (else the configured program).
     fn open_window(&self, cwd: Option<String>, place: Place, argv: Option<Vec<String>>) -> Option<Retained<NSWindow>> {
-        self.open_window_as(cwd, place, argv, false, None, None, None)
+        self.open_window_as(cwd, place, argv, false, None, None, None, None)
     }
 
     /// [`Self::open_window`], or with `settings` the Settings tab: the
     /// main app's binary running the preferences directly (not through
     /// the login shell), titled "Settings", opaque, without notices. With
     /// `layout`, the panes saved for a restart; with `history`, the one
-    /// pane's history saved for it; with `hosted`, an agent API session's
+    /// pane's history saved for it and `was_running`, the command its
+    /// shell was running then; with `hosted`, an agent API session's
     /// window.
     #[allow(clippy::too_many_arguments)]
     fn open_window_as(
@@ -1173,6 +1174,7 @@ impl AppDelegate {
         layout: Option<crate::reload::SavedPanes>,
         hosted: Option<Hosted>,
         history: Option<String>,
+        was_running: Option<String>,
     ) -> Option<Retained<NSWindow>> {
         let mtm = MainThreadMarker::from(self);
         let (config, hosted_command, adopt) = match hosted {
@@ -1333,6 +1335,7 @@ impl AppDelegate {
                 layout,
                 adopt,
                 history,
+                was_running,
             },
         ) {
             eprintln!("terminal-decline: could not open a window: {e}");
@@ -1393,7 +1396,7 @@ impl AppDelegate {
             adopt,
         };
         let window = self
-            .open_window_as(None, Place::Cascade, None, false, None, Some(hosted), None)
+            .open_window_as(None, Place::Cascade, None, false, None, Some(hosted), None, None)
             .ok_or("couldn't open a window")?;
         let Some(view) = self.view_of(&window) else {
             window.close();

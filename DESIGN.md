@@ -311,7 +311,7 @@ Oct 2026, 1.90 → 2.16 MB) and no measurable parse speed.
   and lines are logical, so a word split by a soft wrap is selected whole,
   and dragging after a double- or triple-click grows by words or lines), wheel
   scrolls scrollback, or when the program asks for mouse reporting (1000/1002/
-  1003 + SGR 1006) events go to the program; Shift overrides to select.
+  1003 + SGR 1006) events go to the program; Shift or Option overrides to select.
   A plain click clears the selection and selects nothing: a selection
   starts only once the mouse has moved half a cell width (at least 4
   pixels) from where the button went down (`select::Pending`), so a click

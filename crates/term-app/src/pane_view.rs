@@ -1186,14 +1186,17 @@ impl PaneView {
         )
     }
 
-    /// Whether the program wants this mouse event (Shift forces selection).
+    /// Whether the program wants this mouse event (Shift or Option force
+    /// selection, except on the scroll wheel).
     fn reporting(&self, event: &NSEvent) -> Option<(term_core::MouseMode, bool)> {
-        let shift = event.modifierFlags().contains(NSEventModifierFlags::Shift);
+        let flags = event.modifierFlags();
+        let shift = flags.contains(NSEventModifierFlags::Shift);
+        let option = flags.contains(NSEventModifierFlags::Option) && event.r#type() != NSEventType::ScrollWheel;
         let (mode, sgr) = self.with(|_, p| {
             let t = p.session.lock_term();
             (t.state.modes().mouse, t.state.modes().mouse_sgr)
         })?;
-        mouse::reports(mode, shift).then_some((mode, sgr))
+        mouse::reports(mode, shift, option).then_some((mode, sgr))
     }
 
     /// Whether the program has mouse reporting on (Shift or not).
@@ -1266,9 +1269,10 @@ impl PaneView {
             flags.contains(NSEventModifierFlags::Shift),
             flags.contains(NSEventModifierFlags::Option),
         );
-        // Here with Shift while the program takes the mouse: Shift only
-        // kept the click from it, so this starts a new selection.
-        let gesture = if shift && self.program_takes_mouse() {
+        // Here with Shift or Option while the program takes the mouse:
+        // that only kept the click from it, so this starts a new
+        // selection (a rectangle with Option).
+        let gesture = if (shift || option) && self.program_takes_mouse() {
             select::gesture_over_program(event.clickCount(), option)
         } else {
             select::gesture(event.clickCount(), shift, option)

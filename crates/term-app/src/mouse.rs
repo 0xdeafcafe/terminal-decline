@@ -25,10 +25,12 @@ pub fn modifier_bits(shift: bool, option: bool, ctrl: bool) -> u8 {
     (shift as u8) * 4 + (option as u8) * 8 + (ctrl as u8) * 16
 }
 
-/// Whether events go to the program: it asked for them and Shift isn't held
-/// (Shift forces local selection).
-pub fn reports(mode: MouseMode, shift: bool) -> bool {
-    !shift && mode != MouseMode::Off
+/// Whether events go to the program: it asked for them and neither Shift
+/// nor Option is held (either forces local selection; Option, as in
+/// iTerm2, makes a rectangle). `option` is false for the scroll wheel,
+/// where Option stays the program's.
+pub fn reports(mode: MouseMode, shift: bool, option: bool) -> bool {
+    !shift && !option && mode != MouseMode::Off
 }
 
 /// Whether a button press opens the context menu: a right click, or a
@@ -186,15 +188,18 @@ mod tests {
     #[test]
     fn which_events_are_reported() {
         use MouseMode::*;
-        for (mode, shift, want) in [
-            (Off, false, false),
-            (Click, false, true),
-            (Drag, false, true),
-            (Motion, false, true),
-            (Click, true, false),
-            (Motion, true, false),
+        for (mode, shift, option, want) in [
+            (Off, false, false, false),
+            (Click, false, false, true),
+            (Drag, false, false, true),
+            (Motion, false, false, true),
+            (Click, true, false, false),
+            (Motion, true, false, false),
+            (Click, false, true, false),
+            (Drag, false, true, false),
+            (Drag, true, true, false),
         ] {
-            assert_eq!(reports(mode, shift), want, "{mode:?} shift={shift}");
+            assert_eq!(reports(mode, shift, option), want, "{mode:?} shift={shift} option={option}");
         }
         for (mode, held, want) in [
             (Off, None, false),

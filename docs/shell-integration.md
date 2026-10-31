@@ -108,7 +108,8 @@ on the rows of the line being edited (a line that wraps counts as one), while
 no command is running. A click past the end of the text moves to the end.
 Anywhere else, with no marks, or on a command line of several lines, the
 Option-click is the usual rectangular selection. Shift, Cmd or Ctrl held
-with Option, or a program that has taken the mouse, leave it alone too.
+with Option leave it alone too. Over a program that has taken the mouse,
+Option-drag makes a rectangular selection (as Shift+Option-drag does).
 
 With no prompt that way, or no output to select, the app beeps. The
 shortcuts can be changed in `[keybind]` (`previous_prompt`,

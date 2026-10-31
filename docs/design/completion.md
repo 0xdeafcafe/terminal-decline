@@ -17,10 +17,10 @@ While you type a command line at the shell's prompt, decline:
    (git branches, ssh hosts, make targets…) and shows its answers in the
    same list.
 
-Done when: all three work in zsh started by the app, with typing latency
-unchanged (`scripts/pressure/run.py` and the latency probe, before and
-after), no frame-time change while not at a prompt, and the list and
-colours tested as below (§10). bash and fish get 1 and 2 from the screen
+Done when: all three work in zsh started by the app; each can be turned
+off on its own in Settings (§10); every budget in §11 is met and
+measured (nothing when off or unused, typing latency unchanged when on);
+and the list and colours are tested as below (§12). bash and fish get 1 and 2 from the screen
 (§3.3), without Tab-to-zsh.
 
 ## 1. Decisions (Alex, 31 Oct 2026)
@@ -265,10 +265,87 @@ that doesn't know `--help` would just run.
 - Taking a choice types into the PTY, as Option-click does: Backspaces
   for the part of the word that differs (usually none), then the rest.
   Bracketed paste isn't used, so the shell's own widgets see keys.
-- Settings (live): `completion = true`, `completion_delay = 150`,
-  `highlight_command_line = true`, `[keybind] completion_*`.
 
-## 10. Tests
+## 10. Settings
+
+Each part can be turned off by itself, in `config.toml` and in Settings
+(Cmd+,) in a new **Completion** section of term-prefs' schema, next to
+Shell integration. All are live: a change applies to open tabs at the
+next keystroke, without a restart.
+
+| Key | Default | Range | Does |
+|---|---|---|---|
+| `highlight_command_line` | true | bool | colours the command line (§5) |
+| `completion` | true | bool | the list (§9); off turns off everything below |
+| `completion_files` | true | bool | files and folders in the list |
+| `completion_commands` | true | bool | commands in the list |
+| `completion_flags` | true | bool | flags and subcommands from man pages |
+| `completion_tab_zsh` | true | bool | Tab asks zsh (§7); off leaves Tab to zsh as today |
+| `completion_delay` | 150 | 0–2000 ms | pause before the list opens |
+| `completion_rows` | 8 | 3–20 | choices shown before it scrolls |
+| `completion_ghost_text` | true | bool | the top choice grey after the cursor |
+| `completion_history_order` | true | bool | commands by how often you ran them |
+| `[keybind] completion_next`, `completion_previous`, `completion_accept`, `completion_close` | Down, Up, Tab, Esc | chords | the list's keys |
+
+With `highlight_command_line` and `completion` both off, the app gives
+the shell no token (§3.1), so new shells don't install the line hook and
+send nothing; shells already open keep sending until they exit, and the
+app drops their reports after one match arm in the OSC parser (§11).
+`shell_integration = false` turns all of it off, as it does the marks.
+
+## 11. Cost and how it is measured
+
+The rule: **off costs nothing, and on but unused costs nothing either**.
+Only typing at a prompt pays, and it must not show in keypress-to-screen
+latency.
+
+What each state may cost:
+
+| State | Allowed cost |
+|---|---|
+| Off (both settings) | none: no thread, no timer, no cache, no shell hook in new shells; binary size only |
+| On, a program running (flood, `vim`, `cargo build`) | one branch per frame (`line_colors` is `None`) and an OSC arm never hit; parse and frame benchmarks unchanged within noise |
+| On, idle at a prompt | 0 wakeups and 0.0% CPU: no polling and no timer armed; the pause timer is a one-shot armed by a keystroke |
+| On, typing | per keystroke on the main thread: read the line and colour it ≤ 20 µs for a 200-character line; latency p50 and p99 unchanged within noise |
+| List open | ≤ 50 µs added to a frame; sources answer off the main thread |
+
+Threads and memory:
+- The background thread is started on first use in a window, blocks on
+  its channel while idle (no wakeups), and exits after 60 s unused, its
+  caches with it.
+- Caches are bounded: 64 folders, 32 parsed man pages and one PATH list
+  per window in memory; the man cache on disk is capped at 20 MB, oldest
+  first. History is read from its end, at most 10,000 lines.
+- Budgets: footprint unchanged with both settings off; ≤ 2 MB per
+  process after a session of use with every cache warm; release binary
+  ≤ +200 KB.
+
+New benchmarks (criterion, in the PRs that add the code):
+- `term-core` `parse`: a typing session with 7701 reports between the
+  keystrokes' echoes, against the same input without them.
+- `term-app` (new `benches/complete.rs`): `lex` on lines of 20, 200 and
+  4,000 characters; ranking 3,000 commands against a prefix; the man
+  readers on the `ls`, `openrsync` and `git-checkout` fixtures.
+- `term-render` `frame`: a prompt row with colours and with none; the
+  list open (8 rows, detail pane) and closed.
+
+Before and after, with `uptime` load noted (and a #perfwindow chirp):
+- `cargo bench -p term-core`, `cargo bench -p term-render`, the new
+  `term-app` bench;
+- `scripts/latency/run.py` typing at a zsh prompt with everything on,
+  and with everything off, against main;
+- `scripts/pressure/run.py` with everything on: must match main, since
+  nothing runs while a program floods;
+- `/usr/bin/footprint -p <pid>` off, on and idle, on after use;
+- `top -stats idlew` on an idle tab at a prompt: 0 wakeups;
+- zsh's side: the hook timed over 1,000 redraws (`zmodload zsh/zprof`),
+  ≤ 50 µs each, so the shell's own echo doesn't slow down.
+
+A PR that misses a budget doesn't land until it meets it or Alex agrees
+to the number. The results go in §15 as each PR lands, and in DESIGN.md
+at the end of the phase.
+
+## 12. Tests
 
 - Unit tables: `lex` (quotes, operators, command positions, `sudo`,
   broken input → `Nothing`); quoting of taken names; the 7701 parser
@@ -281,22 +358,31 @@ that doesn't know `--help` would just run.
   that Tab falls back without the app.
 - One smoke test (CI): type `ls -` in zsh, wait, check the dump shows
   the list with `-l`, Tab, check the line reads `ls -l`.
-- Measurement: latency probe and `scripts/pressure/run.py` before and
-  after the colouring PR and the list PR; footprint with the caches warm.
+- Settings: each key in §10 off gives no colours / no entries of its
+  kind (dump checks); both off gives no token in a new shell's
+  environment; the schema lists every key (term-prefs' schema test).
+- Measurement: §11.
 
-## 11. PRs
+## 13. PRs
+
+Each PR adds its settings to the schema and its benchmarks, and puts the
+before-and-after numbers in its description.
 
 1. core + shell: 7701 parsing, token, `take_line`/`take_shell_env`;
-   zsh reports.
-2. app: `complete::lex` and `At`, with tables.
-3. render + app: colouring (§5), `highlight_command_line`. Benchmarks.
-4. app + render: the list, keys, files and commands sources.
-5. app: man page readers, flags and subcommands, cache.
+   zsh reports. Parse bench with reports; zsh hook timing.
+2. app: `complete::lex` and `At`, with tables; `benches/complete.rs`.
+3. render + app: colouring (§5), `highlight_command_line`. Frame bench,
+   latency, pressure.
+4. app + render: the list, keys, files and commands sources, the
+   Completion section in Settings. Frame bench with the list, latency,
+   idle wakeups, footprint.
+5. app: man page readers, flags and subcommands, cache. Reader bench,
+   footprint with the cache warm, disk cap.
 6. shell + app: Tab asks zsh (§7).
 7. app: Read Flags from --help (§8).
 8. app: bash and fish from the screen (§3.3); docs/shell-integration.md.
 
-## 12. Open questions for Alex
+## 14. Open questions for Alex
 
 1. The grey text after the cursor for the top choice (fish-style): on,
    or only the list?
@@ -305,3 +391,8 @@ that doesn't know `--help` would just run.
 3. On by default for everyone, or off until 1.0?
 4. Enter while the list is open: runs the line as typed (decided), or
    should it take the choice when you've moved in the list with Up/Down?
+
+## 15. Measurements
+
+None yet: each PR adds its numbers here as it lands (machine, `uptime`
+load, before and after).

@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 # Build Terminal Decline and install it as ~/Applications/Terminal Decline.app
 # for daily use. A running dogfood build notices the new one and restarts into
-# it, reopening its windows in the same folders and places.
+# it, reopening its windows in the same folders and places, but never under a
+# running program: it waits until every tab is at its prompt and nobody has
+# used it for a couple of minutes, or for Terminal Decline > Restart to Update
+# (crates/term-app/src/reload.rs). With --now it restarts at once, for when
+# nobody is using it.
 #
 # The bundle is the shipping layout (docs/design/pins.md §2): the launcher,
 # libterminal_decline.dylib and the pin stub. It also writes
@@ -19,8 +23,9 @@
 # The app runs this itself to update (Terminal Decline > Update to Latest),
 # with DECLINE_DOGFOOD_DIR set to the folder it is installed in.
 #
-# Usage: scripts/dogfood.sh [--open]
+# Usage: scripts/dogfood.sh [--open] [--now]
 #   --open   start it after installing (otherwise only a running copy restarts)
+#   --now    a running copy restarts into it at once, ending what runs in it
 set -euo pipefail
 
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -28,7 +33,17 @@ apps="${DECLINE_DOGFOOD_DIR:-$HOME/Applications}"
 dest="$apps/Terminal Decline.app"
 old_app="$apps/Decline.app"
 open_after=0
-[[ "${1:-}" == "--open" ]] && open_after=1
+now=0
+for arg in "$@"; do
+  case "$arg" in
+    --open) open_after=1 ;;
+    --now) now=1 ;;
+    *) echo "usage: scripts/dogfood.sh [--open] [--now]" >&2; exit 2 ;;
+  esac
+done
+# Read by the running copy when it sees the new build (reload::RESTART_NOW),
+# and only if just written: restart now, whatever runs.
+restart_now="$HOME/Library/Caches/terminal-decline/restart-now"
 
 cd "$repo"
 # The library, then the launcher and stub in a cargo run of their own (their
@@ -45,6 +60,12 @@ trap 'rm -rf "$stage"' EXIT
 DOGFOOD=1 DOGFOOD_REPO="$repo" DOGFOOD_COMMIT="$(git rev-parse HEAD)" CODESIGN_IDENTITY="${DECLINE_DOGFOOD_IDENTITY:--}" scripts/bundle.sh "$stage" "$version" >/dev/null
 
 mkdir -p "$apps"
+if [[ $now == 1 ]]; then
+  mkdir -p "$(dirname "$restart_now")"
+  touch "$restart_now"
+else
+  rm -f "$restart_now"
+fi
 # Swap in the new bundle, then remove the old one: removing the old
 # executable is what the running copy is waiting for.
 if [[ -d "$dest" ]]; then
@@ -55,6 +76,13 @@ rm -rf "$dest.old"
 lsregister=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 "$lsregister" -f "$dest" || true
 echo "installed $dest ($version)"
+if pgrep -f "$dest/Contents/MacOS/terminal-decline" >/dev/null; then
+  if [[ $now == 1 ]]; then
+    echo "installed; the app restarts into it now"
+  else
+    echo "installed; the app restarts when you're idle, or use Restart to Update"
+  fi
+fi
 
 # Where pins look first for the app (crates/term-pin/FROZEN.md): always
 # $HOME/.config, whatever XDG_CONFIG_HOME says, as a Dock launch has none.

@@ -274,6 +274,23 @@ pub const RESTART_IDLE: Duration = Duration::from_secs(120);
 /// the smoke tests.
 pub const TEST_IDLE_ENV: &str = "DECLINE_TEST_RESTART_IDLE";
 
+/// Written by `scripts/dogfood.sh --now` just before it installs, under
+/// `$HOME`: the running build restarts into the new one at once, whatever
+/// runs ([`take_restart_now`]).
+pub const RESTART_NOW: &str = "Library/Caches/terminal-decline/restart-now";
+
+/// Whether the install just seen asked to restart at once
+/// ([`RESTART_NOW`] in `home`, written in the last minute); the file is
+/// removed either way, so only this install's counts.
+pub fn take_restart_now(home: &Path) -> bool {
+    let file = home.join(RESTART_NOW);
+    let fresh = std::fs::metadata(&file)
+        .and_then(|m| m.modified())
+        .is_ok_and(|t| t.elapsed().is_ok_and(|e| e < Duration::from_secs(60)));
+    let _ = std::fs::remove_file(&file);
+    fresh
+}
+
 /// One pane as the restart sees it, read when deciding (nothing polls).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PaneNow {
@@ -358,6 +375,25 @@ mod tests {
             ..PaneNow::default()
         };
         assert_eq!(busy(&p).as_deref(), Some("htop"));
+    }
+
+    #[test]
+    fn restart_now_counts_once_and_only_fresh() {
+        let home = std::env::temp_dir().join(format!("terminal-decline-restart-now-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        assert!(!take_restart_now(&home), "no file");
+        let file = home.join(RESTART_NOW);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, b"").unwrap();
+        assert!(take_restart_now(&home));
+        assert!(!file.exists() && !take_restart_now(&home), "only once");
+        // Left by an install long ago that no running build saw.
+        std::fs::write(&file, b"").unwrap();
+        let old = std::time::SystemTime::now() - Duration::from_secs(3600);
+        std::fs::File::options().write(true).open(&file).unwrap().set_modified(old).unwrap();
+        assert!(!take_restart_now(&home));
+        assert!(!file.exists());
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]

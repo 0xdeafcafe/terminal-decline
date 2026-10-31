@@ -38,8 +38,12 @@ Use [Conventional Commits](https://www.conventionalcommits.org/):
 
 Alex uses `~/Applications/Terminal Decline.app`, installed by `scripts/dogfood.sh`.
 After merging changes to `main` that affect the app, run
-`scripts/dogfood.sh`: the running copy restarts into the new build and
-reopens its windows in the same folders and places. The bundle is the
+`scripts/dogfood.sh`: it installs, and the running copy restarts into
+the new build and reopens its windows in the same folders and places,
+but only once every tab is at its prompt and nobody has used it for a
+couple of minutes (or when Alex picks Restart to Update); it never ends a
+program he is running. `--now` restarts it at once, only for when nobody
+is using it. The bundle is the
 launcher, `Frameworks/libterminal_decline.dylib` and the pin stub in
 `Helpers/`; the restart watches the library. It then runs `pin --repair`,
 which rebuilds clone pins as stub pins (asking first, since macOS resets a

@@ -660,6 +660,14 @@ impl AppDelegate {
             }
             nb.pending = true;
         }
+        // `scripts/dogfood.sh --now`: nobody is using it, restart at once
+        // (never under the test control, whose HOME is the user's).
+        let test = std::env::var_os(crate::control::ENV).is_some_and(|v| !v.is_empty());
+        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+        if !test && home.is_some_and(|h| crate::reload::take_restart_now(&h)) {
+            self.restart_into_new_build();
+            return;
+        }
         self.consider_restart();
     }
 

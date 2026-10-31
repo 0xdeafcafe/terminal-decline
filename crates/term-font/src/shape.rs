@@ -571,7 +571,7 @@ impl Fonts {
 
     /// The key for a glyph CTLine picked: 2 cells for colour glyphs.
     fn font_key(&self, font: FontId, glyph: CGGlyph) -> GlyphKey {
-        let color = self.registry.borrow().faces[font as usize].color;
+        let color = self.core.reg().faces[font as usize].color;
         GlyphKey {
             font,
             glyph,

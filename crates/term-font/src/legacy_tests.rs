@@ -9,7 +9,7 @@ fn old_rasterize(f: &Fonts, ch: char, style: Style) -> Option<RasterGlyph> {
     if let Some(id) = SpriteId::for_char(ch) {
         return sprite::rasterize(id, &f.metrics, 1);
     }
-    let base = f.registry.borrow().faces[style as usize].font.clone();
+    let base = f.core.reg().faces[style as usize].font.clone();
     let (font, glyph) = glyph_for(&base, ch)?;
     let color = unsafe { font.symbolic_traits() }.contains(CTFontSymbolicTraits::ColorGlyphsTrait);
 
@@ -42,7 +42,15 @@ fn old_rasterize(f: &Fonts, ch: char, style: Style) -> Option<RasterGlyph> {
     let owned = unsafe {
         if color {
             let info = CGImageAlphaInfo::PremultipliedFirst.0 | CGImageByteOrderInfo::Order32Little.0;
-            CGBitmapContextCreate(data.as_mut_ptr() as *mut c_void, width, height, 8, width * 4, Some(&f.rgb), info)
+            CGBitmapContextCreate(
+                data.as_mut_ptr() as *mut c_void,
+                width,
+                height,
+                8,
+                width * 4,
+                Some(&f.core.rgb),
+                info,
+            )
         } else {
             CGBitmapContextCreate(
                 data.as_mut_ptr() as *mut c_void,

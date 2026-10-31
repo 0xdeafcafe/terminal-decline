@@ -205,29 +205,22 @@ impl Registry {
         Some(id)
     }
 
-    /// `ch` in `style`, through the per-character cache.
-    pub fn resolve(&mut self, ch: char, style: Style) -> Resolved {
-        let cached = if ch.is_ascii() {
+    /// What `ch` in `style` resolved to, if it has been looked up.
+    pub fn cached(&self, ch: char, style: Style) -> Option<Resolved> {
+        if ch.is_ascii() {
             self.ascii[style as usize][ch as usize]
         } else {
             self.other.get(&(ch, style)).copied()
-        };
-        if let Some(r) = cached {
-            return r;
         }
-        let face = &self.faces[style as usize].font;
-        let found = if self.line_lookup[style as usize] {
-            crate::glyph_by_line(face, ch).or_else(|| crate::glyph_for(face, ch))
-        } else {
-            crate::glyph_for(face, ch)
-        };
-        let r = found.and_then(|(font, glyph)| Some((self.id(&font)?, glyph)));
+    }
+
+    /// Remember what `ch` in `style` resolved to.
+    pub fn store(&mut self, ch: char, style: Style, r: Resolved) {
         if ch.is_ascii() {
             self.ascii[style as usize][ch as usize] = Some(r);
         } else {
             self.other.insert((ch, style), r);
         }
-        r
     }
 }
 

@@ -21,6 +21,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::ptr::NonNull;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use detect::Ligating;
 use objc2_core_foundation::{CFArray, CFDictionary, CFIndex, CFRange, CFRetained, CFString, CGFloat, CGPoint, CGRect, CGSize, Type};
@@ -78,20 +79,63 @@ pub struct RasterGlyph {
     pub data: Vec<u8>,
 }
 
-pub struct Fonts {
-    /// The four configured faces (ids 0–3) and every fallback since.
-    registry: RefCell<registry::Registry>,
-    /// Shaped grapheme clusters, by face and text (§10.2).
-    clusters: RefCell<shape::ClusterCache>,
-    pub metrics: Metrics,
+/// What finding and rasterising a glyph needs, shared with
+/// [`GlyphFinder`]s on other threads (roadmap R.1): the registry, behind a
+/// lock held only for its lookups and inserts, never while Core Text
+/// searches for a fallback or draws, and what rasterising reads.
+struct Core {
+    /// The four configured faces (ids 0–3) and every fallback since. One
+    /// registry for every thread, so a font gets one id whichever thread
+    /// met it first.
+    registry: Mutex<registry::Registry>,
+    metrics: Metrics,
     /// Pixels coverage glyphs move right to stay centred in a cell made
     /// wider or narrower than the advance ([`CellWidth`]); 0 by default.
     x_shift: i32,
     /// Ids of the fonts on the user's fallback list that were found.
     fallback_ids: Vec<FontId>,
+    rgb: CFRetained<CGColorSpace>,
+    /// The regular face's advance in pixels, which [`GlyphKey::SCALED`]
+    /// glyphs are stretched from to the cell width.
+    advance: f64,
+}
+
+// Core Text fonts and colour spaces are immutable and documented as
+// thread-safe; the registry is behind its lock.
+unsafe impl Send for Core {}
+unsafe impl Sync for Core {}
+
+/// The part of a [`Fonts`] that finds and rasterises glyphs, for another
+/// thread (roadmap R.1): [`GlyphFinder::glyph_key`] and
+/// [`GlyphFinder::rasterize_key`] give what the `Fonts` they came from
+/// gives, with the same font ids, as both use one registry.
+#[derive(Clone)]
+pub struct GlyphFinder(Arc<Core>);
+
+impl GlyphFinder {
+    /// [`Fonts::glyph_key`].
+    pub fn glyph_key(&self, ch: char, style: Style) -> Option<GlyphKey> {
+        self.0.glyph_key(ch, style)
+    }
+
+    /// [`Fonts::cached_glyph_key`].
+    pub fn cached_glyph_key(&self, ch: char, style: Style) -> Option<Option<GlyphKey>> {
+        self.0.cached_glyph_key(ch, style)
+    }
+
+    /// [`Fonts::rasterize_key`].
+    pub fn rasterize_key(&self, key: GlyphKey) -> Option<RasterGlyph> {
+        self.0.rasterize_key(key)
+    }
+}
+
+pub struct Fonts {
+    core: Arc<Core>,
+    /// Shaped grapheme clusters, by face and text (§10.2).
+    clusters: RefCell<shape::ClusterCache>,
+    pub metrics: Metrics,
     /// Config font names that weren't found.
     missing: Vec<String>,
-    rgb: CFRetained<CGColorSpace>,
     /// Per face, the registry's id for its font: a cell is the face's to
     /// shape in a run when its character resolves to this id. Not
     /// [`Fonts::face_id`]: in a family with no bold, the bold face is the
@@ -106,9 +150,6 @@ pub struct Fonts {
     /// Whether [`Fonts::features`] reports `runs`: off until the renderer
     /// draws ligatures (B1.2).
     allow_runs: bool,
-    /// The regular face's advance in pixels, which [`GlyphKey::SCALED`]
-    /// glyphs are stretched from to the cell width.
-    advance: f64,
     /// Per face, the CTLine attributes: its font.
     line_attrs: [CFRetained<CFDictionary<CFString, CTFont>>; 4],
     /// Buffers `shape` reuses, so shaping a run allocates nothing.
@@ -194,18 +235,21 @@ impl Fonts {
         let fallback_ids = fallbacks.iter().filter_map(|f| registry.id(f)).collect();
         let face_ids = Style::ALL.map(|s| registry.id(&face_fonts[s as usize]).unwrap_or(s as FontId));
         let mut fonts = Fonts {
-            registry: RefCell::new(registry),
+            core: Arc::new(Core {
+                registry: Mutex::new(registry),
+                metrics,
+                x_shift,
+                fallback_ids,
+                rgb: CGColorSpace::new_device_rgb().expect("rgb colour space"),
+                advance,
+            }),
             clusters: RefCell::new(shape::ClusterCache::new(shape::ClusterCache::CAP)),
             metrics,
-            x_shift,
-            fallback_ids,
             missing,
-            rgb: CGColorSpace::new_device_rgb().expect("rgb colour space"),
             face_ids,
             runs: [false; 4],
             ligating: Default::default(),
             allow_runs: false,
-            advance,
             line_attrs,
             scratch: RefCell::new(shape::Scratch::default()),
             scaled: RefCell::new(HashMap::new()),
@@ -266,7 +310,7 @@ impl Fonts {
         };
         let in_set = |g: CGGlyph| g != 0 && glyphs.binary_search(&g).is_ok();
         // With the user's features, ASCII may resolve to other glyphs.
-        let featured = self.registry.borrow().line_lookup[style as usize];
+        let featured = self.core.reg().line_lookup[style as usize];
         let face_id = self.face_ids[style as usize];
         let resolved =
             |ch: char| featured && ch.is_ascii_graphic() && self.glyph_key(ch, style).is_some_and(|k| k.font == face_id && in_set(k.glyph));
@@ -341,7 +385,7 @@ impl Fonts {
     #[doc(hidden)]
     pub fn redetect_runs(&self, features: &[(Tag, u32)]) -> [bool; 4] {
         let faces = {
-            let reg = self.registry.borrow();
+            let reg = self.core.reg();
             [0, 1, 2, 3].map(|i| reg.faces[i].font.clone())
         };
         self.detect_runs(&faces, features)
@@ -398,20 +442,14 @@ impl Fonts {
     /// PostScript name of font `id`, e.g. "Menlo-Bold": which face an
     /// override or a fallback actually loaded.
     pub fn postscript_name_of(&self, id: FontId) -> Option<String> {
-        let reg = self.registry.borrow();
+        let reg = self.core.reg();
         let face = reg.faces.get(id as usize)?;
         Some(unsafe { face.font.post_script_name() }.to_string())
     }
 
-    /// An icon, fitted to its cells ([`fit`]): a Private Use Area
-    /// character, or a symbol drawn from a font on the fallback list.
-    pub(crate) fn is_icon(&self, ch: char, font: FontId) -> bool {
-        fit::is_private_use(ch) || (fit::is_symbol(ch) && self.fallback_ids.contains(&font))
-    }
-
     /// Whether glyph `glyph` of font `font` has ink wider than one cell.
     pub(crate) fn wider_than_cell(&self, font: FontId, glyph: CGGlyph) -> bool {
-        let reg = self.registry.borrow();
+        let reg = self.core.reg();
         let Some(face) = reg.faces.get(font as usize) else { return false };
         let mut g = glyph;
         let mut rect = CGRect::default();
@@ -430,14 +468,14 @@ impl Fonts {
     /// Family name of the font that draws `ch`: the loaded one, or the system
     /// fallback Core Text picks for it.
     pub fn family_for(&self, ch: char, style: Style) -> Option<String> {
-        let (id, _) = self.registry.borrow_mut().resolve(ch, style)?;
+        let (id, _) = self.core.resolve(ch, style)?;
         self.family_of(id)
     }
 
     /// Family name of font `id`; `None` for [`SPRITE_FONT`] and ids never
     /// handed out.
     pub fn family_of(&self, id: FontId) -> Option<String> {
-        let reg = self.registry.borrow();
+        let reg = self.core.reg();
         let face = reg.faces.get(id as usize)?;
         Some(unsafe { face.font.family_name() }.to_string())
     }
@@ -451,13 +489,13 @@ impl Fonts {
     /// `CFEqual`) always gets the same id. For fonts Core Text picks while
     /// shaping (F2.2). `None` only once 65535 fonts are registered.
     pub fn font_id(&self, font: &CTFont) -> Option<FontId> {
-        self.registry.borrow_mut().id(font)
+        self.core.reg().id(font)
     }
 
     /// Horizontal advance of `ch`, in device pixels.
     pub fn advance(&self, ch: char, style: Style) -> Option<f64> {
-        let (id, mut g) = self.registry.borrow_mut().resolve(ch, style)?;
-        let reg = self.registry.borrow();
+        let (id, mut g) = self.core.resolve(ch, style)?;
+        let reg = self.core.reg();
         let font = &reg.faces[id as usize].font;
         let mut adv = CGSize::default();
         unsafe { font.advances_for_glyphs(CTFontOrientation::Horizontal, NonNull::from(&mut g), &mut adv, 1) };
@@ -470,18 +508,22 @@ impl Fonts {
     /// `None` when no font has the character. Lookups are cached per
     /// character and style.
     pub fn glyph_key(&self, ch: char, style: Style) -> Option<GlyphKey> {
-        if let Some(id) = SpriteId::for_char(ch) {
-            return Some(GlyphKey::sprite(id, 1));
-        }
-        let (font, glyph) = self.registry.borrow_mut().resolve(ch, style)?;
-        let color = self.registry.borrow().faces[font as usize].color;
-        let fitted = !color && self.is_icon(ch, font);
-        Some(GlyphKey {
-            font,
-            glyph,
-            cells: if color { 2 } else { 1 },
-            variant: if fitted { GlyphKey::FITTED } else { 0 },
-        })
+        self.core.glyph_key(ch, style)
+    }
+
+    /// [`Fonts::glyph_key`] if it needs nothing but the lookup cache:
+    /// `None` when the character hasn't been looked up in `style` yet
+    /// (finding it may take Core Text's fallback search, milliseconds),
+    /// `Some(None)` when no font has it.
+    pub fn cached_glyph_key(&self, ch: char, style: Style) -> Option<Option<GlyphKey>> {
+        self.core.cached_glyph_key(ch, style)
+    }
+
+    /// The part of these fonts that finds and rasterises glyphs, for
+    /// another thread; it shares their registry (font ids) and lookup
+    /// cache.
+    pub fn finder(&self) -> GlyphFinder {
+        GlyphFinder(self.core.clone())
     }
 
     /// The glyph for `ch`: a coverage bitmap (or BGRA for colour glyphs),
@@ -499,13 +541,119 @@ impl Fonts {
     /// ([`GlyphKey::FITTED`]) are scaled down and centred in them and never
     /// reach past them.
     pub fn rasterize_key(&self, key: GlyphKey) -> Option<RasterGlyph> {
+        self.core.rasterize_key(key)
+    }
+
+    /// Whether split glyph `glyph` of font `font`, drawn at its cell's
+    /// origin, would have ink 1 pixel or more off where the cell grid puts
+    /// it: x at the font's size lands at x + the centring shift, and
+    /// belongs at x × cell width / advance (ligatures design §3). Glyphs
+    /// whose ink stays in their own cell are within that whenever plain
+    /// glyphs are. Cached per glyph.
+    pub(crate) fn needs_scaling(&self, font: FontId, glyph: CGGlyph) -> bool {
+        let k = self.core.x_scale();
+        if (k - 1.0).abs() < 1e-9 {
+            return false;
+        }
+        if let Some(&s) = self.scaled.borrow().get(&(font, glyph)) {
+            return s;
+        }
+        let rect = {
+            let reg = self.core.reg();
+            let Some(face) = reg.faces.get(font as usize) else { return false };
+            let mut g = glyph;
+            let mut rect = CGRect::default();
+            unsafe {
+                face.font
+                    .bounding_rects_for_glyphs(CTFontOrientation::Horizontal, NonNull::from(&mut g), &mut rect, 1)
+            };
+            rect
+        };
+        let off = |x: f64| (x + self.core.x_shift as f64 - x * k).abs();
+        let s = rect.size.width > 0.0 && off(rect.origin.x).max(off(rect.origin.x + rect.size.width)) >= 1.0;
+        self.scaled.borrow_mut().insert((font, glyph), s);
+        s
+    }
+}
+
+impl Core {
+    fn reg(&self) -> MutexGuard<'_, registry::Registry> {
+        // A panic elsewhere can't leave the registry half changed: each
+        // change is one insert.
+        self.registry.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// `ch` in `style`, through the per-character cache, with Core Text's
+    /// lookup done without the lock.
+    fn resolve(&self, ch: char, style: Style) -> registry::Resolved {
+        let (face, line) = {
+            let reg = self.reg();
+            if let Some(r) = reg.cached(ch, style) {
+                return r;
+            }
+            (reg.faces[style as usize].font.clone(), reg.line_lookup[style as usize])
+        };
+        let found = if line {
+            glyph_by_line(&face, ch).or_else(|| glyph_for(&face, ch))
+        } else {
+            glyph_for(&face, ch)
+        };
+        let mut reg = self.reg();
+        let r = found.and_then(|(font, glyph)| Some((reg.id(&font)?, glyph)));
+        reg.store(ch, style, r);
+        r
+    }
+
+    /// An icon, fitted to its cells ([`fit`]): a Private Use Area
+    /// character, or a symbol drawn from a font on the fallback list.
+    fn is_icon(&self, ch: char, font: FontId) -> bool {
+        fit::is_private_use(ch) || (fit::is_symbol(ch) && self.fallback_ids.contains(&font))
+    }
+
+    fn key_for(&self, ch: char, (font, glyph): (FontId, CGGlyph)) -> GlyphKey {
+        let color = self.reg().faces[font as usize].color;
+        let fitted = !color && self.is_icon(ch, font);
+        GlyphKey {
+            font,
+            glyph,
+            cells: if color { 2 } else { 1 },
+            variant: if fitted { GlyphKey::FITTED } else { 0 },
+        }
+    }
+
+    fn glyph_key(&self, ch: char, style: Style) -> Option<GlyphKey> {
+        if let Some(id) = SpriteId::for_char(ch) {
+            return Some(GlyphKey::sprite(id, 1));
+        }
+        let found = self.resolve(ch, style)?;
+        Some(self.key_for(ch, found))
+    }
+
+    fn cached_glyph_key(&self, ch: char, style: Style) -> Option<Option<GlyphKey>> {
+        if let Some(id) = SpriteId::for_char(ch) {
+            return Some(Some(GlyphKey::sprite(id, 1)));
+        }
+        let found = self.reg().cached(ch, style)?;
+        Some(found.map(|f| self.key_for(ch, f)))
+    }
+
+    /// Cell width / advance: how much [`GlyphKey::SCALED`] glyphs are
+    /// stretched.
+    fn x_scale(&self) -> f64 {
+        self.metrics.cell_width as f64 / self.advance
+    }
+
+    fn rasterize_key(&self, key: GlyphKey) -> Option<RasterGlyph> {
         if let Some(id) = key.sprite_id() {
             return sprite::rasterize(id, &self.metrics, key.cells as u32);
         }
-        let reg = self.registry.borrow();
-        let face = reg.faces.get(key.font as usize)?;
-        let font = &face.font;
-        let color = face.color;
+        // Drawn without the lock: the font is retained.
+        let (font, color) = {
+            let reg = self.reg();
+            let face = reg.faces.get(key.font as usize)?;
+            (face.font.clone(), face.color)
+        };
+        let font = &*font;
 
         let mut g = key.glyph;
         let mut rect = CGRect::default();
@@ -578,43 +726,6 @@ impl Fonts {
             color,
             data,
         })
-    }
-
-    /// Cell width / advance: how much [`GlyphKey::SCALED`] glyphs are
-    /// stretched.
-    fn x_scale(&self) -> f64 {
-        self.metrics.cell_width as f64 / self.advance
-    }
-
-    /// Whether split glyph `glyph` of font `font`, drawn at its cell's
-    /// origin, would have ink 1 pixel or more off where the cell grid puts
-    /// it: x at the font's size lands at x + the centring shift, and
-    /// belongs at x × cell width / advance (ligatures design §3). Glyphs
-    /// whose ink stays in their own cell are within that whenever plain
-    /// glyphs are. Cached per glyph.
-    pub(crate) fn needs_scaling(&self, font: FontId, glyph: CGGlyph) -> bool {
-        let k = self.x_scale();
-        if (k - 1.0).abs() < 1e-9 {
-            return false;
-        }
-        if let Some(&s) = self.scaled.borrow().get(&(font, glyph)) {
-            return s;
-        }
-        let rect = {
-            let reg = self.registry.borrow();
-            let Some(face) = reg.faces.get(font as usize) else { return false };
-            let mut g = glyph;
-            let mut rect = CGRect::default();
-            unsafe {
-                face.font
-                    .bounding_rects_for_glyphs(CTFontOrientation::Horizontal, NonNull::from(&mut g), &mut rect, 1)
-            };
-            rect
-        };
-        let off = |x: f64| (x + self.x_shift as f64 - x * k).abs();
-        let s = rect.size.width > 0.0 && off(rect.origin.x).max(off(rect.origin.x + rect.size.width)) >= 1.0;
-        self.scaled.borrow_mut().insert((font, glyph), s);
-        s
     }
 
     /// An icon scaled down and centred in its cells ([`fit`]), drawn into a

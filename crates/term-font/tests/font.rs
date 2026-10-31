@@ -185,3 +185,29 @@ fn sprites_are_keyed_through_the_reserved_font() {
     }
     assert!(f.glyph_key('A', Style::Regular).unwrap().sprite_id().is_none());
 }
+
+#[test]
+fn a_finder_on_another_thread_shares_the_font_ids() {
+    let f = Fonts::new("Menlo", 26.0);
+    let finder = f.finder();
+    assert_eq!(f.cached_glyph_key('漢', Style::Regular), None, "not looked up yet");
+    // Found on another thread first: the fallback font gets its id there.
+    let (key, glyph) = std::thread::spawn(move || {
+        let key = finder.glyph_key('漢', Style::Regular).unwrap();
+        (key, finder.rasterize_key(key).map(|g| (g.width, g.height, g.data)))
+    })
+    .join()
+    .unwrap();
+    assert!(key.font > 3, "from a fallback font: {key:?}");
+    // The fonts the finder came from see the same key, from the cache.
+    assert_eq!(f.cached_glyph_key('漢', Style::Regular), Some(Some(key)));
+    assert_eq!(f.glyph_key('漢', Style::Regular), Some(key));
+    assert!(f.family_of(key.font).is_some());
+    let here = f.rasterize_key(key).map(|g| (g.width, g.height, g.data));
+    assert_eq!(here, glyph, "the same bitmap on both threads");
+    // A font met on this thread next gets another id, which the finder
+    // sees too.
+    let emoji = f.glyph_key('😀', Style::Regular).unwrap();
+    assert_ne!(emoji.font, key.font);
+    assert_eq!(f.finder().cached_glyph_key('😀', Style::Regular), Some(Some(emoji)));
+}

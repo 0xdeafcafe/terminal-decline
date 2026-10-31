@@ -1288,10 +1288,8 @@ pub fn build_menus(mtm: MainThreadMarker, app_name: &str, binds: &Keybinds) -> R
                 .concat(),
                 (false, true) => [
                     b(MenuAction::CheckForUpdates.label(), MenuAction::CheckForUpdates),
-                    vec![
-                        item(mtm, "Update to Latest", Some(sel!(updateToLatest:)), ""),
-                        NSMenuItem::separatorItem(mtm),
-                    ],
+                    b(MenuAction::UpdateToLatest.label(), MenuAction::UpdateToLatest),
+                    vec![NSMenuItem::separatorItem(mtm)],
                 ]
                 .concat(),
                 (false, false) => Vec::new(),

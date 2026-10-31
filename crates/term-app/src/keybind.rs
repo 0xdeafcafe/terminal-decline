@@ -88,10 +88,13 @@ pub enum MenuAction {
     /// Terminal Decline > Check for Updates… (only while the updater is
     /// on; unbound by default).
     CheckForUpdates,
+    /// Terminal Decline > Update to Latest (updates from source only;
+    /// does nothing otherwise, and unbound by default).
+    UpdateToLatest,
 }
 
 impl MenuAction {
-    pub const ALL: [MenuAction; 38] = [
+    pub const ALL: [MenuAction; 39] = [
         MenuAction::NewWindow,
         MenuAction::NewTab,
         MenuAction::Close,
@@ -130,6 +133,7 @@ impl MenuAction {
         MenuAction::NextPrompt,
         MenuAction::SelectOutput,
         MenuAction::CheckForUpdates,
+        MenuAction::UpdateToLatest,
     ];
 
     /// The name in the config.
@@ -173,6 +177,7 @@ impl MenuAction {
             MenuAction::NextPrompt => "next_prompt",
             MenuAction::SelectOutput => "select_output",
             MenuAction::CheckForUpdates => "check_for_updates",
+            MenuAction::UpdateToLatest => "update_to_latest",
         }
     }
 
@@ -217,6 +222,7 @@ impl MenuAction {
             MenuAction::NextPrompt => "Jump to Next Prompt",
             MenuAction::SelectOutput => "Select Command Output",
             MenuAction::CheckForUpdates => "Check for Updates…",
+            MenuAction::UpdateToLatest => "Update to Latest",
         }
     }
 
@@ -263,6 +269,7 @@ impl MenuAction {
             MenuAction::NextPrompt => c"jumpToNextPrompt:",
             MenuAction::SelectOutput => c"selectCommandOutput:",
             MenuAction::CheckForUpdates => c"checkForUpdates:",
+            MenuAction::UpdateToLatest => c"updateToLatest:",
         }
     }
 

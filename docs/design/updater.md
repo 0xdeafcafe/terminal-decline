@@ -208,7 +208,9 @@ class answers each.
 A menu item in the app menu, under About, only when `decide` is `On`. It
 calls `checkForUpdates` (if `sessionInProgress` is false; otherwise it
 brings the existing alert forward). It is also a keybind action
-(`check_for_updates`, unbound by default).
+(`check_for_updates`, unbound by default). Update to Latest (updates
+from source) is one too (`update_to_latest`); both are in Settings'
+keybind list.
 
 **Quit and Install**: Sparkle quits the app through a terminate request.
 `applicationShouldTerminate:` asks about running programs only with

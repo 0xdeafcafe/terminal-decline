@@ -384,6 +384,15 @@ mod tests {
         assert_eq!(a.len(), MenuAction::ALL.len());
         assert!(a.iter().any(|a| a.name == "settings" && a.label == "Settings…"));
         assert!(a.iter().any(|a| a.name == "new_tab" && a.label == "New Tab"));
+        // Both update actions can be bound (Settings lists them), with no
+        // chord by default.
+        for (name, label) in [
+            ("check_for_updates", "Check for Updates…"),
+            ("update_to_latest", "Update to Latest"),
+        ] {
+            assert!(a.iter().any(|a| a.name == name && a.label == label), "{name}");
+            assert!(!default_keybinds().iter().any(|(_, n)| n == name), "{name} is unbound");
+        }
         let d = default_keybinds();
         assert!(d.contains(&("cmd+,".into(), "settings".into())));
         assert!(d.contains(&("shift+cmd+d".into(), "split_down".into())));

@@ -1270,11 +1270,16 @@ impl<'a> View<'a> {
     fn text_span_from(&self, n: usize, start: Option<usize>) -> (usize, usize) {
         let at = start.unwrap_or_else(|| {
             let k = n / CHECKPOINT;
-            let mut at = self.checkpoints[k] as usize;
-            for j in k * CHECKPOINT..n {
-                at += self.stored_len(j, at);
+            let first = k * CHECKPOINT;
+            let at = self.checkpoints[k] as usize;
+            // Short lines that aren't wrapped each end in the one end byte
+            // their text has: count those, 32 bytes at a time, rather than
+            // walk line by line (a third of reading a line). Long ones
+            // know their length (`tlen`, behind EXTRA): walk those.
+            if (first..n).all(|j| self.flags(j) & (flag::WRAPPED | flag::EXTRA) == 0) {
+                return skip_ends(self.text, at, n - first);
             }
-            at
+            (first..n).fold(at, |at, j| at + self.stored_len(j, at))
         });
         let len = self.stored_len(n, at);
         let ends = self.flags(n) & flag::WRAPPED == 0;
@@ -1705,6 +1710,48 @@ fn place(row: &mut Row, col: usize, cell: Cell) {
         Some(c) => *c = Cell::from_bits(c.bits() | cell.bits()),
         None => row.cells.push(cell),
     }
+}
+
+/// Where the text after the `count`th end byte from `at` starts (the
+/// text's end if there are fewer). 32 bytes at a time, as [`find_end`]:
+/// the end bytes in each word are found exactly (no carries between
+/// bytes) and counted.
+fn skip_ends(text: &[u8], mut at: usize, mut count: usize) -> usize {
+    const LO7: u64 = 0x7F7F_7F7F_7F7F_7F7F;
+    const HI: u64 = 0x8080_8080_8080_8080;
+    const PAT: u64 = 0x0101_0101_0101_0101 * END as u64;
+    #[inline(always)]
+    fn ends(chunk: &[u8]) -> u64 {
+        let w = u64::from_le_bytes(chunk.try_into().unwrap_or_default()) ^ PAT;
+        !(((w & LO7) + LO7) | w) & HI
+    }
+    while count > 0 {
+        let Some(block) = text.get(at..at + 32) else { break };
+        let words = [ends(&block[..8]), ends(&block[8..16]), ends(&block[16..24]), ends(&block[24..])];
+        let found = words.iter().map(|w| w.count_ones() as usize).sum::<usize>();
+        if found < count {
+            count -= found;
+            at += 32;
+            continue;
+        }
+        for (k, mut w) in words.into_iter().enumerate() {
+            let n = w.count_ones() as usize;
+            if n < count {
+                count -= n;
+                continue;
+            }
+            for _ in 1..count {
+                w &= w - 1;
+            }
+            return at + k * 8 + w.trailing_zeros() as usize / 8 + 1;
+        }
+    }
+    // The last few bytes, one at a time.
+    while count > 0 && at < text.len() {
+        count -= (text[at] == END) as usize;
+        at += 1;
+    }
+    at
 }
 
 /// The first 0x0A in `text`. Walking from a checkpoint skips up to 15

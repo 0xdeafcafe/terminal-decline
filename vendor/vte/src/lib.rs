@@ -899,6 +899,19 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
     /// with a byte >= 0x80, and the stretch ends at the next ASCII byte.
     #[inline(never)]
     fn advance_ground_utf8<P: Perform>(&mut self, performer: &mut P, bytes: &[u8]) -> usize {
+        // Whole, valid characters are decoded and dispatched in one pass;
+        // validating the run first and decoding it again cost a pass
+        // more. The first byte that isn't the start of one (ASCII, an
+        // invalid or a cut-off sequence) ends it, and is handled below on
+        // the next call, as it would have been after the valid prefix.
+        let mut i = 0;
+        while let Some((c, len)) = decode_utf8(&bytes[i..]) {
+            Self::dispatch_char(performer, c);
+            i += len;
+        }
+        if i > 0 {
+            return i;
+        }
         let num_bytes = bytes.len();
         let plain_chars = bytes.iter().position(|&b| b < 0x80).unwrap_or(num_bytes);
 
@@ -1090,6 +1103,44 @@ pub enum OscLarge {
     Stream,
     /// Throw the string away.
     Drop,
+}
+
+/// The non-ASCII character `bytes` starts with, whole and valid UTF-8
+/// (what `str::from_utf8` accepts), and its length; `None` for ASCII, an
+/// invalid sequence or one cut off by the end of `bytes`.
+#[inline(always)]
+fn decode_utf8(bytes: &[u8]) -> Option<(char, usize)> {
+    let cont = |b: u8| (b & 0xC0 == 0x80).then_some((b & 0x3F) as u32);
+    let (c, len) = match *bytes.first()? {
+        b0 @ 0xC2..=0xDF => ((b0 as u32 & 0x1F) << 6 | cont(*bytes.get(1)?)?, 2),
+        b0 @ 0xE0..=0xEF => {
+            let b1 = *bytes.get(1)?;
+            let ok = match b0 {
+                0xE0 => b1 >= 0xA0,
+                0xED => b1 <= 0x9F,
+                _ => true,
+            };
+            if !ok {
+                return None;
+            }
+            ((b0 as u32 & 0x0F) << 12 | cont(b1)? << 6 | cont(*bytes.get(2)?)?, 3)
+        },
+        b0 @ 0xF0..=0xF4 => {
+            let b1 = *bytes.get(1)?;
+            let ok = match b0 {
+                0xF0 => b1 >= 0x90,
+                0xF4 => b1 <= 0x8F,
+                _ => true,
+            };
+            if !ok {
+                return None;
+            }
+            let c = (b0 as u32 & 0x07) << 18 | cont(b1)? << 12 | cont(*bytes.get(2)?)? << 6 | cont(*bytes.get(3)?)?;
+            (c, 4)
+        },
+        _ => return None,
+    };
+    Some((char::from_u32(c)?, len))
 }
 
 /// Powers of ten up to 10⁷, for [`digit_run`]'s numbers.
@@ -2137,6 +2188,48 @@ mod tests {
                 parser.advance(&mut split, &[*b]);
             }
             assert_eq!(reference.dispatched, split.dispatched, "{input:?}");
+        }
+    }
+
+    /// `decode_utf8` takes exactly the characters `str::from_utf8` does:
+    /// every lead byte with every first and second continuation byte,
+    /// and random four-byte sequences.
+    #[test]
+    fn decode_utf8_matches_std() {
+        let check = |b: &[u8]| {
+            let expected = (b[0] >= 0x80)
+                .then(|| {
+                    let len = match b[0] {
+                        0xC0..=0xDF => 2,
+                        0xE0..=0xEF => 3,
+                        0xF0..=0xF7 => 4,
+                        _ => return None,
+                    };
+                    let s = str::from_utf8(b.get(..len)?).ok()?;
+                    Some((s.chars().next()?, len))
+                })
+                .flatten();
+            assert_eq!(decode_utf8(b), expected, "{b:x?}");
+        };
+        for b0 in 0..=255u8 {
+            for b1 in 0..=255u8 {
+                check(&[b0]);
+                check(&[b0, b1]);
+                for b2 in [0x00, 0x7F, 0x80, 0x9F, 0xA0, 0xBF, 0xC0, 0xFF] {
+                    check(&[b0, b1, b2]);
+                    check(&[b0, b1, b2, 0x80]);
+                    check(&[b0, b1, b2, 0xC0]);
+                }
+            }
+        }
+        let mut x = 0x2545_f491_4f6c_dd1du64;
+        for _ in 0..200_000 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            let b = x.to_le_bytes();
+            check(&[0xF0 | b[0] & 0x07, 0x80 | b[1] & 0x3F, b[2], b[3]]);
+            check(&[0xE0 | b[0] & 0x0F, b[1], b[2]]);
         }
     }
 

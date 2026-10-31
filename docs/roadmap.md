@@ -117,7 +117,7 @@ Design: docs/design/pins.md.
 | R.3 | ~~Scrollback row cache while scrolled back~~ (landed: kept history rows aren't laid out again; cells.md §9.3) | no decode per frame when the view doesn't move |
 | R.4 | ~~CSI/SGR parse fast path~~ (landed: coloured 1.48–1.54×, `tui` 1.47–1.55× in thread CPU time on a loaded Mac; cells.md §11) | coloured ≥ 1.5× vs the commit before R.4 |
 | R.10 | Re-measure frame building (plain cases and `--bench renderer`) after images I.4 split the frame's rectangles — its bench ran at load ~31 and gave no usable before/after. Re-measured with R.2 in thread CPU time (cells.md §9.3): within 3% except 300×100 plain, every row changed (+4%); encode within noise | within 3% of before I.4 |
-| R.9 | Win back scrollback v2's costs (merged over the gate on purpose, 29 Oct): parse plain +6–16% and seq +6% (per-line store bookkeeping), unicode +9% (encoder per non-ASCII cell), CJK/ls history decode +12–20%; re-measure on a quiet Mac first | parse within 3% of before PR 7 |
+| R.9 | Win back scrollback v2's costs (merged over the gate on purpose, 29 Oct): parse plain +6–16% and seq +6% (per-line store bookkeeping), unicode +9% (encoder per non-ASCII cell), CJK/ls history decode +12–20%; re-measure on a quiet Mac first. Parse now within 3% (plain 1.02, `seq` 0.94, unicode 0.97); decode `ls` 1.07, CJK 1.11 (cells.md §11) | parse within 3% of before PR 7 |
 | R.5 | Memory-pressure handler (spare drawables, purge textures, compress scrollback) | simulated warning: footprint drop then correct redraw |
 | R.6 | `CAMetalDisplayLink` | kept only if N.5 numbers improve |
 | R.7 | Idle scrollback compression (LZ4, two-block cache) | 100k lines of `ls`/log output ≤ 3 MB; decode ≤ 100 µs per block |

@@ -395,6 +395,8 @@ struct Budget {
     deadline: Option<Instant>,
     /// A glyph was left for a later frame.
     deferred: bool,
+    /// The glyphs left for the glyph thread.
+    wanted: Vec<Want>,
 }
 
 impl Budget {
@@ -495,61 +497,46 @@ impl GlyphCache {
         }
     }
 
-    /// Put the glyphs font set `id`'s glyph thread sent back since the
-    /// last call in the textures (on the main thread: uploads wait for
-    /// the GPU), making room as building does. False when a texture had
-    /// to be emptied for them, so rows built before are wrong. Wakes the
-    /// app again if some still found no room.
-    fn receive(&mut self, id: FontsId, gpu: &Gpu, waker: Option<&GlyphWaker>) -> bool {
-        let Some(i) = self.by_char.iter().position(|(f, _)| *f == id) else {
-            return true;
+    /// Take in what font set `id`'s glyph thread sent back since the last
+    /// call: characters no font has and glyphs with no ink are noted, and
+    /// bitmaps kept until a build draws them ([`PaneGlyphs::sent_back`]).
+    fn receive(&mut self, id: FontsId) {
+        let GlyphCache { by_key, by_char, .. } = self;
+        let Some((_, chars)) = by_char.iter_mut().find(|(f, _)| *f == id) else {
+            return;
         };
-        let Some(thread) = &mut self.by_char[i].1.thread else { return true };
-        let found = thread.take();
-        let mut kept = true;
-        for f in found {
-            let existing = f.key.and_then(|k| self.by_key.get(&(id, k)).copied());
-            let slot = match (&f.glyph, existing) {
-                (_, Some(slot)) => Some(slot),
-                (None, None) => Some(None),
-                (Some(g), None) => match self.put(g) {
-                    Some(slot) => Some(slot),
-                    None => {
-                        kept &= self.make_room(gpu);
-                        self.put(g)
-                    }
-                },
-            };
-            let Some(slot) = slot else {
-                // Still no room (a glyph bigger than the room left at the
-                // cap): tried again on the next build.
-                if let Some(t) = &mut self.by_char[i].1.thread {
-                    t.waiting.push(f);
-                }
+        let Some(thread) = &mut chars.thread else { return };
+        for f in thread.take() {
+            if f.skipped {
                 continue;
-            };
-            if let Some(key) = f.key {
-                self.by_key.insert((id, key), slot);
             }
-            if let Want::Char(cp, style) = f.want {
-                self.by_char[i].1.other.insert((cp, style), slot);
+            match (f.key, f.glyph) {
+                (None, _) => {
+                    if let Want::Char(cp, style) = f.want {
+                        chars.other.insert((cp, style), None);
+                    }
+                }
+                (Some(key), _) if by_key.contains_key(&(id, key)) => {}
+                (Some(key), None) => {
+                    by_key.insert((id, key), None);
+                }
+                // No pane wants it any more (its rows scrolled away).
+                (Some(_), Some(_)) if !thread.is_wanted(f.want) => {}
+                (Some(key), Some(g)) => thread.keep(key, g),
             }
         }
-        if let (Some(t), Some(wake)) = (&self.by_char[i].1.thread, waker)
-            && !t.waiting.is_empty()
-        {
-            wake();
-        }
-        kept
     }
 
-    /// `g` put in its texture: `None` when there is no room right now,
-    /// `Some(None)` when it can never fit.
-    fn put(&mut self, g: &RasterGlyph) -> Option<Option<GlyphSlot>> {
-        match upload(&mut self.mask, &mut self.color, &self.in_flight, g) {
-            Ok(slot) => Some(Some(slot)),
-            Err(NoRoom::TooBig) => Some(None),
-            Err(NoRoom::Full) => None,
+    /// A build of font set `id` drew every glyph: if nothing else is on its
+    /// way, bitmaps the glyph thread sent back that no build drew (rows
+    /// scrolled away first) go now rather than wait out their time.
+    /// Another pane waiting for some asks again.
+    fn settle(&mut self, id: FontsId) {
+        if let Some((_, chars)) = self.by_char.iter_mut().find(|(f, _)| *f == id)
+            && let Some(t) = &mut chars.thread
+            && !t.busy()
+        {
+            t.drop_ready();
         }
     }
 
@@ -757,7 +744,15 @@ impl PaneGlyphs<'_> {
                     self.chars.other.insert((cp, style), slot);
                     return slot;
                 }
-                self.ask(Want::Key(key));
+                if let Some(slot) = self.sent_back(key) {
+                    if let Some(&cached) = self.by_key.get(&(self.id, key)) {
+                        self.chars.other.insert((cp, style), cached);
+                    }
+                    return slot;
+                }
+                // Found by the thread, its bitmap still on the way.
+                let asked = self.chars.thread.as_ref().is_some_and(|t| t.is_pending(Want::Char(cp, style)));
+                self.ask(if asked { Want::Char(cp, style) } else { Want::Key(key) });
                 None
             }
             None => {
@@ -767,10 +762,34 @@ impl PaneGlyphs<'_> {
         }
     }
 
+    /// The bitmap the glyph thread sent back for `key`, put in its texture
+    /// now that a build draws it. `None` when there is none; `Some(None)`
+    /// when it never fits, or when there is no room right now (it is kept
+    /// for the build again after the texture grows).
+    fn sent_back(&mut self, key: GlyphKey) -> Option<Option<GlyphSlot>> {
+        let thread = self.chars.thread.as_mut()?;
+        let g = thread.ready(key)?;
+        match upload(self.mask, self.color, self.in_flight, &g) {
+            Ok(slot) => {
+                self.by_key.insert((self.id, key), Some(slot));
+                Some(Some(slot))
+            }
+            Err(NoRoom::TooBig) => {
+                self.by_key.insert((self.id, key), None);
+                Some(None)
+            }
+            Err(NoRoom::Full) => {
+                thread.keep(key, g);
+                Some(None)
+            }
+        }
+    }
+
     /// Ask the glyph thread for `want` (once), and note the build drew
     /// without it.
     fn ask(&mut self, want: Want) {
         self.budget.deferred = true;
+        self.budget.wanted.push(want);
         let Some(waker) = &self.budget.waker else { return };
         let fonts = self.fonts;
         self.chars
@@ -830,6 +849,9 @@ impl GlyphSource for PaneGlyphs<'_> {
     fn glyph_key(&mut self, key: GlyphKey) -> Option<GlyphSlot> {
         if !self.by_key.contains_key(&(self.id, key)) {
             if self.budget.waker.is_some() && key.sprite_id().is_none() {
+                if let Some(slot) = self.sent_back(key) {
+                    return slot;
+                }
                 self.ask(Want::Key(key));
                 return None;
             }
@@ -891,6 +913,8 @@ pub struct PaneRender {
     built_with: Option<(u64, FontsId)>,
     /// Its last build left new glyphs for later (see [`Budget`]).
     deferred: bool,
+    /// The glyphs its last build left for the glyph thread, and the fonts.
+    wanted: (Option<FontsId>, Vec<Want>),
     /// Its instances on the GPU (roadmap R.2).
     gpu: RefCell<PaneBuffers>,
 }
@@ -1708,9 +1732,19 @@ impl Renderer {
     }
 
     /// Whether the glyph thread of this window's fonts has glyphs asked
-    /// for and not yet put in the textures.
+    /// for and not back yet.
     pub fn glyphs_pending(&self) -> bool {
         self.shared.glyphs.borrow().glyphs_pending(self.fonts_id)
+    }
+
+    /// Woken by the glyph thread with no pane of this window waiting for
+    /// glyphs: take in what it sent back and, once nothing is on its way,
+    /// drop the bitmaps no build drew (a flood's rows scrolled away before
+    /// they came), so they don't stay in memory until the next build.
+    pub fn drop_unused_glyphs(&mut self) {
+        let mut cache = self.shared.glyphs.borrow_mut();
+        cache.receive(self.fonts_id);
+        cache.settle(self.fonts_id);
     }
 
     /// The part of building `pane` that needs `term` locked: the snapshot,
@@ -1893,13 +1927,27 @@ fn build(shared: &Shared, id: FontsId, fonts: &Fonts, rules: &GlyphRules, pane: 
     pane.frame.snapshot(term, input, glyphs.generation());
     pane.frame.build_snapshot(input, &mut glyphs);
     pane.built_with = Some(cache.built_with(id));
-    deferred(&mut cache, pane);
+    deferred(&mut cache, id, pane);
 }
 
 /// Ends the build's glyph budget, noting whether the pane was drawn
 /// without some new glyphs.
-fn deferred(cache: &mut GlyphCache, pane: &mut PaneRender) {
+fn deferred(cache: &mut GlyphCache, id: FontsId, pane: &mut PaneRender) {
+    let wanted = std::mem::take(&mut cache.budget.wanted);
     pane.deferred = cache.budget.end();
+    let old = match std::mem::take(&mut pane.wanted) {
+        (Some(f), old) if f == id => old,
+        _ => Vec::new(),
+    };
+    if let Some((_, chars)) = cache.by_char.iter_mut().find(|(f, _)| *f == id)
+        && let Some(t) = &mut chars.thread
+    {
+        t.retarget(&old, &wanted);
+    }
+    pane.wanted = (Some(id), wanted);
+    if !pane.deferred {
+        cache.settle(id);
+    }
 }
 
 /// Takes `pane`'s snapshot. A pane last drawn without some new glyphs
@@ -1917,12 +1965,9 @@ fn snapshot(pane: &mut PaneRender, term: &mut Terminal, input: &FrameInput, gene
 /// row copied again.
 fn finish(shared: &Shared, id: FontsId, fonts: &Fonts, rules: &GlyphRules, pane: &mut PaneRender, input: &FrameInput) -> bool {
     let mut cache = shared.glyphs.borrow_mut();
-    // Begun first: a build again from the terminal (false) keeps it.
     cache.budget.begin(rules);
-    // Glyphs the glyph thread sent back, so this build draws them.
-    if !cache.receive(id, &shared.gpu, rules.waker.as_ref()) {
-        return false;
-    }
+    // What the glyph thread sent back, for this build to draw.
+    cache.receive(id);
     if !pane.frame.build_snapshot(input, &mut cache.source(id, fonts)) {
         return false;
     }
@@ -1937,7 +1982,7 @@ fn finish(shared: &Shared, id: FontsId, fonts: &Fonts, rules: &GlyphRules, pane:
         pane.frame.redraw(input, &mut cache.source(id, fonts));
     }
     pane.built_with = Some(cache.built_with(id));
-    deferred(&mut cache, pane);
+    deferred(&mut cache, id, pane);
     true
 }
 

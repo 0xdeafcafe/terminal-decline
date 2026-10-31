@@ -1,7 +1,7 @@
 # Completion and highlighting at the prompt
 
 Status: **draft**, not reviewed. Alex's decisions of 31 Oct 2026 are in
-§1; open questions in §12.
+§1; open questions in §14.
 
 ## Goal and done-when
 
@@ -20,8 +20,8 @@ While you type a command line at the shell's prompt, decline:
 Done when: all three work in zsh started by the app; each can be turned
 off on its own in Settings (§10); every budget in §11 is met and
 measured (nothing when off or unused, typing latency unchanged when on);
-and the list and colours are tested as below (§12). bash and fish get 1 and 2 from the screen
-(§3.3), without Tab-to-zsh.
+and the list and colours are tested as below (§12). bash and fish get
+1 and 2 from the screen (§3.3), without Tab-to-zsh.
 
 ## 1. Decisions (Alex, 31 Oct 2026)
 

@@ -297,6 +297,33 @@ fn zsh_that_sources_the_snippet_itself() {
     assert_eq!(ran_files(&home), "zshenv zprofile zshrc zlogin");
 }
 
+/// macOS's /etc/zshrc sets `HISTFILE=${ZDOTDIR:-$HOME}/.zsh_history`, and
+/// it runs while ZDOTDIR is still ours: history must still be the user's
+/// (up-arrow and Ctrl+R found nothing when it was the app bundle's), in
+/// their ZDOTDIR if they have one, and a HISTFILE their .zshrc sets wins.
+#[test]
+fn zsh_history_stays_the_users() {
+    let sets = std::fs::read_to_string("/etc/zshrc").is_ok_and(|t| t.contains("HISTFILE=${ZDOTDIR:-$HOME}"));
+    if !sets {
+        return;
+    }
+    let home = TempDir::new("zsh-histfile");
+    zsh_files(&home.0, "");
+    let probe = check(ZSH, &home, &[], "${HISTFILE-unset}");
+    assert_eq!(probe, format!("{}/.zsh_history", home.str()));
+
+    let home = TempDir::new("zsh-histfile-zdotdir");
+    let zdot = home.join("config/zsh");
+    zsh_files(&zdot, "");
+    let probe = check(ZSH, &home, &[("ZDOTDIR", zdot.to_str().unwrap())], "${HISTFILE-unset}");
+    assert_eq!(probe, format!("{}/.zsh_history", zdot.display()));
+
+    let home = TempDir::new("zsh-histfile-own");
+    zsh_files(&home.0, "HISTFILE=$HOME/.my_history\n");
+    let probe = check(ZSH, &home, &[], "${HISTFILE-unset}");
+    assert_eq!(probe, format!("{}/.my_history", home.str()));
+}
+
 /// The bashes there are: macOS's 3.2 and Homebrew's.
 fn bashes() -> Vec<&'static str> {
     let found: Vec<&str> = ["/bin/bash", "/opt/homebrew/bin/bash", "/usr/local/bin/bash"]

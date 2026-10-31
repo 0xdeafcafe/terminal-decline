@@ -7,6 +7,14 @@ else
   builtin unset ZDOTDIR
 fi
 
+# macOS's /etc/zshrc, which ran just before this, sets
+# HISTFILE=${ZDOTDIR:-$HOME}/.zsh_history while ZDOTDIR was still this
+# directory: put history where it would have been, before the user's
+# .zshrc, so a HISTFILE of their own still wins.
+if [[ $HISTFILE == $_decline_zdotdir/.zsh_history ]]; then
+  HISTFILE=${ZDOTDIR-$HOME}/.zsh_history
+fi
+
 [[ ! -r ${ZDOTDIR-$HOME}/.zshrc ]] || builtin source -- "${ZDOTDIR-$HOME}/.zshrc"
 
 # After the user's .zshrc, so its hooks come after a prompt theme's. It

@@ -1458,6 +1458,8 @@ pub fn build_menus(mtm: MainThreadMarker, app_name: &str, binds: &Keybinds) -> R
         b("Paste", MenuAction::Paste),
         b("Select All", MenuAction::SelectAll),
         b(MenuAction::SelectOutput.label(), MenuAction::SelectOutput),
+        b(MenuAction::CopyCommand.label(), MenuAction::CopyCommand),
+        b(MenuAction::CopyOutput.label(), MenuAction::CopyOutput),
         vec![NSMenuItem::separatorItem(mtm)],
         b("Clear Scrollback", MenuAction::ClearScrollback),
         vec![NSMenuItem::separatorItem(mtm)],
@@ -1481,6 +1483,8 @@ pub fn build_menus(mtm: MainThreadMarker, app_name: &str, binds: &Keybinds) -> R
         vec![NSMenuItem::separatorItem(mtm)],
         b(MenuAction::PreviousPrompt.label(), MenuAction::PreviousPrompt),
         b(MenuAction::NextPrompt.label(), MenuAction::NextPrompt),
+        b(MenuAction::PreviousFailed.label(), MenuAction::PreviousFailed),
+        b(MenuAction::NextFailed.label(), MenuAction::NextFailed),
         vec![NSMenuItem::separatorItem(mtm)],
         b("Enter Full Screen", MenuAction::ToggleFullScreen),
     ];

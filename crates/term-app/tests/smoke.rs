@@ -2757,3 +2757,77 @@ fn smoke_ctl_window_sessions_mark_commands() {
     assert!(w["duration_ms"].as_u64().unwrap() >= 800, "{w}");
     ctl.ok(&["kill", "sh"]);
 }
+
+/// A command that exited non-zero has its prompt's row marked in the
+/// frame (the red mark in the padding); Jump to Previous Failed Command
+/// scrolls to it, past a prompt whose command succeeded, and no further.
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_failed_commands_are_marked_and_jumped_to() {
+    if !have_metal() {
+        return;
+    }
+    let dir = TempDir::new("failed");
+    let wait = "i=0; while [ \"$(stty size)\" != '20 80' ] && [ $i -lt 100 ]; do sleep 0.05; i=$((i+1)); done; ";
+    // Prompts at lines 0, 41 and 82 and the last at 123; `two` exits 3.
+    let session = "s() { printf '\\033]133;A\\007$ %s\\033]133;B\\007\\n\\033]133;C\\007' \"$1\"; \
+                   i=0; while [ $i -lt 40 ]; do echo \"$1 $i\"; i=$((i+1)); done; printf '\\033]133;D;%s\\007' \"$2\"; }; \
+                   s one 0; s two 3; s three 0; printf '\\033]133;A\\007$ '; ";
+    let dump = osc("dump");
+    let back = osc("menu previous_failed");
+    let script = format!(
+        "{resize}{wait}{session}{dump}{back}{dump}{back}{dump}{next}{dump}{quit}sleep 20",
+        resize = osc("resize 80 20"),
+        next = osc("menu next_failed"),
+        quit = osc("quit"),
+    );
+    let (status, _) = decline(&dir, &script, true);
+    assert!(status.success(), "{status}");
+    let d = dumps(&dir);
+    assert_eq!(d.len(), 4, "{d:?}");
+    let offset = |x: &Value| num(x, "view_offset") as u64;
+    let top = |x: &Value| screen(x).lines().next().unwrap_or_default().to_string();
+    let failed = |x: &Value| x["failed_rows"].clone();
+    // At the bottom (lines 104..124) no failed prompt is in view.
+    assert_eq!((offset(&d[0]), failed(&d[0])), (0, serde_json::json!([])), "{}", d[0]);
+    // Past `three` (succeeded) to `two`, marked at the top row.
+    assert_eq!((offset(&d[1]), top(&d[1])), (63, "$ two|".into()), "{}", d[1]);
+    assert_eq!(failed(&d[1]), serde_json::json!([0]), "{}", d[1]);
+    // Nothing failed above it, nor below: the view stays.
+    assert_eq!(offset(&d[2]), 63, "{}", d[2]);
+    assert_eq!(offset(&d[3]), 63, "{}", d[3]);
+}
+
+/// Copy Last Command and Copy Last Command's Output put the last
+/// command line run and its output on the clipboard (listed in the dump
+/// under test control), wherever the view is scrolled, selecting nothing.
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_copy_last_command_and_its_output() {
+    if !have_metal() {
+        return;
+    }
+    let dir = TempDir::new("copylast");
+    let wait = "i=0; while [ \"$(stty size)\" != '20 80' ] && [ $i -lt 100 ]; do sleep 0.05; i=$((i+1)); done; ";
+    let session = "s() { printf '\\033]133;A\\007$ \\033]133;B\\007%s\\n\\033]133;C\\007' \"$1\"; \
+                   i=0; while [ $i -lt 30 ]; do echo \"$1 $i\"; i=$((i+1)); done; printf '\\033]133;D;0\\007'; }; \
+                   s 'echo one'; s 'echo two'; printf '\\033]133;A\\007$ \\033]133;B\\007typing'; ";
+    let script = format!(
+        "{resize}{wait}{session}{command}{output}{up}{output}{dump}{quit}sleep 20",
+        resize = osc("resize 80 20"),
+        command = osc("menu copy_command"),
+        output = osc("menu copy_output"),
+        up = osc("key 126 cmd"),
+        dump = osc("dump"),
+        quit = osc("quit"),
+    );
+    let (status, _) = decline(&dir, &script, true);
+    assert!(status.success(), "{status}");
+    let d = dumps(&dir);
+    assert_eq!(d.len(), 1, "{d:?}");
+    let output: Vec<String> = (0..30).map(|i| format!("echo two {i}")).collect();
+    let output = output.join("\n");
+    assert_eq!(d[0]["copied"], serde_json::json!(["echo two", output, output]), "{}", d[0]);
+    assert!(num(&d[0], "view_offset") > 0.0, "{}", d[0]);
+    assert!(d[0]["selection"].is_null(), "{}", d[0]);
+}

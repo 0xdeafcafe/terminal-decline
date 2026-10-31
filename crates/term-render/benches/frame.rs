@@ -398,6 +398,29 @@ fn bench(c: &mut Criterion) {
             });
         }
     }
+    // Shell integration in history, scrolled back and still: a prompt
+    // (OSC 133 marks) every 4 lines, every other command failed, so each
+    // frame looks for the failed prompts in view.
+    {
+        let (cols, lines) = (300, 100);
+        let mut t = Term::new(cols, lines, 10_000, term_core::ImagePool::process());
+        let mut s = String::new();
+        for l in 0..lines * 3 / 4 {
+            s.push_str(&format!("\x1b]133;A\x07$ \x1b]133;B\x07make {l}\r\n\x1b]133;C\x07"));
+            s.push_str(&format!("out {l}\r\nout\r\nout\r\n\x1b]133;D;{}\x07", l % 2));
+        }
+        t.advance(s.as_bytes());
+        t.state.scroll_view(lines as isize * 2);
+        let mut frame = Frame::default();
+        frame.build(&mut t.state, &input, &mut Cached);
+        assert!(!frame.last_snapshot().failed.is_empty());
+        c.bench_function("frame 300x100 prompts history unchanged", |b| {
+            b.iter(|| {
+                frame.build(&mut t.state, black_box(&input), &mut Cached);
+                black_box(frame.glyphs.len())
+            })
+        });
+    }
     // A sparse screen (roadmap R.2): a shell at 203×50, short coloured
     // lines with blank ends. Every row changed, nothing changed, and the
     // prompt line typed into.

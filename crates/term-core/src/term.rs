@@ -446,6 +446,9 @@ pub struct Terminal {
     /// Where the last OSC 133 B mark put the command line: its buffer
     /// line and column, for the command's text at the C mark.
     input_at: Option<(u64, usize)>,
+    /// OSC 133 D marks written so far: a command's status can only
+    /// change with one (the snapshot's cache of failed prompts).
+    pub(crate) ends_written: u64,
     /// The program's working directory, if it reports it (OSC 7).
     cwd: Option<String>,
     /// The palette and foreground, background and cursor colours: the
@@ -598,6 +601,7 @@ impl Terminal {
             progress: None,
             commands: Vec::new(),
             input_at: None,
+            ends_written: 0,
             cwd: None,
             colors: Box::new(replies::ColorTable::new([0xd8dee9, 0x16181c, 0xd8dee9])),
             colors_changed: false,
@@ -968,6 +972,15 @@ impl Terminal {
         }
     }
 
+    /// Where the cursor is as a buffer line and column, wherever the
+    /// view is scrolled.
+    pub fn cursor_point(&self) -> Point {
+        Point {
+            line: self.top_line + self.cursor.row as u64,
+            col: self.cursor.col,
+        }
+    }
+
     /// Where the cursor is in the view (row, column), if it is in view.
     pub fn cursor_in_view(&self) -> Option<(usize, usize)> {
         let history = self
@@ -1152,6 +1165,93 @@ impl Terminal {
         };
         self.set_selection(Some(Selection::new(a, b)));
         true
+    }
+
+    /// Line `line` has OSC 133 marks: a look at its row (on the screen)
+    /// or its flags (in history), without reading the marks.
+    pub(crate) fn line_has_marks(&self, line: u64) -> bool {
+        match self.screen_line(line) {
+            Some(row) => row.has_marks(),
+            None => self.history_index(line).is_some_and(|i| self.scrollback.has_marks(i)),
+        }
+    }
+
+    /// The first line at or after `line` with OSC 133 marks.
+    pub(crate) fn next_marked_line(&self, line: u64) -> Option<u64> {
+        if self.line_has_marks(line) {
+            return Some(line);
+        }
+        self.marked_lines(Some(line), false).next()
+    }
+
+    /// The marks written after the prompt (OSC 133 A) at `prompt`, in
+    /// the order written: the rest of its line's, then the lines below.
+    fn marks_after_prompt(&self, prompt: Point) -> impl Iterator<Item = (Point, Mark)> + '_ {
+        let here = (prompt.col, mark_rank(MarkKind::Prompt));
+        let at = move |line: u64| {
+            self.marks_at(line)
+                .into_iter()
+                .map(move |m| (Point { line, col: m.col as usize }, m))
+        };
+        let same = at(prompt.line).filter(move |(_, m)| (m.col as usize, mark_rank(m.kind)) > here);
+        same.chain(self.marked_lines(Some(prompt.line), false).flat_map(at))
+    }
+
+    /// The marks of the command whose prompt (OSC 133 A) is at `prompt`,
+    /// up to its end (D) or the next prompt, the end included.
+    fn command_marks(&self, prompt: Point) -> impl Iterator<Item = (Point, Mark)> + '_ {
+        let mut done = false;
+        self.marks_after_prompt(prompt).map_while(move |(p, m)| {
+            if done || m.kind == MarkKind::Prompt {
+                return None;
+            }
+            done = m.kind == MarkKind::End;
+            Some((p, m))
+        })
+    }
+
+    /// The exit status the command of the prompt (OSC 133 A) at `prompt`
+    /// finished with, from its D mark. `None` while it runs, when its
+    /// D mark gave no status, and for a prompt nothing was run from (the
+    /// next prompt came first).
+    pub fn command_status(&self, prompt: Point) -> Option<u32> {
+        self.command_marks(prompt)
+            .find(|(_, m)| m.kind == MarkKind::End)
+            .and_then(|(_, m)| m.status)
+    }
+
+    /// The command of the prompt at `prompt` exited non-zero.
+    pub fn command_failed(&self, prompt: Point) -> bool {
+        self.command_status(prompt).is_some_and(|s| s != 0)
+    }
+
+    /// The command line of the prompt at `prompt` that was run: from
+    /// its B mark to just before its C mark, first and last cell. `None`
+    /// if either mark is missing (not run yet, or no shell integration)
+    /// or the line is empty.
+    pub fn command_line(&self, prompt: Point) -> Option<(Point, Point)> {
+        let mut from = None;
+        let mut to = None;
+        for (p, m) in self.command_marks(prompt) {
+            match m.kind {
+                MarkKind::Input => from = Some(p),
+                MarkKind::Output => {
+                    to = Some(p);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let (from, to) = (from?, to?);
+        // The cell before the C mark.
+        let last = match to.col {
+            0 => Point {
+                line: to.line.checked_sub(1)?,
+                col: self.cols.max(self.row_at(to.line - 1).map_or(0, |r| r.len())) - 1,
+            },
+            c => Point { line: to.line, col: c - 1 },
+        };
+        (from <= last).then_some((from, last))
     }
 
     /// Select the word at `p`, on its logical line: a word that a soft wrap
@@ -1373,8 +1473,9 @@ impl Terminal {
         }
     }
 
-    /// The text from `a` to `b` (both included, `a` first).
-    fn text_between(&self, a: Point, b: Point) -> String {
+    /// The text from `a` to `b` (both included, `a` first), on the
+    /// screen or in history, as copying a selection of it gives.
+    pub fn text_between(&self, a: Point, b: Point) -> String {
         let mut out = String::new();
         for line in a.line..=b.line {
             let Some(row) = self.row_at(line) else { continue };
@@ -1807,7 +1908,10 @@ impl Terminal {
             MarkKind::Output => Some(Command::Started(
                 self.input_at.take().and_then(|from| self.command_text(from, here)),
             )),
-            MarkKind::End => Some(Command::Finished(status)),
+            MarkKind::End => {
+                self.ends_written += 1;
+                Some(Command::Finished(status))
+            }
             MarkKind::Prompt => Some(Command::Prompt),
         };
         if let Some(c) = command {
@@ -2937,11 +3041,14 @@ fn percent_decode(s: &str) -> String {
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
     while i < b.len() {
+        // Two hex digits after the `%` (`b[i + 1]` and `b[i + 2]`): the
+        // last escape can end the path. Only those: `from_str_radix`
+        // takes a sign too, decoding `%+1` as byte 1.
         if b[i] == b'%'
-            && i + 2 < b.len()
-            && let Ok(v) = u8::from_str_radix(std::str::from_utf8(&b[i + 1..i + 3]).unwrap_or("zz"), 16)
+            && let Some(&[h, l]) = b.get(i + 1..i + 3)
+            && let (Some(h), Some(l)) = ((h as char).to_digit(16), (l as char).to_digit(16))
         {
-            out.push(v);
+            out.push((h << 4 | l) as u8);
             i += 3;
         } else {
             out.push(b[i]);

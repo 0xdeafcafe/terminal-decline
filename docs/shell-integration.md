@@ -94,6 +94,14 @@ snippet unconditionally.
 | Cmd+Up | View > Jump to Previous Prompt | scrolls back so the prompt above the top of the view is at the top |
 | Cmd+Down | View > Jump to Next Prompt | scrolls forward to the next prompt, or to the bottom |
 | Shift+Cmd+A | Edit > Select Command Output | selects the output of the command at the top of the view (where a jump leaves it); at the bottom, the running command's or the last one's |
+| Shift+Cmd+C | Edit > Copy Last Command | copies the last command line run (the running one, or the last finished), wherever the view is |
+| Option+Shift+Cmd+C | Edit > Copy Last Command's Output | copies the running command's output, or the last one that printed something, without selecting it |
+| Option+Shift+Cmd+Up | View > Jump to Previous Failed Command | scrolls back to the nearest prompt above whose command exited non-zero |
+| Option+Shift+Cmd+Down | View > Jump to Next Failed Command | the same, forward |
+
+A prompt whose command exited non-zero (its D mark's status) gets a thin
+mark in the theme's red in the left padding beside it, on the screen and
+in the scrollback.
 
 Right-clicking a command's prompt, command line or output also offers
 **Select Command Output** for that command. Cmd+C then copies it.
@@ -113,7 +121,9 @@ Option-drag makes a rectangular selection (as Shift+Option-drag does).
 
 With no prompt that way, or no output to select, the app beeps. The
 shortcuts can be changed in `[keybind]` (`previous_prompt`,
-`next_prompt`, `select_output`); importing a Ghostty config maps
+`next_prompt`, `select_output`, `copy_command`, `copy_output`,
+`previous_failed`, `next_failed`); the copies' chords are Warp's;
+importing a Ghostty config maps
 `jump_to_prompt`.
 
 Marks are kept for lines in the scrollback as well as on the screen, and

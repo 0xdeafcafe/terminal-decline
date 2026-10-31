@@ -169,6 +169,9 @@ pub struct Snapshot {
     /// The styles of the history rows copied this time.
     pub history_styles: Vec<Style>,
     pub highlights: Vec<Highlight>,
+    /// The view rows showing a prompt (OSC 133 A) whose command exited
+    /// non-zero, top to bottom: the renderer marks them in the padding.
+    pub failed: Vec<u16>,
     /// kitty direct placements that reach into the view, ready images only
     /// (images.md §4.4). Empty until kitty graphics lands (I.2).
     pub placements: Vec<SnapPlacement>,
@@ -184,6 +187,16 @@ pub struct Snapshot {
     row: Row,
     row_styles: Vec<Style>,
     row_links: Vec<Option<Arc<LinkValue>>>,
+    /// Whether prompts in history failed, as last found.
+    failed_cache: FailedCache,
+}
+
+/// [`Terminal::prompt_failed`]'s answers, for the terminal, history and
+/// D marks in `key`.
+#[derive(Clone, Debug, Default)]
+struct FailedCache {
+    key: (u64, u64, u64),
+    prompts: std::collections::HashMap<(u64, usize), bool>,
 }
 
 impl Snapshot {
@@ -248,6 +261,46 @@ fn merge(ranges: &mut [Range<usize>]) -> Vec<Range<usize>> {
 }
 
 impl Terminal {
+    /// A view row made of `pieces` shows a prompt (its OSC 133 A mark)
+    /// whose command exited non-zero. A look at each line's flags first,
+    /// so rows without marks cost nothing more.
+    fn shows_failed_prompt(&self, pieces: &[super::history::Piece], cache: &mut FailedCache) -> bool {
+        pieces.iter().any(|p| {
+            self.line_has_marks(p.line)
+                && self.marks_at(p.line).iter().any(|m| {
+                    let col = m.col as usize;
+                    m.kind == crate::cell::MarkKind::Prompt
+                        && ((p.from <= col && col < p.to) || (col == 0 && p.from == 0))
+                        && self.prompt_failed(super::Point { line: p.line, col }, cache)
+                })
+        })
+    }
+
+    /// [`Terminal::command_failed`], kept for prompts in history: their
+    /// marks don't change there, and what follows them only with a new D
+    /// mark, so the answers hold until one is written or history is
+    /// cleared. A prompt on the screen is looked at each time.
+    fn prompt_failed(&self, p: super::Point, cache: &mut FailedCache) -> bool {
+        if p.line >= self.top_line {
+            return self.command_failed(p);
+        }
+        let key = (self.terminal_id, self.history_epoch, self.ends_written);
+        if cache.key != key {
+            cache.key = key;
+            cache.prompts.clear();
+        }
+        if let Some(&failed) = cache.prompts.get(&(p.line, p.col)) {
+            return failed;
+        }
+        let failed = self.command_failed(p);
+        // Bounded: a view shows a few dozen prompts at most.
+        if cache.prompts.len() >= 4096 {
+            cache.prompts.clear();
+        }
+        cache.prompts.insert((p.line, p.col), failed);
+        failed
+    }
+
     /// Copy what the renderer needs for a frame into `out` (§9.2). `have`
     /// says whether the renderer's row cache already has a row; those rows
     /// aren't copied. Takes the styles interned since the last snapshot,
@@ -271,6 +324,7 @@ impl Terminal {
         out.style_updates.clear();
         out.history_styles.clear();
         out.highlights.clear();
+        out.failed.clear();
         out.placements.clear();
         out.virtual_placements.clear();
         // Images the pool evicted since the last command or snapshot are
@@ -319,6 +373,8 @@ impl Terminal {
         let mut found = Vec::new();
         let mut pieces = Vec::new();
         let mut unit: Option<std::sync::Arc<Unit>> = None;
+        // The first line with marks at or after the last row's, once looked up.
+        let mut next_marked: Option<Option<u64>> = None;
         for &at in view_rows.iter() {
             let highlights = out.highlights.len() as u32;
             match at {
@@ -335,6 +391,17 @@ impl Terminal {
             if with_images {
                 let r = out.rows.len();
                 row_pieces.extend(pieces.iter().map(|p| (r, *p)));
+            }
+            // Rows come in line order: the next line with marks is looked
+            // up (a block at a time, from flags) once rows pass it, so rows
+            // without marks cost a compare.
+            if let (Some(first), Some(last)) = (pieces.first(), pieces.last()) {
+                if next_marked.is_none_or(|m| m.is_some_and(|m| m < first.line)) {
+                    next_marked = Some(self.next_marked_line(first.line));
+                }
+                if next_marked.flatten().is_some_and(|m| m <= last.line) && self.shows_failed_prompt(&pieces, &mut out.failed_cache) {
+                    out.failed.push(to_u16(out.rows.len()));
+                }
             }
             // Stored columns `a..b` of `line`, as this row's columns.
             let cols_of = |line: u64, a: usize, b: usize, out: &mut Vec<Range<usize>>| {

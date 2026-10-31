@@ -627,3 +627,33 @@ fn snapshot_lists_the_failed_prompts_rows() {
     plain.advance(b"a\r\nb");
     assert_eq!(failed(&mut plain), Vec::<u16>::new());
 }
+
+/// A prompt in history whose D mark is still on the screen: erasing the
+/// D mark there (as `clear` does) changes what the snapshot shows, though
+/// it keeps answers for prompts in history from frame to frame.
+#[test]
+fn failed_prompts_in_history_follow_their_end_on_the_screen() {
+    let mut t = Term::new(20, 3, 100, term_core::ImagePool::process());
+    session(&mut t, "bad", "o1\r\no2\r\n", 2);
+    // Rows: `$ bad` (in history), o1, o2, and the D mark's row.
+    assert_eq!(t.state.scrollback_len(), 1);
+    t.state.scroll_view(1);
+    let mut snap = Snapshot::default();
+    let mut failed = |t: &mut Term| {
+        t.state.snapshot(&mut snap, |_| false);
+        snap.failed.clone()
+    };
+    assert_eq!(failed(&mut t), vec![0]);
+    assert_eq!(failed(&mut t), vec![0], "the kept answer");
+    // The D mark's row erased: the command no longer reads as failed.
+    t.advance(b"\x1b[3;1H\x1b[2K");
+    let prompt = Point {
+        line: t.state.point_at(0, 0).line,
+        col: 0,
+    };
+    assert_eq!(t.state.command_status(prompt), None);
+    assert_eq!(failed(&mut t), Vec::<u16>::new());
+    // Ended again: failed once more.
+    t.advance(b"\x1b]133;D;1\x07");
+    assert_eq!(failed(&mut t), vec![0]);
+}

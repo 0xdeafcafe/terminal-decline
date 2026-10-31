@@ -446,9 +446,6 @@ pub struct Terminal {
     /// Where the last OSC 133 B mark put the command line: its buffer
     /// line and column, for the command's text at the C mark.
     input_at: Option<(u64, usize)>,
-    /// OSC 133 D marks written so far: a command's status can only
-    /// change with one (the snapshot's cache of failed prompts).
-    pub(crate) ends_written: u64,
     /// The program's working directory, if it reports it (OSC 7).
     cwd: Option<String>,
     /// The palette and foreground, background and cursor colours: the
@@ -601,7 +598,6 @@ impl Terminal {
             progress: None,
             commands: Vec::new(),
             input_at: None,
-            ends_written: 0,
             cwd: None,
             colors: Box::new(replies::ColorTable::new([0xd8dee9, 0x16181c, 0xd8dee9])),
             colors_changed: false,
@@ -1215,9 +1211,16 @@ impl Terminal {
     /// D mark gave no status, and for a prompt nothing was run from (the
     /// next prompt came first).
     pub fn command_status(&self, prompt: Point) -> Option<u32> {
-        self.command_marks(prompt)
-            .find(|(_, m)| m.kind == MarkKind::End)
+        self.command_end(prompt)
+            .filter(|(_, m)| m.kind == MarkKind::End)
             .and_then(|(_, m)| m.status)
+    }
+
+    /// Where the command of the prompt at `prompt` ended, and how: the
+    /// first D (its end) or A (the next prompt) mark after it.
+    pub(crate) fn command_end(&self, prompt: Point) -> Option<(Point, Mark)> {
+        self.marks_after_prompt(prompt)
+            .find(|(_, m)| matches!(m.kind, MarkKind::End | MarkKind::Prompt))
     }
 
     /// The command of the prompt at `prompt` exited non-zero.
@@ -1904,10 +1907,7 @@ impl Terminal {
             MarkKind::Output => Some(Command::Started(
                 self.input_at.take().and_then(|from| self.command_text(from, here)),
             )),
-            MarkKind::End => {
-                self.ends_written += 1;
-                Some(Command::Finished(status))
-            }
+            MarkKind::End => Some(Command::Finished(status)),
             MarkKind::Prompt => Some(Command::Prompt),
         };
         if let Some(c) = command {

@@ -24,6 +24,9 @@ use crate::reload::SavedWindow;
 use crate::secure_input::{self, SecureInput};
 use crate::view::{Launch, WindowView, content_size, delegate_of};
 
+mod quick;
+pub(crate) use quick::{resigned_key as quick_resigned_key, status as quick_status, toggle_quick_now};
+
 /// Every Terminal Decline window shares this, so any two can be tabs of one
 /// window.
 const TABBING_ID: &str = "red.forbes.terminal-decline.terminal";
@@ -36,6 +39,8 @@ enum Place {
     Frame(NSRect),
     /// A new tab of this window, after its current tab.
     TabOf(Retained<NSWindow>),
+    /// The quick terminal's window, at this frame (where it slides from).
+    Quick(NSRect),
 }
 
 pub struct AppIvars {
@@ -66,6 +71,9 @@ pub struct AppIvars {
     /// Quit without asking, even with `confirm_close` (a restart into a
     /// new build, or the test-only `quit`).
     quit_without_asking: Cell<bool>,
+    /// Quitting to restart into a new build, which saved the windows
+    /// itself: a quit's own save for the next launch is skipped.
+    restarting: Cell<bool>,
     /// The Settings tab, while it is open: Cmd+, brings it to the front.
     settings: RefCell<Option<Retained<NSWindow>>>,
     /// The errors of the config in effect, so a reload writes only new
@@ -75,6 +83,10 @@ pub struct AppIvars {
     role: crate::entry::Role,
     /// The theme Settings is previewing in every window, if any.
     preview: RefCell<Previewing>,
+    /// The quick terminal, once the hotkey made it.
+    quick: RefCell<Option<quick::QuickTerminal>>,
+    /// Its hotkey, while registered.
+    hotkey: RefCell<Option<crate::hotkey::Registration>>,
 }
 
 /// A window for a session of the agent API (`ctl spawn --window`): the
@@ -143,7 +155,19 @@ define_class!(
         fn did_finish_launching(&self, _n: &NSNotification) {
             // Before any window opens, so each starts in its appearance.
             apply_appearance(MainThreadMarker::from(self), self.ivars().config.borrow().appearance);
-            let restore = std::mem::take(&mut *self.ivars().restore.borrow_mut());
+            let mut restore = std::mem::take(&mut *self.ivars().restore.borrow_mut());
+            let ours = self.ivars().role == crate::entry::Role::App && !crate::background::on();
+            let store = crate::saved_history::Store::current();
+            if ours && restore.is_empty() {
+                // What the last quit saved, with `restore_scrollback =
+                // true`; dropped if the setting changed since.
+                let session = store.session();
+                if self.ivars().config.borrow().restore_scrollback.on_quit() {
+                    restore = crate::reload::take(&session);
+                } else {
+                    let _ = std::fs::remove_file(&session);
+                }
+            }
             let folders = std::mem::take(&mut *self.ivars().opened_at_launch.borrow_mut());
             self.ivars().launched.set(true);
             // An app started to host the agent API's windows opens none of
@@ -152,6 +176,11 @@ define_class!(
                 self.open_window(None, Place::Cascade, None);
             }
             self.restore(restore);
+            if ours {
+                // Files the windows just opened didn't take: left by a
+                // restart or quit whose next launch never came.
+                store.clean_up();
+            }
             for dir in folders {
                 self.open_folder(dir, None);
             }
@@ -159,6 +188,7 @@ define_class!(
             unsafe { NSApplication::sharedApplication(mtm).setServicesProvider(Some(self)) };
             self.watch_for_new_build();
             self.watch_config();
+            self.register_hotkey();
             crate::memory::listen();
             // The agent API's socket (docs/design/agent-api.md §2): the
             // app only, not pins nor the smoke tests' app.
@@ -279,6 +309,7 @@ define_class!(
 
         #[unsafe(method(applicationWillTerminate:))]
         fn will_terminate(&self, _n: &NSNotification) {
+            self.save_session_for_next_launch();
             secure_input::apply(self.ivars().secure.borrow_mut().quit());
         }
     }
@@ -390,6 +421,12 @@ define_class!(
             let closed = n.object();
             let is_closed = |w: &NSWindow| closed.as_deref().is_some_and(|o| std::ptr::eq(o, w as &AnyObject));
             self.ivars().windows.borrow_mut().retain(|(w, _)| !is_closed(w));
+            let mut quick = self.ivars().quick.borrow_mut();
+            if quick.as_ref().is_some_and(|q| is_closed(&q.window)) {
+                // Its shell exited or it was closed: the hotkey makes a new one.
+                *quick = None;
+            }
+            drop(quick);
             if let Some(window) = closed.as_deref().and_then(|o| o.downcast_ref::<NSWindow>()) {
                 let open = self.ivars().windows.borrow().iter().map(|(w, _)| w.clone()).collect();
                 crate::background::closed(window, open);
@@ -430,8 +467,11 @@ impl AppDelegate {
             launched: Cell::new(false),
             opened_at_launch: RefCell::new(Vec::new()),
             quit_without_asking: Cell::new(false),
+            restarting: Cell::new(false),
             settings: RefCell::new(None),
             preview: RefCell::new(Previewing::Off),
+            quick: RefCell::new(None),
+            hotkey: RefCell::new(None),
             errors: RefCell::new(notices.clone()),
             role,
             notices: RefCell::new(notices.into()),
@@ -497,6 +537,9 @@ impl AppDelegate {
             apply_appearance(MainThreadMarker::from(self), config.appearance);
         }
         crate::images::apply_config(config.images, config.image_memory, config.image_file_transfer);
+        if old.quick_terminal_hotkey != config.quick_terminal_hotkey {
+            self.register_hotkey();
+        }
         if old.keybind != config.keybind || old.update != config.update {
             let mtm = MainThreadMarker::from(self);
             let menus = build_menus(mtm, &self.ivars().app_name, &config.keybinds());
@@ -550,12 +593,18 @@ impl AppDelegate {
             eprintln!("terminal-decline: {} is gone and no new build is beside it", bundle.display());
             return;
         };
-        let saved = self.saved_windows();
+        let store = crate::saved_history::Store::current();
+        let saved = self.saved_windows(self.history_to_save(&store, false).as_ref().map(|(s, l)| (*s, *l)));
+        // The new build registers the quick terminal's hotkey as it starts:
+        // this one lets it go first.
+        self.ivars().hotkey.borrow_mut().take();
         let restored = crate::reload::save(&saved).and_then(|file| crate::reload::relaunch(&bundle, &file));
         if let Err(e) = restored {
             eprintln!("terminal-decline: couldn't start the new build: {e}");
+            self.register_hotkey();
             return;
         }
+        self.ivars().restarting.set(true);
         self.quit_without_asking();
     }
 
@@ -611,9 +660,45 @@ impl AppDelegate {
         })
     }
 
+    /// Where to save each pane's history and how many lines of it, for a
+    /// restart (or with `quitting`, a quit), if the config says to:
+    /// never while Secure Keyboard Entry is on, whose point is that what
+    /// is typed stays in the app, nor in a pin.
+    fn history_to_save<'s>(
+        &self,
+        store: &'s crate::saved_history::Store,
+        quitting: bool,
+    ) -> Option<(&'s crate::saved_history::Store, usize)> {
+        let config = self.ivars().config.borrow();
+        let wanted = match quitting {
+            true => config.restore_scrollback.on_quit(),
+            false => config.restore_scrollback.on_restart(),
+        };
+        let pin = matches!(self.ivars().role, crate::entry::Role::Pin(_));
+        (wanted && !pin && !self.ivars().secure.borrow().wanted()).then_some((store, config.restore_scrollback_limit))
+    }
+
+    /// `restore_scrollback = true`: save the windows and their history as
+    /// the app quits, for the next launch to reopen. Only Terminal
+    /// Decline.app's own process, not under the test control.
+    fn save_session_for_next_launch(&self) {
+        if self.ivars().restarting.get() || self.ivars().role != crate::entry::Role::App || crate::background::on() {
+            return;
+        }
+        let store = crate::saved_history::Store::current();
+        let Some(history) = self.history_to_save(&store, true) else {
+            return;
+        };
+        let saved = self.saved_windows(Some(history));
+        let json = serde_json::to_vec(&saved).expect("saved windows serialise");
+        if let Err(e) = store.save_session(&json) {
+            eprintln!("terminal-decline: saving the windows for the next launch: {e}");
+        }
+    }
+
     /// Each window to reopen after a restart, tabs in order with their
-    /// group's index.
-    fn saved_windows(&self) -> Vec<SavedWindow> {
+    /// group's index. With `history`, each pane's history saved too.
+    fn saved_windows(&self, history: Option<(&crate::saved_history::Store, usize)>) -> Vec<SavedWindow> {
         let windows = self.ivars().windows.borrow();
         let ours = |w: &NSWindow| {
             windows
@@ -629,15 +714,17 @@ impl AppDelegate {
                 frame: [f.origin.x, f.origin.y, f.size.width, f.size.height],
                 tab_group,
                 selected,
-                panes: view.as_ref().and_then(|v| v.saved_panes()),
+                panes: view.as_ref().and_then(|v| v.saved_panes(history)),
                 command: view.as_ref().and_then(|v| v.command_to_restore()),
+                history: history.and_then(|(store, limit)| view.as_ref().and_then(|v| v.saved_history(store, limit))),
             }
         };
         let mut saved = Vec::new();
         let mut done: Vec<*const NSWindow> = Vec::new();
         let mut groups = 0;
         for (w, _) in windows.iter() {
-            if done.contains(&Retained::as_ptr(w)) {
+            // The quick terminal isn't reopened as a window.
+            if done.contains(&Retained::as_ptr(w)) || self.is_quick(w) {
                 continue;
             }
             match w.tabbedWindows().filter(|t| t.len() > 1) {
@@ -673,7 +760,7 @@ impl AppDelegate {
                 };
                 // With panes, each pane types its own command.
                 let command = w.command.filter(|_| w.panes.is_none());
-                let opened = self.open_window_as(w.cwd, place, None, false, w.panes, None);
+                let opened = self.open_window_as(w.cwd, place, None, false, w.panes, None, w.history);
                 if let (Some(command), Some(view)) = (command, opened.as_ref().and_then(|o| self.view_of(o))) {
                     view.type_at_prompt(command);
                 }
@@ -692,7 +779,7 @@ impl AppDelegate {
 
     /// A tab of the window in front, else a window.
     fn new_tab_in_front(&self) {
-        match self.key_window() {
+        match self.key_window().filter(|w| !self.is_quick(w)) {
             Some(window) => self.open_tab(&window),
             None => {
                 self.open_window(None, Place::Cascade, None);
@@ -809,7 +896,7 @@ impl AppDelegate {
             Some(window) => Place::TabOf(window),
             None => Place::Cascade,
         };
-        let opened = self.open_window_as(None, place, None, true, None, None);
+        let opened = self.open_window_as(None, place, None, true, None, None, None);
         *self.ivars().settings.borrow_mut() = opened;
     }
 
@@ -824,7 +911,12 @@ impl AppDelegate {
     /// A new tab after `window`'s current one, in its directory.
     pub(crate) fn open_tab(&self, window: &NSWindow) {
         let cwd = self.view_of(window).and_then(|v| v.foreground_cwd());
-        self.open_window(cwd, Place::TabOf(objc2::Message::retain(window)), None);
+        // The quick terminal has no tabs (its splits it keeps): a window.
+        let place = match self.is_quick(window) {
+            true => Place::Cascade,
+            false => Place::TabOf(objc2::Message::retain(window)),
+        };
+        self.open_window(cwd, place, None);
     }
 
     /// A command from the latency harness (see [`crate::latency`]).
@@ -884,13 +976,16 @@ impl AppDelegate {
     /// Open a window in `cwd` (else the configured one) at `place`, running
     /// `argv` (else the configured program).
     fn open_window(&self, cwd: Option<String>, place: Place, argv: Option<Vec<String>>) -> Option<Retained<NSWindow>> {
-        self.open_window_as(cwd, place, argv, false, None, None)
+        self.open_window_as(cwd, place, argv, false, None, None, None)
     }
 
     /// [`Self::open_window`], or with `settings` the Settings tab: the
     /// main app's binary running the preferences directly (not through
     /// the login shell), titled "Settings", opaque, without notices. With
-    /// `layout`, the panes saved for a restart.
+    /// `layout`, the panes saved for a restart; with `history`, the one
+    /// pane's history saved for it; with `hosted`, an agent API session's
+    /// window.
+    #[allow(clippy::too_many_arguments)]
     fn open_window_as(
         &self,
         cwd: Option<String>,
@@ -899,6 +994,7 @@ impl AppDelegate {
         settings: bool,
         layout: Option<crate::reload::SavedPanes>,
         hosted: Option<Hosted>,
+        history: Option<String>,
     ) -> Option<Retained<NSWindow>> {
         let mtm = MainThreadMarker::from(self);
         let (config, hosted_command, adopt) = match hosted {
@@ -933,13 +1029,23 @@ impl AppDelegate {
             | NSWindowStyleMask::Resizable
             | NSWindowStyleMask::FullSizeContentView;
         let probe = NSRect::new(NSPoint::new(0.0, 0.0), objc2_foundation::NSSize::new(400.0, 300.0));
-        let window = unsafe {
-            NSWindow::initWithContentRect_styleMask_backing_defer(NSWindow::alloc(mtm), probe, style, NSBackingStoreType::Buffered, false)
+        let is_quick = matches!(place, Place::Quick(_));
+        let window = match is_quick {
+            true => quick::QuickWindow::create(mtm, probe),
+            false => unsafe {
+                NSWindow::initWithContentRect_styleMask_backing_defer(
+                    NSWindow::alloc(mtm),
+                    probe,
+                    style,
+                    NSBackingStoreType::Buffered,
+                    false,
+                )
+            },
         };
         unsafe { window.setReleasedWhenClosed(false) };
         window.setTitlebarAppearsTransparent(true);
         window.setTitleVisibility(NSWindowTitleVisibility::Hidden);
-        window.setTabbingIdentifier(&NSString::from_str(TABBING_ID));
+        window.setTabbingIdentifier(&NSString::from_str(if is_quick { quick::TABBING_ID } else { TABBING_ID }));
         // A new window stays a window even when System Settings prefers
         // tabs (Cmd+T is for tabs); tabbing is allowed again once it is on
         // screen, for Merge All Windows and dragging tabs together.
@@ -1005,7 +1111,8 @@ impl AppDelegate {
         // a tab takes its window's frame.
         match &place {
             Place::Frame(frame) => window.setFrame_display(*frame, false),
-            Place::Cascade => match self.ivars().windows.borrow().last() {
+            Place::Quick(frame) => window.setFrame_display(*frame, false),
+            Place::Cascade => match self.ivars().windows.borrow().iter().rfind(|(w, _)| !self.is_quick(w)) {
                 Some((prev, _)) => {
                     let f = prev.frame();
                     window.cascadeTopLeftFromPoint(NSPoint::new(f.origin.x, f.origin.y + f.size.height));
@@ -1026,7 +1133,9 @@ impl AppDelegate {
         // A new tab puts the one in front behind it, without key
         // notifications while the app is inactive.
         crate::view::sync_visibility_soon();
-        window.setTabbingMode(NSWindowTabbingMode::Automatic);
+        if !is_quick {
+            window.setTabbingMode(NSWindowTabbingMode::Automatic);
+        }
         if std::env::var_os("DECLINE_DEBUG").is_some() {
             // Test tooling uses this to screenshot the window.
             eprintln!("terminal-decline: window {}", window.windowNumber());
@@ -1045,6 +1154,7 @@ impl AppDelegate {
                 settings,
                 layout,
                 adopt,
+                history,
             },
         ) {
             eprintln!("terminal-decline: could not open a window: {e}");
@@ -1105,7 +1215,7 @@ impl AppDelegate {
             adopt,
         };
         let window = self
-            .open_window_as(None, Place::Cascade, None, false, None, Some(hosted))
+            .open_window_as(None, Place::Cascade, None, false, None, Some(hosted), None)
             .ok_or("couldn't open a window")?;
         let Some(view) = self.view_of(&window) else {
             window.close();
@@ -1218,7 +1328,13 @@ pub(crate) fn preview_theme(ask: term_prefs::Preview) {
 pub(crate) fn write_saved_windows(path: &std::path::Path) {
     let delegate = DELEGATE.with(|d| d.borrow().as_ref().and_then(|w| w.load()));
     if let Some(delegate) = delegate {
-        let json = serde_json::to_string(&delegate.saved_windows()).expect("saved windows serialise");
+        // With each pane's history, as a restart saves it, in the folder
+        // `<path>.restore` (not the user's).
+        let mut dir = path.as_os_str().to_owned();
+        dir.push(".restore");
+        let store = crate::saved_history::Store::in_dir(dir.into());
+        let history = delegate.history_to_save(&store, false);
+        let json = serde_json::to_string(&delegate.saved_windows(history)).expect("saved windows serialise");
         if let Err(e) = std::fs::write(path, json) {
             eprintln!("terminal-decline: writing {}: {e}", path.display());
         }

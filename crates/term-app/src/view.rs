@@ -625,6 +625,9 @@ define_class!(
             // recorded is cancelled.
             self.finish_recording(None);
             self.set_focus(false);
+            if let Some(window) = self.window() {
+                crate::app::quick_resigned_key(&window);
+            }
             // The tab put behind resigns key before its group selects
             // another tab; look again once that has happened.
             sync_visibility_soon();
@@ -674,6 +677,9 @@ pub struct Launch {
     /// The agent API's session this window shows (`ctl spawn --window`):
     /// its first pane's program is the session's.
     pub adopt: Option<crate::ctl::window::Adopt>,
+    /// One pane's history saved for a restart, shown again above its new
+    /// shell ([`crate::saved_history`]); with `layout`, each pane's own.
+    pub history: Option<String>,
 }
 
 /// The renderer's theme for a window: the Settings tab stays opaque
@@ -769,6 +775,7 @@ impl WindowView {
                     program: true,
                     settings,
                     adopt: adopt.take(),
+                    history: launch.history.as_deref(),
                 })?;
                 panes.insert(pane_id, pane);
                 first_tree
@@ -803,6 +810,7 @@ impl WindowView {
                         program: saved.program,
                         settings: false,
                         adopt: None,
+                        history: saved.history.as_deref(),
                     });
                     match made {
                         Ok(pane) => {
@@ -1201,7 +1209,9 @@ impl WindowView {
             let behind = crate::background::tab_group(&w)
                 .and_then(|g| g.selectedWindow())
                 .is_some_and(|front| !std::ptr::eq::<NSWindow>(&*front, &*w));
-            !behind
+            // Ordered out: the quick terminal while hidden.
+            w.isVisible()
+                && !behind
                 && (crate::background::is_key(&w)
                     || crate::background::on()
                     || w.occlusionState().contains(objc2_app_kit::NSWindowOcclusionState::Visible))
@@ -1212,7 +1222,7 @@ impl WindowView {
     /// behind or brought to the front. Hiding frees what can be rebuilt
     /// while nothing can be seen; showing draws at once, so the window
     /// never shows a stale frame. Returns whether the window can be seen.
-    fn sync_visibility(&self) -> bool {
+    pub(crate) fn sync_visibility(&self) -> bool {
         let visible = self.visible();
         let minimised = self.window().is_some_and(|w| w.isMiniaturized());
         let changed = self.with_state(|st| {
@@ -2109,6 +2119,7 @@ impl WindowView {
                     program: false,
                     settings: false,
                     adopt: None,
+                    history: None,
                 },
             );
             match pane {
@@ -2467,8 +2478,10 @@ impl WindowView {
 
     /// The panes to save for a restart, when there are several: the tree
     /// with its shares, and each pane's folder, the command in its shell's
-    /// foreground and whether it ran the window's program.
-    pub fn saved_panes(&self) -> Option<SavedPanes> {
+    /// foreground and whether it ran the window's program. With
+    /// `history`, each pane's history too, its newest lines up to the
+    /// limit, in the store's files.
+    pub fn saved_panes(&self, history: Option<(&crate::saved_history::Store, usize)>) -> Option<SavedPanes> {
         self.with_state(|st| {
             if st.tree.len() < 2 {
                 return None;
@@ -2484,10 +2497,23 @@ impl WindowView {
                             .flatten()
                             .and_then(crate::running::foreground_command),
                         program: p.program,
+                        history: history.and_then(|(store, limit)| save_history(p, store, limit)),
                     },
                     None => SavedPane::default(),
                 }
             }))
+        })
+        .flatten()
+    }
+
+    /// The history of a window with one pane, saved for a restart as
+    /// [`WindowView::saved_panes`] saves each pane's.
+    pub fn saved_history(&self, store: &crate::saved_history::Store, limit: usize) -> Option<String> {
+        self.with_state(|st| {
+            if st.tree.len() > 1 {
+                return None;
+            }
+            st.focused().and_then(|p| save_history(p, store, limit))
         })
         .flatten()
     }
@@ -2819,6 +2845,8 @@ struct NewPane<'a> {
     settings: bool,
     /// It is the agent API's session: see [`Launch::adopt`].
     adopt: Option<crate::ctl::window::Adopt>,
+    /// Its history from before a restart, to show again.
+    history: Option<&'a str>,
 }
 
 /// Start pane `n` of window `window`: its terminal and program.
@@ -2829,6 +2857,9 @@ fn spawn_pane(window: usize, config: &Config, theme: &Theme, m: term_font::Metri
     t.state.set_cursor_default(config.cursor_style.shape(), config.cursor_blink);
     // Before the program starts: nothing to report yet.
     crate::config::set_term_colors(&mut t.state, theme);
+    if let Some(name) = n.history {
+        crate::saved_history::Store::current().restore(&mut t, name);
+    }
     for notice in n.notices {
         crate::session::write_notice(&mut t, notice);
     }
@@ -2898,6 +2929,15 @@ fn shell_command(config: &Config) -> Command {
 
 /// A pane's working directory: the one its shell reported (OSC 7), else
 /// its foreground program's.
+/// Save `p`'s history in `store`, as [`crate::saved_history::Store::save`]
+/// does; not the Settings pane's.
+fn save_history(p: &Pane, store: &crate::saved_history::Store, limit: usize) -> Option<String> {
+    if p.settings {
+        return None;
+    }
+    store.save(&p.session.lock_term(), limit)
+}
+
 fn pane_cwd(p: &Pane) -> Option<String> {
     let reported = p.session.lock_term().state.cwd().map(str::to_owned);
     reported.or_else(|| p.session.foreground_cwd())
@@ -3200,6 +3240,7 @@ impl WindowView {
                         None => NSBeep(),
                     }
                 }
+                Some(Control::Quick) => crate::app::toggle_quick_now(),
                 Some(Control::Save) => {
                     let path = self.with_state(|st| st.win.test.as_ref().map(|t| t.path.clone())).flatten();
                     if let Some(path) = path {
@@ -3304,6 +3345,7 @@ impl WindowView {
                     // Read before this window's state is borrowed: it may
                     // be the Settings tab.
                     settings: crate::app::settings_status(),
+                    quick: self.window().and_then(|w| crate::app::quick_status(&w)),
                 };
                 self.with_state(|st| write_dump(st, window));
                 self.run_controls();
@@ -3374,6 +3416,7 @@ struct Window {
     active: bool,
     secure_input: bool,
     settings: (bool, bool),
+    quick: Option<control::QuickDump>,
 }
 
 /// One line of JSON about the window, its focused pane and every pane.
@@ -3504,6 +3547,7 @@ fn write_dump(st: &mut State, window: Window) {
         phys_footprint: control::phys_footprint(),
         memory_reliefs: crate::memory::reliefs(),
         images,
+        quick: window.quick,
     };
     let line = serde_json::to_string(&dump).expect("dump serialises");
     let written = std::fs::OpenOptions::new()

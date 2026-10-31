@@ -69,6 +69,57 @@ impl<'de> Deserialize<'de> for UpdateMode {
     }
 }
 
+/// `restore_scrollback`: when a pane's history is saved, to show again
+/// above the new shell ([`crate::saved_history`]). `true` and `false`
+/// mean `"always"` and `"never"`.
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum RestoreScrollback {
+    /// When the app restarts into a new build (dogfood and self-update
+    /// restarts), which reopens its windows anyway.
+    #[default]
+    Restarts,
+    /// Also when it quits: the next launch reopens the windows, each
+    /// pane with its history.
+    Always,
+    /// Never: nothing is written.
+    Never,
+}
+
+impl RestoreScrollback {
+    /// Whether a restart saves history.
+    pub fn on_restart(self) -> bool {
+        self != RestoreScrollback::Never
+    }
+
+    /// Whether quitting saves the windows and their history.
+    pub fn on_quit(self) -> bool {
+        self == RestoreScrollback::Always
+    }
+}
+
+impl<'de> Deserialize<'de> for RestoreScrollback {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<RestoreScrollback, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Bool(bool),
+            Text(String),
+        }
+        let bad = || serde::de::Error::custom("use \"restarts\", \"always\" or \"never\" (or true or false)");
+        match Raw::deserialize(d).map_err(|_| bad())? {
+            Raw::Bool(true) => Ok(RestoreScrollback::Always),
+            Raw::Bool(false) => Ok(RestoreScrollback::Never),
+            Raw::Text(t) => match t.as_str() {
+                "restarts" => Ok(RestoreScrollback::Restarts),
+                "always" => Ok(RestoreScrollback::Always),
+                "never" => Ok(RestoreScrollback::Never),
+                _ => Err(bad()),
+            },
+        }
+    }
+}
+
 /// The cursor's shape until a program sets its own (`cursor_style`).
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
@@ -245,6 +296,12 @@ pub struct Config {
     /// Space around the text, in points.
     pub padding: f64,
     pub scrollback: usize,
+    /// Show each pane's history again after `"restarts"` (the default:
+    /// restarts into a new build), `"always"` (`true`: quitting too, and
+    /// the next launch reopens the windows) or `"never"` (`false`).
+    pub restore_scrollback: RestoreScrollback,
+    /// The most lines of each pane's history saved for that.
+    pub restore_scrollback_limit: usize,
     pub option_as_meta: OptionAsMeta,
     /// 0.0–1.0. Below 1 the desktop shows through.
     pub opacity: f64,
@@ -320,6 +377,24 @@ pub struct Config {
     /// How long a command must run, in seconds, for `notify_on_finish`.
     #[serde(deserialize_with = "notify_after")]
     pub notify_after: u32,
+    /// The quick terminal's system-wide hotkey (see [`crate::quick`]),
+    /// spelled as in `[keybind]`; `""` turns the quick terminal off. Not
+    /// in pins.
+    #[serde(deserialize_with = "quick_terminal_hotkey")]
+    pub quick_terminal_hotkey: String,
+    /// Where it slides in from: `"top"` (the default), `"bottom"`,
+    /// `"left"`, `"right"`, or `"center"` (where it fades in).
+    pub quick_terminal_position: crate::quick::Position,
+    /// How much of the screen it takes, from 0.1 to 1: its depth from its
+    /// edge, or in the centre each side.
+    #[serde(deserialize_with = "quick_terminal_size")]
+    pub quick_terminal_size: f64,
+    /// How long it takes to slide in or out, in milliseconds; 0 for no
+    /// animation (as with Reduce Motion on).
+    #[serde(deserialize_with = "quick_terminal_animation_ms")]
+    pub quick_terminal_animation_ms: u32,
+    /// Slide it away once another window or app takes the focus.
+    pub quick_terminal_autohide: bool,
     /// Updates (docs/design/updater.md): `"notify"` (the default),
     /// `"auto"` or `"off"`. Release builds check once a day and install on
     /// quit unless off; builds from source say when `main` is ahead, and
@@ -354,6 +429,8 @@ impl Default for Config {
             ambiguous_width: 1,
             padding: 6.0,
             scrollback: 10_000,
+            restore_scrollback: RestoreScrollback::Restarts,
+            restore_scrollback_limit: 10_000,
             option_as_meta: OptionAsMeta::None,
             opacity: 1.0,
             unfocused_pane_opacity: 1.0,
@@ -382,6 +459,11 @@ impl Default for Config {
             title_status: true,
             notify_on_finish: true,
             notify_after: 10,
+            quick_terminal_hotkey: crate::quick::DEFAULT_HOTKEY.into(),
+            quick_terminal_position: crate::quick::Position::Top,
+            quick_terminal_size: crate::quick::DEFAULT_SIZE,
+            quick_terminal_animation_ms: 150,
+            quick_terminal_autohide: true,
             update: UpdateMode::Notify,
             editor: None,
             agent_api: true,
@@ -441,6 +523,35 @@ fn notify_after<'de, D: Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
         Ok(v) if v <= NOTIFY_AFTER_MAX => Ok(v),
         _ => Err(serde::de::Error::custom(format!(
             "{v} is not a number of seconds from 0 to {NOTIFY_AFTER_MAX}"
+        ))),
+    }
+}
+
+fn quick_terminal_hotkey<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    let v = String::deserialize(d)?;
+    crate::quick::Hotkey::parse(&v).map_err(serde::de::Error::custom)?;
+    Ok(v)
+}
+
+fn quick_terminal_size<'de, D: Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
+    let v = f64::deserialize(d)?;
+    if (crate::quick::MIN_SIZE..=1.0).contains(&v) {
+        Ok(v)
+    } else {
+        Err(serde::de::Error::custom(format!(
+            "{v} is not between {} and 1",
+            crate::quick::MIN_SIZE
+        )))
+    }
+}
+
+fn quick_terminal_animation_ms<'de, D: Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
+    let v = i64::deserialize(d)?;
+    match u32::try_from(v) {
+        Ok(v) if v <= crate::quick::MAX_ANIMATION_MS => Ok(v),
+        _ => Err(serde::de::Error::custom(format!(
+            "{v} is not a number of milliseconds from 0 to {}",
+            crate::quick::MAX_ANIMATION_MS
         ))),
     }
 }
@@ -1259,6 +1370,62 @@ mod tests {
         assert!(!c.copy_on_select);
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert!(errors[0].starts_with("config: copy_on_select: "), "{errors:?}");
+    }
+
+    #[test]
+    fn quick_terminal_settings() {
+        let c = Config::default();
+        assert_eq!(c.quick_terminal_hotkey, "ctrl+`");
+        assert_eq!(c.quick_terminal_position, crate::quick::Position::Top);
+        assert_eq!((c.quick_terminal_size, c.quick_terminal_animation_ms), (0.4, 150));
+        assert!(c.quick_terminal_autohide);
+        let (c, errors) = parse(
+            "quick_terminal_hotkey = 'cmd+shift+space'\nquick_terminal_position = 'left'\n\
+             quick_terminal_size = 0.25\nquick_terminal_animation_ms = 0\nquick_terminal_autohide = false",
+        );
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(c.quick_terminal_hotkey, "cmd+shift+space");
+        assert_eq!(c.quick_terminal_position, crate::quick::Position::Left);
+        assert_eq!((c.quick_terminal_size, c.quick_terminal_animation_ms), (0.25, 0));
+        assert!(!c.quick_terminal_autohide);
+        assert_eq!(parse("quick_terminal_hotkey = ''").0.quick_terminal_hotkey, "");
+        for bad in [
+            "quick_terminal_hotkey = 'k'",
+            "quick_terminal_hotkey = 'ctrl+nope'",
+            "quick_terminal_position = 'middle'",
+            "quick_terminal_size = 0",
+            "quick_terminal_size = 1.5",
+            "quick_terminal_animation_ms = -1",
+            "quick_terminal_animation_ms = 5000",
+        ] {
+            let (c, errors) = parse(bad);
+            assert_eq!(c.quick_terminal_hotkey, "ctrl+`", "{bad}");
+            assert_eq!((c.quick_terminal_size, c.quick_terminal_animation_ms), (0.4, 150), "{bad}");
+            assert!(errors[0].starts_with("config: quick_terminal_"), "{bad}: {errors:?}");
+        }
+    }
+
+    #[test]
+    fn restore_scrollback_is_for_restarts_unless_set() {
+        let c = Config::default();
+        assert_eq!(
+            (c.restore_scrollback, c.restore_scrollback_limit),
+            (RestoreScrollback::Restarts, 10_000)
+        );
+        assert!(c.restore_scrollback.on_restart() && !c.restore_scrollback.on_quit());
+        assert_eq!(parse("restore_scrollback = true").0.restore_scrollback, RestoreScrollback::Always);
+        assert_eq!(parse("restore_scrollback = false").0.restore_scrollback, RestoreScrollback::Never);
+        assert_eq!(
+            parse("restore_scrollback = 'always'").0.restore_scrollback,
+            RestoreScrollback::Always
+        );
+        assert!(!parse("restore_scrollback = 'never'").0.restore_scrollback.on_restart());
+        assert_eq!(parse("restore_scrollback_limit = 500").0.restore_scrollback_limit, 500);
+        for bad in ["restore_scrollback = 'sometimes'", "restore_scrollback_limit = -1"] {
+            let (c, errors) = parse(bad);
+            assert_eq!(c.restore_scrollback, RestoreScrollback::Restarts);
+            assert!(errors[0].starts_with("config: restore_scrollback"), "{errors:?}");
+        }
     }
 
     #[test]

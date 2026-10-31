@@ -23,6 +23,7 @@ mod history;
 mod own_images;
 mod reflow;
 mod replies;
+mod saved;
 mod search;
 mod snapshot;
 
@@ -3692,6 +3693,12 @@ impl Terminal {
     /// snapshot's `popped_from` is for.
     #[doc(hidden)]
     pub fn pull_back_for_test(&mut self, n: usize) {
+        self.pull_back(n);
+    }
+
+    /// [`Terminal::pull_back_for_test`]: also how restored history's
+    /// screen rows come back onto the screen.
+    fn pull_back(&mut self, n: usize) {
         if self.alt_active {
             return;
         }

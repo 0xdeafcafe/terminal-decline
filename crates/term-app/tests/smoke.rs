@@ -413,6 +413,156 @@ fn smoke_restore_reopens_tabs_as_tabs() {
     assert!(id("tab-a") < id("tab-b") && id("tab-b") < id("solo"), "{all:?}");
 }
 
+/// The quick terminal (the test-only `quick` command standing in for
+/// its hotkey, which isn't registered under the test control): it opens
+/// along the top of the screen, a floating window on the active Space,
+/// without taking the focus from Alex's apps (the app stays inactive);
+/// `quick` again orders it out and it counts as hidden, giving back its
+/// drawables; shown again, it is the same session, its output kept.
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_quick_terminal_slides_in_and_out_keeping_its_session() {
+    if !have_metal() {
+        return;
+    }
+    let dir = TempDir::new("quick");
+    let config = dir.config_home().join("terminal-decline");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("config.toml"),
+        "quick_terminal_position = \"top\"\nquick_terminal_size = 0.5\n",
+    )
+    .unwrap();
+    let mark = |name: &str| dir.path().join(name).display().to_string();
+    let wait = |name: &str| wait_for(&format!("[ -e '{}' ]", mark(name)));
+    // Every window runs this: the first opens the quick terminal, which
+    // finds the marker and is the second. It dumps shown, hidden (a dump
+    // draws a hidden window for the test control) and shown again.
+    let script = format!(
+        "if [ -e '{quick}' ]; then echo 'in the quick terminal'; {dump}touch '{shown}'; {wait_hidden}{dump}touch '{dumped}'; \
+         {wait_back}{dump}touch '{done}'; sleep 20; \
+         else touch '{quick}'; {toggle}{wait_shown}{toggle}sleep 0.3; touch '{hidden}'; {wait_dumped}{toggle}sleep 0.3; \
+         touch '{back}'; {wait_done}{quit}sleep 20; fi",
+        quick = mark("quick"),
+        shown = mark("shown"),
+        hidden = mark("hidden"),
+        dumped = mark("dumped"),
+        back = mark("back"),
+        done = mark("done"),
+        dump = dump_and_wait(&dir),
+        toggle = osc("quick"),
+        wait_shown = wait("shown"),
+        wait_hidden = wait("hidden"),
+        wait_dumped = wait("dumped"),
+        wait_back = wait("back"),
+        wait_done = wait("done"),
+        quit = osc("quit"),
+    );
+    let mut cmd = Command::new(APP);
+    cmd.args(["-e", "/bin/sh", "-c", &script])
+        .env("HOME", dir.path())
+        .env("XDG_CONFIG_HOME", dir.config_home())
+        .env("DECLINE_TEST_DUMP", dir.dump_file())
+        .current_dir(dir.path());
+    let (status, _) = run(&mut cmd);
+    assert!(status.success(), "{status}");
+    let all = dumps(&dir);
+    let quick: Vec<&Value> = all.iter().filter(|d| !d["quick"].is_null()).collect();
+    assert_eq!(quick.len(), 3, "{all:?}");
+    let (first, hidden, again) = (quick[0], quick[1], quick[2]);
+    for d in [first, again] {
+        check_dump(d);
+        assert!(screen(d).contains("in the quick terminal|"), "{}", screen(d));
+        let q = &d["quick"];
+        assert_eq!((&q["shown"], &q["on_screen"]), (&Value::Bool(true), &Value::Bool(true)), "{d}");
+        // Floating, along the whole top of its screen's usable area,
+        // half of it deep.
+        assert_eq!(q["level"], 3, "{d}");
+        let f: Vec<f64> = q["frame"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect();
+        let s: Vec<f64> = q["screen"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect();
+        assert_eq!((f[0], f[2]), (s[0], s[2]), "{d}");
+        assert_eq!(f[1] + f[3], s[1] + s[3], "{d}");
+        assert!((f[3] - (s[3] * 0.5).round()).abs() < 1.0, "{d}");
+        // The test control keeps the app in the background.
+        assert_eq!(d["active"], false, "{d}");
+        assert_eq!(d["visible"], true, "{d}");
+    }
+    assert_eq!(num(first, "hidden"), 0.0, "{first}");
+    // Hidden: ordered out, not seen, its drawables given back; its
+    // session still there.
+    let q = &hidden["quick"];
+    assert_eq!(
+        (&q["shown"], &q["on_screen"]),
+        (&Value::Bool(false), &Value::Bool(false)),
+        "{hidden}"
+    );
+    assert_eq!(hidden["visible"], false, "{hidden}");
+    assert!(num(hidden, "hidden") >= 1.0, "{hidden}");
+    assert!(screen(hidden).contains("in the quick terminal|"), "{}", screen(hidden));
+    // The same window each time, and nothing else opened for it.
+    assert_eq!(first["window"], again["window"]);
+    assert_eq!(first["window"], hidden["window"]);
+    assert!(all.iter().all(|d| num(d, "window") <= 2.0), "{all:?}");
+}
+
+/// A restored window shows its history from before the restart above a
+/// faint "restored from" line, then the new program's output; the file
+/// is gone once read, and saved again the window's history (old and new)
+/// goes to a file of its own, readable only by the user.
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_restore_shows_the_history_from_before() {
+    if !have_metal() {
+        return;
+    }
+    let dir = TempDir::new("restore-history");
+    let store = dir.path().join("Library/Application Support/terminal-decline/restore");
+    std::fs::create_dir_all(&store).unwrap();
+    let mut old = term_core::Term::new(80, 8, 10_000, term_core::ImagePool::process());
+    for i in 0..100 {
+        old.advance(format!("\x1b[32mold line {i}\x1b[0m\r\n").as_bytes());
+    }
+    std::fs::write(store.join("1-2-0.hist"), old.state.save_history(10_000, 1_700_000_000).unwrap()).unwrap();
+    let restore = dir.path().join("restore.json");
+    let saved = serde_json::json!([{"cwd": dir.path(), "frame": [100.0, 100.0, 700.0, 500.0], "history": "1-2-0.hist"}]);
+    std::fs::write(&restore, saved.to_string()).unwrap();
+    let saved_file = format!("{}.saved", dir.dump_file().display());
+    let script = format!(
+        "echo 'new shell'; {dump}{save}{wait}{quit}sleep 20",
+        dump = dump_and_wait(&dir),
+        save = osc("save"),
+        wait = wait_for(&format!("[ -s '{saved_file}' ]")),
+        quit = osc("quit"),
+    );
+    let mut cmd = Command::new(APP);
+    cmd.arg("--restore")
+        .arg(&restore)
+        .args(["-e", "/bin/sh", "-c", &script])
+        .env("HOME", dir.path())
+        .env("XDG_CONFIG_HOME", dir.config_home())
+        .env("DECLINE_TEST_DUMP", dir.dump_file())
+        .current_dir(dir.path());
+    let (status, _) = run(&mut cmd);
+    assert!(status.success(), "{status}");
+    assert!(!store.join("1-2-0.hist").exists(), "read once, then deleted");
+    let all = dumps(&dir);
+    let shown = screen(all.first().unwrap_or_else(|| panic!("no dumps")));
+    assert!(shown.contains("old line 99|\nrestored from "), "{shown}");
+    let after = &shown[shown.find("restored from ").unwrap()..];
+    assert!(after.contains("|\nnew shell|"), "{shown}");
+    // Saved again (by the test control, beside its file): a new file
+    // with both.
+    let again: Value = serde_json::from_str(&std::fs::read_to_string(&saved_file).unwrap()).unwrap();
+    let name = again[0]["history"].as_str().unwrap_or_else(|| panic!("no history: {again}"));
+    let file = Path::new(&format!("{saved_file}.restore")).join(name);
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
+    let mut back = term_core::Term::new(80, 40, 10_000, term_core::ImagePool::process());
+    back.state.restore_history(&std::fs::read(&file).unwrap()).unwrap();
+    let text = back.state.dump();
+    assert!(text.contains("old line 99|") && text.contains("new shell|"), "{text}");
+}
+
 /// A restored tab whose shell was running a program gets its command line
 /// typed at the new shell's prompt, not run. Needs zsh as the login shell
 /// (its startup files come from a temp `ZDOTDIR`): once the command is in

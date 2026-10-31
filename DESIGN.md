@@ -425,6 +425,73 @@ anyway), nor the Settings tab.
   skipped), with oh-my-zsh's `.zshrc` (shown after about 0.8 s), and in
   the app (`smoke_restore_types_the_command_at_the_prompt`).
 
+Each pane's history comes back too (`restore_scrollback`,
+`saved_history`): above the new shell it shows what it showed before,
+its screen's rows on the screen and the rest in history, then a faint
+`restored from Sat 31 Oct 14:05` line. As the app restarts, each pane's
+newest `restore_scrollback_limit` lines (default 10,000; whole blocks, the
+lines over it hidden again) are written to a file of their own in
+`~/Library/Application Support/terminal-decline/restore/` (folder 0700,
+files 0600, created new without following links), named in the saved
+window list (`SavedWindow::history`, `SavedPane::history`; absent in
+older files), read and deleted as the pane opens; files left over (a
+launch that never came) are deleted at the next launch once older than a
+minute. The file holds the scrollback-v2 blocks as history keeps them
+(`Scrollback::save`): blocks idle compression already packed go as they
+are, the others, the open block and the screen's rows are packed with
+LZ4 as idle compression would; no line is decoded or stored again. It
+has a checksum, and every block is decompressed and its lines read
+through before history takes any (a damaged file restores nothing).
+Nothing is written while the app runs, only as it goes. Not saved: a
+pane on the alternate screen (an editor, a pager, a password manager),
+anything while Secure Keyboard Entry is on (what is typed stays in the
+app), the Settings tab, pins. Images don't outlive the process: their
+placeholder cells come back empty. Measured for 10k lines at 160
+columns (`cargo run --release -p term-core --example restore_size`):
+`ls -l --color` 178 KB, log lines 224 KB; saving takes 1 ms a pane
+(0.1 ms once history is idle-compressed), restoring 1.5–2 ms.
+
+`restore_scrollback = "restarts"` (the default) saves on restarts into
+a new build only, which reopen the windows anyway. `"always"` (or
+`true`) also saves as the app quits, with the window list in
+`restore/session.json`, and the next launch of Terminal Decline.app
+reopens the windows from it (not pins, not under the test control);
+`"never"` (`false`) writes nothing. Quitting doesn't save by default:
+a restart's files live for the second it takes, a quit's until the next
+launch, days perhaps, in backups too, with whatever passed through the
+terminal (tokens, a password echoed); and a quit today means a fresh
+start, which reopening every window would change. There is no crash
+relaunch: a crash can't save at quit time, and saving while running
+(periodically) is what this avoids.
+
+The quick terminal (`quick`, `app/quick.rs`), as Ghostty's quick
+terminal and iTerm2's hotkey window: a system-wide hotkey
+(`quick_terminal_hotkey`, default ``ctrl+` ``, a chord in `[keybind]`'s
+spelling with Cmd, Ctrl or Alt unless it is an F key; `""` turns it
+off) slides a terminal window in from the top of the screen the mouse
+is on (`quick_terminal_position = top | bottom | left | right |
+center`, the centre fading in), `quick_terminal_size` (0.4) of the
+screen's usable area deep, over `quick_terminal_animation_ms` (150; 0,
+Reduce Motion and the test control: at once). The hotkey again, or with
+`quick_terminal_autohide` (on) the focus going to another window or
+app, slides it away and gives the focus back to the app that had it.
+The hotkey is Carbon's `RegisterEventHotKey` (`hotkey`): no
+Accessibility permission, and the window server sends one event per
+press, so idle stays at 0 wakeups; the slide is an `NSAnimationContext`
+group, which runs only while it lasts. The window is made on the first
+press: borderless (its own `NSWindow` subclass, which may become key
+and may be placed past the screen's edge), floating, moving to the
+active Space and allowed over full-screen apps (`MoveToActiveSpace |
+FullScreenAuxiliary`), out of Cmd+` cycling, with a tabbing identifier
+of its own. Hidden, it is ordered out: its view counts a window that
+isn't `isVisible` as not seen, so it gives back its drawables as a
+covered window does, while its session and panes keep running. It has
+splits but no tabs (Cmd+T there opens a window), isn't saved for a
+restart, and its shell exiting closes it (the next press makes a new
+one). Pins have none, and under the test control the hotkey isn't
+registered (the test-only `quick` command toggles it), so a test run
+leaves the keys alone.
+
 Splits (docs/design/splits.md) are being built. In place so far, with no
 AppKit yet: the pane tree (`panes`: layout in whole device pixels with a
 1 pt divider and a minimum pane size, focus by direction and in order,
@@ -703,7 +770,9 @@ contents, so only a real change reloads. A reload reads every layer again
   says so on stderr only (`terminal-decline: config: columns changed: it
   applies to new windows`), never in a window.
 
-`confirm_close` (see Files, folders and Services) applies at once.
+`confirm_close` (see Files, folders and Services) applies at once, and so
+do `restore_scrollback` and `restore_scrollback_limit` (see Windows and
+tabs), read when the app restarts or quits.
 
 Errors in the edited file are notices in every window, written after the
 program's output, as at startup, but only those new since the last load,

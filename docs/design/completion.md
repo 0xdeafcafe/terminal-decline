@@ -1,7 +1,7 @@
 # Completion and highlighting at the prompt
 
 Status: **draft**, not reviewed. Alex's decisions of 31 Oct 2026 are in
-§1; open questions in §14.
+§1.
 
 ## Goal and done-when
 
@@ -31,6 +31,10 @@ and the list and colours are tested as below (§12). bash and fish get
 | When the list opens | By itself, after a short pause in typing; Up/Down move in it while it's open, Esc closes it, Tab takes the choice, Enter still runs the line |
 | What the list looks like | Drawn by the renderer in the terminal's font and theme colours (not AppKit) |
 | `--help` | Man pages only; a menu item reads one program's `--help` when you ask |
+| Grey text after the cursor | Kept: the top choice shows grey after the cursor, Right arrow at the end of the line takes it |
+| History order | Yes: commands ordered by how often they appear in the shell's history file |
+| On by default | On for everyone (every setting in §10 defaults to true) |
+| Enter with the list open | Always runs the line as typed, even after moving in the list |
 
 The find bar stays the only AppKit UI of our own; the list is drawn like
 the cursor and the selection, so it costs no view, layer or backing
@@ -384,13 +388,7 @@ before-and-after numbers in its description.
 
 ## 14. Open questions for Alex
 
-1. The grey text after the cursor for the top choice (fish-style): on,
-   or only the list?
-2. Commands by how often you ran them: fine to read the history file
-   for that?
-3. On by default for everyone, or off until 1.0?
-4. Enter while the list is open: runs the line as typed (decided), or
-   should it take the choice when you've moved in the list with Up/Down?
+None: all answered on 31 Oct 2026 (§1).
 
 ## 15. Measurements
 

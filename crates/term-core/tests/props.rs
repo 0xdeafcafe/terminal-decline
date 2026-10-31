@@ -1293,9 +1293,7 @@ proptest! {
         let a = t.state.point_at(0, 0);
         let b = t.state.point_at(lines - 1, cols - 1);
         t.state.set_selection(Some(Selection::new(a, b)));
-        // Selections leave out empty cells ending a wrapped row, which a
-        // reflow can move into the middle of one: compare without spaces.
-        let sel = |t: &Term| t.state.selection_text().map(|s| s.replace(' ', "").trim_end_matches('\n').to_string());
+        let sel = |t: &Term| t.state.selection_text().map(|s| s.trim_end_matches('\n').to_string());
         let selected = sel(&t);
         let before = all_text(&mut t);
         let (c0, l0) = (t.state.cols(), t.state.lines());
@@ -1309,6 +1307,53 @@ proptest! {
         prop_assert_eq!(all_text(&mut t), before);
         prop_assert_eq!(sel(&t), selected);
         check(&t)?;
+    }
+}
+
+proptest! {
+    #![proptest_config(config())]
+
+    /// A line (spaces and wide characters, so typed spaces and edge
+    /// padding end wrapped rows) copies as written, trailing spaces
+    /// trimmed: on the screen, in history, in compressed history, and
+    /// reflowed to other widths.
+    #[test]
+    fn a_line_copies_as_written_wherever_it_is(
+        chars in prop::collection::vec(select(vec!['a', 'b', ' ', ' ', '\u{6f22}']), 1..60),
+        cols in 2usize..=20,
+        widths in prop::collection::vec(2usize..=24, 1..4),
+    ) {
+        let text: String = chars.into_iter().collect();
+        let want = text.trim_end_matches(' ').to_string();
+        let mut t = Term::new(cols, 3, 1000, term_core::ImagePool::process());
+        t.advance(text.as_bytes());
+        // The line is the first one stored: at the top of the view
+        // scrolled all the way back.
+        let copy = |t: &mut Term| {
+            t.state.scroll_view(isize::MAX / 2);
+            let p = t.state.point_at(0, 0);
+            t.state.select_line(p);
+            let s = t.state.selection_text().unwrap_or_default();
+            t.state.scroll_view_to_bottom();
+            s
+        };
+        prop_assert_eq!(copy(&mut t), want.clone(), "on the screen");
+        t.advance("\r\n".repeat(2 * text.len() / cols + 6).as_bytes());
+        prop_assert_eq!(copy(&mut t), want.clone(), "in history");
+        t.state.seal_history_for_test();
+        t.state.shrink_history();
+        prop_assert_eq!(copy(&mut t), want.clone(), "in compressed history");
+        for &w in &widths {
+            t.state.resize(w, 3);
+            prop_assert_eq!(copy(&mut t), want.clone(), "at {} columns", w);
+        }
+        // Reflowed on the screen, never in history.
+        let mut t = Term::new(cols, 30, 1000, term_core::ImagePool::process());
+        t.advance(text.as_bytes());
+        for &w in &widths {
+            t.state.resize(w, 30);
+            prop_assert_eq!(copy(&mut t), want.clone(), "on the screen at {} columns", w);
+        }
     }
 }
 

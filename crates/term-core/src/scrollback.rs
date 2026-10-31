@@ -1775,6 +1775,8 @@ pub struct Scrollback {
     popped_from: Option<u64>,
     /// The same for search (§13.4), since [`Scrollback::take_search_popped`].
     search_popped: Option<u64>,
+    /// Lines popped so far, ever: their line numbers are used again.
+    pops: u64,
     /// The style table the slot cache was filled from: its epoch and sweep
     /// count. `[0, 0]` = unknown, so the cache is dropped each line.
     cache_key: [u64; 2],
@@ -1798,6 +1800,7 @@ impl Scrollback {
             last_wrapped: false,
             popped_from: None,
             search_popped: None,
+            pops: 0,
             cache_key: [0, 0],
             freed_images: Vec::new(),
             scratch: Scratch::default(),
@@ -1942,6 +1945,16 @@ impl Scrollback {
     /// which the row's cells are all [`Cell::BLANK`] (as far as storing it
     /// found out), so the caller can clear only the cells before it.
     pub fn push_keyed(&mut self, row: &Row, styles: &[Style], links: &[Option<Arc<LinkValue>>], key: [u64; 2]) -> usize {
+        let text_len = row.text_len();
+        if text_len < row.cells.len() {
+            // A wrapped row made wider without reflow: stored as wide as
+            // it wrapped, so its padding doesn't read as spaces in the
+            // line. The caller clears all of its cells.
+            let mut cut = row.clone();
+            cut.resize_cells(text_len);
+            self.push_keyed(&cut, styles, links, key);
+            return row.cells.len();
+        }
         self.end += 1;
         if self.limit == 0 {
             // Nothing is kept, but the count goes on: line numbers are the
@@ -2078,10 +2091,18 @@ impl Scrollback {
         self.end = line;
         self.popped_from = Some(self.popped_from.map_or(line, |p| p.min(line)));
         self.search_popped = Some(self.search_popped.map_or(line, |p| p.min(line)));
+        self.pops += 1;
         // Lines hidden by the limit may fit again.
         self.start = self.oldest().max(self.end.saturating_sub(self.limit as u64));
         self.last_wrapped = !self.is_empty() && self.wrapped(self.len() - 1);
         true
+    }
+
+    /// How many lines [`Scrollback::pop_into`] has taken out, ever: while
+    /// it and the history stay the same, every stored line keeps its
+    /// number and its marks.
+    pub fn pops(&self) -> u64 {
+        self.pops
     }
 
     /// [`Scrollback::pop_into`] into new buffers.

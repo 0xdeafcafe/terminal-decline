@@ -3,7 +3,7 @@
 //! and the order replies to queries go back to the program in.
 
 use insta::assert_snapshot;
-use term_core::{Selection, SelectionKind, Term, ViewTop};
+use term_core::{Point, Selection, SelectionKind, Term, ViewTop};
 
 /// Select between two visible (line, col) positions.
 fn select(t: &mut Term, anchor: (usize, usize), head: (usize, usize)) {
@@ -57,6 +57,121 @@ fn selection_stays_on_its_text_as_it_scrolls_into_history() {
     // selection.
     t.advance(b"\r\nseven");
     assert_eq!(t.state.selection(), None);
+}
+
+/// The text of the first `rows` rows of a line written at the top of a
+/// screen `lines` high and pushed into history: (on the screen, in
+/// history, in compressed history).
+fn copied_from_everywhere(cols: usize, lines: usize, text: &str, rows: usize, last_col: usize) -> [String; 3] {
+    let mut t = Term::new(cols, lines, 100, term_core::ImagePool::process());
+    t.advance(text.as_bytes());
+    select(&mut t, (0, 0), (rows - 1, last_col));
+    let screen = copied(&t);
+    t.advance("\r\n".repeat(lines + rows).as_bytes());
+    assert!(t.state.scrollback_len() >= rows);
+    // Scrolled back to the line, which is all in history.
+    t.state.scroll_view(isize::MAX / 2);
+    select(&mut t, (0, 0), (rows - 1, last_col));
+    let history = copied(&t);
+    t.state.seal_history_for_test();
+    t.state.shrink_history();
+    select(&mut t, (0, 0), (rows - 1, last_col));
+    [screen, history, copied(&t)]
+}
+
+#[test]
+fn a_typed_space_ending_a_wrapped_row_is_copied() {
+    // `$ echo ` fills the 7 columns: the space ends the row.
+    for (what, got) in ["screen", "history", "compressed history"]
+        .iter()
+        .zip(copied_from_everywhere(7, 2, "$ echo x", 2, 0))
+    {
+        assert_eq!(got, "$ echo x", "{what}");
+    }
+    // Spaces ending each of several rows.
+    for (what, got) in ["screen", "history", "compressed history"]
+        .iter()
+        .zip(copied_from_everywhere(4, 3, "ab cde fgh", 3, 1))
+    {
+        assert_eq!(got, "ab cde fgh", "{what}");
+    }
+}
+
+#[test]
+fn a_wide_character_that_did_not_fit_adds_no_space() {
+    // `$ ech ` is 6 columns: the wide character goes to the next row,
+    // leaving padding in the last column, which is not copied; the typed
+    // space before it is.
+    for (what, got) in ["screen", "history", "compressed history"]
+        .iter()
+        .zip(copied_from_everywhere(7, 2, "$ ech \u{6f22}x", 2, 2))
+    {
+        assert_eq!(got, "$ ech \u{6f22}x", "{what}");
+    }
+    // A space in the last column, then a wide character.
+    for (what, got) in ["screen", "history", "compressed history"]
+        .iter()
+        .zip(copied_from_everywhere(7, 2, "$ echo \u{6f22}", 2, 1))
+    {
+        assert_eq!(got, "$ echo \u{6f22}", "{what}");
+    }
+}
+
+#[test]
+fn a_space_reflowed_to_the_end_of_a_wrapped_row_is_copied() {
+    // Written at 10 columns, on the screen and in history, then reflowed
+    // to 7, where the space ends the first row.
+    for lines in [3, 1] {
+        let mut t = Term::new(10, lines, 100, term_core::ImagePool::process());
+        t.advance(b"$ echo xyzw\r\n");
+        t.state.resize(7, lines);
+        t.state.scroll_view(isize::MAX / 2);
+        select(&mut t, (0, 0), (1, 3));
+        assert_eq!(copied(&t), "$ echo xyzw", "{lines} lines");
+        // And back.
+        t.state.resize(10, lines);
+        t.state.scroll_view(isize::MAX / 2);
+        select(&mut t, (0, 0), (1, 0));
+        assert_eq!(copied(&t), "$ echo xyzw", "{lines} lines, back");
+    }
+}
+
+#[test]
+fn padding_from_a_resize_without_reflow_is_not_copied() {
+    // The alternate screen isn't reflowed: a row that wrapped at 7
+    // columns is padded to 10, and the padding isn't part of the line.
+    let mut t = Term::new(7, 3, 100, term_core::ImagePool::process());
+    t.advance(b"\x1b[?1049habc def gh");
+    t.state.resize(10, 3);
+    select(&mut t, (0, 0), (1, 9));
+    assert_eq!(copied(&t), "abc def gh");
+    // Not even with a typed space ending it at 7.
+    let mut t = Term::new(7, 3, 100, term_core::ImagePool::process());
+    t.advance(b"\x1b[?1049habc de gh");
+    t.state.resize(10, 3);
+    select(&mut t, (0, 0), (1, 9));
+    assert_eq!(copied(&t), "abc de gh");
+    // Written past it since: copied.
+    t.advance(b"\x1b[1;9HZ");
+    select(&mut t, (0, 0), (1, 9));
+    assert_eq!(copied(&t), "abc de  Zgh");
+
+    // Rows pulled back from history to a wider screen are padded too, and
+    // stored as wide as they wrapped when they go back.
+    let mut t = Term::new(7, 2, 100, term_core::ImagePool::process());
+    t.advance(b"abc de gh\r\n\r\n");
+    t.state.resize(10, 2);
+    t.state.pull_back_for_test(2);
+    select(&mut t, (0, 0), (1, 9));
+    assert_eq!(copied(&t), "abc de gh");
+    let line = t.state.point_at(0, 0).line;
+    let text = |t: &Term| t.state.text_between(Point { line, col: 0 }, Point { line: line + 1, col: 9 });
+    assert_eq!(text(&t), "abc de gh");
+    t.advance(b"\x1b[2;1H\r\n\r\n\r\n");
+    assert!(t.state.point_at(0, 0).line > line + 1, "in history");
+    assert_eq!(text(&t), "abc de gh");
+    t.state.resize(7, 2);
+    assert_eq!(text(&t), "abc de gh");
 }
 
 /// A program redrawing the screen (a TUI) under a selection: once the

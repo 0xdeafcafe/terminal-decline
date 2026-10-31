@@ -276,15 +276,16 @@ impl Terminal {
         })
     }
 
-    /// [`Terminal::command_failed`], kept for prompts in history: their
-    /// marks don't change there, and what follows them only with a new D
-    /// mark, so the answers hold until one is written or history is
-    /// cleared. A prompt on the screen is looked at each time.
+    /// [`Terminal::command_failed`], kept for prompts in history whose
+    /// command ended in history too (its D mark, or the next prompt):
+    /// marks don't change there, so the answers hold until history is
+    /// cleared or lines are pulled back out of it (whose numbers are used
+    /// again). Other prompts are looked at each time.
     fn prompt_failed(&self, p: super::Point, cache: &mut FailedCache) -> bool {
         if p.line >= self.top_line {
             return self.command_failed(p);
         }
-        let key = (self.terminal_id, self.history_epoch, self.ends_written);
+        let key = (self.terminal_id, self.history_epoch, self.scrollback.pops());
         if cache.key != key {
             cache.key = key;
             cache.prompts.clear();
@@ -292,12 +293,18 @@ impl Terminal {
         if let Some(&failed) = cache.prompts.get(&(p.line, p.col)) {
             return failed;
         }
-        let failed = self.command_failed(p);
-        // Bounded: a view shows a few dozen prompts at most.
-        if cache.prompts.len() >= 4096 {
-            cache.prompts.clear();
+        let end = self.command_end(p);
+        let failed = end.is_some_and(|(_, m)| m.kind == crate::cell::MarkKind::End && m.status.is_some_and(|s| s != 0));
+        // Kept only once the mark that settles it is in history too: one
+        // on the screen can still be erased (Ctrl+L, `clear`) or written
+        // over.
+        if end.is_some_and(|(q, _)| q.line < self.top_line) {
+            // Bounded: a view shows a few dozen prompts at most.
+            if cache.prompts.len() >= 4096 {
+                cache.prompts.clear();
+            }
+            cache.prompts.insert((p.line, p.col), failed);
         }
-        cache.prompts.insert((p.line, p.col), failed);
         failed
     }
 

@@ -446,6 +446,9 @@ pub struct Terminal {
     /// Where the last OSC 133 B mark put the command line: its buffer
     /// line and column, for the command's text at the C mark.
     input_at: Option<(u64, usize)>,
+    /// OSC 133 D marks written so far: a command's status can only
+    /// change with one (the snapshot's cache of failed prompts).
+    pub(crate) ends_written: u64,
     /// The program's working directory, if it reports it (OSC 7).
     cwd: Option<String>,
     /// The palette and foreground, background and cursor colours: the
@@ -598,6 +601,7 @@ impl Terminal {
             progress: None,
             commands: Vec::new(),
             input_at: None,
+            ends_written: 0,
             cwd: None,
             colors: Box::new(replies::ColorTable::new([0xd8dee9, 0x16181c, 0xd8dee9])),
             colors_changed: false,
@@ -1170,6 +1174,14 @@ impl Terminal {
             Some(row) => row.has_marks(),
             None => self.history_index(line).is_some_and(|i| self.scrollback.has_marks(i)),
         }
+    }
+
+    /// The first line at or after `line` with OSC 133 marks.
+    pub(crate) fn next_marked_line(&self, line: u64) -> Option<u64> {
+        if self.line_has_marks(line) {
+            return Some(line);
+        }
+        self.marked_lines(Some(line), false).next()
     }
 
     /// The marks written after the prompt (OSC 133 A) at `prompt`, in
@@ -1896,7 +1908,10 @@ impl Terminal {
             MarkKind::Output => Some(Command::Started(
                 self.input_at.take().and_then(|from| self.command_text(from, here)),
             )),
-            MarkKind::End => Some(Command::Finished(status)),
+            MarkKind::End => {
+                self.ends_written += 1;
+                Some(Command::Finished(status))
+            }
             MarkKind::Prompt => Some(Command::Prompt),
         };
         if let Some(c) = command {

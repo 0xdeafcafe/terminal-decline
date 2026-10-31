@@ -532,6 +532,96 @@ fn a_glyph_budget_leaves_new_glyphs_for_later_builds() {
     );
 }
 
+/// With the glyph thread on (roadmap R.1) a build draws without glyphs
+/// it hasn't seen and asks the thread for them; once the thread wakes the
+/// app, the next build has them and draws as a build that found them
+/// itself. ASCII and glyphs found before never wait.
+#[test]
+fn a_glyph_from_the_glyph_thread_appears_on_a_later_build() {
+    if !have_gpu() {
+        return;
+    }
+    let theme = theme();
+    let text = "漢字😀αβ";
+    let mut r = Renderer::new(Fonts::new("Menlo", 24.0));
+    let mut whole = Renderer::new(Fonts::new("Menlo", 24.0));
+    let m = r.metrics();
+    let size = (8 * m.cell_width as usize, m.cell_height as usize);
+    let (woke, wakes) = std::sync::mpsc::channel::<()>();
+    let woke = std::sync::Mutex::new(woke);
+    r.set_glyph_waker(Some(std::sync::Arc::new(move || {
+        let _ = woke.lock().unwrap().send(());
+    })));
+    let (ascii, _t) = built(&mut r, &theme, 8, 1, "abc");
+    assert!(!ascii.glyphs_deferred(), "ASCII is found on this thread");
+    let (mut pane, mut t) = built(&mut r, &theme, 8, 1, text);
+    assert!(pane.glyphs_deferred(), "new glyphs go to the glyph thread");
+    let (blank, _tb) = built(&mut whole, &theme, 8, 1, "");
+    assert!(
+        alone(&mut r, &pane, size) == alone(&mut whole, &blank, size),
+        "drawn without them for now"
+    );
+    let input = input(&r, &theme);
+    let mut builds = 1;
+    while pane.glyphs_deferred() {
+        wakes
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .expect("the glyph thread wakes the app");
+        r.snapshot_pane(&mut pane, &mut t.state, &input);
+        assert!(r.build_from_snapshot(&mut pane, &input));
+        builds += 1;
+        assert!(builds < 20, "the glyphs never came");
+    }
+    assert!(!r.glyphs_pending());
+    let (all, _ta) = built(&mut whole, &theme, 8, 1, text);
+    assert!(
+        alone(&mut r, &pane, size) == alone(&mut whole, &all, size),
+        "every glyph drawn in the end"
+    );
+    // Another pane with the same glyphs has them at once.
+    let (again, _t2) = built(&mut r, &theme, 8, 1, text);
+    assert!(!again.glyphs_deferred(), "glyphs found before don't wait");
+}
+
+/// Glyphs from the glyph thread that find no room in a texture make it
+/// grow, as building does, and are all drawn.
+#[test]
+fn glyphs_from_the_glyph_thread_grow_a_full_texture() {
+    if !have_gpu() {
+        return;
+    }
+    term_render::set_glyph_texture_sizes((256, 4096), (64, 2048));
+    let theme = theme();
+    let text = "😀😁😂😃😄😅😆😇😈😉";
+    let mut r = Renderer::new(Fonts::new("Menlo", 24.0));
+    let mut whole = Renderer::new(Fonts::new("Menlo", 24.0));
+    let m = r.metrics();
+    let size = (20 * m.cell_width as usize, m.cell_height as usize);
+    let (woke, wakes) = std::sync::mpsc::channel::<()>();
+    let woke = std::sync::Mutex::new(woke);
+    r.set_glyph_waker(Some(std::sync::Arc::new(move || {
+        let _ = woke.lock().unwrap().send(());
+    })));
+    let (mut pane, mut t) = built(&mut r, &theme, 20, 1, text);
+    let (_, colour) = r.glyph_texture_sizes();
+    let input = input(&r, &theme);
+    let mut builds = 1;
+    while pane.glyphs_deferred() {
+        wakes
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .expect("the glyph thread wakes the app");
+        r.snapshot_pane(&mut pane, &mut t.state, &input);
+        if !r.build_from_snapshot(&mut pane, &input) {
+            r.build_pane(&mut pane, &mut t.state, &input);
+        }
+        builds += 1;
+        assert!(builds < 30, "the glyphs never came");
+    }
+    assert!(r.glyph_texture_sizes().1 > colour, "the colour texture grew");
+    let (all, _ta) = built(&mut whole, &theme, 20, 1, text);
+    assert!(alone(&mut r, &pane, size) == alone(&mut whole, &all, size), "every glyph drawn");
+}
+
 /// Two windows with their own fonts share the glyph textures: each draws
 /// its own text while the other uploads new glyphs between their frames,
 /// and each frame matches the same frame drawn with the GPU idle.

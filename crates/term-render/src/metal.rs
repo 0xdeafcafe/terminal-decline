@@ -31,9 +31,10 @@ use objc2_metal::{
 };
 use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
 use term_core::Terminal;
-use term_font::{FontConfig, Fonts, GlyphKey, Style};
+use term_font::{FontConfig, Fonts, GlyphKey, RasterGlyph, Style};
 
 use crate::frame::{Frame, FrameInput, GlyphInstance, GlyphSlot, GlyphSource, RectInstance, Rgba};
+use crate::glyph_thread::{GlyphThread, GlyphWaker, Want};
 use crate::images::ImageInstance;
 use crate::packer::{NoRoom, ShelfPacker};
 use crate::pixels::{MetalPixels, PixelAlloc};
@@ -327,6 +328,9 @@ struct Chars {
     /// `None`: not looked up yet; `Some(None)`: draws nothing.
     ascii: Box<[Option<Option<GlyphSlot>>; 128 * 4]>,
     other: HashMap<(u32, Style), Option<GlyphSlot>>,
+    /// The font set's glyph thread, started by the first glyph a build
+    /// with a [`GlyphWaker`] asks it for; it ends with the font set.
+    thread: Option<GlyphThread>,
 }
 
 impl Chars {
@@ -334,8 +338,19 @@ impl Chars {
         Chars {
             ascii: Box::new([None; 512]),
             other: HashMap::new(),
+            thread: None,
         }
     }
+}
+
+/// How a renderer's builds get glyphs they haven't drawn before.
+#[derive(Clone, Default)]
+struct GlyphRules {
+    /// The time a build may spend on them on this thread.
+    budget: Option<Duration>,
+    /// Set: they are found and rasterised on the font set's glyph thread
+    /// instead, which calls this when they are ready.
+    waker: Option<GlyphWaker>,
 }
 
 /// The process's glyph textures: one coverage (R8) and one colour (BGRA)
@@ -373,6 +388,9 @@ pub struct GlyphCache {
 struct Budget {
     /// `None`: no limit (tests, and anything that isn't a window's frame).
     limit: Option<Duration>,
+    /// Set: new glyphs other than sprites go to the glyph thread instead,
+    /// and the limit isn't used.
+    waker: Option<GlyphWaker>,
     /// Set by the first new glyph.
     deadline: Option<Instant>,
     /// A glyph was left for a later frame.
@@ -380,9 +398,10 @@ struct Budget {
 }
 
 impl Budget {
-    fn begin(&mut self, limit: Option<Duration>) {
+    fn begin(&mut self, rules: &GlyphRules) {
         *self = Budget {
-            limit,
+            limit: rules.budget,
+            waker: rules.waker.clone(),
             ..Budget::default()
         };
     }
@@ -474,6 +493,73 @@ impl GlyphCache {
             generation: *generation,
             budget,
         }
+    }
+
+    /// Put the glyphs font set `id`'s glyph thread sent back since the
+    /// last call in the textures (on the main thread: uploads wait for
+    /// the GPU), making room as building does. False when a texture had
+    /// to be emptied for them, so rows built before are wrong. Wakes the
+    /// app again if some still found no room.
+    fn receive(&mut self, id: FontsId, gpu: &Gpu, waker: Option<&GlyphWaker>) -> bool {
+        let Some(i) = self.by_char.iter().position(|(f, _)| *f == id) else {
+            return true;
+        };
+        let Some(thread) = &mut self.by_char[i].1.thread else { return true };
+        let found = thread.take();
+        let mut kept = true;
+        for f in found {
+            let existing = f.key.and_then(|k| self.by_key.get(&(id, k)).copied());
+            let slot = match (&f.glyph, existing) {
+                (_, Some(slot)) => Some(slot),
+                (None, None) => Some(None),
+                (Some(g), None) => match self.put(g) {
+                    Some(slot) => Some(slot),
+                    None => {
+                        kept &= self.make_room(gpu);
+                        self.put(g)
+                    }
+                },
+            };
+            let Some(slot) = slot else {
+                // Still no room (a glyph bigger than the room left at the
+                // cap): tried again on the next build.
+                if let Some(t) = &mut self.by_char[i].1.thread {
+                    t.waiting.push(f);
+                }
+                continue;
+            };
+            if let Some(key) = f.key {
+                self.by_key.insert((id, key), slot);
+            }
+            if let Want::Char(cp, style) = f.want {
+                self.by_char[i].1.other.insert((cp, style), slot);
+            }
+        }
+        if let (Some(t), Some(wake)) = (&self.by_char[i].1.thread, waker)
+            && !t.waiting.is_empty()
+        {
+            wake();
+        }
+        kept
+    }
+
+    /// `g` put in its texture: `None` when there is no room right now,
+    /// `Some(None)` when it can never fit.
+    fn put(&mut self, g: &RasterGlyph) -> Option<Option<GlyphSlot>> {
+        match upload(&mut self.mask, &mut self.color, &self.in_flight, g) {
+            Ok(slot) => Some(Some(slot)),
+            Err(NoRoom::TooBig) => Some(None),
+            Err(NoRoom::Full) => None,
+        }
+    }
+
+    /// Whether font set `id`'s glyph thread has glyphs to send back.
+    fn glyphs_pending(&self, id: FontsId) -> bool {
+        self.by_char
+            .iter()
+            .find(|(f, _)| *f == id)
+            .and_then(|(_, c)| c.thread.as_ref())
+            .is_some_and(|t| t.busy())
     }
 
     /// What a frame built now for `id` is built against.
@@ -641,22 +727,72 @@ impl PaneGlyphs<'_> {
         let Some(g) = self.fonts.rasterize_key(key) else {
             return Some(None);
         };
-        let atlas = if g.color { &mut *self.color } else { &mut *self.mask };
-        let (u, v) = match atlas.insert(g.width, g.height, &g.data, self.in_flight) {
-            Ok(at) => at,
-            Err(NoRoom::Full) => return None,
-            Err(NoRoom::TooBig) => return Some(None),
-        };
-        Some(Some(GlyphSlot {
-            u,
-            v,
-            w: g.width as u16,
-            h: g.height as u16,
-            left: g.left as i16,
-            top: g.top as i16,
-            color: g.color,
-        }))
+        match upload(self.mask, self.color, self.in_flight, &g) {
+            Ok(slot) => Some(Some(slot)),
+            Err(NoRoom::Full) => None,
+            Err(NoRoom::TooBig) => Some(None),
+        }
     }
+
+    /// A glyph not drawn before, with the glyph thread on: `cp` in `style`
+    /// from the caches if they have it, a sprite drawn here, else asked
+    /// of the glyph thread and drawn without for now.
+    fn glyph_later(&mut self, cp: u32, style: Style) -> Option<GlyphSlot> {
+        let Some(ch) = char::from_u32(cp) else {
+            self.chars.other.insert((cp, style), None);
+            return None;
+        };
+        match self.fonts.cached_glyph_key(ch, style) {
+            Some(None) => {
+                self.chars.other.insert((cp, style), None);
+                None
+            }
+            Some(Some(key)) => {
+                if let Some(&slot) = self.by_key.get(&(self.id, key)) {
+                    self.chars.other.insert((cp, style), slot);
+                    return slot;
+                }
+                if key.sprite_id().is_some() {
+                    let slot = self.by_key(key)?;
+                    self.chars.other.insert((cp, style), slot);
+                    return slot;
+                }
+                self.ask(Want::Key(key));
+                None
+            }
+            None => {
+                self.ask(Want::Char(cp, style));
+                None
+            }
+        }
+    }
+
+    /// Ask the glyph thread for `want` (once), and note the build drew
+    /// without it.
+    fn ask(&mut self, want: Want) {
+        self.budget.deferred = true;
+        let Some(waker) = &self.budget.waker else { return };
+        let fonts = self.fonts;
+        self.chars
+            .thread
+            .get_or_insert_with(|| GlyphThread::spawn(fonts.finder(), waker.clone()))
+            .ask(want);
+    }
+}
+
+/// Put `g` in its texture.
+fn upload(mask: &mut Atlas, color: &mut Atlas, in_flight: &InFlight, g: &RasterGlyph) -> Result<GlyphSlot, NoRoom> {
+    let atlas = if g.color { color } else { mask };
+    let (u, v) = atlas.insert(g.width, g.height, &g.data, in_flight)?;
+    Ok(GlyphSlot {
+        u,
+        v,
+        w: g.width as u16,
+        h: g.height as u16,
+        left: g.left as i16,
+        top: g.top as i16,
+        color: g.color,
+    })
 }
 
 impl GlyphSource for PaneGlyphs<'_> {
@@ -674,6 +810,9 @@ impl GlyphSource for PaneGlyphs<'_> {
         if let Some(slot) = self.chars.other.get(&(cp, style)) {
             return *slot;
         }
+        if self.budget.waker.is_some() {
+            return self.glyph_later(cp, style);
+        }
         if self.budget.spent() {
             return None;
         }
@@ -689,8 +828,14 @@ impl GlyphSource for PaneGlyphs<'_> {
 
     #[inline]
     fn glyph_key(&mut self, key: GlyphKey) -> Option<GlyphSlot> {
-        if !self.by_key.contains_key(&(self.id, key)) && self.budget.spent() {
-            return None;
+        if !self.by_key.contains_key(&(self.id, key)) {
+            if self.budget.waker.is_some() && key.sprite_id().is_none() {
+                self.ask(Want::Key(key));
+                return None;
+            }
+            if self.budget.spent() {
+                return None;
+            }
         }
         self.by_key(key).flatten()
     }
@@ -821,8 +966,9 @@ impl PaneRender {
     }
 
     /// Its last build drew without some new glyphs, to keep within the
-    /// time [`Renderer::set_glyph_budget`] gives: build it again next
-    /// frame (every row, so they get their glyphs).
+    /// time [`Renderer::set_glyph_budget`] gives, or while the glyph thread
+    /// finds them ([`Renderer::set_glyph_waker`]): build it again next
+    /// frame, or once woken (every row, so they get their glyphs).
     pub fn glyphs_deferred(&self) -> bool {
         self.deferred
     }
@@ -1268,8 +1414,9 @@ pub struct Renderer {
     hidden: bool,
     /// Hidden with its surface kept (minimised).
     keep_surface: bool,
-    /// The time each pane's build may spend on new glyphs; `None`: no limit.
-    glyph_budget: Option<Duration>,
+    /// How each pane's build gets new glyphs: the time it may spend on
+    /// them, or the glyph thread.
+    glyph_rules: GlyphRules,
     /// The theme transition the next frames draw, if one plays.
     blend: Option<Blend>,
 }
@@ -1319,7 +1466,7 @@ impl Renderer {
             surfaces: [None, None, None],
             hidden: false,
             keep_surface: false,
-            glyph_budget: None,
+            glyph_rules: GlyphRules::default(),
             blend: None,
         }
     }
@@ -1539,14 +1686,31 @@ impl Renderer {
     /// GPU state except new glyphs (and, rarely, a glyph texture that
     /// grows).
     pub fn build_pane(&mut self, pane: &mut PaneRender, term: &mut Terminal, input: &FrameInput) {
-        build(&self.shared, self.fonts_id, &self.fonts, self.glyph_budget, pane, term, input);
+        build(&self.shared, self.fonts_id, &self.fonts, &self.glyph_rules, pane, term, input);
     }
 
     /// Let each pane's build spend at most `limit` on glyphs it hasn't
     /// drawn before, leaving the rest for later frames
     /// ([`PaneRender::glyphs_deferred`]); `None` (the default): no limit.
     pub fn set_glyph_budget(&mut self, limit: Option<Duration>) {
-        self.glyph_budget = limit;
+        self.glyph_rules.budget = limit;
+    }
+
+    /// Find and rasterise glyphs not drawn before on the font set's glyph
+    /// thread (roadmap R.1), which calls `waker` when some are ready: the
+    /// app then builds again the panes drawn without them
+    /// ([`PaneRender::glyphs_deferred`]). Printable ASCII, sprites and
+    /// glyphs found before (also in another style or window) stay on this
+    /// thread. `None` (the default): every glyph is found here, within the
+    /// [budget](Self::set_glyph_budget).
+    pub fn set_glyph_waker(&mut self, waker: Option<GlyphWaker>) {
+        self.glyph_rules.waker = waker;
+    }
+
+    /// Whether the glyph thread of this window's fonts has glyphs asked
+    /// for and not yet put in the textures.
+    pub fn glyphs_pending(&self) -> bool {
+        self.shared.glyphs.borrow().glyphs_pending(self.fonts_id)
     }
 
     /// The part of building `pane` that needs `term` locked: the snapshot,
@@ -1565,7 +1729,7 @@ impl Renderer {
     /// must be copied again): build it with
     /// [`build_pane`](Self::build_pane), with the terminal locked.
     pub fn build_from_snapshot(&mut self, pane: &mut PaneRender, input: &FrameInput) -> bool {
-        finish(&self.shared, self.fonts_id, &self.fonts, self.glyph_budget, pane, input)
+        finish(&self.shared, self.fonts_id, &self.fonts, &self.glyph_rules, pane, input)
     }
 
     /// [`build_pane`](Self::build_pane), with `inject` changing the
@@ -1605,7 +1769,7 @@ impl Renderer {
             &self.shared,
             self.fonts_id,
             &self.fonts,
-            self.glyph_budget,
+            &self.glyph_rules,
             &mut self.pane,
             term,
             input,
@@ -1714,18 +1878,10 @@ impl Drop for Renderer {
 }
 
 /// [`Renderer::build_pane`].
-fn build(
-    shared: &Shared,
-    id: FontsId,
-    fonts: &Fonts,
-    budget: Option<Duration>,
-    pane: &mut PaneRender,
-    term: &mut Terminal,
-    input: &FrameInput,
-) {
+fn build(shared: &Shared, id: FontsId, fonts: &Fonts, rules: &GlyphRules, pane: &mut PaneRender, term: &mut Terminal, input: &FrameInput) {
     let generation = shared.glyphs.borrow_mut().source(id, fonts).generation();
     snapshot(pane, term, input, generation);
-    if finish(shared, id, fonts, budget, pane, input) {
+    if finish(shared, id, fonts, rules, pane, input) {
         return;
     }
     // A glyph texture was emptied at its cap (by this build or another
@@ -1759,9 +1915,14 @@ fn snapshot(pane: &mut PaneRender, term: &mut Terminal, input: &FrameInput, gene
 /// [`Renderer::build_from_snapshot`]: false when a glyph texture was
 /// emptied since the snapshot or while building, and the pane needs every
 /// row copied again.
-fn finish(shared: &Shared, id: FontsId, fonts: &Fonts, budget: Option<Duration>, pane: &mut PaneRender, input: &FrameInput) -> bool {
+fn finish(shared: &Shared, id: FontsId, fonts: &Fonts, rules: &GlyphRules, pane: &mut PaneRender, input: &FrameInput) -> bool {
     let mut cache = shared.glyphs.borrow_mut();
-    cache.budget.begin(budget);
+    // Begun first: a build again from the terminal (false) keeps it.
+    cache.budget.begin(rules);
+    // Glyphs the glyph thread sent back, so this build draws them.
+    if !cache.receive(id, &shared.gpu, rules.waker.as_ref()) {
+        return false;
+    }
     if !pane.frame.build_snapshot(input, &mut cache.source(id, fonts)) {
         return false;
     }

@@ -517,3 +517,113 @@ fn osc8_and_133_split_across_reads() {
     let line = bytes.state.point_at(0, 0).line;
     assert_eq!(bytes.state.marks_at(line), vec![mark(MarkKind::Prompt, 4)]);
 }
+
+/// What each command's prompt says about how it ended: its exit status,
+/// whether it failed, and its command line; on the screen and in history,
+/// compressed or not, and after the width changes (reflowing history and
+/// the screen).
+#[test]
+fn command_status_and_line_across_screen_history_and_reflow() {
+    let run = |lines: usize| {
+        let mut t = Term::new(20, lines, 100, term_core::ImagePool::process());
+        session(&mut t, "true", "1\r\n", 0);
+        session(&mut t, "false", "2\r\n22\r\n", 1);
+        session(&mut t, "a-long-command-line-that-wraps", "x\r\n", 127);
+        // No status on the D mark, then one still running.
+        t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07quiet\r\n\x1b]133;C\x07\x1b]133;D\x07");
+        t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07slow\r\n\x1b]133;C\x07going");
+        t
+    };
+    // Every prompt, oldest first, with what it should say.
+    let want: [(Option<u32>, Option<&str>); 5] = [
+        (Some(0), Some("true")),
+        (Some(1), Some("false")),
+        (Some(127), Some("a-long-command-line-that-wraps")),
+        (None, Some("quiet")),
+        (None, Some("slow")),
+    ];
+    let prompts = |t: &Term| {
+        let mut out = Vec::new();
+        let mut line = 0;
+        while let Some(p) = t.state.next_prompt(line) {
+            out.push(p);
+            line = p.line;
+        }
+        // The first prompt is on line 0, which next_prompt starts after.
+        let mut all: Vec<Point> = t.state.previous_prompt(1).into_iter().collect();
+        all.extend(out);
+        all
+    };
+    let check_all = |t: &Term, what: &str| {
+        let ps = prompts(t);
+        assert_eq!(ps.len(), want.len(), "{what}: {ps:?}");
+        for (p, (status, line)) in ps.iter().zip(want) {
+            assert_eq!(t.state.command_status(*p), status, "{what}: {p:?}");
+            assert_eq!(t.state.command_failed(*p), status.is_some_and(|s| s != 0), "{what}: {p:?}");
+            let text = t.state.command_line(*p).map(|(a, b)| t.state.text_between(a, b));
+            assert_eq!(text.as_deref().map(str::trim_end), line, "{what}: {p:?}");
+        }
+    };
+    let tall = run(20);
+    check_all(&tall, "on the screen");
+    let mut short = run(3);
+    assert!(short.state.scrollback_len() > 6);
+    check_all(&short, "in history");
+    short.state.seal_history_for_test();
+    short.state.shrink_history();
+    check_all(&short, "in compressed history");
+    for cols in [8, 13, 40] {
+        let mut t = run(3);
+        t.state.resize(cols, 3);
+        check_all(&t, &format!("at {cols} columns"));
+        t.state.resize(20, 5);
+        check_all(&t, &format!("back from {cols} columns"));
+        check(&t);
+    }
+    // A prompt nothing was run from has no status or command line.
+    let mut t = Term::new(20, 4, 100, term_core::ImagePool::process());
+    t.advance(b"\x1b]133;A\x07$ \r\n\x1b]133;A\x07$ ");
+    let first = Point {
+        line: t.state.point_at(0, 0).line,
+        col: 0,
+    };
+    assert_eq!(t.state.command_status(first), None);
+    assert_eq!(t.state.command_line(first), None);
+}
+
+/// The snapshot lists the view rows showing a prompt whose command
+/// failed, on the screen and scrolled back into history, at any width.
+#[test]
+fn snapshot_lists_the_failed_prompts_rows() {
+    let mut t = Term::new(20, 6, 100, term_core::ImagePool::process());
+    session(&mut t, "ok", "1\r\n", 0);
+    session(&mut t, "bad", "2\r\n", 2);
+    t.advance(b"\x1b]133;A\x07$ ");
+    let failed = |t: &mut Term| {
+        let mut snap = Snapshot::default();
+        t.state.snapshot(&mut snap, |_| false);
+        snap.failed.clone()
+    };
+    // Rows: `$ ok`, 1, `$ bad`, 2, `$ `.
+    assert_eq!(failed(&mut t), vec![2]);
+    // Scrolled into history and shown from there.
+    t.advance(b"\r\n\r\n\r\n\r\n\r\n");
+    assert_eq!(failed(&mut t), Vec::<u16>::new());
+    t.state.scroll_view(5);
+    assert_eq!(failed(&mut t), vec![2]);
+    t.state.seal_history_for_test();
+    t.state.shrink_history();
+    assert_eq!(failed(&mut t), vec![2]);
+    // Narrower: `$ bad` still starts its row; output lines above it wrap.
+    let mut t = Term::new(20, 6, 100, term_core::ImagePool::process());
+    session(&mut t, "ok", &format!("{}\r\n", "y".repeat(15)), 0);
+    session(&mut t, "bad", "2\r\n", 2);
+    t.advance(b"\x1b]133;A\x07$ ");
+    t.state.resize(10, 8);
+    // Rows: `$ ok`, y×10, y×5, `$ bad`, 2, `$ `.
+    assert_eq!(failed(&mut t), vec![3]);
+    // No marks, no rows.
+    let mut plain = Term::new(20, 3, 100, term_core::ImagePool::process());
+    plain.advance(b"a\r\nb");
+    assert_eq!(failed(&mut plain), Vec::<u16>::new());
+}

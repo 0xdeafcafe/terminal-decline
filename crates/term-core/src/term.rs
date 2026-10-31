@@ -1154,6 +1154,85 @@ impl Terminal {
         true
     }
 
+    /// Line `line` has OSC 133 marks: a look at its row (on the screen)
+    /// or its flags (in history), without reading the marks.
+    pub(crate) fn line_has_marks(&self, line: u64) -> bool {
+        match self.screen_line(line) {
+            Some(row) => row.has_marks(),
+            None => self.history_index(line).is_some_and(|i| self.scrollback.has_marks(i)),
+        }
+    }
+
+    /// The marks written after the prompt (OSC 133 A) at `prompt`, in
+    /// the order written: the rest of its line's, then the lines below.
+    fn marks_after_prompt(&self, prompt: Point) -> impl Iterator<Item = (Point, Mark)> + '_ {
+        let here = (prompt.col, mark_rank(MarkKind::Prompt));
+        let at = move |line: u64| {
+            self.marks_at(line)
+                .into_iter()
+                .map(move |m| (Point { line, col: m.col as usize }, m))
+        };
+        let same = at(prompt.line).filter(move |(_, m)| (m.col as usize, mark_rank(m.kind)) > here);
+        same.chain(self.marked_lines(Some(prompt.line), false).flat_map(at))
+    }
+
+    /// The marks of the command whose prompt (OSC 133 A) is at `prompt`,
+    /// up to its end (D) or the next prompt, the end included.
+    fn command_marks(&self, prompt: Point) -> impl Iterator<Item = (Point, Mark)> + '_ {
+        let mut done = false;
+        self.marks_after_prompt(prompt).map_while(move |(p, m)| {
+            if done || m.kind == MarkKind::Prompt {
+                return None;
+            }
+            done = m.kind == MarkKind::End;
+            Some((p, m))
+        })
+    }
+
+    /// The exit status the command of the prompt (OSC 133 A) at `prompt`
+    /// finished with, from its D mark. `None` while it runs, when its
+    /// D mark gave no status, and for a prompt nothing was run from (the
+    /// next prompt came first).
+    pub fn command_status(&self, prompt: Point) -> Option<u32> {
+        self.command_marks(prompt)
+            .find(|(_, m)| m.kind == MarkKind::End)
+            .and_then(|(_, m)| m.status)
+    }
+
+    /// The command of the prompt at `prompt` exited non-zero.
+    pub fn command_failed(&self, prompt: Point) -> bool {
+        self.command_status(prompt).is_some_and(|s| s != 0)
+    }
+
+    /// The command line of the prompt at `prompt` that was run: from
+    /// its B mark to just before its C mark, first and last cell. `None`
+    /// if either mark is missing (not run yet, or no shell integration)
+    /// or the line is empty.
+    pub fn command_line(&self, prompt: Point) -> Option<(Point, Point)> {
+        let mut from = None;
+        let mut to = None;
+        for (p, m) in self.command_marks(prompt) {
+            match m.kind {
+                MarkKind::Input => from = Some(p),
+                MarkKind::Output => {
+                    to = Some(p);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let (from, to) = (from?, to?);
+        // The cell before the C mark.
+        let last = match to.col {
+            0 => Point {
+                line: to.line.checked_sub(1)?,
+                col: self.cols.max(self.row_at(to.line - 1).map_or(0, |r| r.len())) - 1,
+            },
+            c => Point { line: to.line, col: c - 1 },
+        };
+        (from <= last).then_some((from, last))
+    }
+
     /// Select the word at `p`, on its logical line: a word that a soft wrap
     /// splits across rows is selected whole. Off a word, just that cell.
     pub fn select_word(&mut self, p: Point) {
@@ -1373,8 +1452,9 @@ impl Terminal {
         }
     }
 
-    /// The text from `a` to `b` (both included, `a` first).
-    fn text_between(&self, a: Point, b: Point) -> String {
+    /// The text from `a` to `b` (both included, `a` first), on the
+    /// screen or in history, as copying a selection of it gives.
+    pub fn text_between(&self, a: Point, b: Point) -> String {
         let mut out = String::new();
         for line in a.line..=b.line {
             let Some(row) = self.row_at(line) else { continue };

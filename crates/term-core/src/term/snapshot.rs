@@ -169,6 +169,9 @@ pub struct Snapshot {
     /// The styles of the history rows copied this time.
     pub history_styles: Vec<Style>,
     pub highlights: Vec<Highlight>,
+    /// The view rows showing a prompt (OSC 133 A) whose command exited
+    /// non-zero, top to bottom: the renderer marks them in the padding.
+    pub failed: Vec<u16>,
     /// kitty direct placements that reach into the view, ready images only
     /// (images.md §4.4). Empty until kitty graphics lands (I.2).
     pub placements: Vec<SnapPlacement>,
@@ -248,6 +251,21 @@ fn merge(ranges: &mut [Range<usize>]) -> Vec<Range<usize>> {
 }
 
 impl Terminal {
+    /// A view row made of `pieces` shows a prompt (its OSC 133 A mark)
+    /// whose command exited non-zero. A look at each line's flags first,
+    /// so rows without marks cost nothing more.
+    fn shows_failed_prompt(&self, pieces: &[super::history::Piece]) -> bool {
+        pieces.iter().any(|p| {
+            self.line_has_marks(p.line)
+                && self.marks_at(p.line).iter().any(|m| {
+                    let col = m.col as usize;
+                    m.kind == crate::cell::MarkKind::Prompt
+                        && ((p.from <= col && col < p.to) || (col == 0 && p.from == 0))
+                        && self.command_failed(super::Point { line: p.line, col })
+                })
+        })
+    }
+
     /// Copy what the renderer needs for a frame into `out` (§9.2). `have`
     /// says whether the renderer's row cache already has a row; those rows
     /// aren't copied. Takes the styles interned since the last snapshot,
@@ -271,6 +289,7 @@ impl Terminal {
         out.style_updates.clear();
         out.history_styles.clear();
         out.highlights.clear();
+        out.failed.clear();
         out.placements.clear();
         out.virtual_placements.clear();
         // Images the pool evicted since the last command or snapshot are
@@ -335,6 +354,9 @@ impl Terminal {
             if with_images {
                 let r = out.rows.len();
                 row_pieces.extend(pieces.iter().map(|p| (r, *p)));
+            }
+            if self.shows_failed_prompt(&pieces) {
+                out.failed.push(to_u16(out.rows.len()));
             }
             // Stored columns `a..b` of `line`, as this row's columns.
             let cols_of = |line: u64, a: usize, b: usize, out: &mut Vec<Range<usize>>| {

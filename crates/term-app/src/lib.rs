@@ -37,6 +37,7 @@ pub mod prefs;
 pub mod prompts;
 pub mod reload;
 pub mod running;
+pub mod saved_history;
 pub mod search;
 pub mod secure_input;
 pub mod select;

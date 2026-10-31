@@ -139,6 +139,166 @@ impl Packed {
         }
     }
 
+    /// The block as written, or None if its parts don't decompress to
+    /// the sizes it gives (a saved block read back, [`super::saved`]).
+    pub(super) fn try_unpack(&self) -> Option<BlockData> {
+        let p = self.parts.map(|n| n as usize);
+        let [m, t, s] = self.sizes.map(|n| n as usize);
+        let lz = &self.lz;
+        let (mt, mts) = (m.checked_add(t)?, m.checked_add(t)?.checked_add(s)?);
+        if mts > lz.len() {
+            return None;
+        }
+        let part = |from: usize, to: usize, size: usize| -> Option<Box<[u8]>> {
+            let d = lz4_flex::block::decompress(&lz[from..to], size).ok()?;
+            (d.len() == size).then(|| d.into_boxed_slice())
+        };
+        let meta = part(0, m, p[0])?;
+        let text = part(m, mt, p[2])?;
+        let styles = part(mt, mts, p[4])?;
+        let offsets = part(mts, lz.len(), 2 * (p[1] + p[3] + p[5]))?;
+        let mut at = 0;
+        let mut u16s = |n: usize| -> Box<[u16]> {
+            let (lo, hi) = offsets[at..at + 2 * n].split_at(n);
+            at += 2 * n;
+            let mut prev = 0u16;
+            lo.iter()
+                .zip(hi)
+                .map(|(&l, &h)| {
+                    prev = prev.wrapping_add(u16::from_le_bytes([l, h]));
+                    prev
+                })
+                .collect()
+        };
+        let starts = u16s(p[1]);
+        let checkpoints = u16s(p[3]);
+        let style_starts = u16s(p[5]);
+        Some(BlockData {
+            meta,
+            starts,
+            text,
+            checkpoints,
+            styles,
+            style_starts,
+            links: self.links.clone(),
+            first: self.first,
+            width: self.width,
+            ambiguous: self.ambiguous,
+            head_continues: self.head_continues,
+            has_marks: self.has_marks,
+            images: self.images.clone(),
+        })
+    }
+
+    pub(super) fn set_head_continues(&mut self, on: bool) {
+        self.head_continues = on;
+    }
+
+    /// Append it to `out` as a restart saves it ([`super::saved`]): its
+    /// compressed parts as they are, its links by value, no images
+    /// (they don't outlive the process) and no line numbers (a restored
+    /// history numbers its blocks again).
+    pub(super) fn write(&self, out: &mut Vec<u8>) {
+        use super::saved::put;
+        put::u16(out, self.width);
+        out.extend([self.ambiguous, self.head_continues as u8, self.has_marks as u8]);
+        put::u32(out, self.links.len() as u32);
+        for l in &self.links {
+            put::bytes(out, l.uri.as_bytes());
+            match &l.id {
+                Some(id) => {
+                    out.push(1);
+                    put::bytes(out, id.as_bytes());
+                }
+                None => out.push(0),
+            }
+        }
+        put::u32(out, self.flags.runs.len() as u32);
+        for &(end, f) in &self.flags.runs {
+            put::u16(out, end);
+            out.push(f);
+        }
+        for v in self.parts.iter().chain(&self.sizes) {
+            put::u32(out, *v);
+        }
+        put::bytes(out, &self.lz);
+    }
+
+    /// Read a block [`Packed::write`] wrote, as block `first` onwards.
+    /// None if it is cut short or its counts don't add up; its contents
+    /// are checked by [`super::saved`].
+    pub(super) fn read(r: &mut super::saved::Reader<'_>, first: u64) -> Option<Packed> {
+        use crate::links::{MAX_ID, MAX_URI};
+        let width = r.u16()?;
+        let ambiguous = r.u8()?;
+        let head_continues = r.u8()? != 0;
+        let has_marks = r.u8()? != 0;
+        let n = r.u32()? as usize;
+        if n > super::PART {
+            return None;
+        }
+        let mut links = Vec::with_capacity(n);
+        for _ in 0..n {
+            let uri = String::from_utf8(r.bytes()?.to_vec()).ok()?;
+            let id = match r.u8()? {
+                0 => None,
+                1 => Some(String::from_utf8(r.bytes()?.to_vec()).ok()?),
+                _ => return None,
+            };
+            if uri.len() > MAX_URI || id.as_ref().is_some_and(|i| i.len() > MAX_ID) {
+                return None;
+            }
+            links.push(Arc::new(LinkValue { uri, id }));
+        }
+        let runs = r.u32()? as usize;
+        if runs == 0 || runs > super::PART {
+            return None;
+        }
+        let mut flags = Vec::with_capacity(runs);
+        for _ in 0..runs {
+            let end = r.u16()?;
+            if flags.last().is_some_and(|&(e, _)| e >= end) || end == 0 {
+                return None;
+            }
+            flags.push((end, r.u8()?));
+        }
+        let mut v = [0u32; 9];
+        for x in &mut v {
+            *x = r.u32()?;
+        }
+        let parts: [u32; 6] = v[..6].try_into().ok()?;
+        let sizes: [u32; 3] = v[6..].try_into().ok()?;
+        let lines = flags.last().map_or(0, |r| r.0 as usize);
+        let p = parts.map(|n| n as usize);
+        // Each part within a block's bounds, one start per line, a
+        // checkpoint every 16 lines.
+        if p[0] > super::PART + 1
+            || p[2] > super::PART + 1
+            || p[4] > super::PART + 1
+            || p[1] != lines
+            || p[3] != lines.div_ceil(super::CHECKPOINT)
+            || p[5] > super::PART
+        {
+            return None;
+        }
+        let lz = r.bytes()?.to_vec().into_boxed_slice();
+        Some(Packed {
+            first,
+            width,
+            ambiguous,
+            head_continues,
+            has_marks,
+            images: Box::new([]),
+            links: links.into_boxed_slice(),
+            flags: Flags {
+                runs: flags.into_boxed_slice(),
+            },
+            parts,
+            sizes,
+            lz,
+        })
+    }
+
     /// Every byte it holds, for the backstop.
     pub fn bytes(&self) -> usize {
         std::mem::size_of::<Packed>()

@@ -66,6 +66,9 @@ pub struct AppIvars {
     /// Quit without asking, even with `confirm_close` (a restart into a
     /// new build, or the test-only `quit`).
     quit_without_asking: Cell<bool>,
+    /// Quitting to restart into a new build, which saved the windows
+    /// itself: a quit's own save for the next launch is skipped.
+    restarting: Cell<bool>,
     /// The Settings tab, while it is open: Cmd+, brings it to the front.
     settings: RefCell<Option<Retained<NSWindow>>>,
     /// The errors of the config in effect, so a reload writes only new
@@ -103,13 +106,30 @@ define_class!(
         fn did_finish_launching(&self, _n: &NSNotification) {
             // Before any window opens, so each starts in its appearance.
             apply_appearance(MainThreadMarker::from(self), self.ivars().config.borrow().appearance);
-            let restore = std::mem::take(&mut *self.ivars().restore.borrow_mut());
+            let mut restore = std::mem::take(&mut *self.ivars().restore.borrow_mut());
+            let ours = self.ivars().role == crate::entry::Role::App && !crate::background::on();
+            let store = crate::saved_history::Store::current();
+            if ours && restore.is_empty() {
+                // What the last quit saved, with `restore_scrollback =
+                // true`; dropped if the setting changed since.
+                let session = store.session();
+                if self.ivars().config.borrow().restore_scrollback.on_quit() {
+                    restore = crate::reload::take(&session);
+                } else {
+                    let _ = std::fs::remove_file(&session);
+                }
+            }
             let folders = std::mem::take(&mut *self.ivars().opened_at_launch.borrow_mut());
             self.ivars().launched.set(true);
             if restore.is_empty() && folders.is_empty() {
                 self.open_window(None, Place::Cascade, None);
             }
             self.restore(restore);
+            if ours {
+                // Files the windows just opened didn't take: left by a
+                // restart or quit whose next launch never came.
+                store.clean_up();
+            }
             for dir in folders {
                 self.open_folder(dir, None);
             }
@@ -224,6 +244,7 @@ define_class!(
 
         #[unsafe(method(applicationWillTerminate:))]
         fn will_terminate(&self, _n: &NSNotification) {
+            self.save_session_for_next_launch();
             secure_input::apply(self.ivars().secure.borrow_mut().quit());
         }
     }
@@ -375,6 +396,7 @@ impl AppDelegate {
             launched: Cell::new(false),
             opened_at_launch: RefCell::new(Vec::new()),
             quit_without_asking: Cell::new(false),
+            restarting: Cell::new(false),
             settings: RefCell::new(None),
             preview: RefCell::new(Previewing::Off),
             errors: RefCell::new(notices.clone()),
@@ -490,12 +512,14 @@ impl AppDelegate {
             eprintln!("terminal-decline: {} is gone and no new build is beside it", bundle.display());
             return;
         };
-        let saved = self.saved_windows();
+        let store = crate::saved_history::Store::current();
+        let saved = self.saved_windows(self.history_to_save(&store, false).as_ref().map(|(s, l)| (*s, *l)));
         let restored = crate::reload::save(&saved).and_then(|file| crate::reload::relaunch(&bundle, &file));
         if let Err(e) = restored {
             eprintln!("terminal-decline: couldn't start the new build: {e}");
             return;
         }
+        self.ivars().restarting.set(true);
         self.quit_without_asking();
     }
 
@@ -551,9 +575,45 @@ impl AppDelegate {
         })
     }
 
+    /// Where to save each pane's history and how many lines of it, for a
+    /// restart (or with `quitting`, a quit), if the config says to:
+    /// never while Secure Keyboard Entry is on, whose point is that what
+    /// is typed stays in the app, nor in a pin.
+    fn history_to_save<'s>(
+        &self,
+        store: &'s crate::saved_history::Store,
+        quitting: bool,
+    ) -> Option<(&'s crate::saved_history::Store, usize)> {
+        let config = self.ivars().config.borrow();
+        let wanted = match quitting {
+            true => config.restore_scrollback.on_quit(),
+            false => config.restore_scrollback.on_restart(),
+        };
+        let pin = matches!(self.ivars().role, crate::entry::Role::Pin(_));
+        (wanted && !pin && !self.ivars().secure.borrow().wanted()).then_some((store, config.restore_scrollback_limit))
+    }
+
+    /// `restore_scrollback = true`: save the windows and their history as
+    /// the app quits, for the next launch to reopen. Only Terminal
+    /// Decline.app's own process, not under the test control.
+    fn save_session_for_next_launch(&self) {
+        if self.ivars().restarting.get() || self.ivars().role != crate::entry::Role::App || crate::background::on() {
+            return;
+        }
+        let store = crate::saved_history::Store::current();
+        let Some(history) = self.history_to_save(&store, true) else {
+            return;
+        };
+        let saved = self.saved_windows(Some(history));
+        let json = serde_json::to_vec(&saved).expect("saved windows serialise");
+        if let Err(e) = store.save_session(&json) {
+            eprintln!("terminal-decline: saving the windows for the next launch: {e}");
+        }
+    }
+
     /// Each window to reopen after a restart, tabs in order with their
-    /// group's index.
-    fn saved_windows(&self) -> Vec<SavedWindow> {
+    /// group's index. With `history`, each pane's history saved too.
+    fn saved_windows(&self, history: Option<(&crate::saved_history::Store, usize)>) -> Vec<SavedWindow> {
         let windows = self.ivars().windows.borrow();
         let ours = |w: &NSWindow| {
             windows
@@ -569,8 +629,9 @@ impl AppDelegate {
                 frame: [f.origin.x, f.origin.y, f.size.width, f.size.height],
                 tab_group,
                 selected,
-                panes: view.as_ref().and_then(|v| v.saved_panes()),
+                panes: view.as_ref().and_then(|v| v.saved_panes(history)),
                 command: view.as_ref().and_then(|v| v.command_to_restore()),
+                history: history.and_then(|(store, limit)| view.as_ref().and_then(|v| v.saved_history(store, limit))),
             }
         };
         let mut saved = Vec::new();
@@ -613,7 +674,7 @@ impl AppDelegate {
                 };
                 // With panes, each pane types its own command.
                 let command = w.command.filter(|_| w.panes.is_none());
-                let opened = self.open_window_as(w.cwd, place, None, false, w.panes);
+                let opened = self.open_window_as(w.cwd, place, None, false, w.panes, w.history);
                 if let (Some(command), Some(view)) = (command, opened.as_ref().and_then(|o| self.view_of(o))) {
                     view.type_at_prompt(command);
                 }
@@ -749,7 +810,7 @@ impl AppDelegate {
             Some(window) => Place::TabOf(window),
             None => Place::Cascade,
         };
-        let opened = self.open_window_as(None, place, None, true, None);
+        let opened = self.open_window_as(None, place, None, true, None, None);
         *self.ivars().settings.borrow_mut() = opened;
     }
 
@@ -824,13 +885,14 @@ impl AppDelegate {
     /// Open a window in `cwd` (else the configured one) at `place`, running
     /// `argv` (else the configured program).
     fn open_window(&self, cwd: Option<String>, place: Place, argv: Option<Vec<String>>) -> Option<Retained<NSWindow>> {
-        self.open_window_as(cwd, place, argv, false, None)
+        self.open_window_as(cwd, place, argv, false, None, None)
     }
 
     /// [`Self::open_window`], or with `settings` the Settings tab: the
     /// main app's binary running the preferences directly (not through
     /// the login shell), titled "Settings", opaque, without notices. With
-    /// `layout`, the panes saved for a restart.
+    /// `layout`, the panes saved for a restart; with `history`, the one
+    /// pane's history saved for it.
     fn open_window_as(
         &self,
         cwd: Option<String>,
@@ -838,6 +900,7 @@ impl AppDelegate {
         argv: Option<Vec<String>>,
         settings: bool,
         layout: Option<crate::reload::SavedPanes>,
+        history: Option<String>,
     ) -> Option<Retained<NSWindow>> {
         let mtm = MainThreadMarker::from(self);
         let config = self.ivars().config.borrow().clone();
@@ -972,6 +1035,7 @@ impl AppDelegate {
                 },
                 settings,
                 layout,
+                history,
             },
         ) {
             eprintln!("terminal-decline: could not open a window: {e}");
@@ -1089,7 +1153,13 @@ pub(crate) fn preview_theme(ask: term_prefs::Preview) {
 pub(crate) fn write_saved_windows(path: &std::path::Path) {
     let delegate = DELEGATE.with(|d| d.borrow().as_ref().and_then(|w| w.load()));
     if let Some(delegate) = delegate {
-        let json = serde_json::to_string(&delegate.saved_windows()).expect("saved windows serialise");
+        // With each pane's history, as a restart saves it, in the folder
+        // `<path>.restore` (not the user's).
+        let mut dir = path.as_os_str().to_owned();
+        dir.push(".restore");
+        let store = crate::saved_history::Store::in_dir(dir.into());
+        let history = delegate.history_to_save(&store, false);
+        let json = serde_json::to_string(&delegate.saved_windows(history)).expect("saved windows serialise");
         if let Err(e) = std::fs::write(path, json) {
             eprintln!("terminal-decline: writing {}: {e}", path.display());
         }

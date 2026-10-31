@@ -59,8 +59,10 @@ use crate::style::{Attrs, Style, Underline};
 use crate::unicode;
 
 mod packed;
+mod saved;
 pub(crate) use packed::Body;
 use packed::{Cache, Packed};
+pub use saved::{RestoreError, Restored};
 
 /// The most bytes in one part of a block (meta, text, the dictionary), so
 /// that every offset fits in 16 bits.
@@ -411,6 +413,25 @@ impl OpenBlock {
 
     fn lines(&self) -> usize {
         self.starts.len()
+    }
+
+    /// A sealed block's copy of what it holds so far.
+    fn snapshot(&self) -> BlockData {
+        BlockData {
+            meta: self.meta.clone().into_boxed_slice(),
+            starts: self.starts.clone().into_boxed_slice(),
+            text: self.text.clone().into_boxed_slice(),
+            checkpoints: self.checkpoints.clone().into_boxed_slice(),
+            styles: self.styles.clone().into_boxed_slice(),
+            style_starts: self.style_starts.clone().into_boxed_slice(),
+            links: self.links.clone().into_boxed_slice(),
+            first: self.first,
+            width: if self.width == u16::MAX { 0 } else { self.width },
+            ambiguous: self.ambiguous,
+            head_continues: self.head_continues,
+            has_marks: self.has_marks,
+            images: self.images.clone().into_boxed_slice(),
+        }
     }
 
     fn view(&self) -> View<'_> {
@@ -2531,23 +2552,7 @@ impl Scrollback {
             .map(|b| (b.data.clone(), b.len as usize, b.filter.clone()))
             .collect();
         if self.open.lines() > 0 {
-            let o = &self.open;
-            let data = BlockData {
-                meta: o.meta.clone().into_boxed_slice(),
-                starts: o.starts.clone().into_boxed_slice(),
-                text: o.text.clone().into_boxed_slice(),
-                checkpoints: o.checkpoints.clone().into_boxed_slice(),
-                styles: o.styles.clone().into_boxed_slice(),
-                style_starts: o.style_starts.clone().into_boxed_slice(),
-                links: o.links.clone().into_boxed_slice(),
-                first: o.first,
-                width: if o.width == u16::MAX { 0 } else { o.width },
-                ambiguous: o.ambiguous,
-                head_continues: o.head_continues,
-                has_marks: o.has_marks,
-                images: o.images.clone().into_boxed_slice(),
-            };
-            out.push((Body::Plain(Arc::new(data)), o.lines(), None));
+            out.push((Body::Plain(Arc::new(self.open.snapshot())), self.open.lines(), None));
         }
         (out, self.start)
     }
@@ -2595,6 +2600,13 @@ impl Scrollback {
     /// The first line still visible.
     pub(crate) fn first_visible(&self) -> u64 {
         self.start
+    }
+
+    /// Hide lines before line number `line` again (a pull-back shows
+    /// lines hidden below the limit; restored history hides its own).
+    pub(crate) fn hide_before(&mut self, line: u64) {
+        self.start = self.start.max(line.min(self.end));
+        self.trim();
     }
 
     /// The lowest line popped since the last call (§13.4: search's own

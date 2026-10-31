@@ -69,6 +69,57 @@ impl<'de> Deserialize<'de> for UpdateMode {
     }
 }
 
+/// `restore_scrollback`: when a pane's history is saved, to show again
+/// above the new shell ([`crate::saved_history`]). `true` and `false`
+/// mean `"always"` and `"never"`.
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum RestoreScrollback {
+    /// When the app restarts into a new build (dogfood and self-update
+    /// restarts), which reopens its windows anyway.
+    #[default]
+    Restarts,
+    /// Also when it quits: the next launch reopens the windows, each
+    /// pane with its history.
+    Always,
+    /// Never: nothing is written.
+    Never,
+}
+
+impl RestoreScrollback {
+    /// Whether a restart saves history.
+    pub fn on_restart(self) -> bool {
+        self != RestoreScrollback::Never
+    }
+
+    /// Whether quitting saves the windows and their history.
+    pub fn on_quit(self) -> bool {
+        self == RestoreScrollback::Always
+    }
+}
+
+impl<'de> Deserialize<'de> for RestoreScrollback {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<RestoreScrollback, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Bool(bool),
+            Text(String),
+        }
+        let bad = || serde::de::Error::custom("use \"restarts\", \"always\" or \"never\" (or true or false)");
+        match Raw::deserialize(d).map_err(|_| bad())? {
+            Raw::Bool(true) => Ok(RestoreScrollback::Always),
+            Raw::Bool(false) => Ok(RestoreScrollback::Never),
+            Raw::Text(t) => match t.as_str() {
+                "restarts" => Ok(RestoreScrollback::Restarts),
+                "always" => Ok(RestoreScrollback::Always),
+                "never" => Ok(RestoreScrollback::Never),
+                _ => Err(bad()),
+            },
+        }
+    }
+}
+
 /// The cursor's shape until a program sets its own (`cursor_style`).
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
@@ -245,6 +296,12 @@ pub struct Config {
     /// Space around the text, in points.
     pub padding: f64,
     pub scrollback: usize,
+    /// Show each pane's history again after `"restarts"` (the default:
+    /// restarts into a new build), `"always"` (`true`: quitting too, and
+    /// the next launch reopens the windows) or `"never"` (`false`).
+    pub restore_scrollback: RestoreScrollback,
+    /// The most lines of each pane's history saved for that.
+    pub restore_scrollback_limit: usize,
     pub option_as_meta: OptionAsMeta,
     /// 0.0–1.0. Below 1 the desktop shows through.
     pub opacity: f64,
@@ -354,6 +411,8 @@ impl Default for Config {
             ambiguous_width: 1,
             padding: 6.0,
             scrollback: 10_000,
+            restore_scrollback: RestoreScrollback::Restarts,
+            restore_scrollback_limit: 10_000,
             option_as_meta: OptionAsMeta::None,
             opacity: 1.0,
             unfocused_pane_opacity: 1.0,
@@ -1259,6 +1318,29 @@ mod tests {
         assert!(!c.copy_on_select);
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert!(errors[0].starts_with("config: copy_on_select: "), "{errors:?}");
+    }
+
+    #[test]
+    fn restore_scrollback_is_for_restarts_unless_set() {
+        let c = Config::default();
+        assert_eq!(
+            (c.restore_scrollback, c.restore_scrollback_limit),
+            (RestoreScrollback::Restarts, 10_000)
+        );
+        assert!(c.restore_scrollback.on_restart() && !c.restore_scrollback.on_quit());
+        assert_eq!(parse("restore_scrollback = true").0.restore_scrollback, RestoreScrollback::Always);
+        assert_eq!(parse("restore_scrollback = false").0.restore_scrollback, RestoreScrollback::Never);
+        assert_eq!(
+            parse("restore_scrollback = 'always'").0.restore_scrollback,
+            RestoreScrollback::Always
+        );
+        assert!(!parse("restore_scrollback = 'never'").0.restore_scrollback.on_restart());
+        assert_eq!(parse("restore_scrollback_limit = 500").0.restore_scrollback_limit, 500);
+        for bad in ["restore_scrollback = 'sometimes'", "restore_scrollback_limit = -1"] {
+            let (c, errors) = parse(bad);
+            assert_eq!(c.restore_scrollback, RestoreScrollback::Restarts);
+            assert!(errors[0].starts_with("config: restore_scrollback"), "{errors:?}");
+        }
     }
 
     #[test]

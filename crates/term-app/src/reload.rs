@@ -42,6 +42,12 @@ pub struct SavedWindow {
     /// builds before this. With panes, the focused pane's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
+    /// Its history, saved for the restart: a file of
+    /// [`crate::saved_history`]'s, shown again above the new shell. `None`
+    /// with panes (each pane has its own), on the alternate screen, with
+    /// `restore_scrollback = false`, and in files from builds before this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history: Option<String>,
 }
 
 /// A window's panes as saved: the tree with its shares, each pane's
@@ -82,6 +88,9 @@ pub struct SavedPane {
     /// split) the user's shell.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub program: bool,
+    /// Its history's file, as [`SavedWindow::history`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history: Option<String>,
 }
 
 /// Saved windows as they reopen: one list per window, its tabs in order.
@@ -267,6 +276,7 @@ mod tests {
                 selected: false,
                 panes: None,
                 command: None,
+                history: None,
             },
             SavedWindow {
                 cwd: None,
@@ -275,6 +285,7 @@ mod tests {
                 selected: true,
                 panes: None,
                 command: None,
+                history: None,
             },
             SavedWindow {
                 cwd: Some("/b".into()),
@@ -305,6 +316,7 @@ mod tests {
                     zoomed: None,
                 }),
                 command: None,
+                history: None,
             },
         ];
         std::fs::write(&path, serde_json::to_vec(&w).unwrap()).unwrap();
@@ -321,6 +333,7 @@ mod tests {
             selected,
             panes: None,
             command: None,
+            history: None,
         }
     }
 
@@ -387,6 +400,35 @@ mod tests {
         assert!(json.contains(r#"{"pane":{"cwd":"/a","command":"ssh host"}}"#), "{json}");
         let back: Vec<SavedWindow> = serde_json::from_str(&json).unwrap();
         assert_eq!(back, [w, window("/b", None, false)]);
+    }
+
+    /// Each window's and pane's history file comes back as it was; files
+    /// from builds before this name none, and none is written for a
+    /// window without one.
+    #[test]
+    fn history_files_round_trip_and_old_files_have_none() {
+        let old = br#"[{"cwd":"/a","frame":[1.0,2.0,3.0,4.0],"panes":{"root":{"pane":{"cwd":"/a"}},"focused":0}}]"#;
+        let list: Vec<SavedWindow> = serde_json::from_slice(old).unwrap();
+        assert!(list[0].history.is_none());
+        assert!(matches!(&list[0].panes.as_ref().unwrap().root, SavedNode::Pane(p) if p.history.is_none()));
+        assert!(!serde_json::to_string(&list).unwrap().contains("history"));
+        let mut w = window("/a", None, false);
+        w.history = Some("1-2-0.hist".into());
+        w.panes = Some(SavedPanes {
+            root: SavedNode::Pane(SavedPane {
+                history: Some("1-2-1.hist".into()),
+                ..SavedPane::default()
+            }),
+            focused: 0,
+            zoomed: None,
+        });
+        let json = serde_json::to_string(&[w.clone()]).unwrap();
+        assert!(
+            json.contains(r#""history":"1-2-0.hist""#) && json.contains(r#""history":"1-2-1.hist""#),
+            "{json}"
+        );
+        let back: Vec<SavedWindow> = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, [w]);
     }
 
     #[test]

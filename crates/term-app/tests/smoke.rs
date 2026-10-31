@@ -413,6 +413,64 @@ fn smoke_restore_reopens_tabs_as_tabs() {
     assert!(id("tab-a") < id("tab-b") && id("tab-b") < id("solo"), "{all:?}");
 }
 
+/// A restored window shows its history from before the restart above a
+/// faint "restored from" line, then the new program's output; the file
+/// is gone once read, and saved again the window's history (old and new)
+/// goes to a file of its own, readable only by the user.
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_restore_shows_the_history_from_before() {
+    if !have_metal() {
+        return;
+    }
+    let dir = TempDir::new("restore-history");
+    let store = dir.path().join("Library/Application Support/terminal-decline/restore");
+    std::fs::create_dir_all(&store).unwrap();
+    let mut old = term_core::Term::new(80, 8, 10_000, term_core::ImagePool::process());
+    for i in 0..100 {
+        old.advance(format!("\x1b[32mold line {i}\x1b[0m\r\n").as_bytes());
+    }
+    std::fs::write(store.join("1-2-0.hist"), old.state.save_history(10_000, 1_700_000_000).unwrap()).unwrap();
+    let restore = dir.path().join("restore.json");
+    let saved = serde_json::json!([{"cwd": dir.path(), "frame": [100.0, 100.0, 700.0, 500.0], "history": "1-2-0.hist"}]);
+    std::fs::write(&restore, saved.to_string()).unwrap();
+    let saved_file = format!("{}.saved", dir.dump_file().display());
+    let script = format!(
+        "echo 'new shell'; {dump}{save}{wait}{quit}sleep 20",
+        dump = dump_and_wait(&dir),
+        save = osc("save"),
+        wait = wait_for(&format!("[ -s '{saved_file}' ]")),
+        quit = osc("quit"),
+    );
+    let mut cmd = Command::new(APP);
+    cmd.arg("--restore")
+        .arg(&restore)
+        .args(["-e", "/bin/sh", "-c", &script])
+        .env("HOME", dir.path())
+        .env("XDG_CONFIG_HOME", dir.config_home())
+        .env("DECLINE_TEST_DUMP", dir.dump_file())
+        .current_dir(dir.path());
+    let (status, _) = run(&mut cmd);
+    assert!(status.success(), "{status}");
+    assert!(!store.join("1-2-0.hist").exists(), "read once, then deleted");
+    let all = dumps(&dir);
+    let shown = screen(all.first().unwrap_or_else(|| panic!("no dumps")));
+    assert!(shown.contains("old line 99|\nrestored from "), "{shown}");
+    let after = &shown[shown.find("restored from ").unwrap()..];
+    assert!(after.contains("|\nnew shell|"), "{shown}");
+    // Saved again (by the test control, beside its file): a new file
+    // with both.
+    let again: Value = serde_json::from_str(&std::fs::read_to_string(&saved_file).unwrap()).unwrap();
+    let name = again[0]["history"].as_str().unwrap_or_else(|| panic!("no history: {again}"));
+    let file = Path::new(&format!("{saved_file}.restore")).join(name);
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
+    let mut back = term_core::Term::new(80, 40, 10_000, term_core::ImagePool::process());
+    back.state.restore_history(&std::fs::read(&file).unwrap()).unwrap();
+    let text = back.state.dump();
+    assert!(text.contains("old line 99|") && text.contains("new shell|"), "{text}");
+}
+
 /// A restored tab whose shell was running a program gets its command line
 /// typed at the new shell's prompt, not run. Needs zsh as the login shell
 /// (its startup files come from a temp `ZDOTDIR`): once the command is in

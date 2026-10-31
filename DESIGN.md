@@ -425,6 +425,45 @@ anyway), nor the Settings tab.
   skipped), with oh-my-zsh's `.zshrc` (shown after about 0.8 s), and in
   the app (`smoke_restore_types_the_command_at_the_prompt`).
 
+Each pane's history comes back too (`restore_scrollback`,
+`saved_history`): above the new shell it shows what it showed before,
+its screen's rows on the screen and the rest in history, then a faint
+`restored from Sat 31 Oct 14:05` line. As the app restarts, each pane's
+newest `restore_scrollback_limit` lines (default 10,000; whole blocks, the
+lines over it hidden again) are written to a file of their own in
+`~/Library/Application Support/terminal-decline/restore/` (folder 0700,
+files 0600, created new without following links), named in the saved
+window list (`SavedWindow::history`, `SavedPane::history`; absent in
+older files), read and deleted as the pane opens; files left over (a
+launch that never came) are deleted at the next launch once older than a
+minute. The file holds the scrollback-v2 blocks as history keeps them
+(`Scrollback::save`): blocks idle compression already packed go as they
+are, the others, the open block and the screen's rows are packed with
+LZ4 as idle compression would; no line is decoded or stored again. It
+has a checksum, and every block is decompressed and its lines read
+through before history takes any (a damaged file restores nothing).
+Nothing is written while the app runs, only as it goes. Not saved: a
+pane on the alternate screen (an editor, a pager, a password manager),
+anything while Secure Keyboard Entry is on (what is typed stays in the
+app), the Settings tab, pins. Images don't outlive the process: their
+placeholder cells come back empty. Measured for 10k lines at 160
+columns (`cargo run --release -p term-core --example restore_size`):
+`ls -l --color` 178 KB, log lines 224 KB; saving takes 1 ms a pane
+(0.1 ms once history is idle-compressed), restoring 1.5–2 ms.
+
+`restore_scrollback = "restarts"` (the default) saves on restarts into
+a new build only, which reopen the windows anyway. `"always"` (or
+`true`) also saves as the app quits, with the window list in
+`restore/session.json`, and the next launch of Terminal Decline.app
+reopens the windows from it (not pins, not under the test control);
+`"never"` (`false`) writes nothing. Quitting doesn't save by default:
+a restart's files live for the second it takes, a quit's until the next
+launch, days perhaps, in backups too, with whatever passed through the
+terminal (tokens, a password echoed); and a quit today means a fresh
+start, which reopening every window would change. There is no crash
+relaunch: a crash can't save at quit time, and saving while running
+(periodically) is what this avoids.
+
 Splits (docs/design/splits.md) are being built. In place so far, with no
 AppKit yet: the pane tree (`panes`: layout in whole device pixels with a
 1 pt divider and a minimum pane size, focus by direction and in order,
@@ -703,7 +742,9 @@ contents, so only a real change reloads. A reload reads every layer again
   says so on stderr only (`terminal-decline: config: columns changed: it
   applies to new windows`), never in a window.
 
-`confirm_close` (see Files, folders and Services) applies at once.
+`confirm_close` (see Files, folders and Services) applies at once, and so
+do `restore_scrollback` and `restore_scrollback_limit` (see Windows and
+tabs), read when the app restarts or quits.
 
 Errors in the edited file are notices in every window, written after the
 program's output, as at startup, but only those new since the last load,

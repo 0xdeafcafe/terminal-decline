@@ -116,9 +116,11 @@ pub fn activate_ignoring_other_apps(mtm: MainThreadMarker) {
 }
 
 /// In the background, makes `window` (a sheet or an alert, say)
-/// transparent, so it isn't seen over other apps' windows.
+/// transparent, so it isn't seen over other apps' windows. An app `ctl`
+/// started to host windows keeps them visible (behind the others, never
+/// key): they are there to be watched.
 pub fn hide(window: &NSWindow) {
-    if on() {
+    if on() && !crate::ctl::window::hosted() {
         window.setAlphaValue(0.0);
     }
 }
@@ -153,7 +155,7 @@ pub fn make_key_and_order_front(window: &NSWindow) {
 /// Show `window` behind every other window without making it key or
 /// bringing the app forward: a session's window for the agent API
 /// (`ctl spawn --window`), in the app in front or in the background.
-/// In the background it is transparent as well.
+/// Under the test control it is transparent as well.
 pub fn order_back(window: &NSWindow) {
     hide(window);
     if !window.isVisible() {

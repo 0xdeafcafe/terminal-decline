@@ -177,8 +177,25 @@ fn headless_sessions_end_to_end() {
 #[test]
 fn wait_for_the_next_command_to_finish() {
     let env = Env::new(CONFIG);
-    env.ok(&["spawn", "--name", "sh", "--shell", "--env", "SHELL=/bin/zsh", "--size", "80x10"]);
+    // Its history stays out of the checkout the integration is read from.
+    let history = format!("HISTFILE={}", env.path("history"));
+    env.ok(&[
+        "spawn",
+        "--name",
+        "sh",
+        "--shell",
+        "--env",
+        "SHELL=/bin/zsh",
+        "--env",
+        &history,
+        "--size",
+        "80x10",
+    ]);
     // The first prompt has been drawn once the output is quiet.
+    env.ok(&["wait-for", "sh", "--idle", "700", "--timeout", "15000"]);
+    // No history: zsh would save it in the checkout the integration is
+    // read from.
+    env.ok(&["send", "sh", "--text", "unset HISTFILE\n"]);
     env.ok(&["wait-for", "sh", "--idle", "700", "--timeout", "15000"]);
     env.ok(&["send", "sh", "--text", "sleep 1; (exit 3)\n"]);
     let w = env.ok(&["wait-for", "sh", "--command", "--timeout", "10000"]);

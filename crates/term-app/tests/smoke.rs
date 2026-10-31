@@ -2733,7 +2733,23 @@ fn smoke_ctl_window_sessions_mark_commands() {
         return;
     }
     let ctl = CtlApp::new("cmd");
-    ctl.ok(&["spawn", "--window", "--name", "sh", "--shell", "--env", "SHELL=/bin/zsh"]);
+    // Its history stays out of the checkout the integration is read from.
+    let history = format!("HISTFILE={}", ctl.root.join("history").display());
+    ctl.ok(&[
+        "spawn",
+        "--window",
+        "--name",
+        "sh",
+        "--shell",
+        "--env",
+        "SHELL=/bin/zsh",
+        "--env",
+        &history,
+    ]);
+    ctl.ok(&["wait-for", "sh", "--idle", "700", "--timeout", "15000"]);
+    // No history: zsh would save it in the checkout the integration is
+    // read from.
+    ctl.ok(&["send", "sh", "--text", "unset HISTFILE\n"]);
     ctl.ok(&["wait-for", "sh", "--idle", "700", "--timeout", "15000"]);
     ctl.ok(&["send", "sh", "--text", "sleep 1; (exit 4)\n"]);
     let w = ctl.ok(&["wait-for", "sh", "--command", "--timeout", "10000"]);

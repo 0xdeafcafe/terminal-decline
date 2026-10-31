@@ -615,6 +615,91 @@ zle -N zle-line-pre-redraw td-line-pre-redraw
     assert!(!work.join("ran here").exists(), "it ran without Enter");
 }
 
+/// A dogfood build doesn't restart under a running program when a new
+/// build is installed: the library is swapped while the shell runs a
+/// script, and the app carries on, saying it was updated (a notification
+/// with Restart). Once the script ends, the shell is at its prompt
+/// (shell integration's marks) and nobody has used the app for the idle
+/// time (cut to 1 s), it restarts: under the test control that writes
+/// the windows it would reopen beside the dump, and quits. Needs zsh as
+/// the login shell, whose `zle-line-init` runs the script once.
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_a_new_build_waits_for_the_program_to_end() {
+    if !have_metal() {
+        return;
+    }
+    if !term_pty::login_shell().ends_with("/zsh") {
+        eprintln!("skipped: the login shell isn't zsh");
+        return;
+    }
+    let dir = TempDir::new("new-build");
+    let app = support::bundle(&dir.path().join("out"), &[("DOGFOOD", "1")]);
+    let lib = app.join("Contents/Frameworks/libterminal_decline.dylib");
+    let d = dir.path().display();
+    let wait = |cond: String| format!("i=0; while ! {{ {cond}; }} && [ $i -lt 300 ]; do sleep 0.05; i=$((i+1)); done; ");
+    // The program: says it started, waits for the new build, gives the
+    // watch time to see it (it waits 0.4 s for the install to finish),
+    // asks for a dump and ends once it is written.
+    let program = format!(
+        "touch '{d}/started'; {swapped}sleep 2; {dump}{dumped}touch '{d}/ended'\n",
+        swapped = wait(format!("[ -e '{d}/swapped' ]")),
+        dump = osc("dump"),
+        dumped = wait(format!("[ -s '{}' ]", dir.dump_file().display())),
+    );
+    std::fs::write(dir.path().join("program.sh"), program).unwrap();
+    std::fs::write(
+        dir.path().join(".zshrc"),
+        format!(
+            "PS1='READY> '\ntd_ran=\ntd-line-init() {{ [[ -z $td_ran ]] || return 0; td_ran=1; BUFFER=\"/bin/sh '{d}/program.sh'\"; zle accept-line; }}\nzle -N zle-line-init td-line-init\n"
+        ),
+    )
+    .unwrap();
+    let mut cmd = Command::new(support::launcher(&app));
+    cmd.env("XDG_CONFIG_HOME", dir.config_home())
+        .env("ZDOTDIR", dir.path())
+        .env("DECLINE_TEST_DUMP", dir.dump_file())
+        .env("DECLINE_TEST_RESTART_IDLE", "1")
+        .current_dir(dir.path());
+    let mut child = cmd.spawn().unwrap();
+    let start = Instant::now();
+    while !dir.path().join("started").exists() {
+        assert!(start.elapsed() < TIMEOUT, "the program never started");
+        if let Some(status) = child.try_wait().unwrap() {
+            panic!("the app ended before the program started: {status}");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // How dogfood.sh installs: a new file in place of the old one.
+    let new = lib.with_extension("new");
+    std::fs::copy(&lib, &new).unwrap();
+    std::fs::rename(&new, &lib).unwrap();
+    std::fs::write(dir.path().join("swapped"), b"").unwrap();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if start.elapsed() > TIMEOUT {
+            let _ = child.kill();
+            panic!("the app didn't restart once the program ended");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert!(status.success(), "{status}");
+    assert!(dir.path().join("ended").exists(), "restarted before the program ended");
+    let all = dumps(&dir);
+    assert_eq!(all.len(), 1, "{all:?}");
+    let sent = all[0]["notifications"]["sent"].as_array().unwrap();
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(sent[0]["title"], "Terminal Decline updated — restart when you're ready", "{sent:?}");
+    assert_eq!(sent[0]["button"], "restart", "{sent:?}");
+    assert!(sent[0]["body"].as_str().unwrap().starts_with("sh is still running"), "{sent:?}");
+    let restart = std::fs::read_to_string(format!("{}.restart", dir.dump_file().display())).expect("no restart");
+    let saved: Value = serde_json::from_str(&restart).unwrap();
+    assert_eq!(saved.as_array().map(Vec::len), Some(1), "{saved}");
+    assert!(saved[0]["frame"].is_array(), "{saved}");
+}
+
 /// Under the test control notifications go to the dump, not the
 /// notification center: OSC 9 and 777 from a background tab arrive as
 /// one notification (the second replaces the first, as a burst from one

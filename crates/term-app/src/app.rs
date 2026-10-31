@@ -87,6 +87,34 @@ pub struct AppIvars {
     quick: RefCell<Option<quick::QuickTerminal>>,
     /// Its hotkey, while registered.
     hotkey: RefCell<Option<crate::hotkey::Registration>>,
+    /// A dogfood build: whether it watches for new builds, and the one
+    /// installed while programs ran, waiting to take over.
+    new_build: RefCell<NewBuild>,
+}
+
+/// The restart into a new dogfood build ([`crate::reload`]).
+#[derive(Default)]
+struct NewBuild {
+    /// The bundle watched for a new build; `None` when not watching
+    /// (not a dogfood build). Restart to Update is in the menu while set.
+    watching: Option<std::path::PathBuf>,
+    /// A new build is installed and this one waits to restart into it.
+    pending: bool,
+    /// Said so, in a notification (once).
+    told: bool,
+    /// The user asked for this update (Update to Latest, or the Update
+    /// button): it restarts as soon as no program runs, without waiting
+    /// for the user to be idle.
+    asked: bool,
+    /// Bumped each time a look is scheduled: an older timer does nothing.
+    armed: u64,
+    /// The local event monitor that notes the last input, while watching.
+    monitor: Option<Retained<AnyObject>>,
+}
+
+thread_local! {
+    /// When the user last typed or clicked in the app.
+    static LAST_INPUT: Cell<Option<std::time::Instant>> = const { Cell::new(None) };
 }
 
 /// A window for a session of the agent API (`ctl spawn --window`): the
@@ -222,7 +250,7 @@ define_class!(
             } else if let Some(src) = crate::update::dogfood::source() {
                 crate::update::announce::at_launch(crate::update::announce::Build::Source(src.commit), Some(src.repo));
             }
-            if sparkle || source {
+            if sparkle || source || restart_menu_shown() {
                 let menus = build_menus(mtm, &self.ivars().app_name, &self.ivars().config.borrow().keybinds());
                 NSApplication::sharedApplication(mtm).setMainMenu(Some(&menus));
             }
@@ -361,6 +389,13 @@ define_class!(
             crate::update::dogfood::update_now();
         }
 
+        /// Terminal Decline > Restart to Update (a dogfood build waiting
+        /// to take over).
+        #[unsafe(method(restartToUpdate:))]
+        fn restart_to_update_item(&self, _sender: Option<&AnyObject>) {
+            self.restart_to_update();
+        }
+
         /// Terminal Decline > Settings… (Cmd+,).
         #[unsafe(method(showSettings:))]
         fn show_settings_item(&self, _sender: Option<&AnyObject>) {
@@ -389,8 +424,12 @@ define_class!(
         }
 
         /// Checkmarks: Secure Keyboard Entry shows whether it is on.
+        /// Restart to Update is on only while a new build waits.
         #[unsafe(method(validateMenuItem:))]
         fn validate_menu_item(&self, item: &NSMenuItem) -> bool {
+            if item.action() == Some(sel!(restartToUpdate:)) {
+                return self.ivars().new_build.borrow().pending.into();
+            }
             if item.action() == Some(sel!(toggleSecureKeyboardEntry:)) {
                 let on = self.ivars().secure.borrow().wanted();
                 item.setState(if on { objc2_app_kit::NSControlStateValueOn } else { objc2_app_kit::NSControlStateValueOff });
@@ -421,6 +460,8 @@ define_class!(
             let closed = n.object();
             let is_closed = |w: &NSWindow| closed.as_deref().is_some_and(|o| std::ptr::eq(o, w as &AnyObject));
             self.ivars().windows.borrow_mut().retain(|(w, _)| !is_closed(w));
+            // A new build waiting for programs to end looks again.
+            busy_may_have_changed();
             let mut quick = self.ivars().quick.borrow_mut();
             if quick.as_ref().is_some_and(|q| is_closed(&q.window)) {
                 // Its shell exited or it was closed: the hotkey makes a new one.
@@ -472,6 +513,7 @@ impl AppDelegate {
             preview: RefCell::new(Previewing::Off),
             quick: RefCell::new(None),
             hotkey: RefCell::new(None),
+            new_build: RefCell::default(),
             errors: RefCell::new(notices.clone()),
             role,
             notices: RefCell::new(notices.into()),
@@ -578,21 +620,149 @@ impl AppDelegate {
         let code = crate::reload::running_code(&bundle, exe);
         // Kept from now: once the bundle is gone, the executable can't be
         // resolved to it any more.
-        let _ = crate::reload::watch(code, move || {
+        let watched = bundle.clone();
+        let watching = crate::reload::watch(code, move || {
             dispatch2::DispatchQueue::main().exec_async(move || {
-                let delegate = DELEGATE.with(|d| d.borrow().as_ref().and_then(|w| w.load()));
-                if let Some(delegate) = delegate {
-                    delegate.restart_into_new_build(&bundle);
+                if let Some(delegate) = delegate() {
+                    delegate.new_build_installed();
                 }
             });
         });
+        if watching.is_err() {
+            return;
+        }
+        // The last input, for restarting only once nobody uses the app.
+        LAST_INPUT.with(|t| t.set(Some(std::time::Instant::now())));
+        use objc2_app_kit::NSEventMask;
+        let mask = NSEventMask::KeyDown
+            | NSEventMask::LeftMouseDown
+            | NSEventMask::RightMouseDown
+            | NSEventMask::OtherMouseDown
+            | NSEventMask::ScrollWheel;
+        let handler = block2::RcBlock::new(|event: std::ptr::NonNull<objc2_app_kit::NSEvent>| -> *mut objc2_app_kit::NSEvent {
+            LAST_INPUT.with(|t| t.set(Some(std::time::Instant::now())));
+            event.as_ptr()
+        });
+        let mut nb = self.ivars().new_build.borrow_mut();
+        nb.monitor = crate::background::add_local_monitor(mask, handler);
+        nb.watching = Some(watched);
     }
 
-    fn restart_into_new_build(&self, bundle: &std::path::Path) {
-        let Some(bundle) = crate::reload::relaunch_target(bundle) else {
+    /// The reload watch saw a new build installed: restart into it now if
+    /// no pane runs a program and nobody is using the app, else wait for
+    /// that, saying so once. Meanwhile this build carries on as it is:
+    /// its library stays loaded, whatever is on disk.
+    fn new_build_installed(&self) {
+        {
+            let mut nb = self.ivars().new_build.borrow_mut();
+            if nb.watching.is_none() || nb.pending {
+                return;
+            }
+            nb.pending = true;
+        }
+        self.consider_restart();
+    }
+
+    /// What every pane runs that a restart would end, read now.
+    fn busy_for_restart(&self) -> Vec<String> {
+        let views: Vec<_> = self.ivars().windows.borrow().iter().map(|(_, v)| v.clone()).collect();
+        views.iter().flat_map(|v| v.busy_for_restart()).collect()
+    }
+
+    /// With a new build waiting: restart into it if [`crate::reload::when_to_restart`]
+    /// says so, else tell the user (once) and look again later.
+    fn consider_restart(&self) {
+        let (pending, asked) = {
+            let nb = self.ivars().new_build.borrow();
+            (nb.pending, nb.asked)
+        };
+        if !pending {
+            return;
+        }
+        let busy = self.busy_for_restart();
+        let wait = if asked { std::time::Duration::ZERO } else { restart_idle() };
+        let idle = LAST_INPUT.with(|t| t.get()).map_or(wait, |t| t.elapsed());
+        match crate::reload::when_to_restart(&busy, idle, wait) {
+            None => self.restart_into_new_build(),
+            Some(after) => {
+                let tell = !std::mem::replace(&mut self.ivars().new_build.borrow_mut().told, true);
+                if tell {
+                    let mut n = crate::notify::Note::new(
+                        format!("{} updated — restart when you're ready", crate::PRODUCT_NAME),
+                        crate::running::update_waiting_text(&busy),
+                        crate::notify::Target::App,
+                    );
+                    n.key = Some("new-build".into());
+                    n.group = Some("updates".into());
+                    n.button = Some(crate::notify::Button::Restart);
+                    crate::notify::show(MainThreadMarker::from(self), n);
+                }
+                self.look_again_after(after);
+            }
+        }
+    }
+
+    /// The next look at whether to restart, `after` from now: one timer.
+    fn look_again_after(&self, after: std::time::Duration) {
+        let n = {
+            let mut nb = self.ivars().new_build.borrow_mut();
+            nb.armed += 1;
+            nb.armed
+        };
+        let at = dispatch2::DispatchTime::NOW.time(after.as_nanos().min(i64::MAX as u128) as i64);
+        let _ = dispatch2::DispatchQueue::main().after(at, move || {
+            if let Some(d) = delegate()
+                && d.ivars().new_build.borrow().armed == n
+            {
+                d.consider_restart();
+            }
+        });
+    }
+
+    /// Terminal Decline › Restart to Update, or the notification's
+    /// Restart: now, asking first while programs run, as `confirm_close`
+    /// asks before a quit.
+    fn restart_to_update(&self) {
+        if !self.ivars().new_build.borrow().pending {
+            return;
+        }
+        let busy = self.busy_for_restart();
+        if !busy.is_empty() {
+            let mtm = MainThreadMarker::from(self);
+            let (title, text) = crate::running::restart_question(&self.ivars().app_name, &busy);
+            let alert = NSAlert::new(mtm);
+            alert.setMessageText(&NSString::from_str(&title));
+            alert.setInformativeText(&NSString::from_str(&text));
+            alert.addButtonWithTitle(&NSString::from_str("Restart"));
+            alert.addButtonWithTitle(&NSString::from_str("Cancel"));
+            crate::background::hide(&alert.window());
+            if alert.runModal() != NSAlertFirstButtonReturn {
+                return;
+            }
+        }
+        self.restart_into_new_build();
+    }
+
+    fn restart_into_new_build(&self) {
+        let Some(bundle) = self.ivars().new_build.borrow().watching.clone() else {
+            return;
+        };
+        self.ivars().new_build.borrow_mut().pending = false;
+        let Some(bundle) = crate::reload::relaunch_target(&bundle) else {
             eprintln!("terminal-decline: {} is gone and no new build is beside it", bundle.display());
             return;
         };
+        if let Some(mut path) = std::env::var_os(crate::control::ENV).filter(|v| !v.is_empty()) {
+            // Under the test control the new build isn't started: opened
+            // by Launch Services, it would come up outside the test's
+            // environment. The windows it would reopen go beside the dump.
+            path.push(".restart");
+            let saved = self.saved_windows(None);
+            let _ = std::fs::write(path, serde_json::to_vec(&saved).expect("saved windows serialise"));
+            self.ivars().restarting.set(true);
+            self.quit_without_asking();
+            return;
+        }
         let store = crate::saved_history::Store::current();
         let saved = self.saved_windows(self.history_to_save(&store, false).as_ref().map(|(s, l)| (*s, *l)));
         // The new build registers the quick terminal's hotkey as it starts:
@@ -1355,6 +1525,52 @@ pub(crate) fn running_programs() -> Vec<String> {
     views.iter().flat_map(|v| v.running_programs()).collect()
 }
 
+fn delegate() -> Option<Retained<AppDelegate>> {
+    DELEGATE.with(|d| d.borrow().as_ref().and_then(|w| w.load()))
+}
+
+/// How long nobody must have used the app before a new build waiting to
+/// take over restarts it: [`crate::reload::RESTART_IDLE`], or under the
+/// test control what [`crate::reload::TEST_IDLE_ENV`] says.
+fn restart_idle() -> std::time::Duration {
+    let test = std::env::var_os(crate::control::ENV).is_some_and(|v| !v.is_empty());
+    test.then(|| std::env::var(crate::reload::TEST_IDLE_ENV).ok()?.parse::<f64>().ok())
+        .flatten()
+        .filter(|s| s.is_finite() && *s >= 0.0)
+        .map_or(crate::reload::RESTART_IDLE, std::time::Duration::from_secs_f64)
+}
+
+/// A command finished in some pane: a new build waiting for programs to
+/// end looks again, a moment later (once the prompt is drawn).
+pub(crate) fn busy_may_have_changed() {
+    let Some(d) = delegate() else { return };
+    if d.ivars().new_build.borrow().pending {
+        d.look_again_after(std::time::Duration::from_millis(500));
+    }
+}
+
+/// The notification's Restart, or Terminal Decline › Restart to Update.
+pub(crate) fn restart_to_update() {
+    if let Some(d) = delegate() {
+        d.restart_to_update();
+    }
+}
+
+/// The user asked for the update being built (Update to Latest), or
+/// (`false`) it failed: once installed, an update asked for restarts as
+/// soon as no program runs, without waiting for the user to be away.
+pub(crate) fn set_update_asked(asked: bool) {
+    if let Some(d) = delegate() {
+        d.ivars().new_build.borrow_mut().asked = asked;
+    }
+}
+
+/// Whether Terminal Decline › Restart to Update is in the menu: a
+/// dogfood build watching for new ones.
+pub(crate) fn restart_menu_shown() -> bool {
+    delegate().is_some_and(|d| d.ivars().new_build.borrow().watching.is_some())
+}
+
 /// The next quit doesn't ask, whatever `confirm_close` says: Quit and
 /// Install already asked.
 pub(crate) fn allow_quit_without_asking() {
@@ -1531,13 +1747,29 @@ pub fn build_menus(mtm: MainThreadMarker, app_name: &str, binds: &Keybinds) -> R
                     vec![NSMenuItem::separatorItem(mtm)],
                 ]
                 .concat(),
-                (false, true) => [
-                    b(MenuAction::CheckForUpdates.label(), MenuAction::CheckForUpdates),
-                    b(MenuAction::UpdateToLatest.label(), MenuAction::UpdateToLatest),
-                    vec![NSMenuItem::separatorItem(mtm)],
+                (false, source) => [
+                    if source {
+                        [
+                            b(MenuAction::CheckForUpdates.label(), MenuAction::CheckForUpdates),
+                            b(MenuAction::UpdateToLatest.label(), MenuAction::UpdateToLatest),
+                        ]
+                        .concat()
+                    } else {
+                        Vec::new()
+                    },
+                    // A dogfood build, which restarts into new ones.
+                    if restart_menu_shown() {
+                        b(MenuAction::RestartToUpdate.label(), MenuAction::RestartToUpdate)
+                    } else {
+                        Vec::new()
+                    },
+                    if source || restart_menu_shown() {
+                        vec![NSMenuItem::separatorItem(mtm)]
+                    } else {
+                        Vec::new()
+                    },
                 ]
                 .concat(),
-                (false, false) => Vec::new(),
             },
             b(MenuAction::Settings.label(), MenuAction::Settings),
             vec![
@@ -1671,6 +1903,7 @@ pub fn run(
     crate::notify::on_click(crate::view::show_pane);
     crate::notify::on_button(|b| match b {
         crate::notify::Button::Update => crate::update::dogfood::update_now(),
+        crate::notify::Button::Restart => restart_to_update(),
     });
     let menus = build_menus(mtm, app_name, &config.keybinds());
     let delegate = AppDelegate::new(mtm, config, notices, restore, origin, app_name, role);

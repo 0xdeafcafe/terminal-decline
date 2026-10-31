@@ -73,20 +73,25 @@ pub enum Target {
 pub enum Button {
     /// "Update": update a build from source now ([`crate::update::source`]).
     Update,
+    /// "Restart": restart into the dogfood build installed while
+    /// programs ran ([`crate::reload`]).
+    Restart,
 }
 
 impl Button {
-    const ALL: [Button; 1] = [Button::Update];
+    const ALL: [Button; 2] = [Button::Update, Button::Restart];
 
     fn id(self) -> &'static str {
         match self {
             Button::Update => "update",
+            Button::Restart => "restart",
         }
     }
 
     fn label(self) -> &'static str {
         match self {
             Button::Update => "Update",
+            Button::Restart => "Restart",
         }
     }
 

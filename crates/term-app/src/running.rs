@@ -351,7 +351,7 @@ fn bsd_info(pid: libc::pid_t) -> Option<libc::proc_bsdinfo> {
     (n == size).then_some(info)
 }
 
-fn name_of(pid: libc::pid_t) -> Option<String> {
+pub(crate) fn name_of(pid: libc::pid_t) -> Option<String> {
     let mut buf = [0u8; 256];
     let n = unsafe { libc::proc_name(pid, buf.as_mut_ptr().cast(), buf.len() as u32) };
     (n > 0).then(|| String::from_utf8_lossy(&buf[..n as usize]).into_owned())
@@ -409,10 +409,48 @@ pub fn quit_question(app_name: &str, programs: &[String]) -> (String, String) {
     (format!("Quit {app_name}?"), text)
 }
 
+/// The title and text of the question asked before restarting into a
+/// new build (Restart to Update) while `programs` run, one per pane.
+pub fn restart_question(app_name: &str, programs: &[String]) -> (String, String) {
+    let text = match programs {
+        [one] => format!("{one} is still running. Restarting ends it; the tab comes back with its command typed, not run."),
+        _ => format!(
+            "Programs are still running in {} panes ({}). Restarting ends them; the tabs come back with their commands typed, not run.",
+            programs.len(),
+            names(programs)
+        ),
+    };
+    (format!("Restart {app_name}?"), text)
+}
+
+/// What the notification of a new build waiting to take over says
+/// under its title, with `programs` running (one per pane).
+pub fn update_waiting_text(programs: &[String]) -> String {
+    let after = "It restarts by itself once every tab is at its prompt and you have been away a while, or use Restart.";
+    match programs {
+        [] => "It restarts by itself once you have been away a while, or use Restart.".into(),
+        [one] => format!("{one} is still running, so not now. {after}"),
+        _ => format!("{} are still running, so not now. {after}", names(programs)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::process::{Command, Stdio};
+
+    #[test]
+    fn what_a_waiting_update_says() {
+        let s = |v: &[&str]| v.iter().map(|p| p.to_string()).collect::<Vec<_>>();
+        assert!(update_waiting_text(&[]).starts_with("It restarts by itself once you have been away"));
+        assert!(update_waiting_text(&s(&["rush"])).starts_with("rush is still running, so not now."));
+        assert!(update_waiting_text(&s(&["rush", "vim", "rush"])).starts_with("rush, vim are still running"));
+        let (title, text) = restart_question("Terminal Decline", &s(&["rush"]));
+        assert_eq!(title, "Restart Terminal Decline?");
+        assert!(text.starts_with("rush is still running. Restarting ends it;"), "{text}");
+        let (_, text) = restart_question("Terminal Decline", &s(&["rush", "vim"]));
+        assert!(text.starts_with("Programs are still running in 2 panes (rush, vim)."), "{text}");
+    }
 
     /// A shell on a PTY, as a window runs one, and the foreground program
     /// once it is `want`. With `want` as `None` the shell is only looked at

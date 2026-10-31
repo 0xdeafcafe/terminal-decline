@@ -99,10 +99,14 @@ pub enum MenuAction {
     /// Terminal Decline > Update to Latest (updates from source only;
     /// does nothing otherwise, and unbound by default).
     UpdateToLatest,
+    /// Terminal Decline > Restart to Update: restart into a dogfood build
+    /// installed while programs ran (asking first if they still do; does
+    /// nothing otherwise, and unbound by default).
+    RestartToUpdate,
 }
 
 impl MenuAction {
-    pub const ALL: [MenuAction; 43] = [
+    pub const ALL: [MenuAction; 44] = [
         MenuAction::NewWindow,
         MenuAction::NewTab,
         MenuAction::Close,
@@ -146,6 +150,7 @@ impl MenuAction {
         MenuAction::NextFailed,
         MenuAction::CheckForUpdates,
         MenuAction::UpdateToLatest,
+        MenuAction::RestartToUpdate,
     ];
 
     /// The name in the config.
@@ -194,6 +199,7 @@ impl MenuAction {
             MenuAction::NextFailed => "next_failed",
             MenuAction::CheckForUpdates => "check_for_updates",
             MenuAction::UpdateToLatest => "update_to_latest",
+            MenuAction::RestartToUpdate => "restart_to_update",
         }
     }
 
@@ -243,6 +249,7 @@ impl MenuAction {
             MenuAction::NextFailed => "Jump to Next Failed Command",
             MenuAction::CheckForUpdates => "Check for Updates…",
             MenuAction::UpdateToLatest => "Update to Latest",
+            MenuAction::RestartToUpdate => "Restart to Update",
         }
     }
 
@@ -294,6 +301,7 @@ impl MenuAction {
             MenuAction::NextFailed => c"jumpToNextFailedCommand:",
             MenuAction::CheckForUpdates => c"checkForUpdates:",
             MenuAction::UpdateToLatest => c"updateToLatest:",
+            MenuAction::RestartToUpdate => c"restartToUpdate:",
         }
     }
 

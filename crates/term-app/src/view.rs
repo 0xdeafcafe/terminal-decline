@@ -927,6 +927,10 @@ impl WindowView {
             })
             .flatten();
         let Some((on, after, finished, settings)) = finished else { return };
+        if !finished.is_empty() {
+            // A new build waiting for programs to end looks again.
+            crate::app::busy_may_have_changed();
+        }
         if focused && (events.title.is_some() || !events.commands.is_empty()) {
             self.refresh_title();
         }
@@ -2454,6 +2458,44 @@ impl WindowView {
             })
             .unwrap_or_default();
         pids.into_iter().filter_map(crate::running::foreground_program).collect()
+    }
+
+    /// What each pane runs that a restart into a new build would end
+    /// ([`crate::reload::busy`]), in pane order: read now, from the
+    /// shells' OSC 133 marks and each terminal's foreground process
+    /// group. Not the Settings pane's, nor a pane whose program ended.
+    pub fn busy_for_restart(&self) -> Vec<String> {
+        let panes = self
+            .with_state(|st| {
+                st.tree
+                    .ids()
+                    .iter()
+                    .filter_map(|id| st.panes.get(id))
+                    .filter(|p| !p.settings)
+                    .filter_map(|p| {
+                        let pid = p.session.pid()?;
+                        let marks = p
+                            .activity
+                            .marks
+                            .then(|| p.activity.running.as_ref().map(|r| r.command.clone().unwrap_or_default()));
+                        // A window's own program, unless it is a shell
+                        // whose marks say it is at its prompt.
+                        let own = !p.runs_shell && marks != Some(None);
+                        Some((pid, marks, own))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        panes
+            .into_iter()
+            .filter_map(|(pid, marks, own)| {
+                crate::reload::busy(&crate::reload::PaneNow {
+                    marks,
+                    foreground: crate::running::foreground_program(pid),
+                    program: own.then(|| crate::running::name_of(pid).unwrap_or_else(|| "a program".into())),
+                })
+            })
+            .collect()
     }
 
     /// The program running in pane `pane`'s foreground, as

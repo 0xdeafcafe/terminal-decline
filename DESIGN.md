@@ -387,6 +387,31 @@ build from before the rename to Terminal Decline, removed by the dogfood
 script), it restarts into `Terminal Decline.app` in the same folder
 (`reload::relaunch_target`).
 
+The restart never ends a running program. When the watch sees a new
+build, the app reads, there and then, what each pane runs
+(`reload::busy`): busy if the shell's OSC 133 marks say a command runs,
+or if the PTY's foreground process group isn't the shell's (a program
+started without marks); a pane running the window's own program
+(`-e PROGRAM`) is busy unless its marks say it is at a prompt. With
+every pane at its prompt and no key or mouse input to the app for
+`reload::RESTART_IDLE` (2 minutes; a local event monitor notes the last
+input) it restarts at once. Otherwise the old build carries on (its
+library stays mapped; nothing loads it again) and says so once, in a
+notification "Terminal Decline updated — restart when you're ready" with
+a Restart button; Terminal Decline › Restart to Update
+(`restart_to_update`, unbound) is enabled meanwhile. It looks again when
+a command finishes in some pane, when a window closes, and on a one-shot
+timer (the rest of the idle time, or 2 minutes while busy); nothing
+polls the panes. Restart (button or menu) while programs run asks first,
+naming them, as `confirm_close` does. Quitting instead is fine too: the
+next launch is the new build. An update asked for in the app (Update to
+Latest) restarts as soon as no program runs, without the idle wait.
+Under the test control the restart doesn't start the new build (Launch
+Services would open it outside the test's environment): it writes the
+windows it would reopen to `<dump>.restart` and quits, and
+`DECLINE_TEST_RESTART_IDLE` cuts the idle time
+(`smoke_a_new_build_waits_for_the_program_to_end`).
+
 A tab whose shell was running a program (`claude`, `nvim foo.rs`,
 `ssh host`) also saves that program's command line
 (`SavedWindow::command`, and per pane in `SavedPanes`; absent in older

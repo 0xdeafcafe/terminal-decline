@@ -278,7 +278,7 @@ fn checked(asked: Asked, remote: Result<Remote, String>, tree: Result<Tree, Stri
         }
         Decision::Update => {
             next = None;
-            build(src, remote);
+            build(src, remote, asked == Asked::Update);
         }
     }
     if scheduled && let Some(after) = next {
@@ -287,8 +287,11 @@ fn checked(asked: Asked, remote: Result<Remote, String>, tree: Result<Tree, Stri
 }
 
 /// Build the new commits in the background; the install restarts the
-/// app ([`crate::reload`]). A failure is a notification naming the log.
-fn build(src: Source, remote: Remote) {
+/// app ([`crate::reload`]): once no program runs, and, unless the user
+/// asked for the update (`asked`), once nobody has used the app for a
+/// while. A failure is a notification naming the log.
+fn build(src: Source, remote: Remote, asked: bool) {
+    crate::app::set_update_asked(asked);
     let Some(bundle) = STATE.with(|s| {
         let mut s = s.borrow_mut();
         let st = s.as_mut()?;
@@ -301,7 +304,7 @@ fn build(src: Source, remote: Remote) {
     show(note(
         format!("Updating {}", crate::PRODUCT_NAME),
         format!(
-            "Building {} new {commits} in the background; it restarts in the same windows when done.",
+            "Building {} new {commits} in the background; it restarts in the same windows when done, once no program is running.",
             remote.ahead
         ),
     ));
@@ -326,6 +329,7 @@ fn built(result: Result<(), String>, log_file: PathBuf) {
         // The new build is installed: the restart follows.
         Ok(()) => log("source: built and installed"),
         Err(e) => {
+            crate::app::set_update_asked(false);
             log(&format!("source: update failed: {e}"));
             let shown = crate::activity::tilde(&log_file.to_string_lossy(), std::env::var("HOME").ok().as_deref());
             let mut n = note("Update failed", format!("{e}. The log: {shown}"));

@@ -1,4 +1,4 @@
-//! Dogfood builds restart into a newer build as soon as one is installed.
+//! Dogfood builds restart into a newer build once one is installed.
 //!
 //! `scripts/dogfood.sh` marks the bundle with `Contents/Resources/dogfood`.
 //! Such a build watches its own executable with kqueue (a thread blocked in
@@ -9,6 +9,14 @@
 //! with several panes also saves their layout ([`SavedPanes`]). A tab (or
 //! pane) whose shell was running a program saves its command line, which
 //! the new build types at the shell's prompt without running it.
+//!
+//! The restart never ends a program the user is running. When the new
+//! build arrives while any pane runs something other than its shell at
+//! the prompt, the old build carries on (its library is already loaded)
+//! and says once that it was updated, with a Restart button and Terminal
+//! Decline › Restart to Update. It restarts by itself once every pane is
+//! at its prompt and nobody has used the app for [`RESTART_IDLE`]
+//! ([`busy`], [`when_to_restart`]), else at the next launch.
 
 use std::os::fd::RawFd;
 use std::path::{Path, PathBuf};
@@ -258,10 +266,114 @@ pub fn relaunch(bundle: &Path, restore: &Path) -> std::io::Result<()> {
     }
 }
 
+/// How long nobody must have used the app (no key or mouse input to it)
+/// before a new build waiting to take over restarts it by itself.
+pub const RESTART_IDLE: Duration = Duration::from_secs(120);
+
+/// With the test control on, the seconds [`RESTART_IDLE`] is cut to, for
+/// the smoke tests.
+pub const TEST_IDLE_ENV: &str = "DECLINE_TEST_RESTART_IDLE";
+
+/// One pane as the restart sees it, read when deciding (nothing polls).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PaneNow {
+    /// What the shell's OSC 133 marks say: `None` without marks (no
+    /// shell integration), `Some(None)` at its prompt, `Some(Some(c))`
+    /// running the command typed as `c` (empty if the marks didn't show
+    /// it).
+    pub marks: Option<Option<String>>,
+    /// The program in its terminal's foreground, when that isn't its
+    /// shell (the PTY's foreground process group is another than the
+    /// shell's pid): [`crate::running::foreground_program`].
+    pub foreground: Option<String>,
+    /// It runs the window's own program (`-e PROGRAM`, `command` in the
+    /// config) rather than the user's shell, named here: a restart would
+    /// end it too.
+    pub program: Option<String>,
+}
+
+/// What `pane` runs that a restart would end, named for the question
+/// asked before one, or `None` when it is at its shell's prompt. Busy if
+/// the marks say a command runs or the foreground isn't the shell: the
+/// marks alone miss a program started without them (no shell
+/// integration), the foreground alone a shell builtin or function.
+pub fn busy(pane: &PaneNow) -> Option<String> {
+    if let Some(p) = &pane.program {
+        return Some(p.clone());
+    }
+    match (&pane.marks, &pane.foreground) {
+        (_, Some(f)) => Some(f.clone()),
+        (Some(Some(c)), None) => Some(
+            c.split_whitespace()
+                .next()
+                .map(|w| w.rsplit('/').next().unwrap_or(w).to_string())
+                .unwrap_or_else(|| "a command".into()),
+        ),
+        _ => None,
+    }
+}
+
+/// When a new build waiting to take over restarts the app: `None` for
+/// now (no pane runs anything and nobody has used the app for `wait`),
+/// else look again after the time given: with a program running, `wait`
+/// (a command finishing in a pane with marks looks again sooner); else
+/// the rest of `wait` since the last input.
+pub fn when_to_restart(busy: &[String], idle: Duration, wait: Duration) -> Option<Duration> {
+    if !busy.is_empty() {
+        return Some(wait);
+    }
+    (idle < wait).then(|| wait - idle)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::mpsc;
+
+    fn pane(marks: Option<Option<&str>>, foreground: Option<&str>) -> PaneNow {
+        PaneNow {
+            marks: marks.map(|m| m.map(str::to_string)),
+            foreground: foreground.map(str::to_string),
+            program: None,
+        }
+    }
+
+    #[test]
+    fn busy_from_the_marks_and_the_foreground() {
+        // At the prompt, with marks or without.
+        assert_eq!(busy(&pane(Some(None), None)), None);
+        assert_eq!(busy(&pane(None, None)), None);
+        // The marks say a command runs: named by the foreground program,
+        // else (a function, a builtin) by the first word typed.
+        assert_eq!(busy(&pane(Some(Some("rush --resume")), Some("rush"))).as_deref(), Some("rush"));
+        assert_eq!(busy(&pane(Some(Some("~/bin/rush x")), None)).as_deref(), Some("rush"));
+        assert_eq!(busy(&pane(Some(Some("")), None)).as_deref(), Some("a command"));
+        // No marks (no shell integration): the foreground process group.
+        assert_eq!(busy(&pane(None, Some("vim"))).as_deref(), Some("vim"));
+        // Marks at the prompt, yet another program has the terminal.
+        assert_eq!(busy(&pane(Some(None), Some("ssh"))).as_deref(), Some("ssh"));
+        // A window's own program always counts.
+        let p = PaneNow {
+            program: Some("htop".into()),
+            ..PaneNow::default()
+        };
+        assert_eq!(busy(&p).as_deref(), Some("htop"));
+    }
+
+    #[test]
+    fn restarts_only_at_the_prompt_once_idle() {
+        let wait = RESTART_IDLE;
+        let secs = Duration::from_secs;
+        // Every pane at its prompt, nobody about: now.
+        assert_eq!(when_to_restart(&[], wait, wait), None);
+        assert_eq!(when_to_restart(&[], wait * 3, wait), None);
+        // At the prompt, but used 30 s ago: the rest of the wait.
+        assert_eq!(when_to_restart(&[], secs(30), wait), Some(wait - secs(30)));
+        // A program runs: not now, however idle; look again later.
+        let busy = ["rush".to_string()];
+        assert_eq!(when_to_restart(&busy, wait * 10, wait), Some(wait));
+        assert_eq!(when_to_restart(&busy, Duration::ZERO, wait), Some(wait));
+    }
 
     #[test]
     fn restore_round_trip() {

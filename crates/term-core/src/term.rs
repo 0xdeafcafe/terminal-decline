@@ -2937,11 +2937,14 @@ fn percent_decode(s: &str) -> String {
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
     while i < b.len() {
+        // Two hex digits after the `%` (`b[i + 1]` and `b[i + 2]`): the
+        // last escape can end the path. Only those: `from_str_radix`
+        // takes a sign too, decoding `%+1` as byte 1.
         if b[i] == b'%'
-            && i + 2 < b.len()
-            && let Ok(v) = u8::from_str_radix(std::str::from_utf8(&b[i + 1..i + 3]).unwrap_or("zz"), 16)
+            && let Some(&[h, l]) = b.get(i + 1..i + 3)
+            && let (Some(h), Some(l)) = ((h as char).to_digit(16), (l as char).to_digit(16))
         {
-            out.push(v);
+            out.push((h << 4 | l) as u8);
             i += 3;
         } else {
             out.push(b[i]);

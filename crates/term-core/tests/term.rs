@@ -221,6 +221,24 @@ fn osc_clipboard_and_cwd() {
     assert_eq!(t.state.cwd(), Some("/Users/a b"));
 }
 
+#[test]
+fn osc_7_paths_decode_escapes_at_either_end() {
+    let cwd = |url: &str| {
+        let mut t = Term::new(10, 1, 0, term_core::ImagePool::process());
+        t.advance(format!("\x1b]7;{url}\x07").as_bytes());
+        t.state.cwd().map(str::to_string)
+    };
+    // An escape as the path's last three bytes, and as its first.
+    assert_eq!(cwd("file://h/tmp/a%41").as_deref(), Some("/tmp/aA"));
+    assert_eq!(cwd("file://h/%41b").as_deref(), Some("/Ab"));
+    assert_eq!(cwd("file://h/x%e2%82%ac").as_deref(), Some("/x\u{20ac}"));
+    // Cut short or not hex: kept as written. A sign isn't a hex digit.
+    assert_eq!(cwd("file://h/a%4").as_deref(), Some("/a%4"));
+    assert_eq!(cwd("file://h/a%").as_deref(), Some("/a%"));
+    assert_eq!(cwd("file://h/a%zz").as_deref(), Some("/a%zz"));
+    assert_eq!(cwd("file://h/a%+1b").as_deref(), Some("/a%+1b"));
+}
+
 fn base64(data: &[u8]) -> String {
     const ABC: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);

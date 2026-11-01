@@ -297,6 +297,9 @@ pub enum Control {
     /// Put this text in the focused pane's find bar and search, as typing
     /// it does once the field's delay runs out.
     Find(String),
+    /// Put this text on the clipboard (the test's own pasteboard, see
+    /// [`crate::pane_view::clipboard`]), as another app's copy would.
+    Clipboard(String),
     /// A background update check.
     UpdateCheck,
     /// Give memory back as a memory-pressure warning does.
@@ -349,6 +352,9 @@ impl Control {
         }
         if let Some(text) = s.trim_start().strip_prefix("type-settings ") {
             return Some(Control::TypeSettings(unescape(text)));
+        }
+        if let Some(text) = s.trim_start().strip_prefix("clipboard ") {
+            return Some(Control::Clipboard(String::from_utf8_lossy(&unescape(text)).into_owned()));
         }
         if let Some(text) = s.trim_start().strip_prefix("find ") {
             return Some(Control::Find(text.to_string()));
@@ -766,6 +772,7 @@ mod tests {
             ("drop /x", Some(Control::Drop(vec!["/x".into()]))),
             ("drop ", None),
             ("drop", None),
+            ("clipboard a b\\rc", Some(Control::Clipboard("a b\rc".into()))),
             ("settings", Some(Control::Settings)),
             ("edit-config", Some(Control::EditConfig)),
             ("update-check", Some(Control::UpdateCheck)),

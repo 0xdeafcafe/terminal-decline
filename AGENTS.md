@@ -14,7 +14,7 @@ Use [Conventional Commits](https://www.conventionalcommits.org/):
   `chore`. Use `perf` for changes whose point is speed or memory.
 - Scopes are the modules: `core` (term-core), `pty` (term-pty), `font`
   (term-font), `render` (term-render), `app` (term-app, the `terminal-decline`
-  binary), `keys` (term-keys), `config` (term-config), `activity`
+  binary), `keys` (term-keys), `config` (term-config), `import` (term-import), `activity`
   (term-activity), `restore` (term-restore), `ctl` (term-ctl, the agent
   API), `complete` (term-complete), `update` (term-update, the updater),
   `prefs` (term-prefs), `image` (term-image), `icon` (term-icon), `pin`

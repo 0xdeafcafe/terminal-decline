@@ -1069,6 +1069,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "term-import"
+version = "0.0.1"
+dependencies = [
+ "objc2-app-kit",
+ "term-config",
+ "term-font",
+ "term-keys",
+ "toml",
+]
+
+[[package]]
 name = "term-keys"
 version = "0.0.1"
 dependencies = [
@@ -1172,6 +1183,7 @@ dependencies = [
  "term-font",
  "term-icon",
  "term-image",
+ "term-import",
  "term-keys",
  "term-pin",
  "term-prefs",

@@ -26,6 +26,7 @@ term-image.workspace = true
 term-prefs.workspace = true
 term-keys.workspace = true
 term-config.workspace = true
+term-import.workspace = true
 term-activity.workspace = true
 term-restore.workspace = true
 term-complete.workspace = true

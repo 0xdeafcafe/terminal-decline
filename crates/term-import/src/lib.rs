@@ -12,12 +12,14 @@
 //! only replaced with `--force`. Settings with no Terminal Decline equivalent
 //! are listed as comments at the end.
 
+#[cfg(test)]
+mod testutil;
+
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use crate::Paths;
-use crate::keybind::Chord;
+use term_keys::keybind::Chord;
 
 pub const USAGE: &str = "\
 usage: terminal-decline import ghostty [PATH] [--write [--force]]
@@ -28,7 +30,7 @@ settings. --write saves it (config.toml, or themes/NAME.toml); an existing
 file is replaced only with --force.";
 
 /// `terminal-decline import …` (the arguments after `import`).
-pub fn run(args: &[String], paths: &Paths) -> Result<(), String> {
+pub fn run(args: &[String], config_file: &Path, themes_dir: &Path) -> Result<(), String> {
     let mut write = false;
     let mut force = false;
     let mut name = None;
@@ -58,9 +60,9 @@ pub fn run(args: &[String], paths: &Paths) -> Result<(), String> {
             let path = more.first().map(PathBuf::from).unwrap_or_else(|| ghostty_config_path(&home));
             let config = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
             let import = ghostty(&config, &path, &ghostty_theme_dirs(&home));
-            let mut files = vec![(paths.config_file(), import.config)];
+            let mut files = vec![(config_file.to_path_buf(), import.config)];
             for (name, text) in import.themes {
-                files.push((crate::theme::file_of(&paths.themes_dir(), &name), text));
+                files.push((term_config::theme::file_of(themes_dir, &name), text));
             }
             files
         }
@@ -72,7 +74,7 @@ pub fn run(args: &[String], paths: &Paths) -> Result<(), String> {
                 None => theme_name_of(&path),
             };
             let theme = iterm(&plist, &path)?;
-            vec![(crate::theme::file_of(&paths.themes_dir(), &name), theme)]
+            vec![(term_config::theme::file_of(themes_dir, &name), theme)]
         }
         _ => return Err(USAGE.into()),
     };
@@ -253,7 +255,10 @@ fn loose(name: &str) -> String {
 }
 
 fn built_in_named(name: &str) -> Option<&'static str> {
-    crate::theme::BUILT_IN.iter().map(|(n, _)| *n).find(|n| loose(n) == loose(name))
+    term_config::theme::BUILT_IN
+        .iter()
+        .map(|(n, _)| *n)
+        .find(|n| loose(n) == loose(name))
 }
 
 /// A Ghostty theme as a Terminal Decline theme file, from a path or the theme
@@ -1068,9 +1073,9 @@ pub fn iterm(plist: &Plist, path: &Path) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{self, Palette};
     use crate::testutil::TempDir;
-    use crate::theme::Appearance;
+    use term_config::config::{self, Palette};
+    use term_config::theme::Appearance;
 
     const GHOSTTY: &str = include_str!("../tests/fixtures/ghostty-config");
     const ITERM: &str = include_str!("../tests/fixtures/sample.itermcolors");
@@ -1087,7 +1092,7 @@ mod tests {
         let file = dir.join("config.toml");
         std::fs::write(&file, &import.config).unwrap();
         for (name, text) in &import.themes {
-            save(&crate::theme::file_of(&dir.join("themes"), name), text, false).unwrap();
+            save(&term_config::theme::file_of(&dir.join("themes"), name), text, false).unwrap();
         }
         config::load(&[&file], &dir.join("themes"))
     }
@@ -1140,7 +1145,7 @@ mod tests {
         assert_eq!(p.ansi[9], 0xff6e6e);
         assert_eq!(p.ansi[15], 0xfafafa);
         // Keybinds.
-        use crate::keybind::{Bound, Chord, MenuAction};
+        use term_keys::keybind::{Bound, Chord, MenuAction};
         let b = c.keybinds();
         let get = |s: &str| b.get(&Chord::parse(s).unwrap()).cloned();
         assert_eq!(get("cmd+k"), Some(Bound::Menu(MenuAction::ClearScrollback)));
@@ -1297,7 +1302,7 @@ mod tests {
     #[test]
     fn iterm_presets_become_themes() {
         let out = iterm(&parse_plist(ITERM).unwrap(), Path::new("Sample.itermcolors")).unwrap();
-        let c = crate::theme::parse(&out).unwrap_or_else(|e| panic!("{e}\n{out}"));
+        let c = term_config::theme::parse(&out).unwrap_or_else(|e| panic!("{e}\n{out}"));
         assert_eq!(c.background.as_deref(), Some("#101820"));
         assert_eq!(c.foreground.as_deref(), Some("#ccddee"));
         assert_eq!(c.selection.as_deref(), Some("#334d66"));
@@ -1337,30 +1342,34 @@ mod tests {
     #[test]
     fn the_command_writes_where_it_should() {
         let dir = TempDir::new("import-run");
-        let paths = Paths {
-            config_dir: dir.join("terminal-decline"),
-            apps_dir: dir.join("Applications"),
-            exe: PathBuf::from("terminal-decline"),
-            app_bundle: None,
-        };
+        let (config_file, themes_dir) = (dir.join("terminal-decline/config.toml"), dir.join("terminal-decline/themes"));
         let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let iterm = fixtures().join("sample.itermcolors");
         let iterm = iterm.to_str().unwrap();
-        run(&args(&["iterm", iterm]), &paths).unwrap();
-        assert!(!paths.themes_dir().exists(), "printed only");
-        run(&args(&["iterm", iterm, "--write"]), &paths).unwrap();
-        assert!(paths.themes_dir().join("sample.toml").exists());
-        assert!(run(&args(&["iterm", iterm, "--write"]), &paths).unwrap_err().contains("--force"));
-        run(&args(&["iterm", iterm, "--write", "--name", "mine"]), &paths).unwrap();
-        assert!(paths.themes_dir().join("mine.toml").exists());
+        run(&args(&["iterm", iterm]), &config_file, &themes_dir).unwrap();
+        assert!(!themes_dir.exists(), "printed only");
+        run(&args(&["iterm", iterm, "--write"]), &config_file, &themes_dir).unwrap();
+        assert!(themes_dir.join("sample.toml").exists());
+        assert!(
+            run(&args(&["iterm", iterm, "--write"]), &config_file, &themes_dir)
+                .unwrap_err()
+                .contains("--force")
+        );
+        run(&args(&["iterm", iterm, "--write", "--name", "mine"]), &config_file, &themes_dir).unwrap();
+        assert!(themes_dir.join("mine.toml").exists());
         let ghostty = fixtures().join("ghostty-config");
         // Its theme comes from a Ghostty themes folder the test can't point
         // at, so it is listed as not imported: only the config is written.
-        run(&args(&["ghostty", ghostty.to_str().unwrap(), "--write"]), &paths).unwrap();
-        assert!(paths.config_file().exists());
-        assert!(run(&args(&["ghostty", ghostty.to_str().unwrap(), "--write"]), &paths).is_err());
-        run(&args(&["ghostty", ghostty.to_str().unwrap(), "--write", "--force"]), &paths).unwrap();
-        assert!(run(&args(&["nope"]), &paths).is_err());
-        assert!(run(&args(&["iterm"]), &paths).is_err());
+        run(&args(&["ghostty", ghostty.to_str().unwrap(), "--write"]), &config_file, &themes_dir).unwrap();
+        assert!(config_file.to_path_buf().exists());
+        assert!(run(&args(&["ghostty", ghostty.to_str().unwrap(), "--write"]), &config_file, &themes_dir).is_err());
+        run(
+            &args(&["ghostty", ghostty.to_str().unwrap(), "--write", "--force"]),
+            &config_file,
+            &themes_dir,
+        )
+        .unwrap();
+        assert!(run(&args(&["nope"]), &config_file, &themes_dir).is_err());
+        assert!(run(&args(&["iterm"]), &config_file, &themes_dir).is_err());
     }
 }

@@ -1,0 +1,15 @@
+[package]
+name = "term-import"
+description = "terminal-decline import: settings from Ghostty and iTerm2 as a config or theme (AppKit only to convert colour spaces)"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+term-config.workspace = true
+term-keys.workspace = true
+term-font.workspace = true
+toml = "1.1"
+objc2-app-kit.workspace = true

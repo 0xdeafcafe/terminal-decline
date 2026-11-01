@@ -534,7 +534,7 @@ impl Terminal {
                     }
                 }
             }
-            if let Some(url) = hovered_url {
+            if let Some(url) = hovered_url.or(self.hover_span) {
                 ranges.clear();
                 span(url, &mut ranges);
                 for r in merge(&mut ranges) {

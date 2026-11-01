@@ -9,6 +9,7 @@ pub mod cell;
 pub mod clusters;
 pub mod image;
 mod links;
+pub mod paths;
 pub mod rows;
 pub mod scrollback;
 pub mod search;
@@ -28,7 +29,7 @@ pub use style::{Attrs, LinkId, Style, Underline};
 pub use style_table::StyleStats;
 pub use term::SearchCount;
 pub use term::{
-    Command, Cursor, CursorShape, DynamicColor, Keymap, LineReport, LinkValue, Modes, MouseMode, Notification, Point, Progress, Selection,
-    SelectionKind, ShellEnv, ShellMatches, TOKEN_LEN, Term, Terminal, ViewTop,
+    Command, Cursor, CursorShape, DynamicColor, Keymap, LineReport, LinkValue, Modes, MouseMode, Notification, PathAt, Point, Progress,
+    Selection, SelectionKind, ShellEnv, ShellMatches, TOKEN_LEN, Term, Terminal, ViewTop,
 };
 pub use term::{Ghost, Highlight, HighlightKind, Ink, Popup, PopupItem, RowFlags, RowKey, ScreenId, SnapCursor, SnapRow, Snapshot};

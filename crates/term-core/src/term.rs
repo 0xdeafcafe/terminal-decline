@@ -279,6 +279,18 @@ pub enum SelectionKind {
     Line,
 }
 
+/// A file path found in the text ([`Terminal::path_at`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PathAt {
+    /// Its first and last cell, with its `:line:col`.
+    pub start: Point,
+    pub end: Point,
+    /// The text there: the path as written, with its `:line:col`.
+    pub shown: String,
+    /// The path it names, absolute, without `:line:col`.
+    pub path: String,
+}
+
 /// A selection from `anchor` (where it started) to `head` (where it
 /// ends now), both included, in text order whichever comes first.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -385,6 +397,9 @@ pub struct Terminal {
     /// Where the app's pointer is, so the snapshot highlights the
     /// hyperlink under it (§9.2).
     hover: Option<Point>,
+    /// Cells the app found something under the pointer in (a file path),
+    /// highlighted as the hovered link is.
+    hover_span: Option<(Point, Point)>,
     saved_primary: Option<SavedCursor>,
     saved_alt: Option<SavedCursor>,
     scroll_top: usize,
@@ -580,6 +595,7 @@ impl Terminal {
             pen_link: None,
             pen_link_id: 0,
             hover: None,
+            hover_span: None,
             saved_primary: None,
             saved_alt: None,
             scroll_top: 0,
@@ -1069,6 +1085,20 @@ impl Terminal {
         self.hover
     }
 
+    /// The pointer is over something the app found from `a` to `b` (both
+    /// included), as a file path ([`Terminal::path_at`]), or nothing: the
+    /// snapshot highlights those cells as it does the hovered link.
+    pub fn set_hover_span(&mut self, span: Option<(Point, Point)>) {
+        if span != self.hover_span {
+            self.hover_span = span;
+            self.touch();
+        }
+    }
+
+    pub fn hover_span(&self) -> Option<(Point, Point)> {
+        self.hover_span
+    }
+
     /// The OSC 8 link new characters get, if any.
     pub fn pen_link(&self) -> Option<&LinkValue> {
         self.pen_link.as_deref()
@@ -1394,6 +1424,39 @@ impl Terminal {
         let (text, cells, at) = self.logical_text(p);
         let (a, b) = crate::word::url_at(&text, at?)?;
         Some((cells[a].0, cells[b].1, text[a..=b].iter().collect()))
+    }
+
+    /// The file path at `p` that `exists` says is there (see
+    /// [`crate::paths::path_at`]), on its logical line, so one that a soft
+    /// wrap splits is found whole. Relative paths are resolved against
+    /// [`Terminal::cwd`], `~` against `home`.
+    pub fn path_at(&self, p: Point, home: Option<&str>, exists: impl FnMut(&str) -> bool) -> Option<PathAt> {
+        let (text, cells, at) = self.logical_text(p);
+        let f = crate::paths::path_at(&text, at?, self.cwd(), home, exists)?;
+        Some(PathAt {
+            start: cells[f.start].0,
+            end: cells[f.end].1,
+            shown: text[f.start..=f.end].iter().collect(),
+            path: f.path,
+        })
+    }
+
+    /// The first and last cell of the OSC 8 link at `p`: the run of
+    /// characters around it with the same link, on its logical line.
+    pub fn link_span(&self, p: Point) -> Option<(Point, Point)> {
+        let link = self.link_at(p)?;
+        let (_, cells, at) = self.logical_text(p);
+        let at = at?;
+        let same = |i: usize| self.link_at(cells[i].0).as_ref() == Some(&link);
+        let mut a = at;
+        while a > 0 && same(a - 1) {
+            a -= 1;
+        }
+        let mut b = at;
+        while b + 1 < cells.len() && same(b + 1) {
+            b += 1;
+        }
+        Some((cells[a].0, cells[b].1))
     }
 
     /// The text of the logical line `p` is on, one entry per character,
@@ -2251,6 +2314,7 @@ impl Terminal {
         fresh.ambiguous = self.ambiguous;
         fresh.grapheme_log = self.grapheme_log.take();
         fresh.hover = self.hover;
+        fresh.hover_span = self.hover_span;
         fresh.cursor_default = self.cursor_default;
         fresh.report_token = self.report_token;
         (fresh.cursor_shape, fresh.cursor_blink) = self.cursor_default;

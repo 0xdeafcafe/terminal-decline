@@ -193,6 +193,47 @@ fn plain_urls_are_found_across_wraps_and_hovered_like_links() {
 }
 
 #[test]
+fn paths_are_found_across_wraps_in_the_shells_folder() {
+    let mut t = Term::new(12, 4, 10, term_core::ImagePool::process());
+    // The shell's folder (OSC 7), then a path wrapped onto a second row,
+    // with a line and column, and a full stop that isn't part of it.
+    t.advance(b"\x1b]7;file:///Users/me/src\x1b\\at src/main.rs:12:3. ok");
+    let exists = |p: &str| p == "/Users/me/src/src/main.rs";
+    let found = |t: &Term, line, col| t.state.path_at(t.state.point_at(line, col), Some("/Users/me"), exists);
+    let f = found(&t, 1, 2).unwrap();
+    assert_eq!(f.shown, "src/main.rs:12:3");
+    assert_eq!(f.path, "/Users/me/src/src/main.rs");
+    assert_eq!((f.start, f.end), (t.state.point_at(0, 3), t.state.point_at(1, 6)));
+    assert_eq!(found(&t, 0, 4), Some(f.clone()), "from either row");
+    assert_eq!(found(&t, 0, 1), None, "not on the path");
+    assert_eq!(found(&t, 1, 9), None);
+
+    // Hovered, it is highlighted as a link is.
+    let mut snap = Snapshot::default();
+    t.state.set_hover_span(Some((f.start, f.end)));
+    t.state.snapshot(&mut snap, |_| true);
+    let rows: Vec<Vec<(std::ops::Range<u16>, HighlightKind)>> = snap
+        .rows
+        .iter()
+        .map(|r| snap.row_highlights(r).iter().map(|h| (h.cols.clone(), h.kind)).collect())
+        .collect();
+    use HighlightKind::HoveredLink;
+    assert_eq!(rows, vec![vec![(3..12, HoveredLink)], vec![(0..7, HoveredLink)], vec![], vec![]]);
+    t.state.set_hover_span(None);
+    t.state.snapshot(&mut snap, |_| true);
+    assert!(snap.highlights.is_empty());
+}
+
+#[test]
+fn an_osc8_links_span_covers_its_text() {
+    let mut t = Term::new(10, 3, 0, term_core::ImagePool::process());
+    t.advance(b"a \x1b]8;;https://p\x1b\\linktext!\x1b]8;;\x1b\\ b");
+    let span = t.state.link_span(t.state.point_at(1, 0));
+    assert_eq!(span, Some((t.state.point_at(0, 2), t.state.point_at(1, 0))), "across the wrap");
+    assert_eq!(t.state.link_span(t.state.point_at(0, 0)), None);
+}
+
+#[test]
 fn a_saved_cursor_holds_its_link_by_value() {
     let mut t = Term::new(20, 3, 0, term_core::ImagePool::process());
     t.advance(b"\x1b]8;;https://saved\x1b\\\x1b7\x1b]8;;\x1b\\a\x1b8b");

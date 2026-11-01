@@ -632,6 +632,11 @@ end.
   all the pieces of a link (other colours, other rows) light up, sorted
   left to right with the selection. Hovering bumps `generation` but no
   row's counter: it is an overlay. History rows get none until v2.
+  Landed later (click menu for links and paths): `set_hover_span(Option<(Point,
+  Point)>)` is a second overlay the app sets for a file path it found
+  (`Terminal::path_at`, rules in `term_core::paths`, the exists check
+  passed in), drawn as `HoveredLink` too; `link_span(p)` gives an OSC 8
+  link's cells on its logical line, for selecting it on a click.
 - **Prompt marks** (§11.6) are in `RowExtra` as `marks: [Option<Mark>;
   4]`, one per kind (a second B on a row replaces the first), with
   `Mark { kind, col, status }` and `MarkKind` numbered as §11.3 stores

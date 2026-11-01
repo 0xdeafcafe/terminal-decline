@@ -533,6 +533,16 @@ falls through to `keys::translate`: `"down" = "completion_next"`,
 Binding a chord to `"none"` leaves that key to the shell while the list
 is open.
 
+Show Completions (Edit menu, `show_completions`, Ctrl+Space as in VS
+Code; landed 1 Nov 2026 at Alex's ask) opens the list for the word at
+the cursor at once, without the pause and whether or not it opens as
+you type, and after Esc closed it there. It stays open while you type
+and lapses when it closes. Away from a prompt (or with the list off)
+the menu item is greyed and the chord goes to the program, so Ctrl+Space
+is still set-mark in Emacs. macOS uses Ctrl+Space for the previous
+input source when more than one is set up; move one of them in the
+key mapper or System Settings.
+
 ## 11. Cost and how it is measured
 
 The rule: **off costs nothing, and on but unused costs nothing either**.

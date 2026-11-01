@@ -66,6 +66,10 @@ pub struct PaneState {
     quiet: bool,
     /// A folder was just put in: its list opens without the pause.
     soon: bool,
+    /// Show Completions (Ctrl+Space) asked for the list: it opens at once,
+    /// with or without the as-you-type setting, and stays while it is
+    /// open; it lapses when the line changes with nothing shown.
+    asked: bool,
     /// What zsh's completion found on Tab (§7), shown until a key that
     /// isn't the list's own.
     zsh: Option<Vec<list::Choice>>,
@@ -159,6 +163,13 @@ pub struct Drawn {
     pub wake_after: Option<Duration>,
 }
 
+/// Whether the shell is at its prompt taking a line the list can work
+/// on: reported, not too long, and in an insert keymap.
+pub fn at_prompt(t: &Terminal) -> bool {
+    t.line_report()
+        .is_some_and(|r| !r.too_long && matches!(r.keymap, Keymap::Insert | Keymap::ViInsert))
+}
+
 impl PaneState {
     /// Whether the list is open.
     pub fn is_open(&self) -> bool {
@@ -169,6 +180,20 @@ impl PaneState {
     pub fn close(&mut self) {
         self.open = None;
         self.zsh = None;
+        self.asked = false;
+    }
+
+    /// Show Completions: open the list for the word at the cursor now,
+    /// even after Esc closed it there. False when the shell isn't at its
+    /// prompt taking a line (the chord then goes to the program).
+    pub fn ask(&mut self, t: &Terminal) -> bool {
+        if !at_prompt(t) {
+            return false;
+        }
+        self.asked = true;
+        self.closed = None;
+        self.quiet = false;
+        true
     }
 
     /// zsh's matches from Tab: shown in the list straight away.
@@ -205,11 +230,13 @@ impl PaneState {
         else {
             self.open = None;
             self.seen = None;
+            self.asked = false;
             return Drawn::default();
         };
         let key = (report.text.clone(), report.cursor);
         let changed = self.seen.as_ref() != Some(&key);
         if changed {
+            self.asked &= self.open.is_some() || self.soon;
             self.seen = Some(key);
             self.since = Some(now);
             self.quiet = !self.typing;
@@ -217,15 +244,15 @@ impl PaneState {
         if self.zsh.is_some() {
             return self.show_zsh(t, report, s, wake);
         }
-        if !s.as_you_type {
+        if !s.as_you_type && !self.asked {
             self.open = None;
             return Drawn::default();
         }
         let since = self.since.unwrap_or(now);
-        if self.open.is_none() && self.quiet {
+        if self.open.is_none() && self.quiet && !self.asked {
             return Drawn::default();
         }
-        if self.open.is_none() && !self.soon {
+        if self.open.is_none() && !self.soon && !self.asked {
             let waited = now.saturating_duration_since(since);
             if waited < s.delay {
                 let mut drawn = Drawn::default();
@@ -637,6 +664,7 @@ impl PaneState {
 
     /// Close the list until the word under the cursor changes.
     fn close_on_word(&mut self) {
+        self.asked = false;
         let Some(open) = self.open.take() else { return };
         let start = open.start;
         self.closed = self
@@ -673,6 +701,8 @@ impl PaneState {
         self.seen = None;
         self.typing = folder;
         self.soon = folder;
+        // A folder's list opens again, as it would as you type.
+        self.asked &= folder;
         KeyResult::Send(bytes.into_bytes())
     }
 }
@@ -976,6 +1006,45 @@ mod tests {
         assert_eq!((p.row, p.col + 2), (1, 2));
         // The grey text: the rest of the first choice.
         assert_eq!(d.ghost.map(|g| (g.row, g.col, g.text)), Some((0, 3, "it".to_string())));
+    }
+
+    /// Show Completions (Ctrl+Space): with the list off as you type, it
+    /// opens at once, follows typing while open, and lapses once closed.
+    #[test]
+    fn show_completions_opens_the_list_at_once() {
+        let path = programs("ask", &["gzip", "git", "grep"]);
+        let mut st = state(&path);
+        let s = Settings {
+            as_you_type: false,
+            ..settings()
+        };
+        let t = term("g");
+        let t0 = Instant::now();
+        assert_eq!(st.update(&t.state, &s, t0, &no_wake), Drawn::default(), "not by itself");
+        assert!(st.ask(&t.state));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let d = loop {
+            // No pause: the same instant as the line was typed.
+            let d = st.update(&t.state, &s, t0, &no_wake);
+            if d.popup.is_some() || Instant::now() > deadline {
+                break d;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        let names: Vec<String> = d.popup.expect("a list").items.into_iter().map(|i| i.text).collect();
+        assert_eq!(names, ["git", "grep", "gzip"]);
+        assert_eq!(d.ghost.map(|g| g.text).as_deref(), Some("it"));
+        // Typing on keeps it open, narrowed.
+        st.key(b'r'.into(), true, false);
+        let d = st.update(&term("gr").state, &s, t0, &no_wake);
+        let names: Vec<String> = d.popup.expect("still open").items.into_iter().map(|i| i.text).collect();
+        assert_eq!(names, ["grep"]);
+        // Esc closes it, and then it stays closed as you type.
+        assert_eq!(st.key(keycode::ESCAPE, true, false), KeyResult::Redraw);
+        assert_eq!(st.update(&term("g").state, &s, t0, &no_wake).popup, None);
+        // Away from a prompt (no line reported) the chord isn't the list's.
+        let away = Term::new(40, 10, 100, ImagePool::process());
+        assert!(!st.ask(&away.state));
     }
 
     #[test]

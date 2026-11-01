@@ -92,6 +92,10 @@ pub enum MenuAction {
     /// Edit > Read Flags from --help: the command at the prompt's flags
     /// for the completion list, from its `--help`.
     ReadFlagsFromHelp,
+    /// Edit > Show Completions: the completion list for the word at the
+    /// prompt, at once, whether or not it opens as you type. Away from a
+    /// prompt the chord goes to the program as if unbound.
+    ShowCompletions,
     /// Scroll the view to the prompt above or below its top line whose
     /// command exited non-zero.
     PreviousFailed,
@@ -115,7 +119,7 @@ pub enum MenuAction {
 }
 
 impl MenuAction {
-    pub const ALL: [MenuAction; 46] = [
+    pub const ALL: [MenuAction; 47] = [
         MenuAction::NewWindow,
         MenuAction::NewTab,
         MenuAction::Close,
@@ -156,6 +160,7 @@ impl MenuAction {
         MenuAction::CopyOutput,
         MenuAction::CopyCommand,
         MenuAction::ReadFlagsFromHelp,
+        MenuAction::ShowCompletions,
         MenuAction::PreviousFailed,
         MenuAction::NextFailed,
         MenuAction::CheckForUpdates,
@@ -207,6 +212,7 @@ impl MenuAction {
             MenuAction::CopyOutput => "copy_output",
             MenuAction::CopyCommand => "copy_command",
             MenuAction::ReadFlagsFromHelp => "read_flags_from_help",
+            MenuAction::ShowCompletions => "show_completions",
             MenuAction::PreviousFailed => "previous_failed",
             MenuAction::NextFailed => "next_failed",
             MenuAction::CheckForUpdates => "check_for_updates",
@@ -259,6 +265,7 @@ impl MenuAction {
             MenuAction::CopyOutput => "Copy Last Command's Output",
             MenuAction::CopyCommand => "Copy Last Command",
             MenuAction::ReadFlagsFromHelp => "Read Flags from --help",
+            MenuAction::ShowCompletions => "Show Completions",
             MenuAction::PreviousFailed => "Jump to Previous Failed Command",
             MenuAction::NextFailed => "Jump to Next Failed Command",
             MenuAction::CheckForUpdates => "Check for Updates…",
@@ -313,6 +320,7 @@ impl MenuAction {
             MenuAction::CopyOutput => c"copyLastCommandOutput:",
             MenuAction::CopyCommand => c"copyLastCommand:",
             MenuAction::ReadFlagsFromHelp => c"readFlagsFromHelp:",
+            MenuAction::ShowCompletions => c"showCompletions:",
             MenuAction::PreviousFailed => c"jumpToPreviousFailedCommand:",
             MenuAction::NextFailed => c"jumpToNextFailedCommand:",
             MenuAction::CheckForUpdates => c"checkForUpdates:",
@@ -331,8 +339,8 @@ impl MenuAction {
         match self {
             Settings | CheckForUpdates | UpdateToLatest | RestartToUpdate | UpdateNow => "App",
             NewWindow | NewTab | SplitRight | SplitDown | Close | CloseTab | CloseWindow => "Shell",
-            Copy | Paste | SelectAll | SelectOutput | CopyCommand | CopyOutput | ReadFlagsFromHelp | ClearScrollback | Find | FindNext
-            | FindPrevious | UseSelectionForFind => "Edit",
+            Copy | Paste | SelectAll | SelectOutput | CopyCommand | CopyOutput | ReadFlagsFromHelp | ShowCompletions | ClearScrollback
+            | Find | FindNext | FindPrevious | UseSelectionForFind => "Edit",
             FontBigger | FontSmaller | FontReset | PreviousPrompt | NextPrompt | PreviousFailed | NextFailed | ToggleFullScreen => "View",
             FocusPaneLeft | FocusPaneRight | FocusPaneUp | FocusPaneDown | FocusPaneNext | FocusPanePrevious | ResizePaneLeft
             | ResizePaneRight | ResizePaneUp | ResizePaneDown | EqualizePanes | TogglePaneZoom | NextTab | PreviousTab => "Window",
@@ -350,7 +358,8 @@ impl MenuAction {
 /// Warp's (its Copy Command and Copy Output). No terminal has a chord
 /// for failed commands: Option-Shift with the prompt ones. Cmd+U, which
 /// no terminal uses, is Update Now, as the welcome line says.
-pub const DEFAULTS: [(&str, MenuAction); 43] = [
+/// Ctrl+Space shows completions, as in VS Code.
+pub const DEFAULTS: [(&str, MenuAction); 44] = [
     ("cmd+n", MenuAction::NewWindow),
     ("cmd+t", MenuAction::NewTab),
     ("cmd+w", MenuAction::Close),
@@ -395,6 +404,7 @@ pub const DEFAULTS: [(&str, MenuAction); 43] = [
     ("shift+cmd+g", MenuAction::FindPrevious),
     ("cmd+e", MenuAction::UseSelectionForFind),
     ("cmd+u", MenuAction::UpdateNow),
+    ("ctrl+space", MenuAction::ShowCompletions),
 ];
 
 /// The menus' shortcuts that `[keybind]` can't move, and their items

@@ -226,7 +226,20 @@ define_class!(
         /// then reaches `keyDown`, which sends `copy:` and beeps.
         #[unsafe(method(validateMenuItem:))]
         fn validate_menu_item(&self, item: &NSMenuItem) -> bool {
-            if item.action() == Some(sel!(copy:)) { self.copy_text().is_some() } else { true }
+            match item.action() {
+                Some(a) if a == sel!(copy:) => self.copy_text().is_some(),
+                // Greyed away from a prompt, so Ctrl+Space reaches the
+                // program (`keyDown`).
+                Some(a) if a == sel!(showCompletions:) => self.at_prompt_for_completions(),
+                _ => true,
+            }
+        }
+
+        /// Edit > Show Completions (Ctrl+Space): the completion list for
+        /// the word at the prompt, at once (docs/design/completion.md §9).
+        #[unsafe(method(showCompletions:))]
+        fn show_completions_action(&self, _sender: Option<&AnyObject>) {
+            self.show_completions();
         }
 
         #[unsafe(method(paste:))]
@@ -809,6 +822,9 @@ impl PaneView {
         });
         match decision.flatten() {
             Some(Err(bytes)) => return self.send_input(bytes),
+            // Away from a prompt, Show Completions' chord is the program's.
+            Some(Ok(keybind::MenuAction::ShowCompletions)) if self.show_completions() => return,
+            Some(Ok(keybind::MenuAction::ShowCompletions)) => {}
             Some(Ok(action)) => {
                 let app = NSApplication::sharedApplication(MainThreadMarker::from(self));
                 unsafe { app.sendAction_to_from(Sel::register(action.selector()), None, Some(self)) };
@@ -860,6 +876,31 @@ impl PaneView {
                 self.with(|_, p| p.text_key = None);
             }
         }
+    }
+
+    /// Whether Show Completions has a line to work on: the list is on
+    /// and the shell is at its prompt taking a line.
+    fn at_prompt_for_completions(&self) -> bool {
+        self.with(|win, p| win.config.completion && crate::complete::at_prompt(&p.session.lock_term().state)) == Some(true)
+    }
+
+    /// Ask for the completion list now; false (and nothing done) away
+    /// from a prompt.
+    fn show_completions(&self) -> bool {
+        let asked = self.with(|win, p| {
+            if !win.config.completion {
+                return false;
+            }
+            let asked = p.completion.ask(&p.session.lock_term().state);
+            if asked {
+                p.session.mark_dirty();
+            }
+            asked
+        }) == Some(true);
+        if asked && let Some(w) = self.window_view() {
+            w.unpause();
+        }
+        asked
     }
 
     /// The Cmd shortcut being handled, if it came from the keyboard and the

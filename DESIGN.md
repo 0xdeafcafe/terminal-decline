@@ -1185,10 +1185,39 @@ builds were already incremental, and testing only term-app is cheaper
 because the moved tests are in their own crates; the workspace's tests
 cost the same. A clean debug build waits on objc2-foundation and
 objc2-app-kit (≈13 s and ≈19 s, one after the other, before term-app can
-start), not on our crates: their features (all of AppKit by default) are
-the next thing to look at. Line-tables-only debug info for dependencies
+start), not on our crates: their features (all of AppKit by default) were
+the next thing to look at, below. Line-tables-only debug info for dependencies
 in dev made no difference that held up at low load. Apple's linker
 (ld-prime) is the default; release `lto`/`codegen-units` are unchanged.
+
+Then the objc2 framework crates (objc2-app-kit, -foundation, -metal,
+-quartz-core, -io-surface, -core-text, -core-graphics, -core-foundation,
+-image-io, -user-notifications) lost their default features: the
+workspace asks for `std` only and each crate lists the headers it uses
+(`NSWindow`, `MTLDevice`, `CTFont`, ...). That also drops
+objc2-cloud-kit, -core-data, -core-image, -core-location and
+-core-video from the build. Medians of 3 clean builds, before (main at
+579c155) and after taking turns, load 6–27 (falling during the runs);
+"starts" is when term-app's own compile begins in `--timings`.
+
+| clean build | before | after |
+|---|---|---|
+| `cargo build --workspace` (debug) | 37.3 s | 20.1 s |
+| debug: term-app starts at | 29.9 s | 12.8 s |
+| debug: objc2-foundation / objc2-app-kit | 9.6 / 15.3 s | 5.0 / 3.8 s |
+| `cargo build -p term-dylib --release` | 75.3 s | 64.6 s |
+| release: term-app starts at | 32.8 s | 12.4 s |
+| release: objc2-foundation / objc2-app-kit | 15.2 / 21.2 s | 6.2 / 7.7 s |
+| release: term-app's own compile | 22.5 s | 29.8 s |
+
+A clean debug build now takes about half as long. In release term-app
+starts 20 s sooner, but its own compile is the critical path and ran
+longer here (it now overlaps other crates still building), so the
+whole build saves about 11 s; paired runs saved 10.7–19.3 s. Builds
+after an edit don't rebuild these crates, so they are unchanged. A new
+AppKit or Foundation class needs its header added to the crate's
+features in its Cargo.toml (the feature is named after the header file
+in the objc2 crate's `src/generated/`); until then the import fails.
 
 ## Reviews
 

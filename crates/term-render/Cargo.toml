@@ -10,10 +10,10 @@ term-image.workspace = true
 term-font.workspace = true
 objc2.workspace = true
 block2.workspace = true
-objc2-foundation.workspace = true
-objc2-metal.workspace = true
-objc2-io-surface.workspace = true
-objc2-quartz-core.workspace = true
+objc2-foundation = { workspace = true, features = ["NSString"] }
+objc2-metal = { workspace = true, features = ["MTLAllocation", "MTLBlitCommandEncoder", "MTLBuffer", "MTLCommandBuffer", "MTLCommandEncoder", "MTLCommandQueue", "MTLDevice", "MTLLibrary", "MTLPixelFormat", "MTLRenderCommandEncoder", "MTLRenderPass", "MTLRenderPipeline", "MTLResource", "MTLTexture", "MTLTypes", "block2", "dispatch2"] }
+objc2-io-surface = { workspace = true, features = ["IOSurfaceRef", "libc"] }
+objc2-quartz-core = { workspace = true, features = ["CALayer", "CAMetalLayer", "objc2-metal"] }
 objc2-core-foundation.workspace = true
 dispatch2 = "0.3"
 unicode-width.workspace = true

@@ -6,10 +6,10 @@ version.workspace = true
 license.workspace = true
 
 [dependencies]
-objc2-core-foundation.workspace = true
-objc2-core-graphics.workspace = true
-objc2-core-text.workspace = true
-objc2-image-io.workspace = true
+objc2-core-foundation = { workspace = true, features = ["CFAttributedString", "CFNumber"] }
+objc2-core-graphics = { workspace = true, features = ["CGBitmapContext", "CGColorSpace", "CGContext", "CGGradient", "CGImage", "CGPath"] }
+objc2-core-text = { workspace = true, features = ["CTFont", "CTLine", "CTRun", "CTStringAttributes", "objc2-core-graphics"] }
+objc2-image-io = { workspace = true, features = ["CGImageDestination", "CGImageProperties", "CGImageSource", "objc2-core-graphics"] }
 unicode-normalization = "0.1.25"
 unicode-segmentation = "1.13"
 unicode-properties = { version = "0.1.4", default-features = false, features = ["general-category"] }

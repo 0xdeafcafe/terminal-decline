@@ -12,4 +12,4 @@ term-config.workspace = true
 term-keys.workspace = true
 term-font.workspace = true
 toml = "1.1"
-objc2-app-kit.workspace = true
+objc2-app-kit = { workspace = true, features = ["NSColor", "NSColorSpace", "objc2-core-foundation"] }

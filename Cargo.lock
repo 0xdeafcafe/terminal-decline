@@ -1023,6 +1023,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "term-keys"
+version = "0.0.1"
+dependencies = [
+ "serde",
+ "toml",
+]
+
+[[package]]
 name = "term-pin"
 version = "0.0.1"
 dependencies = [
@@ -1092,6 +1100,7 @@ dependencies = [
  "term-font",
  "term-icon",
  "term-image",
+ "term-keys",
  "term-pin",
  "term-prefs",
  "term-pty",

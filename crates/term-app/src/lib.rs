@@ -7,7 +7,6 @@
 
 pub mod activity;
 pub mod app;
-mod ascii_layout;
 mod background;
 pub mod config;
 pub mod control;
@@ -22,8 +21,6 @@ pub mod hotkey;
 pub mod idle_filters;
 pub mod images;
 pub mod import;
-pub mod keybind;
-pub mod keys;
 pub mod latency;
 pub mod layout;
 pub mod links;
@@ -50,6 +47,10 @@ pub mod theme;
 pub mod update;
 mod view;
 pub mod watch;
+
+// Moved to crates of their own, under their old names here.
+use term_keys::ascii_layout;
+pub use term_keys::{keybind, keys};
 
 pub use entry::{PinInfo, Role, run};
 pub use paths::Paths;

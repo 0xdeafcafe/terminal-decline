@@ -11,18 +11,8 @@ use term_render::Theme;
 use crate::keybind::{self, KeybindConfig, Keybinds};
 use crate::theme::{self as themes, Appearance, AppearanceMode, ThemeChoice, ThemeTransition};
 
-/// Which Option key acts as Meta (sends ESC + key). Off by default, like
-/// Terminal.app and Ghostty, so Option still types @ [ ] { } | \\ ~ on
-/// European keyboard layouts.
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum OptionAsMeta {
-    Left,
-    Right,
-    Both,
-    #[default]
-    None,
-}
+/// `option_as_meta`: defined with the key translation that reads it.
+pub use crate::keys::OptionAsMeta;
 
 /// `update`: what the app does about updates (docs/design/updater.md).
 /// `true` and `false`, from before, mean `"notify"` and `"off"`.

@@ -993,6 +993,7 @@ dependencies = [
  "term-keys",
  "term-prefs",
  "term-render",
+ "term-update",
  "toml",
 ]
 
@@ -1134,6 +1135,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "term-update"
+version = "0.0.1"
+dependencies = [
+ "dispatch2",
+ "libc",
+ "serde",
+ "term-activity",
+ "term-restore",
+]
+
+[[package]]
 name = "terminal-decline"
 version = "0.0.1"
 dependencies = [
@@ -1166,6 +1178,7 @@ dependencies = [
  "term-pty",
  "term-render",
  "term-restore",
+ "term-update",
  "terminal-decline",
  "toml",
 ]

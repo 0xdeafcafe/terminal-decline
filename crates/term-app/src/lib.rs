@@ -56,8 +56,9 @@ pub use paths::Paths;
 /// titles end with it).
 pub use term_activity::PRODUCT_NAME;
 
-/// The app's bundle id, also its defaults domain and os_log subsystem.
-pub const BUNDLE_ID: &str = "red.forbes.terminal-decline";
+/// The app's bundle id, also its defaults domain and os_log subsystem
+/// (spelled in term-activity, with the name).
+pub use term_activity::BUNDLE_ID;
 
 /// The bundle id before the rename to Terminal Decline.
 pub const OLD_BUNDLE_ID: &str = "red.forbes.decline";

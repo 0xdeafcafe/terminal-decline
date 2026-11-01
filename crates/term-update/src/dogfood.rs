@@ -1,22 +1,28 @@
-//! The app's side of updates from source ([`super::source`]): the
-//! one-shot timers, the checks and builds on their own threads, and the
-//! notifications. Everything here but those threads runs on the main
-//! thread. Only Terminal Decline.app's first process does any of it, in
-//! a dogfood bundle whose marker names its checkout, and never under the
-//! test control.
+//! Running updates from source ([`super::source`]): the one-shot
+//! timers, the checks and builds on their own threads, and the
+//! notifications (posted through the app's [`crate::Host`]). Everything
+//! here but those threads runs on the main thread. Only Terminal
+//! Decline.app's first process does any of it, in a dogfood bundle whose
+//! marker names its checkout, and never under the test control.
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use dispatch2::{DispatchQueue, DispatchTime};
-use objc2::MainThreadMarker;
+use term_activity::PRODUCT_NAME;
+use term_restore::reload;
 
 use super::log;
 use super::source::{self, Asked, Decision, Remote, Situation, Source, Tree};
-use crate::config::UpdateMode;
-use crate::entry::Role;
-use crate::notify::{self, Button, Note, Target};
+use crate::{Notice, Role, UpdateMode, host, show};
+
+/// Tell the app whether the update being built was asked for.
+fn set_update_asked(asked: bool) {
+    if let Some(h) = host() {
+        h.set_update_asked(asked);
+    }
+}
 
 struct State {
     src: Source,
@@ -49,11 +55,11 @@ fn home() -> PathBuf {
 /// Start checking, if this is a dogfood build that knows its checkout.
 /// Returns whether it does (the menu then has Check for Updates… and
 /// Update to Latest).
-pub fn start(role: &Role, mode: UpdateMode) -> bool {
-    if *role != Role::App || std::env::var_os(crate::control::ENV).is_some_and(|v| !v.is_empty()) {
+pub fn start(role: Role, mode: UpdateMode) -> bool {
+    if role != Role::App || crate::under_test() {
         return false;
     }
-    let Some(bundle) = crate::reload::own_bundle().filter(|b| crate::reload::is_dogfood_bundle(b)) else {
+    let Some(bundle) = reload::own_bundle().filter(|b| reload::is_dogfood_bundle(b)) else {
         return false;
     };
     let Some(src) = source::of_bundle(&bundle) else {
@@ -166,15 +172,9 @@ fn arm(after: Duration) {
     });
 }
 
-fn show(note: Note) {
-    if let Some(mtm) = MainThreadMarker::new() {
-        notify::show(mtm, note);
-    }
-}
-
 /// A note about updates: they replace each other.
-fn note(title: impl Into<String>, body: impl Into<String>) -> Note {
-    let mut n = Note::new(title, body, Target::App);
+fn note(title: impl Into<String>, body: impl Into<String>) -> Notice {
+    let mut n = Notice::new(title, body);
     n.key = Some("source-update".into());
     n.group = Some("updates".into());
     n
@@ -245,7 +245,7 @@ fn checked(asked: Asked, remote: Result<Remote, String>, tree: Result<Tree, Stri
         told,
         idle: source::idle(),
         on_ac: source::on_ac(),
-        programs: !crate::app::running_programs().is_empty(),
+        programs: host().is_some_and(|h| h.programs_running()),
     };
     let decision = source::decide(&situation);
     log(&format!(
@@ -269,14 +269,14 @@ fn checked(asked: Asked, remote: Result<Remote, String>, tree: Result<Tree, Stri
     let title = source::available_title(remote.relation, remote.new);
     let tell = |remote: &Remote| {
         let mut n = note(title.clone(), source::available_text(remote));
-        n.button = Some(Button::Update);
+        n.update_button = true;
         show(n);
     };
     let mut next = Some(source::CHECK_EVERY);
     match decision {
         Decision::Nothing => {}
         Decision::UpToDate => show(note(
-            format!("{} is up to date", crate::PRODUCT_NAME),
+            format!("{} is up to date", PRODUCT_NAME),
             format!("Built from {}, the newest on {}.", short(&src.commit), source::BRANCH),
         )),
         Decision::Tell => {
@@ -309,11 +309,11 @@ fn checked(asked: Asked, remote: Result<Remote, String>, tree: Result<Tree, Stri
 }
 
 /// Build the new commits in the background; the install restarts the
-/// app ([`crate::reload`]): once no program runs, and, unless the user
+/// app ([`term_restore::reload`]): once no program runs, and, unless the user
 /// asked for the update (`asked`), once nobody has used the app for a
 /// while. A failure is a notification naming the log.
 fn build(src: Source, remote: Remote, asked: bool) {
-    crate::app::set_update_asked(asked);
+    set_update_asked(asked);
     let Some(bundle) = STATE.with(|s| {
         let mut s = s.borrow_mut();
         let st = s.as_mut()?;
@@ -328,7 +328,7 @@ fn build(src: Source, remote: Remote, asked: bool) {
         _ => String::new(),
     };
     show(note(
-        format!("Updating {}", crate::PRODUCT_NAME),
+        format!("Updating {}", PRODUCT_NAME),
         format!(
             "Building {} new {commits}{merging} in the background; it restarts in the same windows when done, once no program is running.",
             remote.new
@@ -362,17 +362,17 @@ fn built(result: Result<(), source::Failure>, log_file: PathBuf) {
             });
         }
         Err(source::Failure::Conflict(files)) => {
-            crate::app::set_update_asked(false);
+            set_update_asked(false);
             log(&format!("source: merge conflicts, aborted: {}", files.join(", ")));
             show(note("Not updating", source::conflict_text(&files)));
             arm(source::CHECK_EVERY);
         }
         Err(source::Failure::Other(e)) => {
-            crate::app::set_update_asked(false);
+            set_update_asked(false);
             log(&format!("source: update failed: {e}"));
-            let shown = crate::activity::tilde(&log_file.to_string_lossy(), std::env::var("HOME").ok().as_deref());
+            let shown = term_activity::activity::tilde(&log_file.to_string_lossy(), std::env::var("HOME").ok().as_deref());
             let mut n = note("Update failed", format!("{e}. The log: {shown}"));
-            n.target = Target::Open(log_file.to_string_lossy().into_owned());
+            n.open = Some(log_file.to_string_lossy().into_owned());
             show(n);
             arm(source::CHECK_EVERY);
         }

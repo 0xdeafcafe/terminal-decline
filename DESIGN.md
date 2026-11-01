@@ -38,25 +38,30 @@ any command as its own Dock app.
 | `term-pty`    | spawns the shell on a pseudo-terminal, reader thread, resize          |
 | `term-font`   | Core Text: font loading, cell metrics, glyph rasterising              |
 | `term-render` | Metal: glyph textures shared by every window, panes drawn into one layer |
-| `term-app`    | AppKit window/view, keyboard + IME, mouse, clipboard, the agent API's server and sessions, updates, pins |
+| `term-app`    | AppKit window/view, keyboard + IME, mouse, clipboard, the agent API's server and sessions, Sparkle and its alerts, pins |
 | `term-keys`   | key press → bytes (xterm, kitty protocol), the `[keybind]` config, the ASCII-capable layout (no AppKit) |
 | `term-config` | `config.toml` and its layers, themes (`themes/`), the quick terminal's settings (no AppKit; term-render and term-font for `Theme` and `FontConfig`) |
 | `term-activity` | what a pane's shell does: OSC 133 activity, status titles, when to notify, prompts, the program running (no AppKit) |
 | `term-restore` | restarting into a new build: the saved window list, the pane tree it saves, each pane's history (no AppKit) |
 | `term-complete` | completion and colouring at the shell's prompt: the command line read into words and coloured, the list's choices, commands, folders, history, man pages and `--help` (no AppKit; docs/design/completion.md) |
 | `term-ctl`    | the agent API's protocol and `ctl` command line, its idle limit, screen read-back and keys (no AppKit; the server and its sessions are term-app's) |
+| `term-update` | the updater: whether it runs, what Sparkle is answered, updates from source (the checkout, git, the build, when to install), what is told after an update, the `update` setting (no AppKit; Sparkle.framework, its alerts and posting notifications are term-app's) |
 | `term-prefs`  | the preferences: settings schema, safe `config.toml` edits, the TUI (no platform code) |
 | `term-icon`   | generated pin icons by the Slope rule (`slope-pins-2`): Core Text outline of the initial, CoreGraphics drawing after `pin-template.svg`, ImageIO `.icns` |
 | `term-image`  | image parsers and decoders with no terminal state: kitty keys, base64, zlib, iTerm2 arguments, Sixel, header sizes, pure-Rust PNG/JPEG/GIF/WebP, conversion to Display P3 (no platform code; docs/design/images.md) |
 
 `term-core` has no platform code and is tested and benchmarked on its own.
 
-term-keys, term-config, term-activity, term-restore, term-ctl and
-term-complete were split out of term-app so they build in parallel and
-their tests compile on their own; term-app re-exports each moved module
-under its old name (`crate::config`, `crate::keys`, `crate::ctl::protocol`,
-`crate::complete`…), so the app's code
-reads as before. They have no objc2 or AppKit dependency of their own.
+term-keys, term-config, term-activity, term-restore, term-ctl,
+term-complete and term-update were split out of term-app so they build in
+parallel and their tests compile on their own; term-app re-exports each
+moved module under its old name (`crate::config`, `crate::keys`,
+`crate::ctl::protocol`, `crate::complete`, `crate::update::source`…), so
+the app's code reads as before. They have no objc2 or AppKit dependency of
+their own (term-update uses libdispatch for its timers); what term-update
+needs of the app (posting a notification, whether a program runs, whether
+an update was asked for) it asks through a small `Host` trait the app sets
+at launch.
 
 `term-app` (the `terminal-decline` package) is a library plus a thin `main.rs`. The
 AppKit code (`app`, `view`) only turns events into the inputs of plain

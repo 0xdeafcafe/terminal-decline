@@ -14,3 +14,8 @@ pub mod running;
 /// spelled in the code; the bundle's own name is set in
 /// `scripts/bundle.sh`.
 pub const PRODUCT_NAME: &str = "Terminal Decline";
+
+/// The app's bundle id, also its defaults domain and os_log subsystem.
+/// Spelled here with the name, for the crates that need it too (the
+/// updater runs only in this bundle).
+pub const BUNDLE_ID: &str = "red.forbes.terminal-decline";

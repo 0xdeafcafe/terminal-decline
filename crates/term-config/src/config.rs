@@ -14,50 +14,8 @@ use crate::theme::{self as themes, Appearance, AppearanceMode, ThemeChoice, Them
 /// `option_as_meta`: defined with the key translation that reads it.
 pub use crate::keys::OptionAsMeta;
 
-/// `update`: what the app does about updates (docs/design/updater.md).
-/// `true` and `false`, from before, mean `"notify"` and `"off"`.
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum UpdateMode {
-    /// Builds from source update themselves once the Mac has been idle a
-    /// while, on AC power; release builds install on quit.
-    Auto,
-    /// Builds from source say an update is there and wait to be told;
-    /// release builds install on quit (nothing is interrupted).
-    #[default]
-    Notify,
-    /// No checks.
-    Off,
-}
-
-impl UpdateMode {
-    /// Whether anything is checked at all.
-    pub fn on(self) -> bool {
-        self != UpdateMode::Off
-    }
-}
-
-impl<'de> Deserialize<'de> for UpdateMode {
-    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<UpdateMode, D::Error> {
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum Raw {
-            Bool(bool),
-            Text(String),
-        }
-        let bad = || serde::de::Error::custom("use \"auto\", \"notify\" or \"off\"");
-        match Raw::deserialize(d).map_err(|_| bad())? {
-            Raw::Bool(true) => Ok(UpdateMode::Notify),
-            Raw::Bool(false) => Ok(UpdateMode::Off),
-            Raw::Text(t) => match t.as_str() {
-                "auto" => Ok(UpdateMode::Auto),
-                "notify" => Ok(UpdateMode::Notify),
-                "off" => Ok(UpdateMode::Off),
-                _ => Err(bad()),
-            },
-        }
-    }
-}
+/// `update`: defined with the updater that reads it.
+pub use term_update::UpdateMode;
 
 /// `welcome`: the faint line a new tab or window starts with
 /// ([`crate::welcome`]).

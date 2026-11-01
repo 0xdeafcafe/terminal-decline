@@ -8,8 +8,10 @@
 
 use std::path::{Path, PathBuf};
 
+use term_activity::PRODUCT_NAME;
+
 use super::log;
-use crate::notify::{Note, Target};
+use crate::{Notice, show};
 
 /// What `updates-seen` remembers.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -85,7 +87,7 @@ pub fn release_page(v: &str) -> String {
 /// "Updated to …": the title and text, `subjects` being the commits a
 /// build from source gained (newest first).
 pub fn updated_text(now: &Build, subjects: &[String]) -> (String, String) {
-    let app = crate::PRODUCT_NAME;
+    let app = PRODUCT_NAME;
     match now {
         Build::Release(v) => (format!("Updated to {app} {v}"), "The release notes say what's new.".into()),
         Build::Source(c) => {
@@ -103,7 +105,7 @@ pub fn updated_text(now: &Build, subjects: &[String]) -> (String, String) {
 /// "Terminal Decline X will install when you quit", if not told for this
 /// version yet.
 pub fn ready_text(seen: &Seen, version: &str) -> Option<String> {
-    (seen.ready.as_deref() != Some(version)).then(|| format!("{} {version} will install when you quit", crate::PRODUCT_NAME))
+    (seen.ready.as_deref() != Some(version)).then(|| format!("{} {version} will install when you quit", PRODUCT_NAME))
 }
 
 fn seen_file() -> Option<PathBuf> {
@@ -119,7 +121,7 @@ fn load() -> Seen {
 
 fn save(seen: &Seen) {
     // Tests never touch the real record.
-    if std::env::var_os(crate::control::ENV).is_some_and(|v| !v.is_empty()) {
+    if crate::under_test() {
         return;
     }
     let Some(f) = seen_file() else { return };
@@ -129,18 +131,12 @@ fn save(seen: &Seen) {
     let _ = std::fs::write(f, seen.text());
 }
 
-fn show(note: Note) {
-    if let Some(mtm) = objc2::MainThreadMarker::new() {
-        crate::notify::show(mtm, note);
-    }
-}
-
 /// At launch, with an updater running (never under the test control):
 /// "Updated to …" if this build is newer than the last one launched. For
 /// a build from source the new commits' subjects are read from its
 /// checkout, on a thread.
 pub fn at_launch(now: Build, repo: Option<PathBuf>) {
-    if std::env::var_os(crate::control::ENV).is_some_and(|v| !v.is_empty()) {
+    if crate::under_test() {
         return;
     }
     let seen = load();
@@ -155,17 +151,19 @@ pub fn at_launch(now: Build, repo: Option<PathBuf>) {
                 let subjects = super::source::subjects_between(&repo, &from, &to).unwrap_or_default();
                 dispatch2::DispatchQueue::main().exec_async(move || {
                     let (title, body) = updated_text(&Build::Source(to), &subjects);
-                    show(Note::new(title, body, Target::App));
+                    show(Notice::new(title, body));
                 });
             });
         }
         (Build::Release(v), _) => {
             let (title, body) = updated_text(&now, &[]);
-            show(Note::new(title, body, Target::Open(release_page(v))));
+            let mut n = Notice::new(title, body);
+            n.open = Some(release_page(v));
+            show(n);
         }
         (Build::Source(_), None) => {
             let (title, body) = updated_text(&now, &[]);
-            show(Note::new(title, body, Target::App));
+            show(Notice::new(title, body));
         }
     }
 }
@@ -177,7 +175,7 @@ pub fn ready(version: &str) {
     let Some(title) = ready_text(&seen, version) else { return };
     seen.ready = Some(version.to_string());
     save(&seen);
-    let mut n = Note::new(title, "Nothing is interrupted: it installs the next time you quit.", Target::App);
+    let mut n = Notice::new(title, "Nothing is interrupted: it installs the next time you quit.");
     n.key = Some("sparkle-ready".into());
     n.group = Some("updates".into());
     show(n);

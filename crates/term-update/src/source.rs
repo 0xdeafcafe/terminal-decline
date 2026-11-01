@@ -17,14 +17,14 @@
 //! pushed) and runs `scripts/dogfood.sh` in the
 //! background at low priority (`taskpolicy -b`), its output in
 //! `~/Library/Logs/terminal-decline/update-build.log`; the installed build
-//! restarts the app as any dogfood install does ([`crate::reload`]). A
+//! restarts the app as any dogfood install does ([`term_restore::reload`]). A
 //! failed build is a notification naming the log.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use crate::config::UpdateMode;
+use crate::UpdateMode;
 
 /// The branch updates come from.
 pub const BRANCH: &str = "main";
@@ -408,7 +408,7 @@ pub fn subjects_text(subjects: &[String], ahead: u32) -> String {
 
 /// The build's log.
 pub fn build_log(home: &Path) -> PathBuf {
-    crate::crash::logs_dir(home).join("update-build.log")
+    crate::logs_dir(home).join("update-build.log")
 }
 
 /// Why an update didn't happen.
@@ -531,8 +531,7 @@ pub fn idle() -> Duration {
 
 /// Whether the Mac runs on AC power (a desktop always does).
 pub fn on_ac() -> bool {
-    use objc2_foundation::NSString;
-    use std::ffi::c_void;
+    use std::ffi::{CStr, c_char, c_void};
     #[link(name = "IOKit", kind = "framework")]
     unsafe extern "C" {
         fn IOPSCopyPowerSourcesInfo() -> *const c_void;
@@ -541,15 +540,20 @@ pub fn on_ac() -> bool {
     #[link(name = "CoreFoundation", kind = "framework")]
     unsafe extern "C" {
         fn CFRelease(cf: *const c_void);
+        fn CFStringGetCString(s: *const c_void, buf: *mut c_char, size: isize, encoding: u32) -> u8;
     }
+    const UTF8: u32 = 0x0800_0100; // kCFStringEncodingUTF8
     unsafe {
         let blob = IOPSCopyPowerSourcesInfo();
         if blob.is_null() {
             return true;
         }
+        // A CFString, not owned.
         let kind = IOPSGetProvidingPowerSourceType(blob);
-        // CFString and NSString are toll-free bridged; not owned.
-        let ac = kind.is_null() || (*(kind as *const NSString)).to_string() == "AC Power";
+        let mut buf = [0 as c_char; 64];
+        let ac = kind.is_null()
+            || (CFStringGetCString(kind, buf.as_mut_ptr(), buf.len() as isize, UTF8) != 0
+                && CStr::from_ptr(buf.as_ptr()).to_bytes() == b"AC Power");
         CFRelease(blob);
         ac
     }

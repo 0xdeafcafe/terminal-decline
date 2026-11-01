@@ -24,6 +24,7 @@ term-activity = { path = "crates/term-activity" }
 term-restore = { path = "crates/term-restore" }
 term-complete = { path = "crates/term-complete" }
 term-ctl = { path = "crates/term-ctl" }
+term-update = { path = "crates/term-update" }
 vte = "0.15"
 libc = "0.2"
 unicode-width = "0.2"

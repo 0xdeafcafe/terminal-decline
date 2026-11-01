@@ -30,6 +30,7 @@ term-activity.workspace = true
 term-restore.workspace = true
 term-complete.workspace = true
 term-ctl.workspace = true
+term-update.workspace = true
 term-pin = { path = "../term-pin" }
 term-icon = { path = "../term-icon" }
 objc2-core-text.workspace = true

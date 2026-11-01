@@ -16,8 +16,9 @@ Use [Conventional Commits](https://www.conventionalcommits.org/):
   (term-font), `render` (term-render), `app` (term-app, the `terminal-decline`
   binary), `keys` (term-keys), `config` (term-config), `activity`
   (term-activity), `restore` (term-restore), `ctl` (term-ctl, the agent
-  API), `complete` (term-complete), `prefs` (term-prefs), `image` (term-image), `icon` (term-icon),
-  `pin` (Dock pins), plus `ci`, `deps`, `docs` where they fit.
+  API), `complete` (term-complete), `update` (term-update, the updater),
+  `prefs` (term-prefs), `image` (term-image), `icon` (term-icon), `pin`
+  (Dock pins), plus `ci`, `deps`, `docs` where they fit.
   Leave the scope out for changes across many modules.
 - Breaking changes: `feat(core)!: …` and a `BREAKING CHANGE:` footer.
 - One logical change per commit. Before committing, run `cargo fmt --all`,

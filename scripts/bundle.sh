@@ -26,14 +26,14 @@
 # has no team ID to match). DOGFOOD=1 marks a local build that restarts
 # itself when a newer one is installed (crates/term-restore/src/reload.rs);
 # with DOGFOOD_REPO and DOGFOOD_COMMIT, its marker names the checkout and
-# commit, for updates from source (crates/term-app/src/update/source.rs).
+# commit, for updates from source (crates/term-update/src/source.rs).
 #
 # Sparkle (docs/design/updater.md §5): when scripts/sparkle.sh has fetched
 # it (target/sparkle/<version>, or SPARKLE_DIR), Sparkle.framework is
 # embedded, thinned and signed, and the updater's Info.plist keys are
 # written. SPARKLE_REQUIRED=1 (the release job) fails without it. The
 # updater still only runs in Developer ID builds that aren't dogfood or
-# nightly builds (crates/term-app/src/update.rs).
+# nightly builds (crates/term-update/src/lib.rs).
 set -euo pipefail
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)

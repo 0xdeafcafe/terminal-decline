@@ -795,6 +795,17 @@ Measured 1 Nov 2026 (load 5–8, 17 during the latency run):
   on each glyph, now an OR; the rest isn't pinned down (skipping the
   per-row checks when nothing is coloured didn't change it). Over the
   "unchanged within noise" budget by 0.2–1.5 µs a frame.
+- Dug in (same day, load 4–6), building the colouring change piece by
+  piece on top of b50de69: the new snapshot field costs nothing; the
+  per-glyph ink lookup on rows the block cursor is on cost 1–2% on
+  unchanged frames (now only on rows with ink); the default-colour flag
+  on every glyph cost 2% on full frames, OR'd or not (now gone: the app
+  only inks cells it sees in the default colour, under the lock, so the
+  renderer paints whatever is in the ink's columns). Before → now, µs:
+  80×24 full 10.30 → 10.39–10.48, 300×100 unchanged 6.04 → 6.11, one row
+  43.8 → 44.9, 160×48 full 7.56 → 7.68. The one-row difference is other
+  work on main (scroll frames and font settings, measured at 0a6eba5
+  with no completion code: 44.9); what is left is about 1%.
 - Prompt frames, 160×48 unchanged: plain 2.92 µs, coloured 3.01 µs
   (+0.1, budget 20), list open 9.34 µs (+6.4, budget 50).
 - Parsing: unchanged (±1%). Typing with reports: 0.47 µs a key against

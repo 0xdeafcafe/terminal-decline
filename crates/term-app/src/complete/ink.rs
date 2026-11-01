@@ -31,6 +31,9 @@ struct Placed {
     row: u16,
     col: u16,
     cells: u16,
+    /// Drawn in the default colour with no attributes: only such text is
+    /// coloured, so what the shell coloured itself keeps its colour.
+    plain: bool,
 }
 
 /// Put the command line's colours in `out`. `known` says whether a
@@ -83,12 +86,15 @@ pub fn line_ink(t: &Terminal, known: &dyn Fn(&str) -> Option<bool>, out: &mut Ve
         }
         while p < placed.len() && placed[p].byte < span.range.end {
             let c = placed[p];
+            p += 1;
+            if !c.plain {
+                continue;
+            }
             let cols = c.col..c.col + c.cells;
             match out.last_mut() {
                 Some(last) if last.row == c.row && last.cols.end == cols.start && last.color == color => last.cols.end = cols.end,
                 _ => out.push(Ink { row: c.row, cols, color }),
             }
-            p += 1;
         }
     }
 }
@@ -143,11 +149,13 @@ fn place(t: &Terminal, text: &str, mut row: usize, mut col: usize) -> Vec<Placed
                 Content::Cluster(s) if want == ch && text[i..].starts_with(s) => len = s.len(),
                 _ => return out,
             }
+            let style = cell.style();
             out.push(Placed {
                 byte: i,
                 row: row as u16,
                 col: col as u16,
                 cells,
+                plain: style.fg == term_core::Color::DEFAULT && style.attrs.is_empty(),
             });
             col += cells as usize;
         }
@@ -236,6 +244,13 @@ mod tests {
         let q = got.iter().find(|i| i.2 == 3).expect("the string");
         assert_eq!(q.0, 1);
         assert_eq!(q.1.end - q.1.start, 3);
+    }
+
+    #[test]
+    fn what_the_shell_coloured_keeps_its_colour() {
+        // zsh-syntax-highlighting draws `-l` red and bold itself.
+        let t = term(80, "ls \x1b[1;31m-l\x1b[0m \"a\"", "ls -l \"a\"");
+        assert_eq!(ink(&t), [(0, 8..11, 3)]);
     }
 
     #[test]

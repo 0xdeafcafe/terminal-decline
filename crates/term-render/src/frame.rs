@@ -232,9 +232,6 @@ impl GlyphInstance {
     /// Keeps its colour under the block cursor: an underline pattern in
     /// the underline colour the style sets, as its rectangles would.
     const FIXED: u32 = 1 << 2;
-    /// The cell's text is in the default colour with no attributes: the
-    /// command line's colours ([`term_core::Ink`]) may paint it.
-    const PLAIN: u32 = 1 << 3;
     pub const TAG_SHIFT: u32 = 8;
     pub const TAG_MASK: u32 = 0x1F << Self::TAG_SHIFT;
     const COL_SHIFT: u32 = 16;
@@ -745,9 +742,6 @@ struct Pen {
     underline_color: term_core::Color,
     /// Any of underline, overline or strike.
     decorated: bool,
-    /// [`GlyphInstance::PLAIN`] for the default text colour and no
-    /// attributes, else 0: OR'd into each glyph's flags as it is.
-    plain: u32,
 }
 
 impl Pen {
@@ -780,7 +774,6 @@ impl Pen {
             underline: style.underline,
             underline_color: style.underline_color,
             decorated: style.underline != Underline::None || a.intersects(Attrs::OVERLINE | Attrs::STRIKE),
-            plain: GlyphInstance::PLAIN * (style.fg == term_core::Color::DEFAULT && a.is_empty()) as u32,
         }
     }
 
@@ -1486,17 +1479,21 @@ impl Frame {
                 {
                     continue;
                 }
+                // The app only inks cells drawn in the default colour, so
+                // a glyph in those columns is painted as it is.
                 let inked_as = || {
-                    let plain = g.is_color & GlyphInstance::PLAIN != 0;
                     ink.clone()
-                        .find(|i| plain && (i.cols.start as usize..i.cols.end as usize).contains(&col))
+                        .find(|i| (i.cols.start as usize..i.cols.end as usize).contains(&col))
                         .map(|i| theme.paint(i.color as usize & 15))
                 };
                 spare_glyphs.push(match () {
                     _ if on.contains(&col) && g.is_color & GlyphInstance::FIXED == 0 => {
                         g.painted(under_cursor(g.is_color & GlyphInstance::DIM != 0))
                     }
-                    _ => inked_as().map_or(*g, |paint| g.painted(paint)),
+                    // Rows the block cursor or the list is on, without ink:
+                    // nothing to look up for each glyph.
+                    _ if inked => inked_as().map_or(*g, |paint| g.painted(paint)),
+                    _ => *g,
                 });
             }
             l.glyphs = out.put(false, p.map(|p| p.glyphs), spare_glyphs);
@@ -1980,7 +1977,7 @@ fn row_cells<const OVERLAY: bool, const LIG: bool, C: CellView, S: RowSink>(
                     u: g.u,
                     v: g.v,
                     color: fg.rgba,
-                    is_color: GlyphInstance::flags(&g, col, pen.attrs.contains(Attrs::DIM), fg.tag) | pen.plain,
+                    is_color: GlyphInstance::flags(&g, col, pen.attrs.contains(Attrs::DIM), fg.tag),
                 });
             }
         } else if !spacer && !pen.attrs.contains(Attrs::HIDDEN) && !covered && !(LIG && pieces.replaced[col]) {

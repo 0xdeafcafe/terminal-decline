@@ -1280,10 +1280,11 @@ fn search_hits_are_drawn_under_the_selection() {
 }
 
 /// The command line's colours (`Snapshot::ink`, completion design §5)
-/// paint only text in the default colour with no attributes, and go when
-/// the snapshot has none: the row cache keeps the plain row.
+/// paint the text in their columns, and go when the snapshot has none:
+/// the row cache keeps the plain row. (The app gives only columns drawn
+/// in the default colour.)
 #[test]
-fn ink_paints_only_default_coloured_text() {
+fn ink_paints_its_columns() {
     use term_core::Ink;
     let mut t = term(10, 2, "ab\x1b[31mcd\x1b[0m\x1b[1mef\x1b[0mgh");
     let theme = Theme::default();
@@ -1294,11 +1295,18 @@ fn ink_paints_only_default_coloured_text() {
     for inked in [true, false, true] {
         f.snapshot(&mut t.state, &input, 0);
         if inked {
-            f.snapshot_mut().ink = vec![Ink {
-                row: 0,
-                cols: 0..8,
-                color: 4,
-            }];
+            f.snapshot_mut().ink = vec![
+                Ink {
+                    row: 0,
+                    cols: 0..2,
+                    color: 4,
+                },
+                Ink {
+                    row: 0,
+                    cols: 6..8,
+                    color: 4,
+                },
+            ];
         }
         assert!(f.build_snapshot(&input, &mut Fake));
         let blue = theme.palette[4];
@@ -1306,7 +1314,7 @@ fn ink_paints_only_default_coloured_text() {
         let want = if inked { blue } else { fg };
         assert_eq!(colour_of(&f, 'a'), Some(want), "inked {inked}");
         assert_eq!(colour_of(&f, 'h'), Some(want), "inked {inked}");
-        // Red text and bold text keep their own colour.
+        // Columns without ink keep their own colour.
         assert_eq!(colour_of(&f, 'c'), Some(theme.palette[1]));
         assert_ne!(colour_of(&f, 'e'), Some(blue));
     }

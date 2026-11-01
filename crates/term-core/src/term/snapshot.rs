@@ -210,10 +210,11 @@ pub struct Snapshot {
     /// The view rows showing a prompt (OSC 133 A) whose command exited
     /// non-zero, top to bottom: the renderer marks them in the padding.
     pub failed: Vec<u16>,
-    /// Colours for text in the default colour, by view row and columns:
-    /// the command line coloured as it is typed (docs/design/completion.md
-    /// §5). Not taken from the terminal: the app puts them in after the
-    /// snapshot, and each snapshot starts with none.
+    /// Colours for the text in some cells, by view row and columns: the
+    /// command line coloured as it is typed (docs/design/completion.md
+    /// §5), only over cells drawn in the default colour. Not taken from
+    /// the terminal: the app puts them in after the snapshot, and each
+    /// snapshot starts with none.
     pub ink: Vec<Ink>,
     /// The completion list over the cells, and the first choice's rest
     /// grey after the cursor (completion design §2); put in by the app

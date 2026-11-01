@@ -108,15 +108,15 @@ impl App<'_> {
                 ("q", "quit"),
             ],
             Mode::Help => &[("any key", "closes")],
-            Mode::Choice { fonts: true, .. } => &[
-                ("type", "filter"),
-                ("↑↓", "move"),
-                ("enter", "pick"),
-                ("tab", "all fonts"),
-                ("esc", "cancel"),
-            ],
+            // Theme, family and face lists preview what is under the
+            // selection in every window.
             Mode::Choice {
                 then: Then::ThemeSide(_), ..
+            }
+            | Mode::Choice {
+                fonts: true,
+                then: Then::Font(_) | Then::Set(_),
+                ..
             } => &[("↑↓", "preview"), ("type", "filter"), ("enter", "keep"), ("esc", "put back")],
             Mode::Choice { .. } => &[("type", "filter"), ("↑↓", "move"), ("enter", "pick"), ("esc", "cancel")],
             Mode::Number { .. } => &[("←→", "step"), ("0-9", "type"), ("enter", "done"), ("esc", "cancel")],
@@ -495,6 +495,17 @@ impl App<'_> {
                 // from dark to light (or back), for the groups that have a
                 // match.
                 let mut groups: Vec<(usize, &str)> = Vec::new();
+                // Font lists: monospaced families, then the others.
+                if matches!(then, Then::Font(_) | Then::ListItem(..)) {
+                    let mut last = None;
+                    for (k, (v, _)) in shown.iter().enumerate() {
+                        let Some(mono) = self.is_monospace(v) else { continue };
+                        if last != Some(mono) {
+                            groups.push((k, if mono { "Monospaced" } else { "Other fonts" }));
+                            last = Some(mono);
+                        }
+                    }
+                }
                 if matches!(then, Then::ThemeSide(_)) {
                     let mut last = None;
                     for (k, (v, _)) in shown.iter().enumerate() {

@@ -963,6 +963,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "term-activity"
+version = "0.0.1"
+dependencies = [
+ "libc",
+ "term-core",
+ "term-pty",
+]
+
+[[package]]
+name = "term-config"
+version = "0.0.1"
+dependencies = [
+ "serde",
+ "term-core",
+ "term-font",
+ "term-keys",
+ "term-prefs",
+ "term-render",
+ "toml",
+]
+
+[[package]]
 name = "term-core"
 version = "0.0.1"
 dependencies = [
@@ -976,6 +998,17 @@ dependencies = [
  "unicode-segmentation",
  "unicode-width",
  "vte",
+]
+
+[[package]]
+name = "term-ctl"
+version = "0.0.1"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "term-core",
+ "term-keys",
 ]
 
 [[package]]
@@ -1020,6 +1053,14 @@ dependencies = [
  "jpeg-decoder",
  "miniz_oxide 0.8.9",
  "png",
+]
+
+[[package]]
+name = "term-keys"
+version = "0.0.1"
+dependencies = [
+ "serde",
+ "toml",
 ]
 
 [[package]]
@@ -1069,6 +1110,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "term-restore"
+version = "0.0.1"
+dependencies = [
+ "libc",
+ "proptest",
+ "serde",
+ "serde_json",
+ "term-activity",
+ "term-core",
+]
+
+[[package]]
 name = "terminal-decline"
 version = "0.0.1"
 dependencies = [
@@ -1089,14 +1142,19 @@ dependencies = [
  "regex-lite",
  "serde",
  "serde_json",
+ "term-activity",
+ "term-config",
  "term-core",
+ "term-ctl",
  "term-font",
  "term-icon",
  "term-image",
+ "term-keys",
  "term-pin",
  "term-prefs",
  "term-pty",
  "term-render",
+ "term-restore",
  "terminal-decline",
  "toml",
  "unicode-width",

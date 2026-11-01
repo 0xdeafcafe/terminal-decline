@@ -183,6 +183,8 @@ fn subcommand(args: &[String], paths: &Paths, moved: Option<&str>) -> Option<i32
         // as `prefs` or by its name, `settings`. By hand nothing is sent to
         // the terminal: no app is assumed to be there (`--in-app` says so).
         Some("prefs" | "settings") => Some(crate::prefs::run(&args[1..], paths)),
+        // The installed fonts, for `font_family` and the faces.
+        Some("fonts") => Some(fonts_command(&args[1..], &mut std::io::stdout())),
         // The agent API (docs/design/agent-api.md).
         Some("ctl") => Some(crate::ctl::run(&args[1..])),
         Some("import") => Some(match crate::import::run(&args[1..], paths) {
@@ -193,6 +195,42 @@ fn subcommand(args: &[String], paths: &Paths, moved: Option<&str>) -> Option<i32
             }
         }),
         _ => None,
+    }
+}
+
+const FONTS_USAGE: &str = "usage: terminal-decline fonts [--mono] [--styles]
+
+Lists the installed font families, one a line, `*` before the monospaced
+ones. --mono lists only those; --styles lists each family's faces under it
+(style and PostScript name). Any family works as font_family, and a face's
+full name (\"Menlo Bold\") as font_bold, font_italic or font_bold_italic.";
+
+/// `terminal-decline fonts`: the installed families on `out`.
+fn fonts_command(args: &[String], out: &mut impl std::io::Write) -> i32 {
+    let (mut mono, mut styles) = (false, false);
+    for a in args {
+        match a.as_str() {
+            "--mono" | "-m" => mono = true,
+            "--styles" | "-s" => styles = true,
+            "-h" | "--help" => {
+                println!("{FONTS_USAGE}");
+                return 0;
+            }
+            other => {
+                eprintln!("terminal-decline fonts: unknown argument {other:?}\n{FONTS_USAGE}");
+                return 2;
+            }
+        }
+    }
+    let text = term_font::format_families(&term_font::list_families(), mono, styles);
+    match out.write_all(text.as_bytes()) {
+        Ok(()) => 0,
+        // A closed pipe (`| head`) is no error.
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => 0,
+        Err(e) => {
+            eprintln!("terminal-decline fonts: {e}");
+            1
+        }
     }
 }
 
@@ -273,6 +311,21 @@ mod tests {
         }
         assert_eq!(subcommand(&args(&["nonsense"]), &paths, None), None);
         assert_eq!(subcommand(&args(&[]), &paths, None), None);
+    }
+
+    #[test]
+    fn fonts_lists_menlo_with_its_faces() {
+        let mut out = Vec::new();
+        assert_eq!(fonts_command(&args(&["--mono", "--styles"]), &mut out), 0);
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("* Menlo\n"), "{text}");
+        assert!(
+            text.lines()
+                .any(|l| l.trim_start().starts_with("Bold Italic") && l.ends_with("Menlo-BoldItalic")),
+            "{text}"
+        );
+        assert!(!text.contains("Helvetica\n"), "monospaced only: {text}");
+        assert_eq!(fonts_command(&args(&["--bogus"]), &mut Vec::new()), 2);
     }
 
     #[test]

@@ -784,6 +784,8 @@ fn build_frame(frame: &mut Frame, t: &mut Terminal) {
             underline_offset: 2,
             underline_thickness: 1,
             strike_offset: 4,
+            strike_thickness: 0,
+            cursor_thickness: 0,
         },
         padding: (4, 4),
         cursor_on: true,

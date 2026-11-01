@@ -24,7 +24,7 @@
 # Ad-hoc builds are hardened only with HARDENED=1, then with
 # packaging/entitlements-dev.plist (library validation off: ad-hoc code
 # has no team ID to match). DOGFOOD=1 marks a local build that restarts
-# itself when a newer one is installed (crates/term-app/src/reload.rs);
+# itself when a newer one is installed (crates/term-restore/src/reload.rs);
 # with DOGFOOD_REPO and DOGFOOD_COMMIT, its marker names the checkout and
 # commit, for updates from source (crates/term-app/src/update/source.rs).
 #

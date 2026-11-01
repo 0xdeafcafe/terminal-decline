@@ -136,7 +136,7 @@ struct Mirror {
 pub(crate) struct Built {
     pub theme: Theme,
     /// [`term_font::Metrics`]' fields, which has no `PartialEq`.
-    pub metrics: [u32; 6],
+    pub metrics: [u32; 7],
     /// Cached x positions include the left padding.
     pub padding_x: u32,
     /// [`GlyphSource::generation`](crate::GlyphSource::generation): glyph

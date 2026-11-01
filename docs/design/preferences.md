@@ -381,13 +381,27 @@ does.
 On Alex's Mac 187 font families are installed, and only 5 carry Core
 Text's monospace flag (Andale Mono, Courier New, Menlo, Monaco, PT Mono);
 one more (Ayuthaya) has equal ASCII advances without it. A monospace-only
-list would hide fonts that don't set the flag. So the family picker shows
-first the families with the flag or with equal advances for `iMW0.`, and a
-"show all fonts" toggle adds the rest, marked "not monospace: text will
-look uneven". The fallback list picks from all fonts (fallbacks such as
-Apple Color Emoji or a Nerd Font symbols font aren't monospace). Typed
-names are accepted and checked with `Fonts::missing`. The scan takes
-90–280 ms, so it runs when the picker opens, not at start.
+list would hide fonts that don't set the flag. So the family picker lists
+every family: first, under "Monospaced", those with the flag or with equal
+advances for `iMW0.`, then the rest under "Other fonts" (they work, but
+text looks uneven). The fallback list picks from the same list (fallbacks
+such as Apple Color Emoji or a Nerd Font symbols font aren't monospace).
+Typed names are accepted and checked with `Fonts::missing`. The listing is
+term-font's `list_families` (Core Text's collection of available fonts,
+grouped by family, each with its faces); `terminal-decline fonts [--mono]
+[--styles]` prints it. It takes 100–300 ms, so it runs when the picker
+opens, not at start.
+
+The bold, italic and bold italic face rows pick from the configured
+family's own faces by full name ("Menlo Bold"), or unset (the family's
+own); any other face's name can be typed.
+
+Like the theme lists, the family and face lists preview live: moving
+sends `OSC 7771 ; theme-preview ; font ; <key> ; <name> ST` (key one of
+`font_family`, `font_bold`, `font_italic`, `font_bold_italic`; an empty
+name is unset), and every window takes that font on over the config. Esc
+sends `cancel`, Enter writes the setting and sends `keep`, as for themes.
+A TUI can't draw each row in its own font, so the preview is the sample.
 
 ## Accessibility
 
@@ -637,8 +651,8 @@ defaults copy as a plain function.
    the TUI would sit in the process holding every window (panics are caught
    per session; hangs aren't). A separate binary without AppKit would save
    only 0.8 MB.
-3. Font picker: monospace fonts first, all fonts behind a toggle (see
-   "Fonts").
+3. Font picker: monospace fonts first, then the others under a header,
+   previewed live in every window (see "Fonts").
 
 ## Later
 

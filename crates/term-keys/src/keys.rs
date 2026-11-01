@@ -8,7 +8,20 @@
 //! [`committed_text`], which encodes it as a key event when the program
 //! asked for every key as an escape code.
 
-use crate::config::OptionAsMeta;
+use serde::{Deserialize, Serialize};
+
+/// Which Option key acts as Meta (sends ESC + key). Off by default, like
+/// Terminal.app and Ghostty, so Option still types @ [ ] { } | \\ ~ on
+/// European keyboard layouts.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum OptionAsMeta {
+    Left,
+    Right,
+    Both,
+    #[default]
+    None,
+}
 
 /// `NSEventModifierFlags` bits used here.
 pub mod flags {

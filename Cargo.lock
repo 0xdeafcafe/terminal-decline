@@ -1099,6 +1099,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "term-restore"
+version = "0.0.1"
+dependencies = [
+ "libc",
+ "proptest",
+ "serde",
+ "serde_json",
+ "term-activity",
+ "term-core",
+]
+
+[[package]]
 name = "terminal-decline"
 version = "0.0.1"
 dependencies = [
@@ -1129,6 +1141,7 @@ dependencies = [
  "term-prefs",
  "term-pty",
  "term-render",
+ "term-restore",
  "terminal-decline",
  "toml",
 ]

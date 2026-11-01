@@ -21,6 +21,7 @@ term-image = { path = "crates/term-image" }
 term-keys = { path = "crates/term-keys" }
 term-config = { path = "crates/term-config" }
 term-activity = { path = "crates/term-activity" }
+term-restore = { path = "crates/term-restore" }
 vte = "0.15"
 libc = "0.2"
 unicode-width = "0.2"

@@ -236,7 +236,7 @@ mod tests {
     #[test]
     fn targets_are_links_then_urls_then_paths() {
         let mut t = term_core::Term::new(60, 2, 0, term_core::ImagePool::process());
-        t.advance(b"\x1b]7;file:///tmp\x1b\\\x1b]8;;https://real\x1b\\shown\x1b]8;;\x1b\\ http://plain.example /etc/hosts:3 x");
+        t.advance(b"\x1b]7;file:///tmp\x1b\\\x1b]8;;https://real\x1b\\shown\x1b]8;;\x1b\\ http://plain.example /etc/hosts:3 nope-zq9-missing");
         let mut cache = ExistsCache::default();
         let at = |t: &term_core::Term, cache: &mut ExistsCache, col| target_at(&t.state, t.state.point_at(0, col), cache);
         let p = |col| t.state.point_at(0, col);

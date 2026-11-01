@@ -1035,9 +1035,17 @@ impl PaneView {
         let mut cache = self.ivars().exists.borrow_mut();
         self.with(|_, p| {
             let t = p.session.lock_term();
-            crate::links::target_at(&t.state, t.state.point_at(line, col), &mut cache)
+            let target = crate::links::target_at(&t.state, t.state.point_at(line, col), &mut cache);
+            target.filter(|x| !Self::typed_path(&t.state, x, line, col))
         })
         .flatten()
+    }
+
+    /// A path on the command line being typed at the prompt: not a target,
+    /// so a click there only places the cursor, and words typed that name
+    /// files aren't underlined.
+    fn typed_path(t: &term_core::Terminal, target: &crate::links::Target, line: usize, col: usize) -> bool {
+        matches!(target, crate::links::Target::Path { .. }) && crate::prompts::input_steps(t, line, col).is_some()
     }
 
     /// Cmd-click, or Open in the click menu: open the link (as
@@ -1176,7 +1184,9 @@ impl PaneView {
         let Some((changed, on_link)) = self.with(|_, p| {
             let mut t = p.session.lock_term();
             let point = cell.map(|(line, col)| t.state.point_at(line, col));
-            let target = point.and_then(|at| crate::links::target_at(&t.state, at, &mut cache));
+            let target = point
+                .and_then(|at| crate::links::target_at(&t.state, at, &mut cache))
+                .filter(|x| cell.is_none_or(|(line, col)| !Self::typed_path(&t.state, x, line, col)));
             // A link is found again as the snapshot is built (an OSC 8
             // link's pieces are compared by value); a path is its cells.
             // Moving along the same link changes nothing to draw.

@@ -38,7 +38,14 @@ const URL_SCHEMES: [&str; 4] = ["https://", "http://", "file://", "mailto:"];
 const URL_BREAKS: &str = "<>\"'`{}|\\^";
 
 fn is_url_char(c: char) -> bool {
-    !c.is_whitespace() && !c.is_control() && !URL_BREAKS.contains(c)
+    !c.is_whitespace() && !c.is_control() && !URL_BREAKS.contains(c) && !is_drawing(c)
+}
+
+/// Arrows, box drawing, blocks, shapes and dingbats: what programs draw
+/// panels, bullets and markers with (`│`, `─`, `▶`, `⏺`, `✓`), never part
+/// of a URL or a path.
+pub(crate) fn is_drawing(c: char) -> bool {
+    matches!(c as u32, 0x2190..=0x21FF | 0x2300..=0x23FF | 0x2500..=0x27BF)
 }
 
 /// The indices (inclusive) of the plain URL around `i` in `text`, or

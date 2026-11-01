@@ -39,10 +39,16 @@ wins.
    - absolute (`/etc/hosts`), `~` and `~/…`, or relative to the shell's
      current folder, which the shell reports with OSC 7 (`./a`, `src/a.rs`,
      `../b`). Without a reported folder, relative paths aren't found.
-   - It must look like a path: hold a `/` or a `.`, or start with `~`. A
-     bare word such as `src` doesn't count even if a folder of that name
-     exists, else every word of prose naming a folder would underline. So
-     `Cargo.toml` in `ls` output is clickable, `crates` isn't.
+   - A bare name counts when the shell's folder holds it: `crates` and
+     `Cargo.toml` in `ls` output are both clickable. (At first a path
+     needed a `/` or a `.`; Alex asked for bare names, 1 Nov 2026.) A word
+     of prose that happens to name something in the folder underlines too.
+   - Not on the command line being typed at the prompt: a click there
+     places the shell's cursor as before, and words typed that name files
+     aren't underlined.
+   - Box drawing, arrows, shapes and dingbats (`│`, `─`, `▶`, `⏺`, `✓`)
+     end a path or URL, so one inside a program's panel (rush, Claude
+     Code) is found without the border.
    - A `:line` or `:line:col` after it, as compilers, grep and test
      runners print (`src/main.rs:12:5`), is kept in what is selected and
      copied, but left out of the path checked and opened. Grep's

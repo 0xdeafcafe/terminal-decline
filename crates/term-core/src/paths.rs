@@ -21,7 +21,7 @@ const PATH_STARTS: &str = "=([{";
 const MAX_LEN: usize = 4096;
 
 fn is_path_char(c: char) -> bool {
-    !c.is_whitespace() && !c.is_control() && !PATH_BREAKS.contains(c)
+    !c.is_whitespace() && !c.is_control() && !PATH_BREAKS.contains(c) && !crate::word::is_drawing(c)
 }
 
 /// A path found in the text.
@@ -155,13 +155,11 @@ fn location(text: &[char], a: usize, b: usize) -> (usize, usize) {
     (b + 1, b)
 }
 
-/// Whether `s` is written as a path: it has a `/` or a `.` in a name, or
-/// starts with `~`; not a URL, nor only dots.
+/// Whether `s` may be a path: not a URL, nor only dots. A bare name
+/// (`crates`, as `ls` lists it) counts: it is only found when the shell's
+/// folder holds it.
 fn looks_like_path(s: &str) -> bool {
-    if s.contains("://") || s.chars().all(|c| c == '.') {
-        return false;
-    }
-    s.starts_with('~') || s.contains('/') || s.contains('.')
+    !s.contains("://") && !s.chars().all(|c| c == '.')
 }
 
 /// `written` as an absolute path: `~` and `~/…` in `home`, a relative
@@ -197,6 +195,7 @@ mod tests {
         "/tmp/a b/c.txt",
         "/etc/hosts",
         "/Users/me/src/app/app/[id]/page.tsx",
+        "/Users/me/src/app/crates",
     ];
 
     fn find(line: &str, col: usize) -> Option<(String, String)> {
@@ -246,6 +245,11 @@ mod tests {
             ("file:///etc/hosts", 9, None),
             ("..", 0, None),
             ("src", 1, None),
+            // A bare name in the shell's folder, as `ls` lists it.
+            ("Cargo.toml  crates", 13, Some(("crates", "/Users/me/src/app/crates"))),
+            // A program's box around it isn't part of it.
+            ("│ main.rs │", 3, Some(("main.rs", "/Users/me/src/app/main.rs"))),
+            ("│main.rs│", 2, Some(("main.rs", "/Users/me/src/app/main.rs"))),
             ("", 0, None),
         ];
         for &(line, col, want) in cases {

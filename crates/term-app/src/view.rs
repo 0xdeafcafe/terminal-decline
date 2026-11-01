@@ -60,6 +60,10 @@ pub(crate) const BLINK_INTERVAL: Duration = Duration::from_millis(530);
 /// fills in within a second at 30 Hz (with 3 ms always, it took ~4 s).
 pub(crate) const GLYPH_BUDGET_TYPING: Duration = Duration::from_millis(3);
 pub(crate) const GLYPH_BUDGET: Duration = Duration::from_millis(8);
+/// While a trackpad scrolls the view, new glyphs are found in the frame
+/// (not on the glyph thread) for this long: rows coming in show them at
+/// once, and a frame still fits well inside a 120 Hz refresh.
+pub(crate) const GLYPH_BUDGET_SCROLLING: Duration = Duration::from_micros(1500);
 
 /// A call to [`glyphs_ready`] is queued on the main queue.
 static GLYPHS_READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -158,7 +162,12 @@ pub(crate) struct Pane {
     pub(crate) blink_scheduled: bool,
     sync_since: Option<Instant>,
     pub(crate) marked: String,
-    pub(crate) scroll_accum: f64,
+    /// The view's position between whole lines under a trackpad, and
+    /// wheel lines not yet whole (see [`crate::scroll`]).
+    pub(crate) scroll: crate::scroll::Smooth,
+    /// Its content moved between whole lines since its last frame: drawn
+    /// again (its frame not built) next tick.
+    pub(crate) moved: bool,
     /// Mouse button held while reporting to the program.
     pub(crate) mouse_button: Option<u8>,
     /// The gesture that started the selection while the left button is
@@ -1355,8 +1364,22 @@ impl WindowView {
             .filter_map(|id| panes.get(id).map(|p| (*id, p.session.term().clone())))
             .collect();
         let mut ticks = Vec::with_capacity(terms.len());
+        let cell = win.renderer.metrics().cell_height as f64;
+        let tick_start = Instant::now();
+        // A trackpad gesture moves a pane's view, or its shift between
+        // lines eases to a whole line (see [`crate::scroll`]).
+        let mut scrolling = false;
         for (id, term) in &terms {
             let p = panes.get_mut(id).expect("shown pane");
+            if let Some(lines) = p.scroll.settle(tick_start, cell) {
+                if lines != 0 {
+                    crate::session::lock(term).state.scroll_view(lines);
+                    p.session.mark_dirty();
+                }
+                p.moved = true;
+            }
+            scrolling |= p.scroll.active(tick_start) || p.scroll.shift() != 0.0;
+            let moved = std::mem::take(&mut p.moved);
             let dirty = p.session.take_dirty();
             let echo = p.awaiting_echo.map(|sent| sent.elapsed());
             let waited_out = echo.is_some_and(|e| e >= ECHO_WAIT);
@@ -1368,8 +1391,18 @@ impl WindowView {
             // and never waits long for it (roadmap R.1): a pane whose
             // reader still holds it is held for a tick, its change kept.
             let wants = (dirty || waited_out) && visible;
-            let t = wants.then(|| crate::session::lock_for_frame(term)).flatten();
+            let mut t = wants.then(|| crate::session::lock_for_frame(term)).flatten();
             let busy = wants && t.is_none();
+            if let Some(t) = t.as_mut() {
+                // Snapshots scrolled back hold the row below the view, for
+                // drawing it part of a line higher.
+                t.state.set_view_overscan(true);
+                if t.state.display_offset() == 0 && p.scroll.shift() != 0.0 {
+                    // Back to following output by other means (typing, a
+                    // search): nothing between lines.
+                    p.scroll.reset();
+                }
+            }
             let synchronized = t.as_ref().is_some_and(|t| t.state.modes().synchronized);
             let sync_elapsed = if synchronized {
                 p.sync_since.get_or_insert_with(Instant::now).elapsed()
@@ -1384,6 +1417,15 @@ impl WindowView {
                 PaneFrame::Held
             } else {
                 frame_policy::pane(dirty || waited_out, synchronized, sync_elapsed, echo.filter(|_| !waited_out))
+            };
+            let frame = match frame {
+                PaneFrame::Reuse if moved => PaneFrame::Moved,
+                PaneFrame::Held | PaneFrame::Waiting if moved => {
+                    // Drawn once it is drawn at all.
+                    p.moved = true;
+                    frame
+                }
+                f => f,
             };
             ticks.push((*id, frame, t));
         }
@@ -1406,6 +1448,7 @@ impl WindowView {
                 idle_ticks: win.idle_ticks,
                 last_input_elapsed: win.last_input.elapsed(),
                 animating,
+                scrolling,
             },
         );
         let now = Instant::now();
@@ -1465,8 +1508,17 @@ impl WindowView {
         win.idle_ticks = 0;
         win.renderer.show();
         let typing = win.last_input.elapsed() < frame_policy::INPUT_BOOST;
-        win.renderer
-            .set_glyph_budget(Some(if typing { GLYPH_BUDGET_TYPING } else { GLYPH_BUDGET }));
+        win.renderer.set_glyph_budget(Some(if scrolling {
+            GLYPH_BUDGET_SCROLLING
+        } else if typing {
+            GLYPH_BUDGET_TYPING
+        } else {
+            GLYPH_BUDGET
+        }));
+        // Rows scrolled into view get their new glyphs in this frame, as
+        // many as the budget allows, rather than popping in from the
+        // glyph thread a frame or two later.
+        win.renderer.set_glyph_sync_first(scrolling);
         images_shown(win, panes, true);
         if rate != win.rate {
             win.rate = rate;
@@ -1685,7 +1737,7 @@ impl WindowView {
                     pane: &p.render,
                     origin: (r.x, r.y),
                     scissor: r.clamped(w, h)?,
-                    scroll: None,
+                    scroll: pane_scroll(win, p, titlebar),
                 })
             })
             .collect();
@@ -2957,6 +3009,29 @@ pub(crate) fn rows_under_find_bar(win: &Win, p: &Pane, titlebar: f64) -> usize {
     ((bottom - grid_top) / cell).ceil().max(0.0) as usize
 }
 
+/// How `p`'s content is drawn when its frame has the row below the view
+/// (scrolled back, for smooth scrolling): moved up by its shift between
+/// whole lines, and inside its rows, so that row shows only as it comes
+/// up, never in the padding below. `None` without that row.
+fn pane_scroll(win: &Win, p: &Pane, titlebar: f64) -> Option<term_render::Scroll> {
+    let cell = win.renderer.metrics().cell_height;
+    let up = p.scroll.shift_px(cell as f64);
+    let snap = p.render.frame.last_snapshot();
+    if snap.rows.len() <= snap.lines as usize {
+        return None;
+    }
+    let pad = pane_padding(&win.config, titlebar, win.scale, p.rect);
+    Some(term_render::Scroll {
+        up,
+        clip: term_render::PxRect {
+            x: p.rect.x,
+            y: p.rect.y + pad.top as i32,
+            w: p.rect.w,
+            h: snap.lines as i32 * cell as i32,
+        },
+    })
+}
+
 pub(crate) fn pane_padding(config: &Config, titlebar: f64, scale: f64, rect: PxRect) -> Padding {
     padding_for(config, if rect.y == 0 { titlebar } else { 0.0 }, scale)
 }
@@ -3057,7 +3132,8 @@ fn spawn_pane(window: usize, config: &Config, theme: &Theme, m: term_font::Metri
         blink_scheduled: false,
         sync_since: None,
         marked: String::new(),
-        scroll_accum: 0.0,
+        scroll: crate::scroll::Smooth::default(),
+        moved: false,
         mouse_button: None,
         selecting: None,
         dragged: false,
@@ -3403,6 +3479,17 @@ impl WindowView {
                         self.request_redraw(pane);
                     }
                 }
+                Some(Control::ScrollPx(points)) => {
+                    if let Some(view) = self.focused_view() {
+                        use crate::scroll::{Input, Phase};
+                        view.scroll_synthetic(Input {
+                            precise: true,
+                            dy: points.unwrap_or(0) as f64,
+                            phase: if points.is_some() { Phase::Changed } else { Phase::Ended },
+                            ..Input::default()
+                        });
+                    }
+                }
                 Some(Control::Close) => {
                     if let Some(window) = self.window() {
                         window.performClose(None);
@@ -3719,6 +3806,7 @@ fn write_dump(st: &mut State, window: Window) {
         copied: test.copied.clone(),
         failed_rows: p.render.frame.last_snapshot().failed.clone(),
         view_offset,
+        view_shift: p.scroll.shift_px(m.cell_height as f64),
         selection,
         find,
         dividers,

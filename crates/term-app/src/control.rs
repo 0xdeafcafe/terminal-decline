@@ -52,6 +52,10 @@
 //!   command line that types the arrow keys to the cell;
 //! - `scroll N`: scroll the focused pane's view N lines back into history
 //!   (negative: towards the bottom), as the scroll wheel does;
+//! - `scroll-px P` / `scroll-px end`: a trackpad scroll event of P (whole) points
+//!   (precise, positive back into history) with the finger down, or the
+//!   finger lifted, as `scrollWheel:` gets them (the dump's `view_shift`
+//!   is how far between lines the view is drawn);
 //! - `menu ACTION`: send a menu item's action (a `[keybind]` action name,
 //!   as `select_output`) up the responder chain, as choosing it does;
 //! - `find TEXT`: put TEXT in the focused pane's find bar (Cmd+F opens
@@ -285,6 +289,9 @@ pub enum Control {
     },
     /// Scroll the view this many lines back.
     Scroll(isize),
+    /// A trackpad scroll event of this many points back, the finger
+    /// down; `None`: the finger lifted.
+    ScrollPx(Option<i32>),
     /// A menu item's action, as choosing the item sends it.
     Menu(crate::keybind::MenuAction),
     /// Put this text in the focused pane's find bar and search, as typing
@@ -441,6 +448,10 @@ impl Control {
                 }
             }
             "scroll" => Control::Scroll(words.next()?.parse().ok()?),
+            "scroll-px" => match words.next()? {
+                "end" => Control::ScrollPx(None),
+                n => Control::ScrollPx(Some(n.parse().ok()?)),
+            },
             "menu" => Control::Menu(crate::keybind::MenuAction::from_name(words.next()?)?),
             "key" => {
                 let keycode = words.next()?.parse().ok()?;
@@ -525,6 +536,9 @@ pub struct Dump {
     pub failed_rows: Vec<u16>,
     /// How many lines the focused pane's view is scrolled back.
     pub view_offset: usize,
+    /// And how many device pixels higher than that line it is drawn
+    /// (smooth scrolling, between lines).
+    pub view_shift: i32,
     /// The focused pane's selected text.
     pub selection: Option<String>,
     /// The focused pane's find bar, while it is open.
@@ -773,6 +787,11 @@ mod tests {
             ("click 0 3 cmd", None),
             ("click 0", None),
             ("scroll -4", Some(Control::Scroll(-4))),
+            ("scroll-px -2", Some(Control::ScrollPx(Some(-2)))),
+            ("scroll-px 2.5", None),
+            ("scroll-px end", Some(Control::ScrollPx(None))),
+            ("scroll-px x", None),
+            ("scroll-px", None),
             ("scroll", None),
             ("menu select_output", Some(Control::Menu(crate::keybind::MenuAction::SelectOutput))),
             ("menu launch_missiles", None),

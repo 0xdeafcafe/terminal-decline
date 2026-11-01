@@ -1767,6 +1767,44 @@ fn smoke_jump_to_prompts_and_select_output() {
     assert_eq!(offset(&d[6]), 0, "{}", d[6]);
 }
 
+/// A trackpad scroll moves the view by its exact pixels: the first
+/// points back take a line and draw it part of a line higher
+/// (`view_shift`), more points take that down; once the finger lifts, the
+/// view eases to the nearest whole line.
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_trackpad_scrolls_by_pixels_then_settles_on_a_line() {
+    if !have_metal() {
+        return;
+    }
+    let dir = TempDir::new("smoothscroll");
+    let wait = "i=0; while [ \"$(stty size)\" != '20 80' ] && [ $i -lt 100 ]; do sleep 0.05; i=$((i+1)); done; ";
+    let dump = osc("dump");
+    let script = format!(
+        "{resize}{wait}i=0; while [ $i -lt 100 ]; do echo \"line $i\"; i=$((i+1)); done; \
+         {dump}{px}{dump}{px}{dump}{end}sleep 1; {dump}{quit}sleep 20",
+        resize = osc("resize 80 20"),
+        px = osc("scroll-px 3"),
+        end = osc("scroll-px end"),
+        quit = osc("quit"),
+    );
+    let (status, _) = decline(&dir, &script, true);
+    assert!(status.success(), "{status}");
+    let d = dumps(&dir);
+    assert_eq!(d.len(), 4, "{d:?}");
+    let at = |x: &Value| (num(x, "view_offset") as i64, num(x, "view_shift") as i64);
+    let (scale, cell) = (num(&d[0], "scale"), num(&d[0], "cell_height") as i64);
+    let step = (3.0 * scale) as i64;
+    assert!(2 * step < cell, "{step} px a step, cells {cell}");
+    assert_eq!(at(&d[0]), (0, 0), "{}", d[0]);
+    assert_eq!(at(&d[1]), (1, cell - step), "{}", d[1]);
+    assert_eq!(at(&d[2]), (1, cell - 2 * step), "{}", d[2]);
+    // 2 steps back: the nearer line is following output unless that's
+    // over half a line.
+    let nearest = if 2 * step > cell / 2 { 1 } else { 0 };
+    assert_eq!(at(&d[3]), (nearest, 0), "{}", d[3]);
+}
+
 /// Option-click on the shell's command line (after the OSC 133 B mark)
 /// types the arrow keys that move the shell's cursor to the cell, as the
 /// program asked for them (application cursor mode: `ESC O`); on the

@@ -4,6 +4,7 @@
 //! wheel, and any scrolling a program takes (its mouse reports, arrow keys
 //! on the alternate screen), go by whole lines.
 
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 /// A scroll event's phase, or its momentum phase (`NSEventPhase`).
@@ -56,6 +57,116 @@ pub const SETTLE_AFTER: Duration = Duration::from_millis(60);
 /// counts as still moving the view.
 pub const RESTING: Duration = Duration::from_secs(1);
 
+/// Shortest and longest the trackpad's movement is shown behind the
+/// display's refresh (see [`Resample`]), and the time between events
+/// assumed until two have come.
+const RESAMPLE_MIN: f64 = 0.004;
+const RESAMPLE_MAX: f64 = 0.017;
+const EVENT_GAP: f64 = 1.0 / 120.0;
+/// Events further apart than this aren't one stream: the first after a
+/// pause is given a typical gap's time.
+const EVENT_GAP_MAX: f64 = 0.05;
+
+/// One trackpad event's pixels, spread evenly over `start..end` (host
+/// seconds): the time since the event before it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Span {
+    start: f64,
+    end: f64,
+    px: f64,
+    /// The part of it already shown, 0 to 1.
+    shown: f64,
+}
+
+/// A trackpad's events, read back at the display's refreshes.
+///
+/// Events come at the trackpad's rate (about 120 Hz) and frames at the
+/// display's, out of step: a frame took one, two or three events' pixels
+/// as their times fell, so a steady scroll moved 16, 32, then 48 px.
+/// Here each event's pixels are spread over the time since the one
+/// before it, and a frame shows the movement up to its refresh less about
+/// one event's gap (by then the event spanning that time has mostly
+/// come): even steps, for that much delay.
+#[derive(Clone, Debug, Default)]
+struct Resample {
+    spans: VecDeque<Span>,
+    /// The last event's time, and the time between events (smoothed).
+    last: Option<f64>,
+    gap: f64,
+}
+
+impl Resample {
+    fn gap(&self) -> f64 {
+        if self.gap > 0.0 { self.gap } else { EVENT_GAP }
+    }
+
+    fn push(&mut self, t: f64, px: f64) {
+        let gap = self.gap();
+        let start = match self.last {
+            // The same time again (or out of order): the last event's.
+            Some(last) if t <= last => {
+                match self.spans.back_mut() {
+                    // All of it in what's left to show (under 1: a span
+                    // shown to its end is gone).
+                    Some(s) => s.px += px / (1.0 - s.shown),
+                    None => self.spans.push_back(Span {
+                        start: last - gap,
+                        end: last,
+                        px,
+                        shown: 0.0,
+                    }),
+                }
+                return;
+            }
+            Some(last) if t - last < EVENT_GAP_MAX => {
+                self.gap = gap * 0.75 + (t - last) * 0.25;
+                last
+            }
+            _ => t - gap,
+        };
+        self.spans.push_back(Span {
+            start,
+            end: t,
+            px,
+            shown: 0.0,
+        });
+        self.last = Some(t);
+    }
+
+    /// How far behind the refresh the movement is shown.
+    fn delay(&self) -> f64 {
+        self.gap().clamp(RESAMPLE_MIN, RESAMPLE_MAX)
+    }
+
+    /// The pixels not shown yet of the movement up to `at` (a refresh's
+    /// time, host seconds) less the delay.
+    fn due(&mut self, at: f64) -> f64 {
+        let to = at - self.delay();
+        let mut px = 0.0;
+        while let Some(s) = self.spans.front_mut() {
+            let shown = if to >= s.end {
+                1.0
+            } else {
+                ((to - s.start) / (s.end - s.start)).max(0.0)
+            };
+            // Never back (a draw out of a tick may have read further on).
+            if shown > s.shown {
+                px += s.px * (shown - s.shown);
+                s.shown = shown;
+            }
+            if to < s.end {
+                break;
+            }
+            self.spans.pop_front();
+        }
+        px
+    }
+
+    fn pending(&self) -> bool {
+        !self.spans.is_empty()
+    }
+}
+
 /// The view's position under a trackpad: whole lines in the terminal
 /// (its view offset), and between them `shift`, the device pixels the
 /// content is drawn higher than the whole-line view shows it, with the
@@ -73,6 +184,8 @@ pub struct Smooth {
     /// Lines not yet whole: from a wheel, or pixels while the view moves
     /// by lines only (a program's mouse reports, arrow keys).
     carry: f64,
+    /// The trackpad's movement still to show, at the coming refreshes.
+    resample: Resample,
 }
 
 impl Smooth {
@@ -114,11 +227,32 @@ impl Smooth {
     /// The gesture, or its momentum, may still move the view: the display
     /// link keeps ticking for it, and the shift isn't settled yet.
     pub fn active(&self, now: Instant) -> bool {
+        if self.resample.pending() {
+            return true;
+        }
         let since = self.last.map(|l| now.saturating_duration_since(l));
         // A finger resting without moving for a while doesn't keep the
         // display link ticking: its next move starts it again.
         let held = (self.touching || self.momentum) && since.is_some_and(|s| s < RESTING);
         held || since.is_some_and(|s| s < SETTLE_AFTER)
+    }
+
+    /// A trackpad event's `px` device pixels at `t` (its timestamp, host
+    /// seconds): shown over the coming refreshes, [`due`](Self::due).
+    pub fn queue(&mut self, t: f64, px: f64) {
+        self.resample.push(t, px);
+    }
+
+    /// The trackpad's pixels to move the view by at the refresh at `at`
+    /// (host seconds): even steps, however its events fell between
+    /// refreshes (see [`Resample`]).
+    pub fn due(&mut self, at: f64) -> f64 {
+        self.resample.due(at)
+    }
+
+    /// Trackpad movement is queued, not all shown yet.
+    pub fn queued(&self) -> bool {
+        self.resample.pending()
     }
 
     /// Move the view by `px` device pixels (positive: back into history)
@@ -164,7 +298,8 @@ impl Smooth {
 
     /// End any gesture and drop to the nearest whole line at once: the
     /// lines to scroll the view by (0 or -1). For a click (cells are hit
-    /// at whole lines), a wheel, or a program that takes the scrolling.
+    /// at whole lines), a wheel, or a program that takes the scrolling;
+    /// trackpad movement not shown yet is dropped (a click stops it).
     pub fn snap(&mut self, cell: f64) -> isize {
         let lines = if self.shift >= cell / 2.0 { -1 } else { 0 };
         *self = Smooth {
@@ -327,6 +462,81 @@ mod tests {
         assert_eq!(s.whole(1.5), 2);
         assert_eq!(s.whole(-0.25), 0);
         assert_eq!(s.whole(-0.75), -1);
+    }
+
+    /// Trackpad events every 8.3 ms (jittered by up to ±2 ms), 16 px
+    /// each, read at 60 Hz refreshes: the events falling between two
+    /// refreshes go 1, 2, 3, but each refresh moves the view by close to
+    /// 32 px, and every pixel is shown in the end.
+    #[test]
+    fn refreshes_move_by_even_steps_however_events_fall() {
+        let mut s = Smooth::default();
+        let (gap, refresh) = (1.0 / 120.0, 1.0 / 60.0);
+        // A fixed pseudo-random jitter.
+        let jitter = |i: u32| ((i.wrapping_mul(2654435761) >> 16) % 4001) as f64 / 1e6 - 0.002;
+        let events: Vec<f64> = (0..120).map(|i| 10.0 + i as f64 * gap + jitter(i)).collect();
+        let mut next = 0;
+        let mut counts = Vec::new();
+        let mut steps = Vec::new();
+        let mut total = 0.0;
+        for k in 0..80 {
+            let at = 10.0 + 0.0005 + k as f64 * refresh;
+            let before = next;
+            while next < events.len() && events[next] <= at {
+                s.queue(events[next], 16.0);
+                next += 1;
+            }
+            counts.push(next - before);
+            let px = s.due(at);
+            total += px;
+            steps.push(px);
+        }
+        assert!(counts.contains(&1) && counts.contains(&3), "events fall unevenly: {counts:?}");
+        // Past the first refreshes and before the last events.
+        for (k, px) in steps.iter().enumerate().take(55).skip(3) {
+            assert!((px - 32.0).abs() < 8.0, "refresh {k}: {px} px ({steps:?})");
+        }
+        assert!((total - 120.0 * 16.0).abs() < 1e-6, "all shown: {total}");
+        assert!(!s.queued());
+    }
+
+    #[test]
+    fn the_first_event_shows_at_the_next_refresh() {
+        let mut s = Smooth::default();
+        s.queue(5.0, 10.0);
+        assert!(s.queued() && s.active(Instant::now()));
+        let first = s.due(5.002);
+        assert!(first > 0.0 && first < 10.0, "{first}");
+        assert!((first + s.due(5.03) - 10.0).abs() < 1e-9);
+        assert!(!s.queued());
+    }
+
+    #[test]
+    fn events_at_one_time_add_up_and_nothing_goes_back() {
+        let mut s = Smooth::default();
+        s.queue(5.0, 10.0);
+        let a = s.due(5.0);
+        // Another event with the same timestamp, half shown already.
+        s.queue(5.0, 6.0);
+        // An earlier refresh moves nothing back.
+        assert_eq!(s.due(4.99), 0.0);
+        let b = s.due(5.1);
+        assert!((a + b - 16.0).abs() < 1e-9, "{a} + {b}");
+        // Downwards too.
+        s.queue(6.0, -8.0);
+        s.queue(6.008, -8.0);
+        let c = s.due(6.01) + s.due(6.0) + s.due(6.1);
+        assert!((c + 16.0).abs() < 1e-9, "{c}");
+    }
+
+    #[test]
+    fn a_snap_drops_movement_not_shown() {
+        let mut s = Smooth::default();
+        s.queue(5.0, 10.0);
+        s.queue(5.008, 10.0);
+        s.snap(CELL);
+        assert!(!s.queued());
+        assert_eq!(s.due(6.0), 0.0);
     }
 
     #[test]

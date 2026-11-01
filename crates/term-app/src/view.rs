@@ -113,6 +113,9 @@ pub(crate) struct Win {
     /// Last key, paste, scroll or click in any pane: typing gets the full
     /// refresh rate.
     pub(crate) last_input: Instant,
+    /// The display refresh a display-link tick draws for (its timestamp,
+    /// host seconds), until that tick draws.
+    refresh_at: Option<f64>,
     /// Only with `DECLINE_TEST_DUMP` set: see [`crate::control`].
     test: Option<TestControl>,
     /// The title bar's height, plus the tab bar's while one shows (points),
@@ -464,7 +467,10 @@ define_class!(
         }
 
         #[unsafe(method(tick:))]
-        fn tick(&self, _link: &CADisplayLink) {
+        fn tick(&self, link: &CADisplayLink) {
+            // Trackpad movement is shown as of this refresh.
+            let at = link.timestamp();
+            self.with_state(|st| st.win.refresh_at = Some(at));
             self.draw();
         }
 
@@ -894,6 +900,7 @@ impl WindowView {
                 frames: 0,
                 rate: 0,
                 last_input: Instant::now(),
+                refresh_at: None,
                 test,
                 top_inset: titlebar,
                 hidden: 0,
@@ -1366,11 +1373,20 @@ impl WindowView {
         let mut ticks = Vec::with_capacity(terms.len());
         let cell = win.renderer.metrics().cell_height as f64;
         let tick_start = Instant::now();
+        let refresh_at = win.refresh_at.take().unwrap_or_else(latency::now);
         // A trackpad gesture moves a pane's view, or its shift between
         // lines eases to a whole line (see [`crate::scroll`]).
         let mut scrolling = false;
         for (id, term) in &terms {
             let p = panes.get_mut(id).expect("shown pane");
+            let queued = p.scroll.queued();
+            let px = p.scroll.due(refresh_at);
+            if px != 0.0 {
+                move_view(p, &mut crate::session::lock(term).state, px, cell);
+            }
+            // All shown: drawn once more even if the last of it moved
+            // nothing whole (a dump waits for this frame).
+            p.moved |= queued && !p.scroll.queued();
             if let Some(lines) = p.scroll.settle(tick_start, cell) {
                 if lines != 0 {
                     crate::session::lock(term).state.scroll_view(lines);
@@ -1781,8 +1797,12 @@ impl WindowView {
         }
         win.frames += 1;
         let mut poll_dump = false;
-        // A dump shows every glyph: it waits for the frame that has them.
-        let complete = !shown.iter().filter_map(|id| panes.get(id)).any(|p| p.render.glyphs_deferred());
+        // A dump shows every glyph, and all of a trackpad's movement: it
+        // waits for the frame that has them.
+        let complete = !shown
+            .iter()
+            .filter_map(|id| panes.get(id))
+            .any(|p| p.render.glyphs_deferred() || p.scroll.queued());
         if let Some(test) = &mut win.test
             && test.dump == DumpState::Requested
             && complete
@@ -3007,6 +3027,21 @@ pub(crate) fn rows_under_find_bar(win: &Win, p: &Pane, titlebar: f64) -> usize {
     let grid_top = pane_padding(&win.config, titlebar, win.scale, p.rect).top as f64;
     let cell = win.renderer.metrics().cell_height.max(1) as f64;
     ((bottom - grid_top) / cell).ceil().max(0.0) as usize
+}
+
+/// Move `p`'s view (of its terminal `t`) by a trackpad's `px` device
+/// pixels: whole lines scroll the terminal's view, the rest is the shift.
+fn move_view(p: &mut Pane, t: &mut term_core::Terminal, px: f64, cell: f64) {
+    let before = (t.display_offset(), p.scroll.shift_px(cell));
+    let lines = p.scroll.pixels(px, cell, before.0);
+    t.scroll_view(lines);
+    let offset = t.display_offset();
+    p.scroll.landed((before.0 as isize + lines).max(0) as usize, offset);
+    // A new whole-line view is built; a new shift only drawn again.
+    if offset != before.0 {
+        p.session.mark_dirty();
+    }
+    p.moved |= p.scroll.shift_px(cell) != before.1;
 }
 
 /// How `p`'s content is drawn when its frame has the row below the view

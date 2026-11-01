@@ -325,7 +325,13 @@ Oct 2026, 1.90 → 2.16 MB) and no measurable parse speed.
   only draws the last frame again (`PaneFrame::Moved`); a new whole line
   builds it, the rows that only moved reused. The display link ticks
   through the gesture and its momentum (`WindowTick::scrolling`, not
-  idle then), and once both end the shift eases to the nearest whole
+  idle then). Its events come at the trackpad's rate, out of step with
+  the display, so a frame took one, two or three events' pixels as their
+  times fell (a steady scroll moving 16, 48, 32 px a frame, on and off as
+  the two drift): each event's pixels are spread over the time since the
+  one before, and each tick moves the view by the movement up to its
+  refresh (the display link's timestamp) less about one event's gap,
+  4–17 ms (`scroll::Resample`). Once the gesture and its momentum end the shift eases to the nearest whole
   line over a few ticks; a click snaps to it at once (cells are hit at
   whole lines). A mouse wheel moves whole lines, `scroll_multiplier`
   (default 1) times its own count; the program's mouse reports and the

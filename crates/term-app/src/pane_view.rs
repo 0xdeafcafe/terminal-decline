@@ -1656,6 +1656,13 @@ impl PaneView {
             return;
         }
         let changed = self.with(|win, p| {
+            if input.precise {
+                // Shown at the coming refreshes, in even steps (the tick
+                // moves the view: crate::view::move_view).
+                p.scroll.event(&input, now);
+                p.scroll.queue(input.t0, input.dy * win.scale);
+                return false;
+            }
             let cell = win.renderer.metrics().cell_height as f64;
             let locking = latency::get().map(|_| latency::now());
             let mut t = p.session.lock_term();
@@ -1663,18 +1670,10 @@ impl PaneView {
                 lat.lock_waited(latency::now() - at);
             }
             let before = (t.state.display_offset(), p.scroll.shift_px(cell));
-            if input.precise {
-                p.scroll.event(&input, now);
-                let lines = p.scroll.pixels(input.dy * win.scale, cell, before.0);
-                t.state.scroll_view(lines);
-                let offset = t.state.display_offset();
-                p.scroll.landed((before.0 as isize + lines).max(0) as usize, offset);
-            } else {
-                // A wheel: whole lines, from the nearest one.
-                let snap = p.scroll.snap(cell);
-                let lines = p.scroll.whole(input.dy * win.config.scroll_multiplier);
-                t.state.scroll_view(snap + lines);
-            }
+            // A wheel: whole lines, from the nearest one.
+            let snap = p.scroll.snap(cell);
+            let lines = p.scroll.whole(input.dy * win.config.scroll_multiplier);
+            t.state.scroll_view(snap + lines);
             let after = (t.state.display_offset(), p.scroll.shift_px(cell));
             // A new whole-line view is built; a new shift only drawn again.
             if after.0 != before.0 {

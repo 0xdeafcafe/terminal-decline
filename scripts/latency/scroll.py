@@ -88,6 +88,15 @@ def summarise(recs, start, end):
         if off is not None:
             pos.append(off * ch - f.get("shift_px", 0))
     px = [abs(b - a) for a, b in zip(pos, pos[1:])]
+    # Judder: a step unlike the steps either side of it (a steady scroll
+    # moving 16, 48, 32 px in turn), where it moves at all.
+    uneven = sum(
+        1
+        for a, b, c in zip(px, px[1:], px[2:])
+        if (a + c) / 2 >= 4 and abs(b - (a + c) / 2) > 0.25 * (a + c) / 2
+    )
+    # The main thread's time for a frame: the tick until its commit.
+    main_ms = [(f["commit"] - f["frame_start"]) * 1000 for f in frames if f.get("commit")]
     first = frames[:5]
     return {
         "frames": len(frames),
@@ -106,6 +115,8 @@ def summarise(recs, start, end):
         "copied_rows_max": max((f["copied"] for f in frames), default=0),
         "lines_per_frame": run.stats(moved),
         "px_per_frame": run.stats(px),
+        "uneven_steps": uneven,
+        "main_ms": run.stats(main_ms),
         "cell_h": ch,
         "shift_px_max": max((abs(f.get("shift_px", 0)) for f in frames), default=0),
         "deferred_frames": sum(1 for f in frames if f["deferred"]),
@@ -128,7 +139,8 @@ def show(name, s):
     print(f"  frame gaps     {f(s['gap_ms'])} ms ({s['until']}), {s['long_gaps']} over 1.5x {s['refresh_ms']:.2f} ms")
     print(f"  event → {s['until']:8} {f(s['event_to_glass_ms'])} ms")
     print(f"  build          {f(s['build_ms'])} ms (snapshot {f(s['snapshot_ms'])})")
-    print(f"  px/frame       {f(s['px_per_frame'])} (cell {s['cell_h']} px)")
+    print(f"  main thread    {f(s['main_ms'])} ms a frame (tick to commit)")
+    print(f"  px/frame       {f(s['px_per_frame'])} (cell {s['cell_h']} px), {s['uneven_steps']} steps unlike their neighbours")
     print(f"  lines/frame    {f(s['lines_per_frame'])}, sub-line shift max {s['shift_px_max']} px, rows copied max {s['copied_rows_max']}")
     print(f"  glyphs deferred in {s['deferred_frames']} frames; glyph uploads waited {f(s['upload_wait_ms'])} ms; idle ticks {s['idle_ticks']}")
     print(f"  lock waits     {f(s['lock_wait_ms'])} ms (a scroll event, for the terminal)")

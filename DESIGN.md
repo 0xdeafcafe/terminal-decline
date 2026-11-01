@@ -1219,6 +1219,30 @@ AppKit or Foundation class needs its header added to the crate's
 features in its Cargo.toml (the feature is named after the header file
 in the objc2 crate's `src/generated/`); until then the import fails.
 
+The second split moved completion (term-complete), the updater
+(term-update), the settings import (term-import) and the Dock pin
+commands (term-pins) out of term-app. Builds after an edit, before
+(main at 579c155) and after (main at c80bd95, which includes the objc2
+trim); same method as the first table (both trees warmed first, each
+edit reverted and rebuilt before the next), medians of 3 taking turns,
+load 4–25 (3.8 at the start, 20.7 at the end).
+
+| build after an edit | before | after |
+|---|---|---|
+| bundle, editing view.rs | 45.8 s | 34.0 s |
+| bundle, editing the updater's git logic (`source.rs`) | 45.3 s | 35.4 s |
+| bundle, editing completion (`lex.rs`) | 49.4 s | 34.6 s |
+| `nextest -p terminal-decline --no-run`, editing view.rs | 4.0 s | 3.4 s |
+| `nextest --workspace --no-run`, editing view.rs | 4.8 s | 4.2 s |
+| `cargo build --workspace` (debug), editing view.rs | 1.6 s | 1.4 s |
+
+A release bundle after an edit is about 11–15 s faster, because the
+release term-app compile (one codegen unit) has less code in it. Editing
+the updater or completion costs about the same as editing the app
+itself: term-app depends on them, so it is compiled again either way,
+and the dylib's link is the same. Debug builds and test builds after an
+edit were already a few seconds and stay so.
+
 ## Reviews
 
 Design reviewed by Opus (xhigh effort); code reviewed by Astra (OpenAI) and

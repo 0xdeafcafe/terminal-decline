@@ -308,12 +308,17 @@ fn screenshots_draw_the_screen() {
 #[test]
 fn the_socket_is_the_users_alone() {
     let env = Env::new(CONFIG);
-    env.ok(&["hello"]);
+    // A running session keeps the server, and so its socket, there:
+    // with nothing running it leaves once idle (1.5 s here) and takes
+    // the socket with it, which a busy machine can let happen before
+    // the socket is looked at.
+    env.ok(&["spawn", "--name", "keep", "--", "/bin/sleep", "60"]);
     let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode(&env.dir()), 0o700);
     assert_eq!(mode(&env.dir().join("ctl.sock")), 0o600);
     let socket = env.ok(&["socket"]);
     assert_eq!(socket["socket"], env.dir().join("ctl.sock").to_string_lossy().as_ref());
+    env.ok(&["kill", "keep"]);
 
     let open = Env::new(CONFIG);
     std::fs::create_dir_all(open.dir()).unwrap();

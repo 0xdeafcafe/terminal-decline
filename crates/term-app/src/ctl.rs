@@ -7,12 +7,14 @@
 //! - `client`: the command line;
 //! - `server`: the socket, who may connect, the sessions;
 //! - `headless`: a session without a view;
+//! - `idle`: the limit on how long a session may go unasked about;
 //! - `keys`, `screen`, `shot`: keys through the app's encoding, the
 //!   screen read back, screenshots on the GPU;
 //! - [`window`]: sessions shown in a window of the app (`spawn --window`).
 
 mod client;
 mod headless;
+mod idle;
 mod keys;
 pub mod protocol;
 mod screen;

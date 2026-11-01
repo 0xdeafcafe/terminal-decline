@@ -106,6 +106,9 @@ pub struct Spawn {
     /// Show it in a window of the app, in the background; closing the
     /// window kills the session. Refused by a headless server.
     pub window: bool,
+    /// Kill the session once no request has named it for this long, in
+    /// ms; 0 never. Unset, the config's `agent_api_idle_timeout`.
+    pub idle_timeout_ms: Option<u64>,
     pub font: Option<String>,
     pub font_size: Option<f64>,
     pub theme: Option<String>,
@@ -131,6 +134,7 @@ impl Default for Spawn {
             term: None,
             shell: false,
             window: false,
+            idle_timeout_ms: None,
             font: None,
             font_size: None,
             theme: None,

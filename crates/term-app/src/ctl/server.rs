@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use super::headless::{Headless, Look};
+use super::idle::{self, Timer};
 use super::protocol::{self, Request};
 
 /// Who serves.
@@ -27,6 +28,28 @@ pub enum Kind {
 /// How long a request line may be.
 const MAX_LINE: usize = 16 << 20;
 
+/// A session a request is about: while it is held the session isn't idle,
+/// and when it is dropped the clock starts again.
+struct Asked<'a> {
+    h: Arc<Headless>,
+    server: &'a Server,
+}
+
+impl std::ops::Deref for Asked<'_> {
+    type Target = Headless;
+    fn deref(&self) -> &Headless {
+        &self.h
+    }
+}
+
+impl Drop for Asked<'_> {
+    fn drop(&mut self) {
+        self.h.idle().end();
+        // The deadline moved: the timer may be waiting for none.
+        self.server.reaper.rearm();
+    }
+}
+
 pub struct Server {
     kind: Kind,
     dir: PathBuf,
@@ -35,6 +58,8 @@ pub struct Server {
     next: AtomicU64,
     connections: AtomicUsize,
     last_request: Mutex<Instant>,
+    /// Armed for the soonest session's idle deadline.
+    reaper: Timer,
     /// Held while serving: one server per directory.
     _lock: File,
 }
@@ -70,7 +95,7 @@ pub fn bind(dir: &Path) -> io::Result<Option<(UnixListener, File)>> {
 
 impl Server {
     pub fn new(kind: Kind, dir: &Path, source: crate::config::Source, lock_file: File) -> Arc<Server> {
-        Arc::new(Server {
+        let server = Arc::new(Server {
             kind,
             dir: dir.to_path_buf(),
             source,
@@ -78,8 +103,43 @@ impl Server {
             next: AtomicU64::new(1),
             connections: AtomicUsize::new(0),
             last_request: Mutex::new(Instant::now()),
+            reaper: Timer::default(),
             _lock: lock_file,
-        })
+        });
+        let reaper = server.clone();
+        let _ = std::thread::Builder::new()
+            .name("ctl-reaper".into())
+            .spawn(move || reaper.reap_when_due());
+        server
+    }
+
+    /// Kill the sessions that have gone unasked about for their timeout
+    /// (docs/design/agent-api.md §3.2). One timer, armed for the soonest
+    /// deadline: it runs when that passes, and when a session is added or
+    /// a request about one has finished (which can change the soonest).
+    fn reap_when_due(&self) {
+        loop {
+            let seen = self.reaper.generation();
+            let (due, next) = {
+                let mut sessions = lock(&self.sessions);
+                let (names, next) = idle::split_due(sessions.iter().map(|(n, s)| (n.clone(), s.deadline())), Instant::now());
+                let due: Vec<_> = names.into_iter().filter_map(|n| sessions.remove(&n)).collect();
+                (due, next)
+            };
+            for h in due {
+                let idle = h.idle().last().elapsed();
+                let exit = h.kill(None);
+                eprintln!(
+                    "terminal-decline ctl: session {:?} (pid {}) killed after {} s without a request (idle timeout {} s); exit {}",
+                    h.name,
+                    h.summary()["pid"],
+                    idle.as_secs(),
+                    h.idle().timeout().map_or(0, |t| t.as_secs()),
+                    exit.map_or_else(|e| format!("unknown: {e}"), |v| v["exit"].to_string()),
+                );
+            }
+            self.reaper.sleep(seen, next);
+        }
     }
 
     /// Accept connections until the listener fails.
@@ -148,11 +208,15 @@ impl Server {
         }
     }
 
-    fn session(&self, name: &str) -> Result<Arc<Headless>, String> {
-        lock(&self.sessions)
+    /// The session a request names. It counts as asked about now, and
+    /// until the returned [`Asked`] is dropped, however long that takes.
+    fn session(&self, name: &str) -> Result<Asked<'_>, String> {
+        let h = lock(&self.sessions)
             .get(name)
             .cloned()
-            .ok_or_else(|| format!("no session {name:?}"))
+            .ok_or_else(|| format!("no session {name:?}"))?;
+        h.idle().begin();
+        Ok(Asked { h, server: self })
     }
 
     /// Answer one request.
@@ -215,6 +279,8 @@ impl Server {
                     return Err(format!("a session {name:?} exists already (kill it first)"));
                 }
                 sessions.insert(name.clone(), h);
+                drop(sessions);
+                self.reaper.rearm();
                 Ok(json!({ "ok": true, "session": name, "pid": pid, "spawn_ms": took.as_secs_f64() * 1000.0 }))
             }
             Request::Send { session, actions } => self.session(&session)?.send(&actions),
@@ -226,7 +292,7 @@ impl Server {
                     return Err(format!("{path}: give an absolute path"));
                 }
                 let h = self.session(&session)?;
-                let (img, times) = super::shot::capture(&h)?;
+                let (img, times) = super::shot::capture(&h.h)?;
                 let t0 = Instant::now();
                 super::shot::write_png(&img, &path)?;
                 let png_ms = t0.elapsed().as_secs_f64() * 1000.0;
@@ -253,7 +319,11 @@ impl Server {
                 self.session(&session)?.record(path.as_deref(), input)
             }
             Request::List => {
-                let list: Vec<Value> = lock(&self.sessions).values().map(|s| s.summary()).collect();
+                let all: Vec<_> = lock(&self.sessions).values().cloned().collect();
+                for s in &all {
+                    s.idle().touch();
+                }
+                let list: Vec<Value> = all.iter().map(|s| s.summary()).collect();
                 Ok(json!({ "ok": true, "sessions": list, "server": self.process_stats() }))
             }
             Request::Kill { session, signal } => {

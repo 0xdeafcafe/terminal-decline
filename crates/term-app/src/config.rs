@@ -409,6 +409,11 @@ pub struct Config {
     /// ctl` and its socket (docs/design/agent-api.md). Only the app's own
     /// process serves; pins never do.
     pub agent_api: bool,
+    /// Minutes a `ctl` session may go without a request before the server
+    /// kills it (a window session the user has typed into is exempt); 0
+    /// never. A `spawn --idle-timeout` overrides it per session.
+    #[serde(deserialize_with = "agent_api_idle_timeout")]
+    pub agent_api_idle_timeout: u32,
     /// Set in a pin's config: the app bundle it belongs to.
     #[allow(dead_code)]
     pub pin_app: Option<String>,
@@ -467,6 +472,7 @@ impl Default for Config {
             update: UpdateMode::Notify,
             editor: None,
             agent_api: true,
+            agent_api_idle_timeout: 30,
             pin_app: None,
         }
     }
@@ -511,6 +517,19 @@ fn image_memory<'de, D: Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
         Err(serde::de::Error::custom(format!(
             "{v} is not a number of MB from 0 to {IMAGE_MEMORY_MAX} (0 is the default)"
         )))
+    }
+}
+
+/// The longest `agent_api_idle_timeout`, in minutes: a week.
+pub const AGENT_API_IDLE_TIMEOUT_MAX: u32 = 10_080;
+
+fn agent_api_idle_timeout<'de, D: Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
+    let v = i64::deserialize(d)?;
+    match u32::try_from(v) {
+        Ok(v) if v <= AGENT_API_IDLE_TIMEOUT_MAX => Ok(v),
+        _ => Err(serde::de::Error::custom(format!(
+            "{v} is not a number of minutes from 0 to {AGENT_API_IDLE_TIMEOUT_MAX} (0 is never)"
+        ))),
     }
 }
 
@@ -1779,6 +1798,23 @@ mod tests {
                 "title"
             ]
         );
+    }
+
+    #[test]
+    fn agent_api_idle_timeout_defaults_reads_and_reports_bad_values() {
+        let (c, errors) = parse("");
+        assert!(errors.is_empty() && c.agent_api_idle_timeout == 30, "{errors:?}");
+        let (c, errors) = parse("agent_api_idle_timeout = 0");
+        assert!(errors.is_empty() && c.agent_api_idle_timeout == 0, "{errors:?}");
+        for bad in [
+            "agent_api_idle_timeout = -1",
+            "agent_api_idle_timeout = 10081",
+            "agent_api_idle_timeout = 'x'",
+        ] {
+            let (c, errors) = parse(bad);
+            assert_eq!(c.agent_api_idle_timeout, 30, "{bad}");
+            assert!(errors[0].starts_with("config: agent_api_idle_timeout: "), "{errors:?}");
+        }
     }
 
     #[test]

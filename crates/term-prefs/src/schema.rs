@@ -575,6 +575,13 @@ pub const SETTINGS: &[Setting] = &[
         Editor::Toggle,
         "Let your own programs drive terminals with terminal-decline ctl (the app only, never pins)",
     ),
+    setting(
+        "agent_api_idle_timeout",
+        "Agent API idle timeout",
+        Advanced,
+        integer(0.0, 10_080.0, 5.0),
+        "Minutes a ctl session may go without a request before it is killed; 0 never",
+    ),
     Setting {
         hidden: true,
         ..setting(
@@ -735,6 +742,7 @@ mod tests {
                 "update",
                 "editor",
                 "agent_api",
+                "agent_api_idle_timeout",
                 "pin_app",
             ]
         );

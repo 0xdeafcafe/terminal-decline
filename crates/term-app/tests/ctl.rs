@@ -442,3 +442,51 @@ fn a_headless_server_refuses_windows() {
     assert!(text.contains("--window needs the app"), "{text}");
     assert_eq!(env.ok(&["list"])["sessions"].as_array().unwrap().len(), 0);
 }
+
+/// A session nobody has made a request about for its idle timeout is
+/// killed and the server logs it; any request naming a session keeps it,
+/// and `--idle-timeout 0` never kills. (A socket directory of the test's
+/// own: the real servers are never met.)
+#[test]
+fn idle_sessions_are_killed_and_asked_about_ones_are_kept() {
+    let env = Env::new(CONFIG);
+    env.ok(&["spawn", "--name", "idle", "--idle-timeout", "1s", "--", "/bin/sh"]);
+    env.ok(&["spawn", "--name", "asked", "--idle-timeout", "2s", "--", "/bin/sh"]);
+    env.ok(&["spawn", "--name", "never", "--idle-timeout", "0", "--", "/bin/sh"]);
+    let (code, text) = env.run(&["spawn", "--name", "bad", "--idle-timeout", "soon", "--", "/bin/sh"]);
+    assert_eq!(code, 2, "{text}");
+
+    // `list` shows each session's last request and its timeout.
+    let list = env.ok(&["list"]);
+    let timeouts: Vec<_> = list["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| (s["session"].as_str().unwrap().to_string(), s["idle_timeout_ms"].as_u64()))
+        .collect();
+    assert_eq!(
+        timeouts,
+        [("asked".into(), Some(2000)), ("idle".into(), Some(1000)), ("never".into(), None)]
+    );
+    assert!(list["sessions"][0]["last_request_unix_ms"].as_u64().unwrap() > 0, "{list}");
+    let stats = env.ok(&["stats", "never"]);
+    assert_eq!(stats["idle_timeout_ms"], Value::Null, "{stats}");
+
+    // Ask about `asked` (not `idle`, and not through `list`, which asks
+    // about all of them) for longer than its timeout.
+    for _ in 0..5 {
+        std::thread::sleep(std::time::Duration::from_millis(700));
+        env.ok(&["stats", "asked"]);
+    }
+    let list = env.ok(&["list"]);
+    let names: Vec<_> = list["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["session"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["asked", "never"], "{list}");
+    let log = std::fs::read_to_string(env.dir().join("server.log")).unwrap_or_default();
+    assert!(log.contains("\"idle\"") && log.contains("killed after"), "the log: {log:?}");
+    assert!(!log.contains("\"asked\"") && !log.contains("\"never\""), "the log: {log:?}");
+}

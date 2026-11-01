@@ -345,6 +345,10 @@ pub struct Session {
     /// ([`Session::type_at_prompt`]); taken when it is sent or given up
     /// on, or when something else is typed first.
     at_prompt: Arc<Mutex<Option<Sender<Vec<u8>>>>>,
+    /// Set by [`Session::send`], which is what the user typing, pasting
+    /// or clicking into the pane goes through (the agent API's idle limit
+    /// leaves a window the user typed into alone).
+    typed: Arc<AtomicBool>,
     /// Its side of the decode queue, when images are on.
     images: Option<Arc<SessionImages>>,
 }
@@ -387,6 +391,7 @@ impl Session {
                     batches: Arc::default(),
                     stopped: Arc::default(),
                     at_prompt: Arc::default(),
+                    typed: Arc::default(),
                     images: None,
                 });
             }
@@ -511,6 +516,7 @@ impl Session {
             batches,
             stopped,
             at_prompt: Arc::default(),
+            typed: Arc::default(),
             images,
         })
     }
@@ -596,6 +602,11 @@ impl Session {
     /// A way to send bytes to the program from another thread, as
     /// [`Session::send`] does (without clearing a command waiting for
     /// the prompt): the agent API's windows use it.
+    /// Whether anything has been typed ([`Session::send`]) into the session.
+    pub fn typed(&self) -> Arc<AtomicBool> {
+        self.typed.clone()
+    }
+
     pub fn input(&self) -> Option<Sender<Vec<u8>>> {
         self.input.clone()
     }
@@ -624,6 +635,7 @@ impl Session {
     /// Send bytes to the program (in order, on the writer thread). A
     /// command waiting for the prompt isn't typed any more.
     pub fn send(&self, bytes: Vec<u8>) {
+        self.typed.store(true, Ordering::Release);
         *lock_slot(&self.at_prompt) = None;
         if let Some(tx) = &self.input {
             let _ = tx.send(bytes);

@@ -124,8 +124,10 @@ Each command prints a line of JSON and exits 0 when done (3 when
 keyboard protocol included (`send top --key ctrl+c --text q`). It talks
 to the running app, or starts a headless server with no Dock icon that
 leaves once idle, over a socket only your user can reach;
-`agent_api = false` turns it off. `terminal-decline ctl --help` lists
-the commands; [docs/design/agent-api.md](docs/design/agent-api.md) has
+`agent_api = false` turns it off. A session nothing has asked about for
+30 minutes is killed, so forgotten test sessions don't keep a server
+running (`spawn --idle-timeout`, or `agent_api_idle_timeout` in minutes
+in the config; 0 never). `terminal-decline ctl --help` lists the commands; [docs/design/agent-api.md](docs/design/agent-api.md) has
 the details.
 
 ## Features

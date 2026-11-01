@@ -68,6 +68,8 @@ pub struct Ready {
     pub input: Option<Sender<Vec<u8>>>,
     pub child: Option<Child>,
     pub pid: Option<i32>,
+    /// Set once the user has typed into the window.
+    pub typed: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// The window the app opened.
@@ -146,6 +148,7 @@ impl Adopt {
                 input: session.input(),
                 child: session.child(),
                 pid: session.pid(),
+                typed: session.typed(),
             });
         })
     }

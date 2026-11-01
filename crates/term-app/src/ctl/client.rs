@@ -32,6 +32,10 @@ with no window of its own, that exits when idle).
         --font FAMILY --font-size PT --theme NAME --appearance light|dark
         --scale N               pixels per point for screenshots (default 2)
         --scrollback LINES      --record FILE.cast
+        --idle-timeout TIME     kill it once no request has named it (or
+                                `list` been asked) for TIME: 90s, 30m, 2h,
+                                a bare number is minutes; 0 never (default
+                                30m, or agent_api_idle_timeout in config)
         --window                show it in a real window of the app, in the
                                 background (no focus taken, behind the other
                                 windows); closing it kills the session
@@ -206,6 +210,25 @@ fn start_server(dir: &Path, windows: bool) -> Result<std::process::Child, String
     cmd.spawn().map_err(|e| format!("starting the headless server: {e}"))
 }
 
+/// `--idle-timeout`'s value in ms: a number with `ms`, `s`, `m` or `h`;
+/// bare, minutes.
+fn duration_ms(s: &str) -> Result<u64, String> {
+    let bad = || format!("--idle-timeout {s:?}: a time such as 90s, 30m or 2h (a bare number is minutes), or 0");
+    let (digits, unit) = match s.find(|c: char| !c.is_ascii_digit()) {
+        Some(i) => s.split_at(i),
+        None => (s, "m"),
+    };
+    let n: u64 = digits.parse().map_err(|_| bad())?;
+    let per = match unit {
+        "ms" => 1,
+        "s" => 1000,
+        "m" => 60_000,
+        "h" => 3_600_000,
+        _ => return Err(bad()),
+    };
+    n.checked_mul(per).ok_or_else(bad)
+}
+
 fn size(s: &str) -> Result<(u16, u16), String> {
     let (c, r) = s.split_once(['x', 'X']).ok_or_else(|| format!("{s:?}: COLSxROWS, like 80x24"))?;
     let n = |v: &str| {
@@ -326,6 +349,7 @@ pub fn parse(args: &[String]) -> Result<Request, String> {
                     "--appearance" => s.appearance = Some(value(a, &mut rest)?),
                     "--scale" => s.scale = Some(value(a, &mut rest)?.parse().map_err(|_| "--scale: a number")?),
                     "--scrollback" => s.scrollback = Some(number(a, value(a, &mut rest)?)? as usize),
+                    "--idle-timeout" => s.idle_timeout_ms = Some(duration_ms(&value(a, &mut rest)?)?),
                     "--record" => s.record = Some(absolute(&value(a, &mut rest)?)),
                     other if !other.starts_with('-') => {
                         s.argv = std::iter::once(a).chain(rest.by_ref()).cloned().collect();
@@ -456,6 +480,23 @@ mod tests {
 
     fn p(a: &[&str]) -> Result<Request, String> {
         parse(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn idle_timeouts_are_times() {
+        assert_eq!(duration_ms("30"), Ok(1_800_000));
+        assert_eq!(duration_ms("30m"), Ok(1_800_000));
+        assert_eq!(duration_ms("90s"), Ok(90_000));
+        assert_eq!(duration_ms("1500ms"), Ok(1500));
+        assert_eq!(duration_ms("2h"), Ok(7_200_000));
+        assert_eq!(duration_ms("0"), Ok(0));
+        for bad in ["", "soon", "-1", "5d", "1.5m", "m"] {
+            assert!(duration_ms(bad).is_err(), "{bad}");
+        }
+        let Ok(Request::Spawn(s)) = p(&["spawn", "--idle-timeout", "1s", "--", "ls"]) else {
+            panic!()
+        };
+        assert_eq!(s.idle_timeout_ms, Some(1000));
     }
 
     #[test]

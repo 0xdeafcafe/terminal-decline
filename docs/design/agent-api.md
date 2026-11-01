@@ -137,6 +137,38 @@ is the session's fonts and scale, not the window's pixels).
   program, directory and environment are the request's, as for a
   headless session; `--shell` gets the shell integration.
 
+### 3.2 Idle limit
+
+A session nobody has made a request about for its **idle timeout** is
+killed: the server hangs up on the program, as `kill` does, drops the
+session and writes a line to its log (`server.log` in the socket
+directory for a headless server): the session, its pid, how long it went
+unasked about and its exit. This stops a test that spawned sessions and
+never killed them from leaving a server running for days (a headless
+server only leaves once no session runs).
+
+- **What counts as a request.** Any `ctl` command naming the session, and
+  `list` for every session. A request that waits (`wait-for`, a `send`
+  with `--sleep`) keeps the session busy until it ends, then the clock
+  starts again. `hello`, `socket` and requests about other sessions don't
+  count.
+- **The limit.** `spawn --idle-timeout TIME` (`90s`, `30m`, `2h`, a bare
+  number is minutes, `0` never). Unset: `agent_api_idle_timeout` in the
+  config, in minutes (default 30, `0` never; in Settings under Advanced).
+- **Windows** (`--window`) are the same, unless the user has typed into
+  the window (keys, paste or mouse reports through the pane's own input,
+  not the server's `send`): then it is theirs, with no timeout. A session
+  whose program has exited isn't timed; `kill` forgets it.
+- **`list` and `stats`** show each session's `last_request_unix_ms`,
+  `idle_ms`, `idle_timeout_ms` (null: never), `expires_in_ms` (null: no
+  deadline now) and `user_typed`.
+- **How it is timed.** One thread with a one-shot timer, armed for the
+  soonest session's deadline; no polling. It runs the check when that
+  deadline passes and is re-armed when a session is added or a request
+  about one ends (the soonest deadline may have changed). Requests only
+  push deadlines later, so they don't wake it: it wakes at the old
+  deadline, finds the session not due, and arms for the next.
+
 ## 4. Protocol and exit codes
 
 Requests are JSON objects with a `cmd` (`hello`, `spawn`, `send`,
@@ -172,6 +204,15 @@ so medians), headless server, release build, 30 Oct 2026:
   can't be given a window afterwards; `--window` is a choice at `spawn`.
 
 ## 7. Landed
+
+1 Nov 2026: the idle limit (§3.2). The `idle` module in `ctl` (deadlines,
+the one-shot timer), `Session::typed` for windows, the
+`agent_api_idle_timeout` setting and `spawn --idle-timeout`. Tests:
+deadlines, the due/next split, the timer's re-arming and the time syntax
+as unit tests; `idle_sessions_are_killed_and_asked_about_ones_are_kept`
+in `tests/ctl.rs` (1 s timeout, a socket directory of its own). The
+window case (typing exempts it) has no test of its own, as windows are
+smoke-test only.
 
 31 Oct 2026: `--window` (§3.1) and `wait-for --command` (§3). The
 `window` module in `ctl` (the app's way of opening a window, the hooks

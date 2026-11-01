@@ -14,6 +14,7 @@ use term_core::Term;
 use term_pty::{Child, Command, Size};
 use term_render::Theme;
 
+use super::idle::{self, Idle};
 use super::protocol::{Action, Mouse, Spawn, WaitFor};
 use super::window::{Observer, Opener, Ready, WindowControl, WindowRequest};
 use crate::config::Config;
@@ -285,6 +286,10 @@ pub struct Headless {
     integrated: bool,
     /// Shown in a window.
     window: bool,
+    /// When a request last named it, and how long it may go without one.
+    idle: Idle,
+    /// A window's: the user has typed into it.
+    typed: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 /// What `spawn` asks of the program, worked out from the request.
@@ -427,6 +432,7 @@ impl Headless {
     pub fn spawn(name: String, spawn: &Spawn, look: Look) -> Result<Headless, String> {
         let mut plan = Plan::new(spawn, &look)?;
         let config = &look.config;
+        let timeout = idle::timeout(spawn.idle_timeout_ms, config.agent_api_idle_timeout);
         // A program run directly gets exactly what it prints; a shell
         // (`--shell`) gets the integration, as a window's does.
         let integrated = plan.integration.is_some();
@@ -481,6 +487,8 @@ impl Headless {
             spawn_time,
             integrated,
             window: false,
+            idle: Idle::new(timeout, Instant::now()),
+            typed: None,
         })
     }
 
@@ -488,6 +496,7 @@ impl Headless {
     /// `look` is what the window is made with and what screenshots draw.
     pub fn spawn_window(name: String, spawn: &Spawn, look: Look, open: &Opener) -> Result<Headless, String> {
         let plan = Plan::new(spawn, &look)?;
+        let timeout = idle::timeout(spawn.idle_timeout_ms, look.config.agent_api_idle_timeout);
         let integrated = plan.integration.is_some();
         let watch = Watch::new(spawn, &plan)?;
         let opened = open(WindowRequest {
@@ -498,7 +507,13 @@ impl Headless {
             observer: watch.observer(),
         })?;
         let spawn_time = watch.started.elapsed();
-        let Ready { term, input, child, pid } = opened.ready;
+        let Ready {
+            term,
+            input,
+            child,
+            pid,
+            typed,
+        } = opened.ready;
         if let Some(c) = &child {
             let _ = watch.child.set(c.clone());
         }
@@ -519,6 +534,8 @@ impl Headless {
             spawn_time,
             integrated,
             window: true,
+            idle: Idle::new(timeout, Instant::now()),
+            typed: Some(typed),
         })
     }
 
@@ -528,6 +545,20 @@ impl Headless {
 
     pub fn running(&self) -> bool {
         lock(&self.shared.counts).exit.is_none()
+    }
+
+    pub fn idle(&self) -> &Idle {
+        &self.idle
+    }
+
+    /// The user has typed into the window this session is shown in.
+    pub fn typed(&self) -> bool {
+        self.typed.as_ref().is_some_and(|t| t.load(std::sync::atomic::Ordering::Acquire))
+    }
+
+    /// When the idle limit kills it, if it will.
+    pub fn deadline(&self) -> Option<Instant> {
+        self.idle.deadline(self.running(), self.typed())
     }
 
     fn write(&self, bytes: Vec<u8>) -> Result<(), String> {
@@ -788,7 +819,7 @@ impl Headless {
         let c = lock(&self.shared.counts);
         let ms = |d: Duration| d.as_secs_f64() * 1000.0;
         let history_bytes = self.term().state.scrollback_bytes();
-        json!({
+        let mut v = json!({
             "ok": true,
             "session": self.name,
             "pid": self.pid,
@@ -809,13 +840,17 @@ impl Headless {
             "screenshot": c.shot.map(|s| json!({
                 "build_ms": ms(s.build), "gpu_ms": ms(s.gpu), "total_ms": ms(s.total), "width": s.width, "height": s.height,
             })),
-        })
+        });
+        let running = c.exit.is_none();
+        drop(c);
+        self.add_idle(&mut v, running);
+        v
     }
 
     pub fn summary(&self) -> Value {
         let c = lock(&self.shared.counts);
         let t = self.term();
-        json!({
+        let mut v = json!({
             "session": self.name,
             "argv": self.argv,
             "pid": self.pid,
@@ -825,7 +860,20 @@ impl Headless {
             "cols": t.state.cols(),
             "rows": t.state.lines(),
             "title": t.state.title(),
-        })
+        });
+        let running = c.exit.is_none();
+        drop(t);
+        drop(c);
+        self.add_idle(&mut v, running);
+        v
+    }
+
+    /// Add when a request last named the session and when it will be
+    /// killed for going without one.
+    fn add_idle(&self, v: &mut Value, running: bool) {
+        if let (Some(o), Value::Object(idle)) = (v.as_object_mut(), self.idle.json(Instant::now(), running, self.typed())) {
+            o.extend(idle);
+        }
     }
 
     /// Send `signal`, or with none hang up and let the session go.

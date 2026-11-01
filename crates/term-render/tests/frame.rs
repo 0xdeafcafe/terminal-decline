@@ -1193,3 +1193,36 @@ fn search_hits_are_drawn_under_the_selection() {
         ]
     );
 }
+
+/// The command line's colours (`Snapshot::ink`, completion design §5)
+/// paint only text in the default colour with no attributes, and go when
+/// the snapshot has none: the row cache keeps the plain row.
+#[test]
+fn ink_paints_only_default_coloured_text() {
+    use term_core::Ink;
+    let mut t = term(10, 2, "ab\x1b[31mcd\x1b[0m\x1b[1mef\x1b[0mgh");
+    let theme = Theme::default();
+    let o = Opts::default();
+    let input = input(&theme, &o);
+    let mut f = Frame::default();
+    let colour_of = |f: &Frame, ch: char| f.glyphs.iter().find(|g| decode_cp(g) == ch).map(|g| g.color);
+    for inked in [true, false, true] {
+        f.snapshot(&mut t.state, &input, 0);
+        if inked {
+            f.snapshot_mut().ink = vec![Ink {
+                row: 0,
+                cols: 0..8,
+                color: 4,
+            }];
+        }
+        assert!(f.build_snapshot(&input, &mut Fake));
+        let blue = theme.palette[4];
+        let fg = theme.foreground;
+        let want = if inked { blue } else { fg };
+        assert_eq!(colour_of(&f, 'a'), Some(want), "inked {inked}");
+        assert_eq!(colour_of(&f, 'h'), Some(want), "inked {inked}");
+        // Red text and bold text keep their own colour.
+        assert_eq!(colour_of(&f, 'c'), Some(theme.palette[1]));
+        assert_ne!(colour_of(&f, 'e'), Some(blue));
+    }
+}

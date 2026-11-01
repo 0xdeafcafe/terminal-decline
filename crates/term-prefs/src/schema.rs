@@ -517,17 +517,14 @@ pub const SETTINGS: &[Setting] = &[
         Editor::Toggle,
         "Load prompt marks into zsh, bash and fish, for jumping between prompts and command status (off: start the shell untouched)",
     )),
-    // Hidden until the colours and the list land (docs/design/completion.md).
-    Setting {
-        hidden: true,
-        ..setting(
-            "highlight_command_line",
-            "Colour the command line",
-            Advanced,
-            Editor::Toggle,
-            "Colour the command, its flags, strings and paths as you type at the shell's prompt",
-        )
-    },
+    setting(
+        "highlight_command_line",
+        "Colour the command line",
+        Advanced,
+        Editor::Toggle,
+        "Colour flags, strings, variables and pipes as you type at zsh's prompt (needs shell integration; new tabs)",
+    ),
+    // Hidden until the list lands (docs/design/completion.md).
     Setting {
         hidden: true,
         ..setting(

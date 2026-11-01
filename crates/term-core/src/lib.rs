@@ -31,4 +31,4 @@ pub use term::{
     Command, Cursor, CursorShape, DynamicColor, Keymap, LineReport, LinkValue, Modes, MouseMode, Notification, Point, Progress, Selection,
     SelectionKind, ShellEnv, TOKEN_LEN, Term, Terminal, ViewTop,
 };
-pub use term::{Highlight, HighlightKind, RowFlags, RowKey, ScreenId, SnapCursor, SnapRow, Snapshot};
+pub use term::{Highlight, HighlightKind, Ink, RowFlags, RowKey, ScreenId, SnapCursor, SnapRow, Snapshot};

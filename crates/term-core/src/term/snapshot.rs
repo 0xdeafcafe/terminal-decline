@@ -113,6 +113,15 @@ pub enum HighlightKind {
     HoveredLink,
 }
 
+/// A colour for the default-coloured text in some cells of a view row.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Ink {
+    pub row: u16,
+    pub cols: Range<u16>,
+    /// One of the 16 ANSI colours, from the theme.
+    pub color: u8,
+}
+
 /// The cursor, as the renderer draws it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct SnapCursor {
@@ -172,6 +181,11 @@ pub struct Snapshot {
     /// The view rows showing a prompt (OSC 133 A) whose command exited
     /// non-zero, top to bottom: the renderer marks them in the padding.
     pub failed: Vec<u16>,
+    /// Colours for text in the default colour, by view row and columns:
+    /// the command line coloured as it is typed (docs/design/completion.md
+    /// §5). Not taken from the terminal: the app puts them in after the
+    /// snapshot, and each snapshot starts with none.
+    pub ink: Vec<Ink>,
     /// kitty direct placements that reach into the view, ready images only
     /// (images.md §4.4). Empty until kitty graphics lands (I.2).
     pub placements: Vec<SnapPlacement>,
@@ -332,6 +346,7 @@ impl Terminal {
         out.history_styles.clear();
         out.highlights.clear();
         out.failed.clear();
+        out.ink.clear();
         out.placements.clear();
         out.virtual_placements.clear();
         // Images the pool evicted since the last command or snapshot are

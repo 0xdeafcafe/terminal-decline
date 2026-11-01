@@ -695,3 +695,31 @@ spans in order. The benchmark is `cargo bench -p terminal-decline
 --bench complete` (lines of 20, 200 and 4,000 bytes); not run yet: it
 needs a release build, held while another agent's frame-timing
 benchmarks ran.
+
+### PR 3 (1 Nov 2026): colouring the line
+
+What landed: `complete::ink` in term-app matches the reported line to
+the cells from its B mark (wrapped rows, wide characters, clusters,
+control characters as `^X`, a newline as the next row) up to the first
+cell that differs, reads it with `lex`, and puts colours in the
+snapshot's new `ink` (view row, columns, ANSI colour) with the terminal
+locked. term-render paints glyphs flagged `PLAIN` (default colour, no
+attributes, set in `build_row`) in those columns while assembling, the
+way the block cursor recolours; the row cache is untouched, and a row
+with ink is rebuilt for that frame only. `highlight_command_line` is
+shown in Settings > Advanced and on by default; `completion` stays
+hidden.
+
+Colours: reserved words green, flags blue, strings yellow, variables
+and expansions cyan, pipes, operators and redirects magenta, comments
+bright black. Commands and arguments stay plain until the app knows
+whether a command exists (the commands source, PR 4).
+
+Known gaps: wide characters drawn by `other_cell` and ligature runs
+aren't flagged `PLAIN`, so they stay plain; after the glyph textures are
+emptied, the frame rebuilt with the terminal locked has no colours for
+that one frame.
+
+Not measured yet: the frame benchmark before and after, the latency at
+a zsh prompt, held while other agents' build-timing and frame benchmarks
+ran (load 60–180 all morning).

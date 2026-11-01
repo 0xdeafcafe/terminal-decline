@@ -1560,6 +1560,11 @@ impl WindowView {
             }
             // Re-decodes the snapshot asked for (images.md §5.4).
             p.session.take_image_jobs(t);
+            // The command line's colours, matched against the cells with
+            // the terminal still locked.
+            if win.config.highlight_command_line {
+                crate::complete::ink::line_ink(&t.state, &mut p.render.frame.snapshot_mut().ink);
+            }
             if let Some(f) = &mut p.find {
                 let snap = p.render.frame.snapshot_mut();
                 f.drawn = snap

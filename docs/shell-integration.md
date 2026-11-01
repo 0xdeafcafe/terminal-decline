@@ -138,6 +138,20 @@ go when their lines are dropped from it or it is cleared (Cmd+K). A
 full-screen program (an editor, `less`) has no scrollback, so the
 shortcuts beep there.
 
+## Colouring the command line
+
+In zsh started by the app, the command line is coloured as you type:
+reserved words (`if`, `for`, `do`) green, flags blue, strings yellow,
+variables and `$(…)` cyan, pipes, `&&`, `;` and redirects magenta,
+comments grey, all in the theme's ANSI colours. Only text the shell
+left in the default colour is coloured, so a prompt theme or
+zsh-autosuggestions keeps its own colours; what is copied is unchanged.
+zsh tells the app the line it is editing with a sequence of its own
+(OSC 7701) carrying a token only that shell was given, so other output
+can't fake it. `highlight_command_line = false` (Settings > Advanced >
+Colour the command line) turns it off; new tabs only take it back on.
+bash and fish aren't coloured yet.
+
 ## Checking it works
 
 ```sh

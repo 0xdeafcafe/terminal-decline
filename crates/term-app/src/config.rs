@@ -334,12 +334,12 @@ pub struct Config {
     /// shell is started exactly as it is.
     pub shell_integration: bool,
     /// Colour the command line at the shell's prompt as it is typed
-    /// (docs/design/completion.md §5). Hidden and off until the colours
-    /// land; for now it only has a zsh started with the integration
-    /// report its command line.
+    /// (docs/design/completion.md §5): flags, strings, variables, pipes
+    /// and redirects, reserved words. A zsh started with the integration
+    /// reports its line for it; new shells only (§10).
     pub highlight_command_line: bool,
     /// The completion list at the prompt (docs/design/completion.md §9).
-    /// Hidden and off until the list lands, as `highlight_command_line`.
+    /// Hidden and off until the list lands.
     pub completion: bool,
     /// Window title for a pin; also shown in the Window menu.
     pub title: Option<String>,
@@ -458,7 +458,7 @@ impl Default for Config {
             cwd: None,
             env: BTreeMap::new(),
             shell_integration: true,
-            highlight_command_line: false,
+            highlight_command_line: true,
             completion: false,
             title: None,
             images: true,

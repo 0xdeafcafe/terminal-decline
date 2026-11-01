@@ -21,6 +21,15 @@
 [[ -n ${_decline_integration-} ]] && return 0
 _decline_integration=1
 
+# `decline` for the app this came with (decline pin, decline ctl, …),
+# last in PATH so an installed one wins: bundled, this file is in
+# Contents/Resources/shell-integration and the link in Contents/Resources/bin.
+_decline_bin=$(builtin cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../bin" 2>/dev/null && builtin pwd -P)
+if [[ -n $_decline_bin && -x $_decline_bin/decline ]] && ! builtin type -P decline >/dev/null; then
+  PATH=$PATH:$_decline_bin
+fi
+unset _decline_bin
+
 # A at the start of the prompt and B at its end, inside \[ \] so bash
 # doesn't count them in the prompt's width.
 _decline_a='\[\e]133;A\a\]'

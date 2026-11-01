@@ -133,6 +133,10 @@ shortcuts can be changed in `[keybind]` (`previous_prompt`,
 importing a Ghostty config maps
 `jump_to_prompt`.
 
+Bundled, the integration also adds the app's `Contents/Resources/bin` last
+to `PATH` when there is no `decline` command already, so `decline pin …`,
+`decline ctl …` and the rest work in the app's shells without the cask.
+
 Marks are kept for lines in the scrollback as well as on the screen, and
 go when their lines are dropped from it or it is cleared (Cmd+K). A
 full-screen program (an editor, `less`) has no scrollback, so the

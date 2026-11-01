@@ -65,7 +65,7 @@ pub const OLD_BUNDLE_ID: &str = "red.forbes.decline";
 
 pub const USAGE: &str = "\
 usage: terminal-decline [--config FILE] [-e PROGRAM [ARGS...]]
-       terminal-decline pin NAME [--icon FILE] [--config FILE] [--cwd DIR] [--dir DIR] [--dock] -- PROGRAM [ARGS...]
+       terminal-decline pin NAME [--icon FILE] [--config FILE] [--cwd DIR] [--dir DIR] [--dock] [-- PROGRAM [ARGS...]]
        terminal-decline pin --list [--json] | --edit NAME | --remove NAME
        terminal-decline pin --repair [NAME] [--yes] | --update [--yes]
        terminal-decline import ghostty [PATH] [--write [--force]]
@@ -74,4 +74,7 @@ usage: terminal-decline [--config FILE] [-e PROGRAM [ARGS...]]
        terminal-decline ctl COMMAND [ARGS...]   (drive terminals from agents; ctl --help)
 
 Runs a terminal window. With -e, runs PROGRAM instead of your login shell.
-`terminal-decline pin` makes PROGRAM its own macOS app, with its own Dock icon.";
+`terminal-decline pin` makes PROGRAM (NAME if none is given) its own macOS app,
+with its own Dock icon: FILE, else the program's own (its app bundle's, or
+NAME.png, NAME.icns, icon.png or icon.icns beside it), else one drawn for it.
+In the app's shells, `decline` runs this binary.";

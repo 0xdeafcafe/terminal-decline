@@ -18,6 +18,14 @@ status is-interactive; or exit 0
 set -q __decline_integration; and exit 0
 set -g __decline_integration 1
 
+# `decline` for the app this came with (decline pin, decline ctl, …),
+# last in PATH so an installed one wins: bundled, this file is in
+# Contents/Resources/shell-integration and the link in Contents/Resources/bin.
+set -l __decline_bin (dirname (status filename))/../bin
+if test -x $__decline_bin/decline; and not command -q decline
+    set -gx PATH $PATH $__decline_bin
+end
+
 # C carries the command line ($argv[1]), kitty's way (cmdline_url,
 # percent-encoded), which the terminal types again after a restart.
 function __decline_preexec --on-event fish_preexec

@@ -98,6 +98,10 @@ chmod 644 "$contents/Frameworks/libterminal_decline.dylib"
 # The shell integration the app loads into the shells it starts
 # (crates/term-pty/src/integration.rs), dotfiles (zsh/.zshenv) included.
 ditto "$repo_root/shell" "$contents/Resources/shell-integration"
+# `decline` on PATH in the shells the app starts (the integration adds
+# this folder last), for those without the cask's links.
+mkdir -p "$contents/Resources/bin"
+ln -s ../../MacOS/terminal-decline "$contents/Resources/bin/decline"
 
 # Sparkle.framework, without what only an Xcode build or a sandboxed app
 # uses: the XPC services (the folder and its top-level symlink, or

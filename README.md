@@ -88,10 +88,13 @@ are tested on Apple Silicon. MIT licensed.
 
 ## Using it
 
+In the app's own shells `decline` is on `PATH` even without the cask.
+
 ```sh
 terminal-decline              # your login shell
 terminal-decline -e htop      # a program instead of the shell
 terminal-decline pin Rush --icon rush.png -- ./rush   # Rush.app with its own Dock icon
+decline pin rush             # rush.app; its icon found beside it, else drawn for it
 terminal-decline settings     # the Settings screen, in any terminal (also `decline settings`)
 terminal-decline fonts --mono  # the installed monospaced fonts (see docs/fonts.md)
 ```

@@ -24,6 +24,9 @@ use list::{Listings, Offer, What};
 /// The settings the list follows (docs/design/completion.md §10).
 #[derive(Clone, Copy, Debug)]
 pub struct Settings {
+    /// The list opens by itself after a pause in typing; without it, it
+    /// only shows zsh's matches on Tab.
+    pub as_you_type: bool,
     pub delay: Duration,
     /// Choices shown before the list scrolls.
     pub rows: usize,
@@ -64,6 +67,9 @@ pub struct PaneState {
     /// What zsh's completion found on Tab (§7), shown until a key that
     /// isn't the list's own.
     zsh: Option<Vec<list::Choice>>,
+    /// zsh's matches without a description were given one from the man
+    /// page or `--help` (or there was nothing to give).
+    zsh_described: bool,
     /// The last offer and what it was made from: the same again (each
     /// frame while the list is open) isn't worked out again.
     last_offer: Option<(OfferKey, Option<Arc<Offer>>)>,
@@ -182,6 +188,7 @@ impl PaneState {
             })
             .collect();
         self.zsh = Some(choices);
+        self.zsh_described = false;
         self.open = None;
     }
 
@@ -206,7 +213,11 @@ impl PaneState {
             self.quiet = !self.typing;
         }
         if self.zsh.is_some() {
-            return self.show_zsh(t, report, s);
+            return self.show_zsh(t, report, s, wake);
+        }
+        if !s.as_you_type {
+            self.open = None;
+            return Drawn::default();
         }
         let since = self.since.unwrap_or(now);
         if self.open.is_none() && self.quiet {
@@ -353,14 +364,24 @@ impl PaneState {
     }
 
     /// The list with zsh's matches, under the word at the cursor.
-    fn show_zsh(&mut self, t: &Terminal, report: &term_core::LineReport, s: &Settings) -> Drawn {
-        let Some(choices) = self.zsh.clone() else { return Drawn::default() };
+    fn show_zsh(&mut self, t: &Terminal, report: &term_core::LineReport, s: &Settings, wake: &dyn Fn() -> sources::Wake) -> Drawn {
         // zsh's redraw, with what the matches share inserted, comes after
         // the matches: wait for the screen to show it.
         if !shown_before_cursor(t, &report.text[..report.cursor]) {
             return Drawn::default();
         }
         let line = lex::read(&report.text, report.cursor);
+        // What zsh didn't describe, described from what we read: a flag's
+        // line in its man page, a subcommand's.
+        if !self.zsh_described
+            && let Some(known) = self.descriptions(&line.at, s, wake)
+        {
+            if let Some(choices) = &mut self.zsh {
+                describe(choices, &known);
+            }
+            self.zsh_described = true;
+        }
+        let Some(choices) = self.zsh.clone() else { return Drawn::default() };
         let start = line
             .words
             .iter()
@@ -388,6 +409,30 @@ impl PaneState {
         let drawn = place(t, &mut open, &no_ghost, false);
         self.open = Some(open);
         drawn
+    }
+
+    /// Names and what each is, for describing zsh's matches at `at`:
+    /// flags from the command's man page (or `--help`), subcommands from
+    /// theirs. `None` while still being read; empty when there is nothing.
+    fn descriptions(&self, at: &lex::At, s: &Settings, wake: &dyn Fn() -> sources::Wake) -> Option<Vec<(String, String)>> {
+        use lex::At;
+        let Some(env) = self.shell_env.as_deref().filter(|_| s.flags) else {
+            return Some(Vec::new());
+        };
+        let base = |c: &str| c.rsplit('/').next().unwrap_or(c).to_string();
+        match at {
+            At::Flag { command, subcommand, .. } => {
+                let m = manual_for(&env.path, &base(command), subcommand.as_deref(), wake)?;
+                Some(m.page.flags.iter().map(|f| (f.name.clone(), f.about.clone())).collect())
+            }
+            At::Argument {
+                command,
+                position: 0,
+                prefix,
+                ..
+            } if !prefix.contains('/') => Some(sources::subcommands(&env.path, &base(command), wake)?.list.clone()),
+            _ => Some(Vec::new()),
+        }
     }
 
     /// The choices for what the cursor is on, if any are worth a list.
@@ -429,15 +474,7 @@ impl PaneState {
         let mut subcommands = None;
         match (at, env) {
             (At::Flag { command, subcommand, .. }, Some(env)) if s.flags => {
-                let command = base(command);
-                manual = match subcommand {
-                    // `git fetch -`: git-fetch's page, else git's.
-                    Some(sub) => match sources::manual(&env.path, &format!("{command}-{sub}"), wake) {
-                        Some(m) if !m.found => sources::manual(&env.path, &command, wake),
-                        m => m,
-                    },
-                    None => sources::manual(&env.path, &command, wake),
-                };
+                manual = manual_for(&env.path, &base(command), subcommand.as_deref(), wake);
                 // Still being read: wait for it rather than show nothing.
                 manual.as_ref()?;
             }
@@ -639,6 +676,28 @@ impl PaneState {
     }
 }
 
+/// Give each choice without a description the one `known` has for its
+/// name.
+fn describe(choices: &mut [list::Choice], known: &[(String, String)]) {
+    for c in choices.iter_mut().filter(|c| c.about.is_empty()) {
+        if let Some((_, about)) = known.iter().find(|(name, _)| *name == c.name) {
+            c.about = about.clone();
+        }
+    }
+}
+
+/// `command`'s man page, or for `git fetch -` git-fetch's, else git's.
+/// `None` while it is being read.
+fn manual_for(path: &str, command: &str, sub: Option<&str>, wake: &dyn Fn() -> sources::Wake) -> Option<Arc<sources::Manual>> {
+    match sub {
+        Some(sub) => match sources::manual(path, &format!("{command}-{sub}"), wake) {
+            Some(m) if !m.found => sources::manual(path, command, wake),
+            m => m,
+        },
+        None => sources::manual(path, command, wake),
+    }
+}
+
 /// A program and subcommand for Read Flags from --help.
 #[derive(Debug, PartialEq, Eq)]
 pub struct HelpTarget {
@@ -827,6 +886,7 @@ mod tests {
 
     fn settings() -> Settings {
         Settings {
+            as_you_type: true,
             delay: Duration::from_millis(150),
             rows: 8,
             ghost: true,
@@ -1147,6 +1207,41 @@ mod tests {
         assert_eq!(st.key(b'x'.into(), true, false), KeyResult::Pass);
         assert!(!st.is_open());
         assert_eq!(st.update(&t.state, &settings(), Instant::now(), &no_wake).popup, None);
+    }
+
+    #[test]
+    fn zshs_matches_described_from_what_we_read() {
+        let choice = |name: &str, about: &str| list::Choice {
+            name: name.into(),
+            what: What::Match,
+            about: about.into(),
+        };
+        let mut choices = vec![choice("--all", ""), choice("--tags", "zsh's own"), choice("--zzz", "")];
+        let known = [
+            ("--all".to_string(), "Fetch all remotes".to_string()),
+            ("--tags".to_string(), "Fetch all tags".to_string()),
+        ];
+        describe(&mut choices, &known);
+        let abouts: Vec<&str> = choices.iter().map(|c| c.about.as_str()).collect();
+        assert_eq!(abouts, ["Fetch all remotes", "zsh's own", ""]);
+    }
+
+    #[test]
+    fn only_tab_without_the_list_as_you_type() {
+        let path = programs("tab-only", &["gzip", "git", "grep"]);
+        let mut st = state(&path);
+        let s = Settings {
+            as_you_type: false,
+            ..settings()
+        };
+        let t = term("g");
+        let later = Instant::now() + Duration::from_secs(5);
+        st.update(&t.state, &s, Instant::now(), &no_wake);
+        assert_eq!(st.update(&t.state, &s, later, &no_wake).popup, None, "not by itself");
+        st.zsh_matches(term_core::ShellMatches {
+            shown: vec!["git".into(), "grep".into()],
+        });
+        assert!(st.update(&t.state, &s, later, &no_wake).popup.is_some(), "zsh's matches on Tab");
     }
 
     #[test]

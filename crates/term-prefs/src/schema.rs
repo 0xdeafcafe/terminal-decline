@@ -727,7 +727,14 @@ pub const SETTINGS: &[Setting] = &[
         "Completion list",
         Completion,
         Editor::Toggle,
-        "A list of files, folders and commands under the cursor after a pause in typing at zsh's prompt (new tabs)",
+        "Our list at zsh's prompt: zsh's matches on Tab, with what each is, and the list as you type when that is on (new tabs)",
+    ),
+    setting(
+        "completion_as_you_type",
+        "Open the list as you type",
+        Completion,
+        Editor::Toggle,
+        "The list of files, folders, commands and flags opens by itself after a pause in typing; off, it shows only on Tab",
     ),
     setting(
         "completion_delay",
@@ -1051,6 +1058,7 @@ mod tests {
                 "shell_integration",
                 "highlight_command_line",
                 "completion",
+                "completion_as_you_type",
                 "completion_delay",
                 "completion_rows",
                 "completion_ghost_text",

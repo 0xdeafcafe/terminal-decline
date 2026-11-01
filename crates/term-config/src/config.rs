@@ -412,6 +412,9 @@ pub struct Config {
     /// typing. A zsh started with the integration reports its line for
     /// it; new shells only (§10).
     pub completion: bool,
+    /// The list opens by itself after a pause in typing. Off, it shows
+    /// only zsh's matches when Tab is pressed (`completion_tab_zsh`).
+    pub completion_as_you_type: bool,
     /// How long typing pauses before the list opens, in milliseconds.
     #[serde(deserialize_with = "completion_delay")]
     pub completion_delay: u32,
@@ -589,6 +592,7 @@ impl Default for Config {
             shell_integration: true,
             highlight_command_line: true,
             completion: true,
+            completion_as_you_type: false,
             completion_delay: 300,
             completion_rows: 8,
             completion_ghost_text: true,

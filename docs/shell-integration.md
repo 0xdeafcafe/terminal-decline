@@ -156,8 +156,12 @@ fish aren't coloured yet.
 
 ## The completion list
 
-When you stop typing for a moment (300 ms, `completion_delay`), a list
-opens under the word you are typing: commands where a command goes, a
+Tab shows zsh's matches in the app's list, with what each one is: zsh's
+own description, or for flags and subcommands zsh doesn't describe, the
+line from the man page (or `--help`). With Settings > Completion > Open
+the list as you type (`completion_as_you_type`, off by default), the
+list also opens by itself: when you stop typing for a moment (300 ms,
+`completion_delay`), it opens under the word you are typing: commands where a command goes, a
 command's subcommands (`git fet`) and flags (`ls -`, `git fetch --a`)
 with what each does, read from its man pages, and files and folders
 elsewhere. Commands you run most come first (from zsh's `HISTFILE`;

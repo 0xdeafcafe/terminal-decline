@@ -33,7 +33,7 @@ and the list and colours are tested as below (§12). bash and fish get
 | `--help` | Man pages only; a menu item reads one program's `--help` when you ask |
 | Grey text after the cursor | Kept: the top choice shows grey after the cursor, Right arrow at the end of the line takes it |
 | History order | Yes: commands ordered by how often they appear in the shell's history file |
-| On by default | On for everyone (every setting in §10 defaults to true) |
+| On by default | On for everyone (every setting in §10 defaults to true), except the list opening as you type (`completion_as_you_type`) and Enter putting a choice in (`completion_enter_puts_in`), both opt-in since 1 Nov 2026 at Alex's ask: by default the list shows zsh's matches on Tab, described from man pages where zsh gave no description |
 | Enter with the list open | Runs the line as typed. With `completion_enter_puts_in` (off by default, since Enter is the shell's), once a choice is chosen (Down, or the mouse over it) Enter puts that one in instead, as VS Code's terminal does. Added 1 Nov 2026 at Alex's ask |
 
 The find bar stays the only AppKit UI of our own; the list is drawn like
@@ -501,6 +501,7 @@ Each part can be turned off by itself, in `config.toml` and in Settings
 |---|---|---|---|---|
 | `highlight_command_line` | true | bool | live* | colours the command line (§5) |
 | `completion` | true | bool | live* | the list (§9); off turns off everything below |
+| `completion_as_you_type` | false | bool | live | the list opens by itself after a pause in typing; off, only on Tab |
 | `completion_files` | true | bool | live | files and folders in the list |
 | `completion_commands` | true | bool | live | commands in the list |
 | `completion_flags` | true | bool | live | flags and subcommands from man pages |
@@ -802,7 +803,11 @@ Enter and the mouse landed (1 Nov 2026), at Alex's ask: Enter puts in
 a chosen choice (and runs the line while none is), the bottom border
 shows the keys that work, the mouse over a choice chooses it and a
 click puts it in, and taking a folder opens its list again at once.
-Enter putting a choice in is opt-in (`completion_enter_puts_in`).
+Enter putting a choice in is opt-in (`completion_enter_puts_in`), and
+so is the list opening as you type (`completion_as_you_type`): by
+default it shows zsh's matches on Tab, and those zsh gave no
+description get one from the man page or `--help` (flags) or the
+subcommands' pages.
 
 Measured 1 Nov 2026 (load 5–8, 17 during the latency run):
 - Frames with everything idle, before colouring (b50de69) → now, µs:

@@ -1708,6 +1708,7 @@ impl WindowView {
             if win.config.completion && focused {
                 let c = &win.config;
                 let settings = crate::complete::Settings {
+                    as_you_type: c.completion_as_you_type,
                     delay: Duration::from_millis(c.completion_delay as u64),
                     rows: c.completion_rows as usize,
                     ghost: c.completion_ghost_text,

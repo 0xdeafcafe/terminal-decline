@@ -259,31 +259,68 @@ fn a_selected_line_is_kept_scrolled_cleared_overwritten_or_erased() {
     assert_eq!(copied(&t), "same");
 }
 
+/// The selection's first and last cell as view (line, col).
+fn selected_at(t: &Term) -> ((u64, usize), (u64, usize)) {
+    let (a, b) = t.state.selection().expect("a selection").ordered();
+    let top = t.state.point_at(0, 0).line;
+    ((a.line - top, a.col), (b.line - top, b.col))
+}
+
 /// A scroll region (a TUI's scrolling list, IL/DL) moves rows past fixed
-/// line numbers: the selection stays on its lines, so text moving under
-/// it clears it. Following the text instead would leave a selection cut
-/// at the region's edge, half of it on rows that left the region.
-/// Rows outside the region, and a region scroll that leaves the selected
-/// text as it was, keep it.
+/// line numbers: the selection moves with its text (cells §13.2), cut at
+/// the region's edge as its text leaves, and cleared once all of it has.
+/// Rows outside the region keep it; one partly on rows that move and
+/// partly not is cleared once other text moves under it.
 #[test]
-fn a_scroll_region_moving_text_under_the_selection_clears_it() {
+fn a_scroll_region_moving_text_under_the_selection_takes_it_along() {
     let mut t = Term::new(20, 5, 100, term_core::ImagePool::process());
     let draw = b"\x1b[2J\x1b[Htitle\r\none\r\ntwo\r\nthree\r\nstatus";
     t.advance(draw);
     // Rows 2-4 scroll; the title above and the status line below stay.
     select(&mut t, (2, 0), (2, 2));
     t.advance(b"\x1b[2;4r\x1b[4;1H\n\x1b[r");
-    assert_eq!(t.state.selection(), None, "moved up by a region scroll");
+    assert_eq!(copied(&t), "two", "moved up by a region scroll");
+    assert_eq!(selected_at(&t), ((1, 0), (1, 2)));
 
     t.advance(draw);
     select(&mut t, (1, 0), (1, 2));
     t.advance(b"\x1b[2;1H\x1b[L");
-    assert_eq!(t.state.selection(), None, "moved down by IL");
+    assert_eq!(copied(&t), "one", "moved down by IL");
+    assert_eq!(selected_at(&t), ((2, 0), (2, 2)));
 
     t.advance(draw);
     select(&mut t, (2, 0), (2, 2));
     t.advance(b"\x1b[2;1H\x1b[M");
-    assert_eq!(t.state.selection(), None, "moved up by DL");
+    assert_eq!(copied(&t), "two", "moved up by DL");
+    assert_eq!(selected_at(&t), ((1, 0), (1, 2)));
+
+    // CSI S and T, and RI at the region's top.
+    t.advance(draw);
+    select(&mut t, (2, 0), (2, 2));
+    t.advance(b"\x1b[2;4r\x1b[T\x1b[r");
+    assert_eq!(selected_at(&t), ((3, 0), (3, 2)), "down by CSI T");
+    t.advance(b"\x1b[2;4r\x1b[S\x1b[r");
+    assert_eq!(selected_at(&t), ((2, 0), (2, 2)), "up by CSI S");
+    t.advance(b"\x1b[2;4r\x1b[2;1H\x1bM\x1b[r");
+    assert_eq!(selected_at(&t), ((3, 0), (3, 2)), "down by RI");
+    assert_eq!(copied(&t), "two");
+
+    // Text leaving the region cuts the selection at its edge, then
+    // clears it once all of it has left.
+    t.advance(draw);
+    select(&mut t, (1, 1), (2, 1));
+    assert_eq!(copied(&t), "ne\ntw");
+    t.advance(b"\x1b[2;4r\x1b[S");
+    assert_eq!(copied(&t), "tw", "cut at the region's top");
+    assert_eq!(selected_at(&t), ((1, 0), (1, 1)));
+    t.advance(b"\x1b[S");
+    assert_eq!(t.state.selection(), None, "scrolled out of the region");
+    t.advance(b"\x1b[r");
+    t.advance(draw);
+    select(&mut t, (2, 1), (3, 2));
+    t.advance(b"\x1b[2;4r\x1b[T\x1b[r");
+    assert_eq!(copied(&t), "wo", "cut at the region's bottom");
+    assert_eq!(selected_at(&t), ((3, 1), (3, 19)));
 
     // Rows outside the region keep it, at the top or the bottom.
     for row in [0, 4] {
@@ -292,7 +329,15 @@ fn a_scroll_region_moving_text_under_the_selection_clears_it() {
         let before = copied(&t);
         t.advance(b"\x1b[2;4r\x1b[4;1H\n\n\x1b[2;1H\x1b[L\x1b[M\x1b[r");
         assert_eq!(copied(&t), before, "row {row} outside the region");
+        assert_eq!(selected_at(&t), ((row as u64, 0), (row as u64, 3)));
     }
+
+    // Partly in the region and partly above it: other text moves under
+    // it, so it goes.
+    t.advance(draw);
+    select(&mut t, (0, 0), (2, 2));
+    t.advance(b"\x1b[2;4r\x1b[S\x1b[r");
+    assert_eq!(t.state.selection(), None, "half of it moved");
 
     // A region at the top of the primary screen sends its lines to
     // history: the selection there goes with them and is kept.
@@ -300,12 +345,25 @@ fn a_scroll_region_moving_text_under_the_selection_clears_it() {
     select(&mut t, (0, 0), (0, 4));
     t.advance(b"\x1b[1;3r\x1b[3;1H\n\n\x1b[r");
     assert_eq!(copied(&t), "title");
+    // The rows below such a region stay where they are on the screen,
+    // and a selection there with them.
+    t.advance(draw);
+    select(&mut t, (4, 0), (4, 5));
+    t.advance(b"\x1b[1;3r\x1b[3;1H\n\x1b[r");
+    assert_eq!(copied(&t), "status");
+    assert_eq!(selected_at(&t), ((4, 0), (4, 5)));
 
     // A region scrolled by blank rows over blank ones changes nothing.
     t.advance(b"\x1b[2J\x1b[Htop");
     select(&mut t, (2, 0), (3, 5));
     t.advance(b"\x1b[2;5r\x1b[5;1H\n\x1b[r");
     assert_eq!(copied(&t), "\n");
+
+    // Text changing under it where it moved to still clears it.
+    t.advance(draw);
+    select(&mut t, (2, 0), (2, 2));
+    t.advance(b"\x1b[2;4r\x1b[S\x1b[r\x1b[2;1Hxyz");
+    assert_eq!(t.state.selection(), None, "overwritten where it moved to");
 }
 
 /// On the alternate screen rows scrolling off the top aren't kept: a
@@ -330,6 +388,13 @@ fn alternate_screen_selection() {
     select(&mut t, (0, 0), (0, 0));
     t.advance(b"\x1b[4;1H\n");
     assert_eq!(t.state.selection(), None, "scrolled off the alternate screen");
+
+    // Partly scrolled off: cut at the screen's top, following its text.
+    t.advance(b"\x1b[Ha\r\nb\r\nc\r\nd");
+    select(&mut t, (0, 0), (1, 0));
+    t.advance(b"\x1b[4;1H\n");
+    assert_eq!(copied(&t), "b", "cut at the top");
+    assert_eq!(selected_at(&t), ((0, 0), (0, 0)));
 
     t.advance(b"\x1b[Ha\r\nb\r\nc\r\nd");
     select(&mut t, (1, 0), (1, 0));

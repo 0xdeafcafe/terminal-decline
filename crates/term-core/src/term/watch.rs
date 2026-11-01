@@ -13,19 +13,29 @@
 //! it if it blanks a plain character that isn't a space, a soft wrap
 //! changing adds or takes away a line break. Once a change is found the
 //! watch stops, and the parse call's end clears the selection. A write
-//! that can't tell (over a wide character or cluster, a cluster growing,
-//! a scroll region moving rows past the selection's lines) reads the
-//! selected text first and stops watching; the parse call's end reads it
-//! again and compares. Lines scrolling into history keep their text, so
-//! a flood scrolling the selection away costs nothing; lines dropped from
-//! history (or scrolled off the alternate screen) take the selection
-//! with them. A selection on rows a scroll region moves stays on its
-//! lines, so it is cleared when other text moves under it, rather than
-//! following its text and being cut at the region's edge.
+//! that can't tell (over a wide character or cluster, a cluster growing)
+//! reads the selected text first and stops watching; the parse call's
+//! end reads it again and compares. A selection kept to a program's
+//! panel (§13.2) is watched in the panel's columns only, so the other
+//! panels redrawing leave it alone.
+//!
+//! Text scrolling under the selection takes it along (§13.2). Lines
+//! scrolling into history keep their text and numbers, so a flood
+//! scrolling the selection away costs nothing; lines dropped from
+//! history take the selection with them. When a scroll region moves
+//! (CSI S and T, LF at its bottom margin, RI at its top, insert and
+//! delete line, and the alternate screen scrolling), a selection on the
+//! rows that move moves with them ([`Terminal::follow_scroll`]): its
+//! lines are renumbered and watched again, cut at the region's edge
+//! where its text leaves (at the panel's columns, or the screen's), and
+//! cleared once all of it has left. A selection read to compare is
+//! compared first, before its text moves. One partly on the rows that
+//! move and partly not can't follow both: it is read and compared, and
+//! cleared if other text moved under it, as before.
 
 use std::ops::Range;
 
-use super::{Point, Selection, Terminal};
+use super::{Panel, Point, Selection, Terminal};
 use crate::cell::Cell;
 use crate::image::placeholder::PLACEHOLDER;
 
@@ -78,9 +88,19 @@ impl SelectionWatch {
     /// The selected columns of watched line `line`, `start..end`.
     #[inline]
     fn cols(&self, line: u64) -> Range<usize> {
-        let start = if line == self.a.line { self.a.col } else { 0 };
-        let end = if line == self.b.line { self.b.col + 1 } else { usize::MAX };
+        let mut start = if line == self.a.line { self.a.col } else { 0 };
+        let mut end = if line == self.b.line { self.b.col + 1 } else { usize::MAX };
+        if let Some(p) = self.panel() {
+            // Only the panel's columns: the other panels' text changing
+            // changes nothing selected.
+            start = start.max(p.left);
+            end = end.min(p.right + 1).max(start);
+        }
         start..end
+    }
+
+    fn panel(&self) -> Option<Panel> {
+        self.sel.and_then(|s| s.panel)
     }
 
     fn stop(&mut self) {
@@ -123,6 +143,118 @@ impl Terminal {
         true
     }
 
+    /// Screen rows `top..=bottom` are about to scroll `n` rows, up (to
+    /// the top) or down, with the screen's top line moving on `n` lines
+    /// when `moves_top` (output scrolling from the screen's top row): a selection on them moves with its text, cut at
+    /// the region's edge where its text leaves, and cleared once all of
+    /// it has. Whether that was seen to (or the scroll doesn't touch the
+    /// selection); false when the selection is partly on the rows that
+    /// move and partly not, which the caller watches as text changing
+    /// under it, as before.
+    #[inline(always)]
+    pub(super) fn follow_scroll(&mut self, top: usize, bottom: usize, n: usize, up: bool, moves_top: bool) -> bool {
+        if self.watch.sel.is_none() {
+            return true;
+        }
+        // The whole primary screen scrolling into history: the selection's
+        // lines keep their text, at no cost.
+        if moves_top && bottom == self.lines - 1 && !self.alt_active {
+            return true;
+        }
+        self.follow_scroll_slow(top, bottom, n, up, moves_top)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn follow_scroll_slow(&mut self, top: usize, bottom: usize, n: usize, up: bool, moves_top: bool) -> bool {
+        let Some(sel) = self.selection.filter(|s| Some(*s) == self.watch.sel) else {
+            return true;
+        };
+        if matches!(self.watch.state, Outcome::Changed) {
+            return true;
+        }
+        let (a, b) = sel.ordered();
+        let t0 = self.top_line;
+        let (first, last) = (t0 + top as u64, t0 + bottom as u64);
+        // How the selection's lines move, in buffer lines, and the lines
+        // whose text is lost.
+        let (shift, kept): (i64, Range<u64>) = if moves_top {
+            // The screen's top line moves on: the region's lines (and
+            // history's) keep their numbers; the rows below it stay where
+            // they are on the screen, so their numbers move on too.
+            if a.line > last {
+                (n as i64, 0..u64::MAX)
+            } else if b.line > last {
+                return false;
+            } else {
+                let t1 = t0 + n as u64;
+                let kept = if self.alt_active { t1..u64::MAX } else { 0..u64::MAX };
+                (0, kept)
+            }
+        } else {
+            if b.line < first || a.line > last {
+                return true;
+            }
+            if a.line < first || b.line > last {
+                return false;
+            }
+            if up {
+                (-(n as i64), first..u64::MAX)
+            } else {
+                (n as i64, 0..last + 1)
+            }
+        };
+        // Text read to compare: compare it now, before it moves.
+        if let Outcome::Read { from, text } = &self.watch.state {
+            if self.text_in(*from, b, sel.panel) != *text {
+                self.watch_changed();
+                return true;
+            }
+            self.watch.state = Outcome::Same;
+        }
+        let moved = |p: Point| Point {
+            line: p.line.saturating_add_signed(shift),
+            col: p.col,
+        };
+        let (mut na, mut nb) = (moved(a), moved(b));
+        let (left, right) = sel.panel.map_or((0, self.cols - 1), |p| (p.left, p.right));
+        if nb.line < kept.start || na.line >= kept.end {
+            // All of it scrolled out.
+            self.selection = None;
+            self.watch.stop();
+            self.watch.sel = None;
+            return true;
+        }
+        if na.line < kept.start {
+            na = Point {
+                line: kept.start,
+                col: left,
+            };
+        }
+        if nb.line >= kept.end {
+            nb = Point {
+                line: kept.end - 1,
+                col: right,
+            };
+        }
+        let (anchor, head) = if sel.anchor <= sel.head { (na, nb) } else { (nb, na) };
+        let new = Selection { anchor, head, ..sel };
+        self.selection = Some(new);
+        // Watch its new lines (on the screen as it will be).
+        let t1 = if moves_top { t0 + n as u64 } else { t0 };
+        let lo = na.line.max(t1);
+        let hi = nb.line.min(t1 + self.lines as u64 - 1);
+        self.watch = SelectionWatch {
+            lo,
+            span: if lo <= hi { hi - lo + 1 } else { 0 },
+            sel: Some(new),
+            a: na,
+            b: nb,
+            state: Outcome::Same,
+        };
+        true
+    }
+
     /// After parsing: clear the selection if the output changed the text
     /// under it, or dropped its lines.
     pub(crate) fn check_selection(&mut self) {
@@ -140,7 +272,7 @@ impl Terminal {
             || match w.state {
                 Outcome::Same => false,
                 Outcome::Changed => true,
-                Outcome::Read { from, text } => self.text_between(from, w.b) != text,
+                Outcome::Read { from, ref text } => self.text_in(from, w.b, w.panel()) != *text,
             };
         if changed {
             self.selection = None;
@@ -166,7 +298,7 @@ impl Terminal {
             line: self.top_line,
             col: 0,
         });
-        let text = self.text_between(from, self.watch.b);
+        let text = self.text_in(from, self.watch.b, self.watch.panel());
         self.watch.state = Outcome::Read { from, text };
     }
 
@@ -230,7 +362,8 @@ impl Terminal {
     #[cold]
     #[inline(never)]
     fn watch_wrap(&mut self, row: usize) {
-        if self.top_line + row as u64 != self.watch.b.line {
+        // A panel's selection is a line for each row, wrapped or not.
+        if self.top_line + row as u64 != self.watch.b.line && self.watch.panel().is_none() {
             self.watch_changed();
         }
     }

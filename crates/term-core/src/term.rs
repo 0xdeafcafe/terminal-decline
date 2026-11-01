@@ -22,6 +22,7 @@ mod compress;
 mod graphics;
 mod history;
 mod own_images;
+mod panel;
 mod reflow;
 mod replies;
 mod saved;
@@ -31,6 +32,7 @@ mod snapshot;
 mod watch;
 
 pub use graphics::HeadRead;
+pub use panel::Panel;
 pub use replies::DynamicColor;
 pub use search::SearchCount;
 pub use snapshot::{Ghost, Highlight, HighlightKind, Ink, Popup, PopupItem, RowFlags, RowKey, ScreenId, SnapCursor, SnapRow, Snapshot};
@@ -298,6 +300,10 @@ pub struct Selection {
     pub anchor: Point,
     pub head: Point,
     pub kind: SelectionKind,
+    /// The program's panel it was started in, which it keeps to: only
+    /// the panel's columns of each line are selected, and dragging stops
+    /// at its edges (cells §13.2).
+    pub panel: Option<Panel>,
 }
 
 /// Where the view is: following output, or showing history from a fixed
@@ -320,7 +326,30 @@ impl Selection {
             anchor,
             head,
             kind: SelectionKind::Normal,
+            panel: None,
         }
+    }
+
+    /// The same selection, kept to `panel` (or to none).
+    pub fn in_panel(self, panel: Option<Panel>) -> Selection {
+        Selection { panel, ..self }
+    }
+
+    /// The columns of buffer line `line` it covers, `start..end` (`end`
+    /// may be `usize::MAX`: to the end of the line), inside its panel's
+    /// columns; `None` off its lines or when none are left.
+    pub fn line_cols(&self, line: u64) -> Option<std::ops::Range<usize>> {
+        let (a, b) = self.ordered();
+        if line < a.line || line > b.line {
+            return None;
+        }
+        let mut start = if line == a.line { a.col } else { 0 };
+        let mut end = if line == b.line { b.col + 1 } else { usize::MAX };
+        if let Some(p) = self.panel {
+            start = start.max(p.left);
+            end = end.min(p.right + 1);
+        }
+        (start < end).then_some(start..end)
     }
 
     pub fn ordered(&self) -> (Point, Point) {
@@ -463,6 +492,10 @@ pub struct Terminal {
     /// Where the last OSC 133 B mark put the command line: its buffer
     /// line and column, for the command's text at the C mark.
     input_at: Option<(u64, usize)>,
+    /// The shell's last OSC 133 mark was a prompt, command line or a
+    /// command's end (A, B or D), not a command's start (C): at the
+    /// shell's prompt, where no program draws panels.
+    at_prompt: bool,
     /// The program's working directory, if it reports it (OSC 7).
     cwd: Option<String>,
     /// The host OSC 7 named with it.
@@ -627,6 +660,7 @@ impl Terminal {
             progress: None,
             commands: Vec::new(),
             input_at: None,
+            at_prompt: false,
             cwd: None,
             cwd_host: None,
             report_token: None,
@@ -757,7 +791,7 @@ impl Terminal {
 
     /// The columns of view row `line` the selection covers.
     pub fn selected_cols(&self, line: usize) -> std::ops::Range<usize> {
-        let Some((a, b)) = self.selection.map(|s| s.ordered()) else {
+        let Some(sel) = self.selection else {
             return 0..0;
         };
         let at = self.view_row_at(line);
@@ -765,12 +799,8 @@ impl Terminal {
         self.view_pieces(at, &mut pieces);
         let mut out: Option<std::ops::Range<usize>> = None;
         for p in &pieces {
-            if p.line < a.line || p.line > b.line {
-                continue;
-            }
-            let start = if p.line == a.line { a.col } else { 0 };
-            let end = if p.line == b.line { b.col + 1 } else { usize::MAX };
-            if let Some(r) = p.view_cols(p.line, start, end) {
+            let Some(cols) = sel.line_cols(p.line) else { continue };
+            if let Some(r) = p.view_cols(p.line, cols.start, cols.end) {
                 out = Some(match out {
                     None => r,
                     Some(o) => o.start.min(r.start)..o.end.max(r.end),
@@ -1332,6 +1362,7 @@ impl Terminal {
             anchor,
             head,
             kind: SelectionKind::Word,
+            panel: None,
         }));
     }
 
@@ -1342,6 +1373,7 @@ impl Terminal {
             anchor,
             head,
             kind: SelectionKind::Line,
+            panel: None,
         }));
     }
 
@@ -1366,6 +1398,11 @@ impl Terminal {
         let Some(sel) = self.selection else {
             self.set_selection(Some(Selection::new(to, to)));
             return;
+        };
+        // A selection kept to a panel stops at its edges.
+        let to = match sel.panel {
+            Some(p) => self.clamp_to_panel(p, to),
+            None => to,
         };
         let span = |t: &Self, p: Point| match sel.kind {
             SelectionKind::Normal => (p, p),
@@ -1519,8 +1556,34 @@ impl Terminal {
     }
 
     pub fn selection_text(&self) -> Option<String> {
-        let (a, b) = self.selection?.ordered();
-        Some(self.text_between(a, b))
+        let sel = self.selection?;
+        let (a, b) = sel.ordered();
+        Some(self.text_in(a, b, sel.panel))
+    }
+
+    /// The text from `a` to `b` as [`Terminal::text_between`] gives it,
+    /// or, kept to `panel`, each line's slice inside the panel's columns,
+    /// trailing spaces trimmed, a line for each row (cells §13.2).
+    pub(crate) fn text_in(&self, a: Point, b: Point, panel: Option<Panel>) -> String {
+        let Some(panel) = panel else {
+            return self.text_between(a, b);
+        };
+        let sel = Selection::new(a, b).in_panel(Some(panel));
+        let mut lines = Vec::new();
+        for line in a.line..=b.line {
+            let mut text = String::new();
+            if let (Some(row), Some(cols)) = (self.row_at(line), sel.line_cols(line)) {
+                for col in cols.start..cols.end.min(row.len()) {
+                    let cell = row.cell(col);
+                    if !cell.is_spacer() {
+                        cell.push_text(&mut text);
+                    }
+                }
+            }
+            text.truncate(text.trim_end_matches(' ').len());
+            lines.push(text);
+        }
+        lines.join("\n")
     }
 
     /// The text from `a` to `b` (both included, `a` first), on the
@@ -1789,7 +1852,7 @@ impl Terminal {
         let n = n.min(bottom - top + 1);
         let blank = self.blank();
         let to_history = top == 0 && !self.alt_active;
-        if self.watching() {
+        if !self.follow_scroll(top, bottom, n, true, top == 0) && self.watching() {
             if top > 0 {
                 // The region's rows move to other lines.
                 self.watch_rows(top..bottom + 1);
@@ -1839,7 +1902,9 @@ impl Terminal {
     fn scroll_down(&mut self, n: usize) {
         let (top, bottom) = (self.scroll_top, self.scroll_bottom);
         let n = n.min(bottom - top + 1);
-        self.watch_rows(top..bottom + 1);
+        if !self.follow_scroll(top, bottom, n, false, false) {
+            self.watch_rows(top..bottom + 1);
+        }
         if self.graphics.has_placements() {
             self.scroll_placements(self.top_line, (top, bottom), n, false, false);
         }
@@ -1983,6 +2048,7 @@ impl Terminal {
         let col = self.cursor.col.min(u16::MAX as usize) as u16;
         self.screen[self.cursor.row].set_mark(Mark { kind, col, status });
         let here = (self.top_line + self.cursor.row as u64, self.cursor.col);
+        self.at_prompt = kind != MarkKind::Output;
         let command = match kind {
             MarkKind::Input => {
                 self.input_at = Some(here);
@@ -4100,7 +4166,9 @@ impl Terminal {
     fn scroll_up_no_history(&mut self, n: usize) {
         let (top, bottom) = (self.scroll_top, self.scroll_bottom);
         let n = n.min(bottom - top + 1);
-        self.watch_rows(top..bottom + 1);
+        if !self.follow_scroll(top, bottom, n, true, false) {
+            self.watch_rows(top..bottom + 1);
+        }
         self.screen.make_contiguous()[top..=bottom].rotate_left(n);
         let blank = self.blank();
         for row in self.screen.range_mut(bottom + 1 - n..=bottom) {

@@ -2829,7 +2829,8 @@ and where it differs from the plan above:
   selection read its text once and compare at the end of the call. A
   selection on rows a region moves stays on its lines and is cleared
   when other text moves under it (following the text would cut it at
-  the region's edge). `cpubench` with `CPUBENCH_SELECT=10` against
+  the region's edge). Later it was made to follow its text, cut at the
+  region's edge, as Alex asked (§13.2, panels). `cpubench` with `CPUBENCH_SELECT=10` against
   no selection, medians of 8 interleaved rounds, load average 16–33:
   every input at both chunk sizes 0.997–1.009 (before: `parse_1k`
   plain 3.08, coloured 2.14, `tui` 5.46, `seq` 1.20, unicode 1.58,
@@ -3097,7 +3098,7 @@ made exact for reflow:
 |---|---|---|
 | output scrolls | unchanged (the number moves up with its row) | unchanged |
 | text overwritten or erased | unchanged (the text under it changes) | — |
-| region scroll, IL/DL | **selection ends and search hits inside the region move with it; one that leaves the region clears the selection or drops the hit**; placements likewise (§8.2) | — |
+| region scroll, IL/DL | **selection ends and search hits inside the region move with it; a selection whose text leaves the region is cut at its edge, and cleared once all of it has left; a hit that leaves is dropped**; placements likewise (§8.2) | — |
 | a block is freed | — | points above the first stored line are gone: selections are clipped, search hits dropped, the view moves to the first stored line |
 | resize, same width | unchanged; pulled-back lines keep their numbers | unchanged |
 | resize, new width | remapped in the same call (§12.2), including those inside pulled-back lines | **unchanged**: stored lines are never renumbered |
@@ -3187,6 +3188,51 @@ behind accessors in PR 1.
   cells as spaces, trimmed at the line end.
 - **Copying whole history lines** takes the stored text directly, skipping
   the cell decode (could).
+
+**Landed (panels, and following region scrolls).** Alex's rules for
+programs that draw panels (rush, Claude Code, vim splits, htop), built in
+`term/panel.rs`, `term/watch.rs` and the app's `select.rs`:
+- **The panel is the box the drag starts in**
+  (`Terminal::panel_at`). Its rows are the program's scrolling area, the
+  scroll region's margins (DECSTBM), when one narrower than the screen is
+  set and the drag starts inside it. Its columns are those between the
+  vertical box-drawing borders (`│ ┃ ║ ╎ ╏ ┆ ┇ ┊ ┋`, the tees `├ ┤ ┼` and
+  their heavy and double forms) nearest left and right of the start, on
+  that row, or the screen's edge on a side with none. A border counts
+  only if it is a vertical line: the same column holds a vertical border,
+  corner or tee on the row above or below, so a stray `│` in prose
+  splits nothing. A drag starting on a border has no columns.
+- **At the shell's prompt there are no panels**: one command's output
+  isn't one. The prompt is known from the shell's OSC 133 marks (the
+  last one A, B or D); while a command runs (C), on the alternate screen,
+  or without marks, panels are found.
+- **The selection keeps to its panel.** `Selection` carries the `Panel`
+  (`panel: Option<Panel>`); `extend_selection` stops a drag at the
+  panel's edges (columns, and the region's rows). It is line-wise inside
+  the panel's columns: the first row from the start to the right edge,
+  the middle rows edge to edge, the last from the left edge to the end.
+  Copy gives each row's slice, trailing spaces trimmed, a line for each
+  row (soft wraps don't join rows inside a panel); the highlight (the
+  snapshot's and `selected_cols`) is drawn only inside the panel. The
+  selection check watches only the panel's columns, so the other panels
+  redrawing leave it alone. Plain drags, double- and triple-click
+  selections are kept to a panel; Shift (extending, or selecting over a
+  program taking the mouse) and Option rectangles never are.
+- **The selection moves with its text** when a scroll region moves it:
+  CSI S and T, LF at the bottom margin, RI at the top margin, IL and DL,
+  and the alternate screen scrolling (`Terminal::follow_scroll`, called
+  before rows move). Its lines are renumbered and watched again; text
+  leaving the region cuts it at the region's top or bottom row (at the
+  panel's columns, or the whole row), and once all of it has left it is
+  cleared. A selection read to compare (the selection check, §11.8) is compared
+  before its text moves. One partly on rows that move and partly not
+  can't follow both and is checked as before, cleared when other text
+  moves under it. Text changing under it still clears it. The primary
+  screen scrolling into history costs nothing, as before.
+- **During a drag**, the start stays on its text as that scrolls; the
+  end stays under the mouse: when output has moved the selection, the
+  next frame extends its end to the cell under the mouse's last position
+  again (`select::DragAt`).
 
 ### 13.3 Search: what it has to do
 

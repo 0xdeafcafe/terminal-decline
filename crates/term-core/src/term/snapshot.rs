@@ -416,7 +416,7 @@ impl Terminal {
         out.cols = cols;
         out.lines = to_u16(self.lines);
 
-        let selection = self.selection.map(|s| s.ordered());
+        let selection = self.selection;
         // The hovered link's id in the screen's table: cells are compared
         // with it, which is comparing by value within one table.
         let hovered_link = self.hover.and_then(|p| self.link_at(p));
@@ -491,7 +491,12 @@ impl Terminal {
             };
             if let Some(sel) = selection {
                 ranges.clear();
-                span(sel, &mut ranges);
+                // Inside its panel's columns, when it keeps to one.
+                for p in &pieces {
+                    if let Some(c) = sel.line_cols(p.line) {
+                        cols_of(p.line, c.start, c.end, &mut ranges);
+                    }
+                }
                 for r in merge(&mut ranges) {
                     out.highlights.push(Highlight {
                         cols: to_u16(r.start)..to_u16(r.end),

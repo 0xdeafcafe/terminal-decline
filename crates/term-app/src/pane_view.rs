@@ -167,7 +167,7 @@ define_class!(
         #[unsafe(method(copyLink:))]
         fn copy_link_item(&self, _sender: Option<&AnyObject>) {
             if let Some(uri) = self.ivars().menu_link.take() {
-                let pb = NSPasteboard::generalPasteboard();
+                let pb = clipboard();
                 pb.clearContents();
                 pb.setString_forType(&NSString::from_str(&uri), unsafe { NSPasteboardTypeString });
             }
@@ -194,9 +194,17 @@ define_class!(
 
         #[unsafe(method(paste:))]
         fn paste(&self, _sender: Option<&AnyObject>) {
-            let pb = NSPasteboard::generalPasteboard();
-            let Some(text) = pb.stringForType(unsafe { NSPasteboardTypeString }) else { return };
-            self.paste_text(&text.to_string());
+            let pb = clipboard();
+            match pb.stringForType(unsafe { NSPasteboardTypeString }) {
+                Some(text) => self.paste_text(&text.to_string()),
+                // Text is there but macOS didn't hand it over: paste from
+                // other apps is denied for this app (macOS 15.4 and later).
+                None if has_text(&pb) => self.notice(
+                    "macOS didn't let Terminal Decline read the clipboard: allow it in \
+                     System Settings > Privacy & Security > Paste from Other Apps",
+                ),
+                None => NSBeep(),
+            }
         }
 
         /// Files, URLs or text dragged onto the pane are typed in: see
@@ -415,6 +423,24 @@ define_class!(
         }
     }
 );
+
+/// The clipboard: the general pasteboard, or under the test control a
+/// pasteboard of this process's own (set with the test-only `clipboard`
+/// command), so smoke tests neither read nor change the user's.
+pub(crate) fn clipboard() -> Retained<NSPasteboard> {
+    if std::env::var_os(crate::control::ENV).is_some_and(|v| !v.is_empty()) {
+        let name = format!("com.0xdeafcafe.terminal-decline.test.{}", std::process::id());
+        return NSPasteboard::pasteboardWithName(&NSString::from_str(&name));
+    }
+    NSPasteboard::generalPasteboard()
+}
+
+/// Whether `pb` holds text, from its types alone: reading the text when
+/// the user didn't ask to paste would have macOS ask them, or refuse.
+fn has_text(pb: &NSPasteboard) -> bool {
+    pb.availableTypeFromArray(&NSArray::from_slice(&[unsafe { NSPasteboardTypeString }]))
+        .is_some()
+}
 
 fn string_of(obj: &AnyObject) -> String {
     if let Some(s) = obj.downcast_ref::<NSAttributedString>() {
@@ -648,7 +674,7 @@ impl PaneView {
         let has_selection = self
             .with(|_, p| p.session.lock_term().state.selection_text().is_some_and(|t| !t.is_empty()))
             .unwrap_or(false);
-        let can_paste = unsafe { NSPasteboard::generalPasteboard().stringForType(NSPasteboardTypeString) }.is_some();
+        let can_paste = has_text(&clipboard());
         let menu = NSMenu::new(mtm);
         menu.setAutoenablesItems(false);
         let add = |title: &str, action: Sel, enabled: bool| {
@@ -968,7 +994,7 @@ impl PaneView {
         if self.window_view().is_some_and(|w| w.copied_in_test(&text)) {
             return;
         }
-        let pb = NSPasteboard::generalPasteboard();
+        let pb = clipboard();
         pb.clearContents();
         pb.setString_forType(&NSString::from_str(&text), unsafe { NSPasteboardTypeString });
     }
@@ -1414,7 +1440,7 @@ impl PaneView {
     /// False when there was nothing to copy.
     fn copy_selection(&self) -> bool {
         let Some(text) = self.copy_text() else { return false };
-        let pb = NSPasteboard::generalPasteboard();
+        let pb = clipboard();
         pb.clearContents();
         pb.setString_forType(&NSString::from_str(&text), unsafe { NSPasteboardTypeString });
         true

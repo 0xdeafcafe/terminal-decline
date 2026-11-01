@@ -325,6 +325,8 @@ struct TestControl {
     /// Text that would have been put on the clipboard by the copies
     /// that don't select (Copy Last Command and its output).
     copied: Vec<String>,
+    /// Click menus that would have opened (see `Dump::menus`).
+    menus: Vec<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -837,6 +839,7 @@ impl WindowView {
             seq: 0,
             opened: Vec::new(),
             copied: Vec::new(),
+            menus: Vec::new(),
         });
         let spawn = |n: NewPane| spawn_pane(id, &config, &theme, m, test.is_some(), n);
         let mut panes = HashMap::new();
@@ -3615,16 +3618,8 @@ impl WindowView {
                         }
                     }
                     Some(Control::Click(line, col, false)) => {
-                        let pane = self.focused_pane();
-                        let uri = pane.and_then(|pane| {
-                            self.with_pane(pane, |_, p| {
-                                let t = p.session.lock_term();
-                                crate::links::under(&t.state, t.state.point_at(line, col))
-                            })
-                        });
-                        match (self.focused_view(), uri.flatten()) {
-                            (Some(view), Some(uri)) => view.open_link(&uri),
-                            _ => NSBeep(),
+                        if !self.focused_view().is_some_and(|view| view.open_target_at(line, col)) {
+                            NSBeep();
                         }
                     }
                     Some(Control::Mouse {
@@ -3728,6 +3723,19 @@ impl WindowView {
         self.with_state(|st| match &mut st.win.test {
             Some(test) => {
                 test.opened.push(url.to_string());
+                true
+            }
+            None => false,
+        })
+        .unwrap_or(false)
+    }
+
+    /// Under test control, a click menu that would open on a link or path
+    /// is listed in the dump (`menus`) instead: whether it was.
+    pub(crate) fn menu_in_test(&self, described: &str) -> bool {
+        self.with_state(|st| match &mut st.win.test {
+            Some(test) => {
+                test.menus.push(described.to_string());
                 true
             }
             None => false,
@@ -3980,6 +3988,7 @@ fn write_dump(st: &mut State, window: Window) {
         hovered_link,
         opened: test.opened.clone(),
         copied: test.copied.clone(),
+        menus: test.menus.clone(),
         failed_rows: p.render.frame.last_snapshot().failed.clone(),
         view_offset,
         view_shift: p.scroll.shift_px(m.cell_height as f64),

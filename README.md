@@ -147,7 +147,10 @@ What is in the code today:
   as bright; true colour, underline styles, graphemes and emoji,
   box-drawing and Powerline glyphs drawn in code. Every setting, with an
   example: [docs/fonts.md](docs/fonts.md).
-- **Links**: OSC 8 hyperlinks and plain URLs, opened with Cmd-click.
+- **Links**: OSC 8 hyperlinks, plain URLs and file paths that exist
+  (with `:line:col`), underlined under the pointer and opened with
+  Cmd-click; a plain click selects one and opens a menu (Open, Copy,
+  Reveal in Finder for paths).
 - **Find bar**: Cmd+F with a standard macOS search field over the whole
   scrollback; Cmd+G, Cmd+E and the shared find text work as in other apps.
 - **Selection**: auto-scroll past the edge, rectangular selection

@@ -1,6 +1,8 @@
-//! Links in the terminal (roadmap E.2): what is under the pointer while
-//! Cmd is held (an OSC 8 hyperlink, else a plain URL in the text), and
-//! which of them Cmd-click opens.
+//! Links in the terminal (roadmap E.2): what is under the pointer (an
+//! OSC 8 hyperlink, else a plain URL in the text, else a file path that
+//! exists), and which of them Cmd-click opens. A plain click on one
+//! selects it and opens a small menu (Open, Copy; for a path also Reveal
+//! in Finder); see the pane view.
 //!
 //! Only `http`, `https` and `mailto` links open as they are, and `file`
 //! links naming this Mac (no host, `localhost` or its own name). Anything
@@ -8,12 +10,118 @@
 //! schemes, other machines' files) is refused with a notice: clicking text
 //! a program printed shouldn't start arbitrary apps.
 
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
+
 use term_core::{Point, Terminal};
 
 /// The link at `p`: its OSC 8 URI, else the plain URL written there
 /// ([`Terminal::url_at`]).
 pub fn under(t: &Terminal, p: Point) -> Option<String> {
     t.link_at(p).map(|l| l.uri).or_else(|| t.url_at(p).map(|(_, _, url)| url))
+}
+
+/// What is under the pointer, for the hover underline and a click.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Target {
+    /// An OSC 8 link or a plain URL: what it opens, and its cells.
+    Url { uri: String, start: Point, end: Point },
+    /// A file path that exists: as written (with its `:line:col`), and
+    /// the absolute path it names (without).
+    Path {
+        shown: String,
+        path: String,
+        start: Point,
+        end: Point,
+    },
+}
+
+impl Target {
+    /// Its first and last cell.
+    pub fn span(&self) -> (Point, Point) {
+        match self {
+            Target::Url { start, end, .. } | Target::Path { start, end, .. } => (*start, *end),
+        }
+    }
+
+    /// What Copy (Copy Path) puts on the clipboard: the URL, or the path
+    /// as shown, `:line:col` and all.
+    pub fn copy_text(&self) -> &str {
+        match self {
+            Target::Url { uri, .. } => uri,
+            Target::Path { shown, .. } => shown,
+        }
+    }
+}
+
+/// The link or path at `p`: an OSC 8 link, else a plain URL, else a path
+/// that exists ([`Terminal::path_at`], asking `cache`). Paths are only
+/// looked for while the shell is on this Mac (its OSC 7 host is ours or
+/// none): another machine's paths can't be checked or opened here.
+pub fn target_at(t: &Terminal, p: Point, cache: &mut ExistsCache) -> Option<Target> {
+    if let Some(link) = t.link_at(p) {
+        let (start, end) = t.link_span(p).unwrap_or((p, p));
+        return Some(Target::Url { uri: link.uri, start, end });
+    }
+    if let Some((start, end, uri)) = t.url_at(p) {
+        return Some(Target::Url { uri, start, end });
+    }
+    if !t.cwd_host().is_none_or(|h| is_this_mac(h, &host_name())) {
+        return None;
+    }
+    let home = std::env::var("HOME").ok();
+    let found = t.path_at(p, home.as_deref(), |path| cache.exists(path))?;
+    Some(Target::Path {
+        shown: found.shown,
+        path: found.path,
+        start: found.start,
+        end: found.end,
+    })
+}
+
+/// Whether a host named in a `file://` link or OSC 7 (`name`) is this
+/// Mac (`host`): none, `localhost`, or its own name with or without
+/// `.local`.
+pub fn is_this_mac(name: &str, host: &str) -> bool {
+    let ours = |h: &str| h.eq_ignore_ascii_case(name) || h.strip_suffix(".local").is_some_and(|h| h.eq_ignore_ascii_case(name));
+    name.is_empty() || name.eq_ignore_ascii_case("localhost") || ours(host)
+}
+
+/// Whether paths exist, remembered for a while, so the hover underline
+/// doesn't ask the filesystem on every mouse move.
+#[derive(Default)]
+pub struct ExistsCache {
+    entries: HashMap<String, (bool, Instant)>,
+}
+
+/// How long an answer is kept: a file made or removed shows within this.
+const EXISTS_FOR: Duration = Duration::from_secs(3);
+/// Answers kept at most; past it they are all dropped.
+const EXISTS_MAX: usize = 512;
+
+impl ExistsCache {
+    pub fn exists(&mut self, path: &str) -> bool {
+        self.exists_with(path, Instant::now(), |p| std::fs::metadata(p).is_ok())
+    }
+
+    fn exists_with(&mut self, path: &str, now: Instant, check: impl FnOnce(&str) -> bool) -> bool {
+        if let Some(&(there, at)) = self.entries.get(path)
+            && now.duration_since(at) < EXISTS_FOR
+        {
+            return there;
+        }
+        if self.entries.len() >= EXISTS_MAX {
+            self.entries.clear();
+        }
+        let there = check(path);
+        self.entries.insert(path.to_string(), (there, now));
+        there
+    }
+
+    /// Forget every answer, so the next ones are asked afresh.
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
 }
 
 /// Why a link isn't opened.
@@ -53,9 +161,7 @@ pub fn to_open(uri: &str, host: &str) -> Result<String, Refused> {
                 return Ok(format!("file://{rest}"));
             };
             let (name, path) = after.split_at(after.find('/').unwrap_or(after.len()));
-            let ours = |h: &str| h.eq_ignore_ascii_case(name) || h.strip_suffix(".local").is_some_and(|h| h.eq_ignore_ascii_case(name));
-            let local = name.is_empty() || name.eq_ignore_ascii_case("localhost") || ours(host);
-            if !local {
+            if !is_this_mac(name, host) {
                 return Err(Refused::RemoteFile);
             }
             Ok(format!("file://{}", if path.is_empty() { "/" } else { path }))
@@ -125,6 +231,48 @@ mod tests {
         assert_eq!(at(3).as_deref(), Some("https://real"));
         assert_eq!(at(16).as_deref(), Some("http://plain.example"));
         assert_eq!(at(35), None);
+    }
+
+    #[test]
+    fn targets_are_links_then_urls_then_paths() {
+        let mut t = term_core::Term::new(60, 2, 0, term_core::ImagePool::process());
+        t.advance(b"\x1b]7;file:///tmp\x1b\\\x1b]8;;https://real\x1b\\shown\x1b]8;;\x1b\\ http://plain.example /etc/hosts:3 x");
+        let mut cache = ExistsCache::default();
+        let at = |t: &term_core::Term, cache: &mut ExistsCache, col| target_at(&t.state, t.state.point_at(0, col), cache);
+        let p = |col| t.state.point_at(0, col);
+        let url = |uri: &str, a, b| Target::Url {
+            uri: uri.into(),
+            start: p(a),
+            end: p(b),
+        };
+        assert_eq!(at(&t, &mut cache, 2), Some(url("https://real", 0, 4)));
+        assert_eq!(at(&t, &mut cache, 8), Some(url("http://plain.example", 6, 25)));
+        let path = at(&t, &mut cache, 30).expect("/etc/hosts is on every Mac");
+        assert_eq!(path.copy_text(), "/etc/hosts:3");
+        assert!(matches!(&path, Target::Path { path, .. } if path == "/etc/hosts"));
+        assert_eq!(path.span(), (p(27), p(38)));
+        assert_eq!(at(&t, &mut cache, 40), None);
+
+        // Over ssh, paths name another machine's files.
+        t.advance(b"\x1b]7;file://elsewhere.example/tmp\x1b\\");
+        assert_eq!(at(&t, &mut cache, 30), None);
+    }
+
+    #[test]
+    fn exists_answers_are_kept_a_while() {
+        let mut cache = ExistsCache::default();
+        let t0 = Instant::now();
+        let mut asked = 0;
+        let mut ask = |cache: &mut ExistsCache, now| {
+            cache.exists_with("/x", now, |_| {
+                asked += 1;
+                true
+            })
+        };
+        assert!(ask(&mut cache, t0));
+        assert!(ask(&mut cache, t0 + Duration::from_secs(1)));
+        assert!(ask(&mut cache, t0 + EXISTS_FOR));
+        assert_eq!(asked, 2, "asked again once the answer is old");
     }
 
     #[test]

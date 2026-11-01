@@ -41,8 +41,16 @@ pub struct Ivars {
     menu_link: RefCell<Option<String>>,
     /// Where the right-click menu was opened, for Select Command Output.
     menu_point: Cell<Option<Point>>,
-    /// The pointer is the pointing hand, over a link with Cmd held.
+    /// The pointer is the pointing hand, over a link or path.
     hand: Cell<bool>,
+    /// A plain click on a link or path, and where (in this view): its
+    /// menu opens once the double-click interval has passed without a
+    /// second click.
+    click: RefCell<Option<(crate::links::Target, NSPoint)>>,
+    /// The link or path the click menu was opened on.
+    menu_target: RefCell<Option<crate::links::Target>>,
+    /// Whether paths exist, for the hover underline and clicks.
+    exists: RefCell<crate::links::ExistsCache>,
 }
 
 define_class!(
@@ -170,6 +178,35 @@ define_class!(
                 let pb = clipboard();
                 pb.clearContents();
                 pb.setString_forType(&NSString::from_str(&uri), unsafe { NSPasteboardTypeString });
+            }
+        }
+
+        /// The double-click interval passed after a plain click on a link
+        /// or path, with no second click: select it and open its menu.
+        #[unsafe(method(showClickMenu:))]
+        fn show_click_menu_now(&self, _sender: Option<&AnyObject>) {
+            self.show_click_menu();
+        }
+
+        #[unsafe(method(clickOpen:))]
+        fn click_open_item(&self, _sender: Option<&AnyObject>) {
+            if let Some(target) = self.ivars().menu_target.take() {
+                self.open_target(&target);
+            }
+        }
+
+        #[unsafe(method(clickReveal:))]
+        fn click_reveal_item(&self, _sender: Option<&AnyObject>) {
+            if let Some(crate::links::Target::Path { path, .. }) = self.ivars().menu_target.take() {
+                self.reveal_path(&path);
+            }
+        }
+
+        #[unsafe(method(clickCopy:))]
+        fn click_copy_item(&self, _sender: Option<&AnyObject>) {
+            if let Some(target) = self.ivars().menu_target.take() {
+                let text = target.copy_text().to_string();
+                self.copy_from(|_| Some(text));
             }
         }
 
@@ -498,6 +535,9 @@ impl PaneView {
             menu_link: RefCell::new(None),
             menu_point: Cell::new(None),
             hand: Cell::new(false),
+            click: RefCell::new(None),
+            menu_target: RefCell::new(None),
+            exists: RefCell::new(crate::links::ExistsCache::default()),
         });
         let view: Retained<PaneView> = unsafe { msg_send![super(this), initWithFrame: frame] };
         let types = unsafe { [NSPasteboardTypeFileURL, NSPasteboardTypeURL, NSPasteboardTypeString] };
@@ -552,6 +592,7 @@ impl PaneView {
     /// is told if it asked for focus events, and keys still down are
     /// released for a program that asked for releases (kitty flag 2).
     fn lose_focus(&self) {
+        self.cancel_click_menu();
         let Some(modes) = self.key_modes() else { return };
         if modes.composing {
             // The input method may commit it itself (through `insertText`).
@@ -731,6 +772,7 @@ impl PaneView {
     }
 
     fn handle_key(&self, event: &NSEvent) {
+        self.cancel_click_menu();
         if latency::get().is_some() {
             let times = (event.timestamp(), latency::now());
             self.with(|_, p| p.key_t0 = Some(times));
@@ -962,6 +1004,135 @@ impl PaneView {
         true
     }
 
+    /// The link or path at visible `line`, `col` ([`crate::links::target_at`]).
+    fn target_at_cell(&self, line: usize, col: usize) -> Option<crate::links::Target> {
+        let mut cache = self.ivars().exists.borrow_mut();
+        self.with(|_, p| {
+            let t = p.session.lock_term();
+            crate::links::target_at(&t.state, t.state.point_at(line, col), &mut cache)
+        })
+        .flatten()
+    }
+
+    /// Cmd-click, or Open in the click menu: open the link (as
+    /// [`Self::open_link`] does) or the file, in the app macOS opens it
+    /// with.
+    pub(crate) fn open_target(&self, target: &crate::links::Target) {
+        match target {
+            crate::links::Target::Url { uri, .. } => self.open_link(uri),
+            crate::links::Target::Path { path, .. } => {
+                let url = NSURL::fileURLWithPath(&NSString::from_str(path));
+                let shown = url.absoluteString().map(|s| s.to_string()).unwrap_or_default();
+                if self.window_view().is_some_and(|w| w.opened_in_test(&shown)) {
+                    return;
+                }
+                if !NSWorkspace::sharedWorkspace().openURL(&url) {
+                    self.notice(&format!("couldn't open {path}"));
+                }
+            }
+        }
+    }
+
+    /// Cmd-click on visible `line`, `col` (the test control's `click`):
+    /// open the link or path there. False if there is none.
+    pub(crate) fn open_target_at(&self, line: usize, col: usize) -> bool {
+        let Some(target) = self.target_at_cell(line, col) else {
+            return false;
+        };
+        self.open_target(&target);
+        true
+    }
+
+    /// Reveal in Finder: a Finder window with `path` selected.
+    fn reveal_path(&self, path: &str) {
+        if self.window_view().is_some_and(|w| w.opened_in_test(&format!("reveal {path}"))) {
+            return;
+        }
+        let url = NSURL::fileURLWithPath(&NSString::from_str(path));
+        NSWorkspace::sharedWorkspace().activateFileViewerSelectingURLs(&NSArray::from_retained_slice(&[url]));
+    }
+
+    /// Open the click menu once the system's double-click interval has
+    /// passed: a second click before then cancels it
+    /// ([`Self::cancel_click_menu`]) and selects a word as ever. The menu
+    /// is modal, so opening it at once would swallow that second click.
+    /// A run loop timer, not the main queue: the menu's own run loop must
+    /// still let the main queue's work run.
+    fn schedule_click_menu(&self) {
+        let interval = NSEvent::doubleClickInterval();
+        let _: () = unsafe { msg_send![self, performSelector: sel!(showClickMenu:), withObject: None::<&AnyObject>, afterDelay: interval] };
+    }
+
+    /// A click menu waiting to open won't: another click, a key, or the
+    /// pane losing focus came first.
+    fn cancel_click_menu(&self) {
+        if self.ivars().click.take().is_some() {
+            let _: () = unsafe {
+                msg_send![
+                    objc2::class!(NSObject),
+                    cancelPreviousPerformRequestsWithTarget: self,
+                    selector: sel!(showClickMenu:),
+                    object: None::<&AnyObject>
+                ]
+            };
+        }
+    }
+
+    /// The plain click on a link or path stood alone: select all of it
+    /// (so Copy works as for any selection) and open its menu at the
+    /// click: Open and Copy for a link; Open, Reveal in Finder and Copy
+    /// Path for a path. Nothing if the text there changed meanwhile.
+    fn show_click_menu(&self) {
+        let Some((target, at)) = self.ivars().click.take() else { return };
+        let (start, end) = target.span();
+        let still = {
+            let mut cache = self.ivars().exists.borrow_mut();
+            self.with(|_, p| crate::links::target_at(&p.session.lock_term().state, start, &mut cache))
+                .flatten()
+        };
+        if still.as_ref() != Some(&target) {
+            return;
+        }
+        self.clear_other_selections();
+        self.with(|_, p| {
+            p.block = None;
+            p.session
+                .lock_term()
+                .state
+                .set_selection(Some(term_core::Selection::new(start, end)));
+        });
+        self.request_redraw();
+        let is_path = matches!(target, crate::links::Target::Path { .. });
+        let described = format!("{} {}", if is_path { "path" } else { "url" }, target.copy_text());
+        self.ivars().menu_target.replace(Some(target));
+        if self.window_view().is_some_and(|w| w.menu_in_test(&described)) {
+            return;
+        }
+        let mtm = MainThreadMarker::from(self);
+        let menu = NSMenu::new(mtm);
+        menu.setAutoenablesItems(false);
+        let add = |title: &str, action: Sel| {
+            let item = unsafe {
+                NSMenuItem::initWithTitle_action_keyEquivalent(
+                    NSMenuItem::alloc(mtm),
+                    &NSString::from_str(title),
+                    Some(action),
+                    &NSString::new(),
+                )
+            };
+            unsafe { item.setTarget(Some(self)) };
+            menu.addItem(&item);
+        };
+        add("Open", sel!(clickOpen:));
+        if is_path {
+            add("Reveal in Finder", sel!(clickReveal:));
+            add("Copy Path", sel!(clickCopy:));
+        } else {
+            add("Copy", sel!(clickCopy:));
+        }
+        menu.popUpMenuPositioningItem_atLocation_inView(None, at, Some(self));
+    }
+
     fn link_at_cell(&self, line: usize, col: usize) -> Option<String> {
         self.with(|_, p| {
             let t = p.session.lock_term();
@@ -970,16 +1141,31 @@ impl PaneView {
         .flatten()
     }
 
-    /// The pointer is over visible `cell` with Cmd held, or `None`: the
-    /// link there (every piece of it) is underlined, and the pointer is a
-    /// pointing hand while it is over one.
+    /// The pointer is over visible `cell` (and the program isn't taking
+    /// the mouse, or Cmd is held), or `None`: the link or path there
+    /// (every piece of it) is underlined, and the pointer is a pointing
+    /// hand while it is over one.
     pub(crate) fn set_hover(&self, cell: Option<(usize, usize)>) {
+        let mut cache = self.ivars().exists.borrow_mut();
         let Some((changed, on_link)) = self.with(|_, p| {
             let mut t = p.session.lock_term();
             let point = cell.map(|(line, col)| t.state.point_at(line, col));
-            let changed = t.state.hover() != point;
-            t.state.set_hover(point);
-            (changed, point.is_some_and(|at| crate::links::under(&t.state, at).is_some()))
+            let target = point.and_then(|at| crate::links::target_at(&t.state, at, &mut cache));
+            // A link is found again as the snapshot is built (an OSC 8
+            // link's pieces are compared by value); a path is its cells.
+            // Moving along the same link changes nothing to draw.
+            let (hover, span) = match &target {
+                Some(url @ crate::links::Target::Url { .. }) => {
+                    let (a, b) = url.span();
+                    (t.state.hover().filter(|old| a <= *old && *old <= b).or(point), None)
+                }
+                Some(path) => (None, Some(path.span())),
+                None => (None, None),
+            };
+            let changed = t.state.hover() != hover || t.state.hover_span() != span;
+            t.state.set_hover(hover);
+            t.state.set_hover_span(span);
+            (changed, target.is_some())
         }) else {
             return;
         };
@@ -996,7 +1182,8 @@ impl PaneView {
     }
 
     /// Cmd went down or up: every pane of the window hovers what is under
-    /// the pointer, or stops (the key goes to the focused pane only).
+    /// the pointer, or stops where the program takes the mouse (the key
+    /// goes to the focused pane only).
     fn hover_with_cmd(&self, cmd: bool) {
         let views = match self.window_view() {
             Some(w) => w.with_state(|st| st.panes.values().map(|p| p.view.clone()).collect::<Vec<_>>()),
@@ -1009,7 +1196,8 @@ impl PaneView {
             let at = view.convertPoint_fromView(loc, None);
             let b = view.bounds();
             let inside = at.x >= b.origin.x && at.y >= b.origin.y && at.x < b.origin.x + b.size.width && at.y < b.origin.y + b.size.height;
-            view.set_hover(if cmd && inside { view.cell_at_point(at) } else { None });
+            let shows = inside && (cmd || !view.program_takes_mouse());
+            view.set_hover(if shows { view.cell_at_point(at) } else { None });
         }
     }
 
@@ -1346,22 +1534,35 @@ impl PaneView {
 
     fn mouse_button_event(&self, event: &NSEvent, button: u8, press: bool) {
         self.with(|win, _| win.last_input = Instant::now());
+        // Any press (a second click above all) ends a click menu waiting.
+        if press {
+            self.cancel_click_menu();
+        }
         let Some((line, col)) = self.cell_at(event) else { return };
-        // Cmd-click on a link opens it, even while the program takes the
-        // mouse; the rest of the click (drag, release) goes nowhere.
+        // Cmd-click on a link or path opens it, even while the program
+        // takes the mouse; the rest of the click (drag, release) goes
+        // nowhere.
         if button == mouse::LEFT
             && press
             && event.modifierFlags().contains(NSEventModifierFlags::Command)
-            && let Some(uri) = self.link_at_cell(line, col)
+            && let Some(target) = self.target_at_cell(line, col)
         {
             self.with(|_, p| p.swallow_click = true);
-            self.open_link(&uri);
+            self.open_target(&target);
             return;
         }
         // A selection being made ends on its own button's release, even
         // if Shift (which kept the program from the mouse) is let go first.
+        // A plain click on a link or path that wasn't dragged opens its
+        // menu once a double-click can no longer come.
         if button == mouse::LEFT && !press && self.with(|_, p| p.selecting.is_some()) == Some(true) {
+            let clicked = self.with(|_, p| p.pending.is_some() && p.selecting == Some(Gesture::Start)) == Some(true);
             self.end_selection();
+            if clicked && self.ivars().click.borrow().is_some() {
+                self.schedule_click_menu();
+            } else {
+                self.ivars().click.replace(None);
+            }
             return;
         }
         if let Some((_, sgr)) = self.reporting(event) {
@@ -1412,6 +1613,18 @@ impl PaneView {
             select::gesture(event.clickCount(), shift, option)
         };
         let at = self.px_at(event);
+        // A plain single click (Shift only kept it from a program taking
+        // the mouse) on a link or path: its menu may open on release.
+        let plain = gesture == Gesture::Start && !flags.intersects(NSEventModifierFlags::Command | NSEventModifierFlags::Control);
+        let target = if plain {
+            // Asked afresh: the click acts on it.
+            self.ivars().exists.borrow_mut().clear();
+            self.target_at_cell(line, col)
+        } else {
+            None
+        };
+        let in_view = self.convertPoint_fromView(event.locationInWindow(), None);
+        self.ivars().click.replace(target.map(|t| (t, in_view)));
         self.clear_other_selections();
         self.with(|win, p| {
             p.selecting = Some(gesture);
@@ -1612,8 +1825,11 @@ impl PaneView {
 
     fn mouse_motion(&self, event: &NSEvent, button: Option<u8>) {
         let Some((line, col)) = self.cell_at(event) else { return };
+        // Links and paths are underlined under the pointer, unless the
+        // program takes the mouse (then only with Cmd held).
         let cmd = event.modifierFlags().contains(NSEventModifierFlags::Command);
-        self.set_hover((cmd && button.is_none()).then_some((line, col)));
+        let hovers = button.is_none() && (cmd || self.reporting(event).is_none());
+        self.set_hover(hovers.then_some((line, col)));
         let selecting = self.with(|_, p| p.selecting.is_some()) == Some(true);
         if !selecting && let Some((mode, sgr)) = self.reporting(event) {
             let held = self.with(|_, p| p.mouse_button).flatten();

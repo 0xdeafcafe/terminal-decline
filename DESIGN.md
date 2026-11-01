@@ -388,6 +388,23 @@ Oct 2026, 1.90 → 2.16 MB) and no measurable parse speed.
   the clipboard) while the program isn't taking the mouse
   (`mouse::opens_menu`); with mouse reporting on, the click goes to the
   program as before, and Shift still overrides.
+- Links and paths (`links::target_at`): an OSC 8 link, else a plain URL
+  (`term_core::word::url_at`), else a file path that exists
+  (`term_core::paths`: absolute, `~/…`, or relative to the shell's OSC 7
+  folder, only while that folder is on this Mac; a `:line:col` after it
+  is shown and copied but not opened; soft wraps are followed; spaces
+  only inside quotes). The one under the pointer is underlined and the
+  pointer is a pointing hand; over a program taking the mouse only with
+  Cmd held. Whether a path exists is asked of the filesystem at most
+  once every 3 s per path while hovering (`links::ExistsCache`), and
+  afresh on a click. Cmd-click opens it. A plain single click on one
+  that isn't dragged (Shift-click over a program taking the mouse)
+  selects all of it and opens a small menu at the click: Open and Copy
+  for a link; Open, Reveal in Finder and Copy Path (with its
+  `:line:col`) for a path. The menu is modal, so it opens only once the
+  system double-click interval has passed with no second click (a run
+  loop timer, cancelled by any press, key or loss of focus); a double-
+  or triple-click selects a word or line as ever.
 
 ## Windows and tabs
 

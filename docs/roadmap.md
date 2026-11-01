@@ -83,7 +83,7 @@ Design: docs/design/pins.md.
 | # | Work | Size |
 |---|---|---|
 | E.1 | Native tabs: enable window tabbing, menu items, Cmd+T / Cmd+1…9; grid shrinks when the tab bar appears; background tabs give back memory | S |
-| E.2 | OSC 8 links + Cmd-click; plain URLs | M |
+| E.2 | OSC 8 links + Cmd-click; plain URLs; file paths, and a plain click's menu (Open, Copy, Reveal in Finder) | M |
 | E.3 | Keyboard: non-Latin layouts for Ctrl/Meta; kitty protocol levels Neovim/Helix use (table tests from the spec + real-app checks); `keybind` config (remap/unbind/send text; per pin) | M |
 | E.4 | Fonts: fallback list, bold/italic overrides, Nerd Font icon fitting, line height / cell width adjust | M |
 | E.5 | Shell integration (OSC 133) via documented snippets for zsh/bash/fish (not injected): ~~jump between prompts, select output, Option-click to move the cursor~~ (all done) | M |

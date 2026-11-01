@@ -47,8 +47,9 @@
 //!   of the focused pane with Cmd held, as a mouse move there would be, or
 //!   Cmd is let go;
 //! - `click LINE COL [option]`: Cmd-click that cell. A link that may open
-//!   isn't opened while this control is on: it is listed in the dump's
-//!   `opened`. With `option`, Option-click it instead: on the shell's
+//!   (or a path) isn't opened while this control is on: it is listed in
+//!   the dump's `opened`. A plain `mouse down` and `up` on a link or path
+//!   lists the menu it would open in the dump's `menus`, not opening it. With `option`, Option-click it instead: on the shell's
 //!   command line that types the arrow keys to the cell;
 //! - `scroll N`: scroll the focused pane's view N lines back into history
 //!   (negative: towards the bottom), as the scroll wheel does;
@@ -565,6 +566,10 @@ pub struct Dump {
     /// Text Copy Last Command and Copy Last Command's Output would have
     /// put on the clipboard (stubbed under test control).
     pub copied: Vec<String>,
+    /// Click menus that would have opened (a plain click on a link or
+    /// path, stubbed under test control): `url TEXT` or `path TEXT`, with
+    /// what Copy would copy.
+    pub menus: Vec<String>,
     /// The focused pane's view rows marked as a failed command's prompt
     /// in its last frame.
     pub failed_rows: Vec<u16>,

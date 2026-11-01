@@ -517,7 +517,7 @@ impl GlyphCache {
                         by_key.insert((id, key), None);
                     }
                     Some(_) if !thread.is_wanted(&f.want) => {}
-                    Some(g) => thread.keep(key, g),
+                    Some(g) => thread.keep(key, g, f.want.clone()),
                 }
             }
             match (f.key, f.glyph) {
@@ -532,21 +532,34 @@ impl GlyphCache {
                 }
                 // No pane wants it any more (its rows scrolled away).
                 (Some(_), Some(_)) if !thread.is_wanted(&f.want) => {}
-                (Some(key), Some(g)) => thread.keep(key, g),
+                (Some(key), Some(g)) => thread.keep(key, g, f.want),
             }
         }
     }
 
     /// A build of font set `id` drew every glyph: if nothing else is on its
-    /// way, bitmaps the glyph thread sent back that no build drew (rows
-    /// scrolled away first) go now rather than wait out their time.
-    /// Another pane waiting for some asks again.
+    /// way, bitmaps the glyph thread sent back that no build drew and no
+    /// pane waits for (rows scrolled away first) go now rather than wait
+    /// out their time.
     fn settle(&mut self, id: FontsId) {
         if let Some((_, chars)) = self.by_char.iter_mut().find(|(f, _)| *f == id)
             && let Some(t) = &mut chars.thread
             && !t.busy()
         {
-            t.drop_ready();
+            t.drop_unwanted();
+        }
+    }
+
+    /// A pane of font set `id` whose last build went without `wanted` is
+    /// gone.
+    fn forget_wants(&mut self, id: FontsId, wanted: &[Want]) {
+        if let Some((_, chars)) = self.by_char.iter_mut().find(|(f, _)| *f == id)
+            && let Some(t) = &mut chars.thread
+        {
+            t.retarget(wanted, &[]);
+            if !t.busy() {
+                t.drop_unwanted();
+            }
         }
     }
 
@@ -778,7 +791,7 @@ impl PaneGlyphs<'_> {
     /// for the build again after the texture grows).
     fn sent_back(&mut self, key: GlyphKey) -> Option<Option<GlyphSlot>> {
         let thread = self.chars.thread.as_mut()?;
-        let g = thread.ready(key)?;
+        let (g, want) = thread.ready(key)?;
         match upload(self.mask, self.color, self.in_flight, &g) {
             Ok(slot) => {
                 self.by_key.insert((self.id, key), Some(slot));
@@ -789,7 +802,7 @@ impl PaneGlyphs<'_> {
                 Some(None)
             }
             Err(NoRoom::Full) => {
-                thread.keep(key, g);
+                thread.keep(key, g, want);
                 Some(None)
             }
         }
@@ -1002,6 +1015,28 @@ impl PaneBuffers {
             self.held[k].1 = version;
         }
         (rects, glyph_buf)
+    }
+}
+
+/// A pane dropped while waiting for glyphs no longer wants them: the
+/// glyph thread skips them, and their bitmaps go, unless another pane
+/// waits for them too.
+impl Drop for PaneRender {
+    fn drop(&mut self) {
+        let (Some(id), wanted) = (self.wanted.0, std::mem::take(&mut self.wanted.1)) else {
+            return;
+        };
+        if wanted.is_empty() {
+            return;
+        }
+        let _ = SHARED.try_with(|weak| {
+            let Some(shared) = weak.try_borrow().ok().and_then(|w| w.upgrade()) else {
+                return;
+            };
+            if let Ok(mut cache) = shared.glyphs.try_borrow_mut() {
+                cache.forget_wants(id, &wanted);
+            }
+        });
     }
 }
 
@@ -1760,6 +1795,19 @@ impl Renderer {
     /// [budget](Self::set_glyph_budget).
     pub fn set_glyph_waker(&mut self, waker: Option<GlyphWaker>) {
         self.glyph_rules.waker = waker;
+    }
+
+    /// How many glyphs some pane's last build of this window's fonts went
+    /// without. Test aid.
+    #[doc(hidden)]
+    pub fn glyphs_wanted(&self) -> usize {
+        let cache = self.shared.glyphs.borrow();
+        cache
+            .by_char
+            .iter()
+            .find(|(f, _)| *f == self.fonts_id)
+            .and_then(|(_, c)| c.thread.as_ref())
+            .map_or(0, |t| t.wanted_len())
     }
 
     /// Whether the glyph thread of this window's fonts has glyphs asked

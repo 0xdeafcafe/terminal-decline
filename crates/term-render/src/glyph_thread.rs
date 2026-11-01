@@ -88,8 +88,9 @@ fn lock(live: &Live) -> std::sync::MutexGuard<'_, HashSet<Want>> {
 /// glyph.
 const WAKE_EVERY: Duration = Duration::from_millis(16);
 
-/// How long a bitmap back from the thread waits for a build to draw it.
-/// A pane waiting for it is built again within a frame or two of the wake.
+/// How long a bitmap back from the thread that no pane waits for any
+/// more is kept, in case a build draws it after all. Those some pane
+/// waits for are kept until it draws them.
 const READY_FOR: Duration = Duration::from_millis(500);
 
 /// One font set's glyph thread, as the main thread sees it.
@@ -99,8 +100,8 @@ pub(crate) struct GlyphThread {
     /// Asked for and not back yet: each glyph is asked for once.
     pending: HashSet<Want>,
     /// Bitmaps back, not yet put in a texture: when it was sent back,
-    /// and the bitmap.
-    ready: HashMap<GlyphKey, (Instant, RasterGlyph)>,
+    /// the bitmap, and what it was asked for as.
+    ready: HashMap<GlyphKey, (Instant, RasterGlyph, Want)>,
     /// How many panes' last builds went without each glyph.
     wanted: HashMap<Want, u32>,
     /// The glyphs in `wanted`, or asked for since: the thread skips others.
@@ -141,9 +142,10 @@ impl GlyphThread {
 
     /// A pane's build went without `new`, its last one without `old`:
     /// glyphs no pane wants any more are no longer looked for, and their
-    /// bitmaps are dropped when they come. (A pane dropped while waiting
-    /// leaves its glyphs wanted: they are looked for as if it had been
-    /// built.)
+    /// bitmaps are dropped when they come. A pane dropped goes without
+    /// nothing ([`PaneRender`]'s drop).
+    ///
+    /// [`PaneRender`]: crate::PaneRender
     pub fn retarget(&mut self, old: &[Want], new: &[Want]) {
         if old.is_empty() && new.is_empty() {
             return;
@@ -179,16 +181,23 @@ impl GlyphThread {
         self.wanted.contains_key(want)
     }
 
+    /// How many glyphs some pane's last build went without.
+    pub fn wanted_len(&self) -> usize {
+        self.wanted.len()
+    }
+
     /// Whether `want` was asked for and isn't back yet.
     pub fn is_pending(&self, want: &Want) -> bool {
         self.pending.contains(want)
     }
 
-    /// What came back since the last call; bitmaps unused for
-    /// [`READY_FOR`] go.
+    /// What came back since the last call; bitmaps no pane waits for
+    /// that were kept for [`READY_FOR`] go.
     pub fn take(&mut self) -> Vec<Found> {
         let now = Instant::now();
-        self.ready.retain(|_, (at, _)| now.duration_since(*at) < READY_FOR);
+        let wanted = &self.wanted;
+        self.ready
+            .retain(|_, (at, _, w)| wanted.contains_key(w) || now.duration_since(*at) < READY_FOR);
         let mut out = Vec::new();
         while let Ok(f) = self.rx.try_recv() {
             self.pending.remove(&f.want);
@@ -197,19 +206,25 @@ impl GlyphThread {
         out
     }
 
-    /// Keep `glyph` until a build draws `key`.
-    pub fn keep(&mut self, key: GlyphKey, glyph: RasterGlyph) {
-        self.ready.insert(key, (Instant::now(), glyph));
+    /// Keep `glyph`, asked for as `want`, until a build draws `key`.
+    pub fn keep(&mut self, key: GlyphKey, glyph: RasterGlyph, want: Want) {
+        self.ready.insert(key, (Instant::now(), glyph, want));
     }
 
-    /// The bitmap kept for `key`, if one is.
-    pub fn ready(&mut self, key: GlyphKey) -> Option<RasterGlyph> {
-        self.ready.remove(&key).map(|(_, g)| g)
+    /// The bitmap kept for `key`, if one is, and what it was asked for as.
+    pub fn ready(&mut self, key: GlyphKey) -> Option<(RasterGlyph, Want)> {
+        self.ready.remove(&key).map(|(_, g, w)| (g, w))
     }
 
-    /// Drop every bitmap kept.
-    pub fn drop_ready(&mut self) {
-        self.ready = HashMap::new();
+    /// Drop the bitmaps kept that no pane waits for: with split panes, one
+    /// pane's complete build leaves those another pane's last build went
+    /// without until it draws them.
+    pub fn drop_unwanted(&mut self) {
+        let wanted = &self.wanted;
+        self.ready.retain(|_, (_, _, w)| wanted.contains_key(w));
+        if self.ready.is_empty() {
+            self.ready = HashMap::new();
+        }
     }
 
     /// Whether anything asked for isn't back yet: the panes drawn without

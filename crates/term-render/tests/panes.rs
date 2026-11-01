@@ -654,6 +654,53 @@ fn clusters_and_ligatures_are_shaped_on_the_glyph_thread() {
     assert!(!again.glyphs_deferred(), "runs shaped before don't wait");
 }
 
+/// A pane dropped while waiting for glyphs wants nothing any more.
+#[test]
+fn a_pane_dropped_while_waiting_wants_nothing() {
+    if !have_gpu() {
+        return;
+    }
+    let theme = theme();
+    let mut r = Renderer::new(Fonts::new("Menlo", 24.0));
+    let (waker, _wakes) = waker();
+    r.set_glyph_waker(Some(waker));
+    let (pane, _t) = built(&mut r, &theme, 8, 1, "\u{4E01}\u{4E03}");
+    assert!(pane.glyphs_deferred());
+    assert_eq!(r.glyphs_wanted(), 2);
+    drop(pane);
+    assert_eq!(r.glyphs_wanted(), 0, "its wants went with it");
+}
+
+/// With split panes, one pane's complete build keeps the bitmaps another
+/// pane is waiting for: that pane draws them on its next build without
+/// asking again.
+#[test]
+fn a_complete_build_keeps_what_another_pane_waits_for() {
+    if !have_gpu() {
+        return;
+    }
+    let theme = theme();
+    let mut r = Renderer::new(Fonts::new("Menlo", 24.0));
+    let (waker, wakes) = waker();
+    r.set_glyph_waker(Some(waker));
+    let (mut a, mut ta) = built(&mut r, &theme, 8, 1, "\u{4E08}");
+    let (mut b, mut tb) = built(&mut r, &theme, 8, 1, "\u{4E08}\u{4E09}");
+    assert!(a.glyphs_deferred() && b.glyphs_deferred());
+    // Woken with nothing back drawn yet, as the app is: what came back
+    // is taken in, and what no pane waits for would go.
+    while r.glyphs_pending() {
+        wakes.recv_timeout(std::time::Duration::from_secs(20)).expect("woken");
+        r.drop_unused_glyphs();
+    }
+    let input = input(&r, &theme);
+    r.snapshot_pane(&mut a, &mut ta.state, &input);
+    assert!(r.build_from_snapshot(&mut a, &input));
+    assert!(!a.glyphs_deferred(), "the first pane has its glyph");
+    r.snapshot_pane(&mut b, &mut tb.state, &input);
+    assert!(r.build_from_snapshot(&mut b, &input));
+    assert!(!b.glyphs_deferred(), "the second pane's glyphs were kept for it");
+}
+
 /// Glyphs from the glyph thread that find no room in a texture make it
 /// grow, as building does, and are all drawn.
 #[test]

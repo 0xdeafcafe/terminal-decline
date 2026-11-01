@@ -18,6 +18,7 @@ use crate::style_table::{StyleStats, StyleTable};
 use crate::unicode::{self, Segmenter};
 pub use shell_report::{Keymap, LineReport, MAX_MATCHES, ShellEnv, ShellMatches, TOKEN_LEN};
 
+mod commands;
 mod compress;
 mod graphics;
 mod history;
@@ -31,6 +32,7 @@ mod shell_report;
 mod snapshot;
 mod watch;
 
+pub use commands::{CommandMark, Finished, ViewCommand};
 pub use graphics::HeadRead;
 pub use panel::Panel;
 pub use replies::DynamicColor;
@@ -496,6 +498,11 @@ pub struct Terminal {
     /// command's end (A, B or D), not a command's start (C): at the
     /// shell's prompt, where no program draws panels.
     at_prompt: bool,
+    /// The commands run (OSC 133 C) with their text and times, for
+    /// [`Terminal::view_commands`], and the time now as the app last set
+    /// it ([`Terminal::set_clock`]): term-core reads no clock.
+    command_log: commands::Log,
+    clock: u64,
     /// The program's working directory, if it reports it (OSC 7).
     cwd: Option<String>,
     /// The host OSC 7 named with it.
@@ -661,6 +668,8 @@ impl Terminal {
             commands: Vec::new(),
             input_at: None,
             at_prompt: false,
+            command_log: Default::default(),
+            clock: 0,
             cwd: None,
             cwd_host: None,
             report_token: None,
@@ -912,6 +921,13 @@ impl Terminal {
     /// since the last call, oldest first.
     pub fn take_commands(&mut self) -> Vec<Command> {
         std::mem::take(&mut self.commands)
+    }
+
+    /// The time now, in milliseconds from any fixed start, for timing
+    /// commands from their OSC 133 C mark to their D mark. term-core
+    /// reads no clock: the app sets this before parsing.
+    pub fn set_clock(&mut self, ms: u64) {
+        self.clock = ms;
     }
 
     /// The program's working directory, if it reports it (OSC 7).
@@ -2046,7 +2062,10 @@ impl Terminal {
             _ => None,
         };
         let col = self.cursor.col.min(u16::MAX as usize) as u16;
-        self.screen[self.cursor.row].set_mark(Mark { kind, col, status });
+        // A C mark carries its command's number in the log, given below
+        // once its text is known.
+        let at_row = self.cursor.row;
+        self.screen[at_row].set_mark(Mark { kind, col, status });
         let here = (self.top_line + self.cursor.row as u64, self.cursor.col);
         self.at_prompt = kind != MarkKind::Output;
         let command = match kind {
@@ -2066,12 +2085,22 @@ impl Terminal {
                     }
                     None => from.and_then(|from| self.command_text(from, here)),
                 };
+                let logged = line.as_deref().map(str::to_owned).or_else(|| shown.clone());
+                let id = self.command_log.started(logged, self.clock);
+                self.screen[at_row].set_mark(Mark {
+                    kind,
+                    col,
+                    status: Some(id),
+                });
                 if let Some(l) = line {
                     self.push_command(Command::CommandLine(l));
                 }
                 Some(Command::Started(shown))
             }
-            MarkKind::End => Some(Command::Finished(status)),
+            MarkKind::End => {
+                self.command_log.finished(self.clock);
+                Some(Command::Finished(status))
+            }
             MarkKind::Prompt => Some(Command::Prompt),
         };
         if let Some(c) = command {

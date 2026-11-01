@@ -215,15 +215,22 @@ pub struct Snapshot {
     pub failed: Vec<u16>,
     /// Colours for the text in some cells, by view row and columns: the
     /// command line coloured as it is typed (docs/design/completion.md
-    /// §5), only over cells drawn in the default colour. Not taken from
-    /// the terminal: the app puts them in after the snapshot, and each
-    /// snapshot starts with none.
+    /// §5), past command lines and plain output (command-marks design),
+    /// only over cells drawn in the default colour, sorted by row. Not
+    /// taken from the terminal: the app puts them in after the snapshot,
+    /// and each snapshot starts with none.
     pub ink: Vec<Ink>,
     /// The completion list over the cells, and the first choice's rest
     /// grey after the cursor (completion design §2); put in by the app
     /// after the snapshot, as `ink`.
     pub popup: Option<Popup>,
     pub ghost: Option<Ghost>,
+    /// The faint lines above prompts and the worked/failed marks of
+    /// finished commands (docs/design/command-marks.md); put in by the
+    /// app after the snapshot, as `ink`. `separators` are view rows
+    /// whose top gets the line.
+    pub separators: Vec<u16>,
+    pub command_marks: Vec<super::CommandMark>,
     /// kitty direct placements that reach into the view, ready images only
     /// (images.md §4.4). Empty until kitty graphics lands (I.2).
     pub placements: Vec<SnapPlacement>,
@@ -385,6 +392,8 @@ impl Terminal {
         out.highlights.clear();
         out.failed.clear();
         out.ink.clear();
+        out.separators.clear();
+        out.command_marks.clear();
         out.popup = None;
         out.ghost = None;
         out.placements.clear();

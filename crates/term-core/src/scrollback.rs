@@ -802,7 +802,8 @@ impl OpenBlock {
             }
         }
         if flags & flag::MARKS != 0 {
-            // count, then per mark: kind (bit 7: an exit status follows),
+            // count, then per mark: kind (bit 7: a number follows, an end
+            // mark's exit status or an output mark's command),
             // column, status.
             let at = self.meta.len();
             self.meta.push(0);
@@ -1633,7 +1634,9 @@ impl<'a> View<'a> {
             for _ in 0..count {
                 let k = meta.get(pos).copied().unwrap_or(0);
                 pos += 1;
-                if !(1..=4).contains(&(k & 0x7F)) || (k & 0x80 != 0 && k & 0x7F != 4) {
+                // A number follows only an output mark (its command's) or an
+                // end mark (its exit status).
+                if !(1..=4).contains(&(k & 0x7F)) || (k & 0x80 != 0 && !matches!(k & 0x7F, 3 | 4)) {
                     return Err(format!("mark kind {k:#x}"));
                 }
                 get_varint(meta, &mut pos);

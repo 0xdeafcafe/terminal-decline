@@ -358,7 +358,12 @@ fn marks_go_on_the_cursors_row_at_its_column() {
     let top = t.state.point_at(0, 0).line;
     let line = |r: usize| top + r as u64;
     assert_eq!(t.state.marks_at(line(0)), vec![mark(MarkKind::Prompt, 0), mark(MarkKind::Input, 2)]);
-    assert_eq!(t.state.marks_at(line(1)), vec![mark(MarkKind::Output, 0)]);
+    // A C mark carries its command's number in the terminal's log.
+    let output = |col, n| Mark {
+        status: Some(n),
+        ..mark(MarkKind::Output, col)
+    };
+    assert_eq!(t.state.marks_at(line(1)), vec![output(0, 1)]);
     assert_eq!(t.state.marks_at(line(2)), vec![]);
     let end = Mark {
         kind: MarkKind::End,
@@ -415,7 +420,11 @@ fn marks_move_with_their_rows_and_go_when_the_row_is_erased() {
     t.advance(b"\x1b[1;15H\x1b]133;C\x07");
     t.state.resize(10, 3);
     assert_eq!(t.state.marks_at(line), vec![]);
-    assert_eq!(t.state.marks_at(line + 1), vec![mark(MarkKind::Output, 4)]);
+    let output = Mark {
+        status: Some(1),
+        ..mark(MarkKind::Output, 4)
+    };
+    assert_eq!(t.state.marks_at(line + 1), vec![output]);
     assert_eq!(t.state.marks_at(line + 2), vec![mark(MarkKind::Prompt, 0)]);
     check(&t);
 }

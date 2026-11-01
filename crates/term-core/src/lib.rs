@@ -29,7 +29,7 @@ pub use style::{Attrs, LinkId, Style, Underline};
 pub use style_table::StyleStats;
 pub use term::SearchCount;
 pub use term::{
-    Command, Cursor, CursorShape, DynamicColor, Keymap, LineReport, LinkValue, Modes, MouseMode, Notification, Panel, PathAt, Point,
-    Progress, Selection, SelectionKind, ShellEnv, ShellMatches, TOKEN_LEN, Term, Terminal, ViewTop,
+    Command, CommandMark, Cursor, CursorShape, DynamicColor, Finished, Keymap, LineReport, LinkValue, Modes, MouseMode, Notification,
+    Panel, PathAt, Point, Progress, Selection, SelectionKind, ShellEnv, ShellMatches, TOKEN_LEN, Term, Terminal, ViewCommand, ViewTop,
 };
 pub use term::{Ghost, Highlight, HighlightKind, Ink, Popup, PopupItem, RowFlags, RowKey, ScreenId, SnapCursor, SnapRow, Snapshot};

@@ -472,7 +472,11 @@ pub enum MarkKind {
 }
 
 /// An OSC 133 mark: where on its row it was set, and for
-/// [`MarkKind::End`] the exit status, if the shell sent one.
+/// [`MarkKind::End`] the exit status, if the shell sent one. For
+/// [`MarkKind::Output`], `status` holds the command's number in the
+/// terminal's log of commands run (its text and times,
+/// [`crate::Terminal::view_commands`]), so they follow the mark into
+/// history and through reflow.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Mark {
     pub kind: MarkKind,

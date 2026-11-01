@@ -46,7 +46,7 @@ thread_local! {
 }
 
 /// Held for the life of the process: one process checks.
-static LOCK: std::sync::OnceLock<std::fs::File> = std::sync::OnceLock::new();
+static LOCK: std::sync::OnceLock<super::Lock> = std::sync::OnceLock::new();
 
 fn home() -> PathBuf {
     std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(std::env::temp_dir)

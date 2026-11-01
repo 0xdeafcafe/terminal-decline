@@ -252,9 +252,9 @@ pub fn lock_path(home: &Path) -> PathBuf {
     home.join("Library/Caches/terminal-decline/updater.lock")
 }
 
-/// Take the updater lock at `path`: an exclusive `flock`, held as long as
-/// the file is open. `None` if another process (or open file) holds it.
-pub fn take_lock(path: &Path) -> Option<File> {
+/// Take the updater lock at `path`: an exclusive `flock`, held until the
+/// [`Lock`] is dropped. `None` if another process (or open file) holds it.
+pub fn take_lock(path: &Path) -> Option<Lock> {
     use std::os::fd::AsRawFd;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).ok()?;
@@ -266,7 +266,23 @@ pub fn take_lock(path: &Path) -> Option<File> {
         .open(path)
         .ok()?;
     let locked = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0;
-    locked.then_some(file)
+    locked.then_some(Lock(file))
+}
+
+/// A lock taken by [`take_lock`], released on drop.
+///
+/// Released with `LOCK_UN`, not just by closing the file: an `flock`
+/// belongs to the open file, which a child forked by another thread
+/// shares until it execs (close-on-exec only closes it then). Closing
+/// our copy alone would leave the lock held for that moment.
+#[derive(Debug)]
+pub struct Lock(File);
+
+impl Drop for Lock {
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd;
+        unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
+    }
 }
 
 /// Sparkle's stage of an update (`SPUUserUpdateStage`).
@@ -570,6 +586,43 @@ mod tests {
         assert!(take_lock(&path).is_none(), "second can't");
         drop(first);
         assert!(take_lock(&path).is_some(), "free again once the first is gone");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A child forked while the lock is held shares its open file until
+    /// it execs (as one of another test's `Command`s does: a bare program
+    /// name with a PATH of its own is forked, not posix_spawned). Dropping
+    /// the lock frees it all the same.
+    #[test]
+    fn a_forked_child_doesnt_keep_the_lock() {
+        let dir = std::env::temp_dir().join(format!("td-update-fork-{}", std::process::id()));
+        let path = dir.join("Caches/updater.lock");
+        let first = take_lock(&path).expect("first takes it");
+        let mut go = [0; 2];
+        assert_eq!(unsafe { libc::pipe(go.as_mut_ptr()) }, 0);
+        for fd in go {
+            unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+        }
+        // The child waits for the pipe to close and leaves: nothing that
+        // isn't async-signal-safe after a fork.
+        let child = unsafe { libc::fork() };
+        if child == 0 {
+            unsafe {
+                libc::close(go[1]);
+                let mut b = 0u8;
+                libc::read(go[0], (&mut b as *mut u8).cast(), 1);
+                libc::_exit(0);
+            }
+        }
+        assert!(child > 0, "fork");
+        unsafe { libc::close(go[0]) };
+        drop(first);
+        let again = take_lock(&path);
+        unsafe {
+            libc::close(go[1]);
+            libc::waitpid(child, std::ptr::null_mut(), 0);
+        }
+        assert!(again.is_some(), "free once dropped, though the child still has the file open");
         let _ = std::fs::remove_dir_all(dir);
     }
 

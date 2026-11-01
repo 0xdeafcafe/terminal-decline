@@ -41,7 +41,7 @@ thread_local! {
 }
 
 /// The updater lock, held open for the life of the process.
-static LOCK: std::sync::OnceLock<std::fs::File> = std::sync::OnceLock::new();
+static LOCK: std::sync::OnceLock<super::Lock> = std::sync::OnceLock::new();
 
 /// Decide, log why, and start Sparkle if the updater is on. Returns
 /// whether it runs (the menu then gains Check for Updates…).

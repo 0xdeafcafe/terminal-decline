@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793421510320,
+  "lastUpdate": 1793507906598,
   "repoUrl": "https://github.com/0xdeafcafe/terminal-decline",
   "entries": {
     "Throughput": [
@@ -415,6 +415,178 @@ window.BENCHMARK_DATA = {
           {
             "name": "history push/plain",
             "value": 24322502,
+            "unit": "elem/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Alexander Forbes-Reed",
+            "username": "0xdeafcafe",
+            "email": "git@alex.forbes.red"
+          },
+          "committer": {
+            "name": "Alexander Forbes-Reed",
+            "username": "0xdeafcafe",
+            "email": "git@alex.forbes.red"
+          },
+          "id": "b14aa9593c843d56217f98a6331b004edfea91fc",
+          "message": "docs(design): note the glyph thread under R.1\n\nHow fonts share their registry with the glyph thread, which glyphs\nstay synchronous, how the thread wakes the app, why bitmaps are put in\nthe textures only when drawn and unwanted glyphs skipped, the numbers,\nand what is left: cluster and ligature shaping, and the upload's wait\nfor the GPU.\n\nCo-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-10-31T18:29:36Z",
+          "url": "https://github.com/0xdeafcafe/terminal-decline/commit/b14aa9593c843d56217f98a6331b004edfea91fc"
+        },
+        "date": 1793507905680,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "parse/clusters",
+            "value": 94.56,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse/coloured",
+            "value": 239.43,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse/plain",
+            "value": 577.32,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse/seq",
+            "value": 141.81,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse/tui",
+            "value": 389.37,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse/unicode",
+            "value": 153.82,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse_1k/clusters",
+            "value": 80.94,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse_1k/coloured",
+            "value": 243.73,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse_1k/plain",
+            "value": 567.14,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse_1k/seq",
+            "value": 149.92,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse_1k/tui",
+            "value": 374.56,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse_1k/unicode",
+            "value": 145.61,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "history decode/background",
+            "value": 12324061,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history decode/cjk",
+            "value": 6922163,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history decode/emoji",
+            "value": 4896761,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history decode/gradient",
+            "value": 592203,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history decode/ls",
+            "value": 7873547,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history decode/plain",
+            "value": 14620570,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/background",
+            "value": 6784184,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/cjk",
+            "value": 8782742,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/emoji",
+            "value": 10043184,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/gradient",
+            "value": 434600,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/keyed/background",
+            "value": 6761444,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/keyed/cjk",
+            "value": 8457571,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/keyed/emoji",
+            "value": 9188649,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/keyed/gradient",
+            "value": 412817,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/keyed/ls",
+            "value": 13394168,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/keyed/plain",
+            "value": 29421260,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/ls",
+            "value": 10817363,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/plain",
+            "value": 29504569,
             "unit": "elem/s"
           }
         ]

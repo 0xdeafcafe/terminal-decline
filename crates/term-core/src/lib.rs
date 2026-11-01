@@ -28,7 +28,7 @@ pub use style::{Attrs, LinkId, Style, Underline};
 pub use style_table::StyleStats;
 pub use term::SearchCount;
 pub use term::{
-    Command, Cursor, CursorShape, DynamicColor, LinkValue, Modes, MouseMode, Notification, Point, Progress, Selection, SelectionKind, Term,
-    Terminal, ViewTop,
+    Command, Cursor, CursorShape, DynamicColor, Keymap, LineReport, LinkValue, Modes, MouseMode, Notification, Point, Progress, Selection,
+    SelectionKind, ShellEnv, TOKEN_LEN, Term, Terminal, ViewTop,
 };
 pub use term::{Highlight, HighlightKind, RowFlags, RowKey, ScreenId, SnapCursor, SnapRow, Snapshot};

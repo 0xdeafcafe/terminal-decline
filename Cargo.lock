@@ -1073,6 +1073,7 @@ name = "terminal-decline"
 version = "0.0.1"
 dependencies = [
  "block2",
+ "criterion",
  "dispatch2",
  "libc",
  "objc2",

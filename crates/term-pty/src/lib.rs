@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 mod command;
 pub mod integration;
 
-pub use command::{Command, build_argv, build_env, exec_argv, resolve_cwd};
+pub use command::{Command, Reports, build_argv, build_env, exec_argv, resolve_cwd};
 
 #[derive(Clone, Copy, Debug)]
 pub struct Size {
@@ -135,7 +135,7 @@ impl Pty {
         if let Some(dir) = &cmd.integration
             && !cmd.direct
         {
-            integration::apply(dir, &shell, &cmd.argv, &mut argv, &mut env);
+            integration::apply(dir, &shell, &cmd.argv, cmd.reports.as_ref(), &mut argv, &mut env);
         }
         // Written to the terminal by the child if exec fails (it can't
         // format anything after forking).

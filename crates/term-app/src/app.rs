@@ -1283,6 +1283,7 @@ impl AppDelegate {
                 shell: None,
                 direct: false,
                 integration: None,
+                reports: None,
             },
         };
         if let Some(dir) = &command.cwd {

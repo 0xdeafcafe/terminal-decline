@@ -181,6 +181,7 @@ fn main() {
         shell: Some("/bin/sh".into()),
         direct: false,
         integration: None,
+        reports: None,
     };
     let pty = Pty::spawn(&cmd, size).expect("spawn");
     let child = pty.child();

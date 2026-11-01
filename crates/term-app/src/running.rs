@@ -468,6 +468,7 @@ mod tests {
             shell: Some("/bin/sh".into()),
             direct: false,
             integration: None,
+            reports: None,
         };
         let size = term_pty::Size {
             cols: 80,

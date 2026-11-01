@@ -221,17 +221,20 @@ struct Bug;
 /// if `events` is set, the [`Events`] taken out of it. A panic is caught
 /// before the lock is released, and the terminal, possibly half-updated, is
 /// replaced by a fresh one of the same size.
+/// Parse `bytes`: the replies to send, the events, and whether the bytes
+/// held only the shell's line reports (OSC 7701) and nothing to draw.
 fn parse(
     term: &Mutex<Term>,
     bytes: &[u8],
     on_parsed: Option<&(dyn Fn() + Send)>,
     events: bool,
     images: Option<&SessionImages>,
-) -> Result<(Vec<u8>, Events), Bug> {
+) -> Result<(Vec<u8>, Events, bool), Bug> {
+    let mut t = lock(term);
+    let generation = t.state.generation();
     let (mut t, parsed) = if images.is_some() {
-        parse_with_head_reads(term, lock(term), bytes)
+        parse_with_head_reads(term, t, bytes)
     } else {
-        let mut t = lock(term);
         let parsed = catch_unwind(AssertUnwindSafe(|| {
             test_panic(bytes);
             t.advance(bytes);
@@ -248,7 +251,8 @@ fn parse(
                 images.take_jobs(&mut t.state);
             }
             let events = if events { Events::take(&mut t) } else { Events::default() };
-            Ok((t.state.take_replies(), events))
+            let only_reports = t.state.take_report_seen() && t.state.generation() == generation;
+            Ok((t.state.take_replies(), events, only_reports))
         }
         Err(_) => {
             replace_term(&mut t);
@@ -314,6 +318,7 @@ pub(crate) fn replace_term(t: &mut Term) {
     // The same host: the app's.
     fresh.state.set_image_host(t.state.image_host().clone());
     fresh.state.set_reads_off_lock(true);
+    fresh.state.set_report_token(t.state.report_token());
     *t = fresh;
 }
 
@@ -434,20 +439,31 @@ impl Session {
                 let mut prefs = on_prefs.as_ref().map(|_| ControlScanner::new(crate::control::PREFS_PREFIX));
                 let mut asked = Vec::new();
                 let mut found = Vec::new();
-                let parse = |bytes: &[u8]| -> Result<(), Bug> {
-                    if bytes.is_empty() || stopped2.load(Ordering::Acquire) {
-                        return Ok(());
+                // Whether to wake the view for what was parsed: not for
+                // the shell's line reports alone. zsh writes one just
+                // before its redraw of the line, which the reader often
+                // reads apart; waking for it would draw nothing new and
+                // stop the view waiting for the echo, which would then
+                // wait for the next tick (docs/design/completion.md §3.2).
+                let parse = |bytes: &[u8]| -> Result<bool, Bug> {
+                    if bytes.is_empty() {
+                        return Ok(false);
                     }
-                    let (replies, events) = parse(&term2, bytes, on_parsed.as_deref(), on_events.is_some(), images2.as_deref())?;
+                    if stopped2.load(Ordering::Acquire) {
+                        return Ok(true);
+                    }
+                    let (replies, events, only_reports) =
+                        parse(&term2, bytes, on_parsed.as_deref(), on_events.is_some(), images2.as_deref())?;
                     if !replies.is_empty() {
                         let _ = tx2.send(replies);
                     }
+                    let wake = !only_reports || !events.is_empty();
                     if let Some(f) = &on_events
                         && !events.is_empty()
                     {
                         f(events);
                     }
-                    Ok(())
+                    Ok(wake)
                 };
                 loop {
                     if let Some(images) = &images2 {
@@ -461,15 +477,17 @@ impl Session {
                     batches2.fetch_add(1, Ordering::Relaxed);
                     let parse_started = on_output.as_ref().map(|_| Instant::now());
                     let mut start = 0;
+                    let mut wake_view = false;
                     if let (Some(scanner), Some(control)) = (&mut scanner, &mut on_control) {
                         scanner.feed(&buf[..n], &mut found);
                         for (end, cmd) in found.drain(..) {
                             parse(&buf[start..end])?;
                             start = end;
                             control(cmd);
+                            wake_view = true;
                         }
                     }
-                    parse(&buf[start..n])?;
+                    wake_view |= parse(&buf[start..n])?;
                     if let (Some(f), Some(t0)) = (&mut on_output, parse_started) {
                         f(&buf[..n], t0.elapsed());
                     }
@@ -477,9 +495,10 @@ impl Session {
                         scanner.feed(&buf[..n], &mut asked);
                         for (_, what) in asked.drain(..) {
                             ask(what);
+                            wake_view = true;
                         }
                     }
-                    if !dirty2.swap(true, Ordering::AcqRel) {
+                    if wake_view && !dirty2.swap(true, Ordering::AcqRel) {
                         wake();
                     }
                 }

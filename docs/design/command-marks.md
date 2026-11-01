@@ -23,7 +23,7 @@ $ █
    being typed (`lex`, `color_of`), commands green or red by whether
    they exist. Follows the `highlight_command_line` setting.
 2. **Each command is marked off** (setting `command_marks`, default on):
-   - a faint one-pixel line across the pane at the top of each prompt's
+   - a faint line about a point high (a sixteenth of the cell's height, at least a pixel) across the pane at the top of each prompt's
      first row (its A mark), except at the very top of the view;
    - at the right of the command's line (the row holding its B mark), a
      dim green `✓` when it exited 0, a dim red `✗ 2` (its exit status)
@@ -31,7 +31,8 @@ $ █
      mark when that was 1 s or more: `1.2s`, `14s`, `2m03s`, `1h02m`.
 3. **Plain output coloured** (setting `colour_output`, default off):
    commit hashes yellow, URLs blue, `->` and `=>` magenta, numbers with
-   units or `%` cyan, `error` `fatal` `failed` `panic` `denied` red,
+   units or `%` cyan (bare numbers aren't: an `ls -l` listing's sizes,
+   counts, dates and times read as random highlights when coloured), `error` `fatal` `failed` `panic` `denied` red,
    `warning` `warn` `deprecated` yellow, `ok` `done` `passed` `success`
    green.
 
@@ -90,7 +91,7 @@ the renderer like the ghost text and the completion list.
   cells are plain). The formatting is `mark_text` and `duration`.
 - `crates/term-complete/src/output.rs`: the output patterns.
 - `crates/term-render/src/frame.rs`: the line (a rect in the foreground
-  at alpha 48) with the failed-prompt marks, the mark (`draw_command_mark`,
+  at alpha 96, raised from 48 and one pixel, which was too faint to see on a dark theme) with the failed-prompt marks, the mark (`draw_command_mark`,
   green or red at alpha 150) with the ghost text. `Snapshot::ink` is now
   kept sorted by row, and the renderer finds a row's colours by binary
   search instead of scanning all of them for each glyph.

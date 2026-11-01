@@ -1385,13 +1385,16 @@ impl Frame {
             over.push(failed_mark(line as usize, input));
         }
         // The faint line above each prompt (command-marks design).
+        // About a point high: a device pixel is half a point on a Retina
+        // screen, too thin to see on a dark theme.
         let rule = theme.paint(slot::FOREGROUND).alpha(SEPARATOR_ALPHA);
+        let thick = (ch / 16).max(1) as u16;
         for &line in snap.separators.iter().filter(|&&l| l < snap.lines) {
             over.push(RectInstance::painted(
                 s16(px),
                 s16(row_y(line as usize)),
                 (cols as i32 * cw) as u16,
-                1,
+                thick,
                 rule,
             ));
         }
@@ -1783,7 +1786,7 @@ fn draw_ghost(out: &mut Vec<GlyphInstance>, g: &Ghost, cols: usize, input: &Fram
 
 /// How strongly the line above each prompt shows: the foreground at
 /// this alpha.
-const SEPARATOR_ALPHA: u8 = 48;
+const SEPARATOR_ALPHA: u8 = 96;
 
 /// The worked/failed mark's alpha over its green or red.
 const COMMAND_MARK_ALPHA: u8 = 150;

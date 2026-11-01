@@ -71,8 +71,10 @@ fn url_end(text: &[char], i: usize) -> Option<usize> {
 }
 
 /// Where a number starting at `i` (a digit after a non-word character)
-/// ends: digits, `.` and more digits, then optional unit letters (up to
-/// three) or `%`, at the end of a word. `None` if the word goes on.
+/// ends: digits, `.` and more digits, then unit letters (up to three) or
+/// `%`, at the end of a word. A bare number isn't one: sizes, counts,
+/// dates and times in listings (`ls -l`) are everywhere, and colouring
+/// them all reads as noise. `None` if there's no unit or the word goes on.
 fn number_end(text: &[char], i: usize) -> Option<usize> {
     let digits = |mut j: usize| {
         while j < text.len() && text[j].is_ascii_digit() {
@@ -87,10 +89,10 @@ fn number_end(text: &[char], i: usize) -> Option<usize> {
     let letters = (end..text.len()).take_while(|&j| text[j].is_ascii_alphabetic()).count();
     if letters > 0 && letters <= 3 {
         end += letters;
-    } else if letters > 3 {
-        return None;
-    } else if end < text.len() && text[end] == '%' {
+    } else if letters == 0 && end < text.len() && text[end] == '%' {
         return Some(end + 1);
+    } else {
+        return None;
     }
     (end == text.len() || !is_word_char(text[end])).then_some(end)
 }
@@ -174,7 +176,7 @@ mod tests {
         );
         // No digit: a word. No letter: a number. Too short or too long: not a hash.
         assert_eq!(colors("deadbeef cafebabe"), []);
-        assert_eq!(colors("1234567"), [s("1234567", CYAN)]);
+        assert_eq!(colors("1234567"), []);
         assert_eq!(colors("ab12cd"), []);
         assert_eq!(colors(&"a1".repeat(21)), []);
         // Only as a whole word.
@@ -187,7 +189,11 @@ mod tests {
             colors("took 12ms, 3.5GB at 99% (v2 x86)"),
             [s("12ms", CYAN), s("3.5GB", CYAN), s("99%", CYAN)]
         );
-        assert_eq!(colors("1.2.3"), [s("1.2.3", CYAN)]);
+        // Bare numbers aren't coloured: an `ls -l` line keeps its
+        // sizes, counts, dates and times as printed.
+        assert_eq!(colors("1.2.3"), []);
+        assert_eq!(colors("drwxr-xr-x@  14 lw  staff  448 Nov  1 20:12 .docker"), []);
+        assert_eq!(colors(".zcompdump-AFRs-MacBook-Pro-5.9.local.47316"), []);
         // Inside a word, or with a long tail: not a number.
         assert_eq!(colors("abc123 42things"), []);
     }
@@ -205,7 +211,7 @@ mod tests {
     fn words_only_whole() {
         assert_eq!(
             colors("error: build failed, 2 warnings; ok done"),
-            [s("error", RED), s("failed", RED), s("2", CYAN), s("ok", GREEN), s("done", GREEN)]
+            [s("error", RED), s("failed", RED), s("ok", GREEN), s("done", GREEN)]
         );
         assert_eq!(
             colors("Error ERROR FAILED Warning"),

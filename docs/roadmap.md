@@ -96,6 +96,7 @@ Design: docs/design/pins.md.
 | E.19 | Conformance fixes: the `to-fix` entries in docs/conformance-failures.md (OSC 4/10/11 colours, DECRQSS, DEC graphics glyphs, REP, DECALN, DECID, DECXCPR) | M |
 | E.14 | Small bugs: ~~VS16 with autowrap off~~ (fixed by cells design PR 6); ~~CSI M on the top row~~ (already right since the cells design; pinned by a conformance test) | S |
 | E.18 | Preferences: Cmd+, opens a tab running the built-in settings TUI (hand-rolled, its own process; sectioned list, live preview, keeps comments in config.toml), with the change to the reload's notices and chord recording through the app; the Pins section after P.2; design in docs/design/preferences.md | M |
+| E.20 | Completion and highlighting at the prompt: colour the command line, a list after a pause with files, commands and flags (from man pages), Tab asks zsh for the rest; design in docs/design/completion.md | L |
 | E.16 | Release: make repo + tap public, **then** tag `0.1.0`; changelog (git-cliff); cask caveats + `zap`; smoke on macOS 14 | S |
 
 ## B — Betas to 1.0 (0.x releases)

@@ -3152,6 +3152,10 @@ fn spawn_pane(window: usize, config: &Config, theme: &Theme, m: term_font::Metri
     let mut command = n.command.clone();
     if config.shell_integration && !n.settings && !command.direct {
         command.integration = crate::Paths::current().shell_integration_dir();
+        command.reports = line_reports(config);
+        if let Some(r) = &command.reports {
+            t.state.set_report_token(r.token.as_bytes().try_into().ok());
+        }
     }
     let session = Session::spawn(&command, pty_size(cols, lines, m), t, hooks)?;
     if let Some(ready) = adopted {
@@ -3207,6 +3211,7 @@ fn shell_command(config: &Config) -> Command {
         shell: None,
         direct: false,
         integration: None,
+        reports: None,
     }
 }
 
@@ -3380,6 +3385,27 @@ fn resize_cursor(dir: Dir) -> Retained<NSCursor> {
         Dir::Down if newer(sel!(rowResizeCursor)) => NSCursor::rowResizeCursor(),
         Dir::Down => NSCursor::resizeUpDownCursor(),
     }
+}
+
+/// What a zsh started with the integration is given to report its
+/// command line (docs/design/completion.md §3.1): a new random token for
+/// each shell, and what the reports are for. `None` when nothing would
+/// use them, so the shell sets up no hook and sends nothing.
+fn line_reports(config: &Config) -> Option<term_pty::Reports> {
+    let features: Vec<&str> = [("highlight", config.highlight_command_line), ("list", config.completion)]
+        .into_iter()
+        .filter_map(|(name, on)| on.then_some(name))
+        .collect();
+    if features.is_empty() {
+        return None;
+    }
+    let mut bytes = [0u8; term_core::TOKEN_LEN / 2];
+    // SAFETY: fills exactly the buffer's bytes.
+    unsafe { libc::arc4random_buf(bytes.as_mut_ptr().cast(), bytes.len()) };
+    Some(term_pty::Reports {
+        token: bytes.iter().map(|b| format!("{b:02x}")).collect(),
+        features: features.join(","),
+    })
 }
 
 fn pty_size(cols: usize, lines: usize, m: term_font::Metrics) -> Size {

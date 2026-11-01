@@ -16,6 +16,7 @@ use crate::scrollback::{HistoryStats, Scrollback};
 use crate::style::{Attrs, LinkId, Style, Underline};
 use crate::style_table::{StyleStats, StyleTable};
 use crate::unicode::{self, Segmenter};
+pub use shell_report::{Keymap, LineReport, ShellEnv, TOKEN_LEN};
 
 mod compress;
 mod graphics;
@@ -25,6 +26,7 @@ mod reflow;
 mod replies;
 mod saved;
 mod search;
+mod shell_report;
 mod snapshot;
 mod watch;
 
@@ -448,6 +450,15 @@ pub struct Terminal {
     input_at: Option<(u64, usize)>,
     /// The program's working directory, if it reports it (OSC 7).
     cwd: Option<String>,
+    /// The host OSC 7 named with it.
+    cwd_host: Option<String>,
+    /// What the shell reports about the command line (OSC 7701,
+    /// [`shell_report`]): the token its reports must carry, the latest
+    /// line and what it can run, and whether any report was parsed.
+    report_token: Option<[u8; shell_report::TOKEN_LEN]>,
+    line_report: Option<LineReport>,
+    shell_env: Option<ShellEnv>,
+    report_seen: bool,
     /// The palette and foreground, background and cursor colours: the
     /// theme's, with what programs set (OSC 4, 10–12) on top.
     colors: Box<replies::ColorTable>,
@@ -600,6 +611,11 @@ impl Terminal {
             commands: Vec::new(),
             input_at: None,
             cwd: None,
+            cwd_host: None,
+            report_token: None,
+            line_report: None,
+            shell_env: None,
+            report_seen: false,
             colors: Box::new(replies::ColorTable::new([0xd8dee9, 0x16181c, 0xd8dee9])),
             colors_changed: false,
             dcs: None,
@@ -853,6 +869,12 @@ impl Terminal {
     /// The program's working directory, if it reports it (OSC 7).
     pub fn cwd(&self) -> Option<&str> {
         self.cwd.as_deref()
+    }
+
+    /// The host OSC 7 named with the working directory (empty if it named
+    /// none), to tell this Mac's shell from one over ssh.
+    pub fn cwd_host(&self) -> Option<&str> {
+        self.cwd_host.as_deref()
     }
 
     /// How many cells (1 or 2) East Asian Ambiguous characters take.
@@ -1899,9 +1921,12 @@ impl Terminal {
         let command = match kind {
             MarkKind::Input => {
                 self.input_at = Some(here);
+                // A new prompt (or Ctrl+C's reprint): the old line is gone.
+                self.line_report = None;
                 None
             }
             MarkKind::Output => {
+                self.line_report = None;
                 let from = self.input_at.take();
                 let shown = match &line {
                     Some(l) => {
@@ -2225,6 +2250,7 @@ impl Terminal {
         fresh.grapheme_log = self.grapheme_log.take();
         fresh.hover = self.hover;
         fresh.cursor_default = self.cursor_default;
+        fresh.report_token = self.report_token;
         (fresh.cursor_shape, fresh.cursor_blink) = self.cursor_default;
         // The find bar stays open: its search carries on over the new state.
         fresh.search = self.search.take();
@@ -3384,11 +3410,12 @@ impl Perform for Terminal {
             [b"7", url, ..] => {
                 let url = String::from_utf8_lossy(url);
                 if let Some(rest) = url.strip_prefix("file://") {
-                    // Skip the host name.
-                    let path = rest.find('/').map_or("", |i| &rest[i..]);
-                    self.cwd = Some(percent_decode(path));
+                    let host_end = rest.find('/').unwrap_or(rest.len());
+                    self.cwd_host = Some(percent_decode(&rest[..host_end]));
+                    self.cwd = Some(percent_decode(&rest[host_end..]));
                 }
             }
+            [b"7701", kind, token, rest @ ..] => self.shell_report(kind, token, rest),
             [b"0" | b"2", title @ ..] => {
                 let title = title.iter().map(|p| String::from_utf8_lossy(p)).collect::<Vec<_>>().join(";");
                 self.title = Some(title);

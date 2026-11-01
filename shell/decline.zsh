@@ -56,6 +56,7 @@ _decline_precmd() {
     unset _decline_ran
   fi
   PS1=$_decline_d$_decline_a$PS1$_decline_b
+  (( ${+functions[_decline_env]} )) && _decline_env
   # A hook added after this one (a theme loaded later) would set PS1
   # after the marks went in: be the last again from the next prompt.
   if [[ ${precmd_functions[-1]} != _decline_precmd ]]; then
@@ -81,3 +82,82 @@ _decline_preexec() {
 autoload -Uz add-zsh-hook
 add-zsh-hook precmd _decline_precmd
 add-zsh-hook preexec _decline_preexec
+
+# The command line being edited, for the app to colour it and complete
+# it (OSC 7701; docs/design/completion.md §3.1). Only with the token the
+# app gave this shell, which .zshenv here moved out of the environment
+# before the user's files ran; another terminal gives none, and then
+# nothing below is set up.
+if [[ -n ${_decline_token-} && -n ${_decline_features-} && -n $TTY ]] \
+    && zmodload zsh/system 2>/dev/null \
+    && builtin typeset -gH _decline_fd= \
+    && sysopen -w -o cloexec -u _decline_fd -- $TTY 2>/dev/null; then
+  typeset -gH _decline_last_line= _decline_last_env=
+
+  # On each redraw of the line, before zle draws it:
+  #   ESC ] 7701 ; line ; <token> ; <keymap> ; <cursor> ; <line> BEL
+  # with %, ; and control bytes percent-encoded in one expansion, and the
+  # cursor in bytes, both with multibyte off so the app counts the same
+  # way (cheaper than a locale change on every key).
+  # Nothing for a continuation line (PS2 has no prompt mark) or vared,
+  # and nothing past 4 KB; nothing again until the report changes.
+  _decline_line() {
+    emulate -L zsh -o extendedglob +o multibyte
+    local keymap=$KEYMAP cursor=0 text=
+    if [[ $CONTEXT != start || -n $PREBUFFER ]]; then
+      keymap=cont
+    elif (( ${#BUFFER} > 4096 )); then
+      keymap=long
+    else
+      text=$BUFFER
+      # Most lines have nothing to encode: a match is cheaper than the
+      # substitution's scan.
+      if [[ $text == *[%\;[:cntrl:]]* ]]; then
+        text=${text//(#m)[%;[:cntrl:]]/%${(l:2::0:)$(( [##16] #MATCH ))}}
+      fi
+      cursor=${#LBUFFER}
+    fi
+    local report="$keymap;$cursor;$text"
+    [[ $report == $_decline_last_line ]] && return
+    _decline_last_line=$report
+    print -rnu $_decline_fd -- $'\e]7701;line;'"$_decline_token;$report"$'\a'
+  }
+
+  # Once per prompt, when it changed: what the shell can run and where
+  # its history is.
+  _decline_env() {
+    # The user's option, before emulate sets zsh's defaults here.
+    local autocd=0
+    [[ -o autocd ]] && autocd=1
+    emulate -L zsh -o extendedglob +o multibyte
+    local -a f=(
+      path "$PATH"
+      alias "${(pj:\n:)${(@k)aliases}}"
+      salias "${(pj:\n:)${(@k)saliases}}"
+      galias "${(pj:\n:)${(@k)galiases}}"
+      func "${(pj:\n:)${(@k)functions:#_*}}"
+      builtin "${(pj:\n:)${(@k)builtins}}"
+      resword "${(pj:\n:)${(@k)reswords}}"
+      autocd $autocd
+      histfile "${HISTFILE-}"
+    )
+    # A prompt starts afresh: its first line report always goes.
+    _decline_last_line=
+    local env=${(pj:\0:)f}
+    [[ $env == $_decline_last_env ]] && return
+    _decline_last_env=$env
+    local k v out=
+    for k v in "${f[@]}"; do
+      out+=";$k=${v//(#m)[%;[:cntrl:]]/%${(l:2::0:)$(( [##16] #MATCH ))}}"
+    done
+    print -rnu $_decline_fd -- $'\e]7701;env;'"$_decline_token$out"$'\a'
+  }
+
+  zle -N _decline_line
+  autoload -Uz add-zle-hook-widget
+  # line-init too: a new line (the prompt's, or a continuation's) is
+  # drawn before any redraw hook runs.
+  add-zle-hook-widget line-init _decline_line
+  add-zle-hook-widget line-pre-redraw _decline_line
+fi
+

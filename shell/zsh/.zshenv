@@ -13,6 +13,14 @@
 # Everything runs at the top level, not in a function, so `typeset` and
 # `local` in the user's files mean what they always do.
 
+# The token for reporting the command line (OSC 7701), and what for:
+# into hidden variables before the user's files run, so nothing they
+# start (an agent, tmux, a daemon) inherits it.
+if [[ -n ${DECLINE_TOKEN+x} ]]; then
+  builtin typeset -gH _decline_token=$DECLINE_TOKEN _decline_features=$DECLINE_COMPLETION
+fi
+builtin unset DECLINE_TOKEN DECLINE_COMPLETION
+
 # This directory, and the user's ZDOTDIR (unset: $HOME).
 builtin typeset -g _decline_zdotdir=$ZDOTDIR
 if [[ -n ${DECLINE_ZSH_ZDOTDIR+x} ]]; then

@@ -1808,12 +1808,22 @@ fn draw_popup(
         bg,
     ));
     let (last, bottom) = (col0 + w - 1, row0 + h - 1);
+    // The hint sits in the bottom border, a space either side, a dash
+    // before the corner: `└──── ⏎ put in ─┘`. Only when it fits.
+    let hint_w: usize = p.hint.chars().map(char_cells).sum();
+    let hint = (hint_w > 0 && hint_w + 6 <= w).then(|| last - 3 - hint_w..last - 1);
     for (row, (left, mid, right)) in [(row0, ('┌', '─', '┐')), (bottom, ('└', '─', '┘'))] {
         put_glyph(out, glyphs, input, (row, col0), left, dim);
         for c in col0 + 1..last {
+            if row == bottom && hint.as_ref().is_some_and(|h| h.contains(&c)) {
+                continue;
+            }
             put_glyph(out, glyphs, input, (row, c), mid, dim);
         }
         put_glyph(out, glyphs, input, (row, last), right, dim);
+    }
+    if let Some(h) = hint {
+        put_text(out, glyphs, input, (bottom, h.start + 1), h.end - 1, &p.hint, dim);
     }
     for (i, item) in p.items.iter().take(h - 2).enumerate() {
         let row = row0 + 1 + i;

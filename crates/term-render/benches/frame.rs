@@ -309,6 +309,7 @@ fn prompt(c: &mut Criterion, input: &FrameInput) {
                 selected: i == 2,
             })
             .collect(),
+        hint: "⏎ put in · esc close".into(),
     };
     let mut frame = Frame::default();
     for (name, with_ink, with_popup) in [("plain", false, false), ("coloured", true, false), ("list open", true, true)] {

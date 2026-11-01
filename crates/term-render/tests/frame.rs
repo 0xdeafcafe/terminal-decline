@@ -1354,6 +1354,7 @@ fn popup_covers_the_cells_under_it() {
                 selected: false,
             },
         ],
+        hint: "⏎ in".into(),
     });
     snap.ghost = Some(Ghost {
         row: 0,
@@ -1375,6 +1376,9 @@ fn popup_covers_the_cells_under_it() {
     assert_eq!(at(2, 3), ['▸']);
     assert_eq!(at(2, 4), ['m']);
     assert_eq!(at(3, 2), ['│']);
+    // The hint in the bottom border: `└─── ⏎ in ─┘` (columns 2 to 13).
+    let bottom: String = (2..14).map(|c| at(4, c).into_iter().next().unwrap_or(' ')).collect();
+    assert_eq!(bottom, "└─── ⏎ in ─┘");
     // The cells' own glyphs under it are gone, beside it they stay.
     assert_eq!(at(1, 5), ['─']);
     assert_eq!(at(1, 1), ['A']);

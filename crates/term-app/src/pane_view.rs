@@ -1539,6 +1539,20 @@ impl PaneView {
             self.cancel_click_menu();
         }
         let Some((line, col)) = self.cell_at(event) else { return };
+        // A click on the completion list takes the choice under it; the
+        // rest of the click (drag, release) goes nowhere.
+        if button == mouse::LEFT && press && event.modifierFlags().is_empty() {
+            let taken = self.with(|_, p| {
+                let r = p.completion.click(line, col)?;
+                p.swallow_click = true;
+                Some(r)
+            });
+            match taken.flatten() {
+                Some(crate::complete::KeyResult::Send(bytes)) => return self.send_input(bytes),
+                Some(_) => return self.request_redraw(),
+                None => {}
+            }
+        }
         // Cmd-click on a link or path opens it, even while the program
         // takes the mouse; the rest of the click (drag, release) goes
         // nowhere.
@@ -1825,6 +1839,10 @@ impl PaneView {
 
     fn mouse_motion(&self, event: &NSEvent, button: Option<u8>) {
         let Some((line, col)) = self.cell_at(event) else { return };
+        // Over the completion list, the choice under the mouse is chosen.
+        if button.is_none() && self.with(|_, p| p.completion.hover(line, col)) == Some(true) {
+            self.request_redraw();
+        }
         // Links and paths are underlined under the pointer, unless the
         // program takes the mouse (then only with Cmd held).
         let cmd = event.modifierFlags().contains(NSEventModifierFlags::Command);

@@ -1711,6 +1711,7 @@ impl WindowView {
             if win.config.completion && focused {
                 let c = &win.config;
                 let settings = crate::complete::Settings {
+                    as_you_type: c.completion_as_you_type,
                     delay: Duration::from_millis(c.completion_delay as u64),
                     rows: c.completion_rows as usize,
                     ghost: c.completion_ghost_text,
@@ -1718,6 +1719,7 @@ impl WindowView {
                     commands: c.completion_commands,
                     flags: c.completion_flags,
                     history_order: c.completion_history_order,
+                    enter_takes: c.completion_enter_puts_in,
                 };
                 let drawn = p.completion.update(&t.state, &settings, Instant::now(), &waker);
                 let snap = p.render.frame.snapshot_mut();

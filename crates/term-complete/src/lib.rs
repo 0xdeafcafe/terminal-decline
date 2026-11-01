@@ -24,6 +24,9 @@ use list::{Listings, Offer, What};
 /// The settings the list follows (docs/design/completion.md §10).
 #[derive(Clone, Copy, Debug)]
 pub struct Settings {
+    /// The list opens by itself after a pause in typing; without it, it
+    /// only shows zsh's matches on Tab.
+    pub as_you_type: bool,
     pub delay: Duration,
     /// Choices shown before the list scrolls.
     pub rows: usize,
@@ -34,6 +37,9 @@ pub struct Settings {
     pub flags: bool,
     /// Commands by how often they were run.
     pub history_order: bool,
+    /// Return puts in a chosen choice instead of running the line (off:
+    /// Return always goes to the shell).
+    pub enter_takes: bool,
 }
 
 /// What a pane keeps for completion and colouring.
@@ -56,9 +62,14 @@ pub struct PaneState {
     /// The line last changed by something other than typing (history, a
     /// widget, zsh's own completion): the list waits for typing.
     quiet: bool,
+    /// A folder was just put in: its list opens without the pause.
+    soon: bool,
     /// What zsh's completion found on Tab (§7), shown until a key that
     /// isn't the list's own.
     zsh: Option<Vec<list::Choice>>,
+    /// zsh's matches without a description were given one from the man
+    /// page or `--help` (or there was nothing to give).
+    zsh_described: bool,
     /// The last offer and what it was made from: the same again (each
     /// frame while the list is open) isn't worked out again.
     last_offer: Option<(OfferKey, Option<Arc<Offer>>)>,
@@ -82,9 +93,16 @@ fn address<T>(a: &Option<Arc<T>>) -> usize {
 #[derive(Debug)]
 struct Open {
     offer: Arc<Offer>,
-    /// The choice moved to with Down; none until then, so Up still goes
-    /// to the shell's history.
+    /// The choice moved to with Down (or the mouse); none until then, so
+    /// Up still goes to the shell's history and Return runs the line.
     selected: Option<usize>,
+    /// `selected` is the one under the mouse: it is let go when the mouse
+    /// leaves the list or the line is typed on, so Return runs the line
+    /// again.
+    hovered: bool,
+    /// Where the list was last drawn: its top row and left column (border
+    /// included), its width and how many choices it shows.
+    drawn_at: Option<(usize, usize, usize, usize)>,
     /// The first choice shown.
     scroll: usize,
     /// The word's start in the line (bytes), and how much of it to keep
@@ -95,6 +113,8 @@ struct Open {
     ghost: bool,
     /// Esc also goes to the shell (vi insert mode).
     vi: bool,
+    /// Return puts in a chosen choice ([`Settings::enter_takes`]).
+    enter_takes: bool,
     /// zsh's matches: taking one sends its number for zsh to insert.
     zsh: bool,
 }
@@ -168,6 +188,7 @@ impl PaneState {
             })
             .collect();
         self.zsh = Some(choices);
+        self.zsh_described = false;
         self.open = None;
     }
 
@@ -185,19 +206,24 @@ impl PaneState {
             return Drawn::default();
         };
         let key = (report.text.clone(), report.cursor);
-        if self.seen.as_ref() != Some(&key) {
+        let changed = self.seen.as_ref() != Some(&key);
+        if changed {
             self.seen = Some(key);
             self.since = Some(now);
             self.quiet = !self.typing;
         }
         if self.zsh.is_some() {
-            return self.show_zsh(t, report, s);
+            return self.show_zsh(t, report, s, wake);
+        }
+        if !s.as_you_type {
+            self.open = None;
+            return Drawn::default();
         }
         let since = self.since.unwrap_or(now);
         if self.open.is_none() && self.quiet {
             return Drawn::default();
         }
-        if self.open.is_none() {
+        if self.open.is_none() && !self.soon {
             let waited = now.saturating_duration_since(since);
             if waited < s.delay {
                 let mut drawn = Drawn::default();
@@ -230,11 +256,13 @@ impl PaneState {
             self.open = None;
             return Drawn::default();
         };
-        // Keep the selected choice when it is still offered.
-        let previous = self.open.as_ref().filter(|o| o.start == start);
+        // Keep the selected choice when it is still offered; the one under
+        // the mouse only until the line changes.
+        let previous = self.open.as_ref().filter(|o| o.start == start && !(o.hovered && changed));
         let selected = previous
             .and_then(|o| o.offer.choices.get(o.selected?))
             .and_then(|c| offer.choices.iter().position(|x| x.name == c.name));
+        let hovered = selected.is_some() && previous.is_some_and(|o| o.hovered);
         let scroll = previous.map_or(0, |o| o.scroll);
         // What is typed before the matched part is kept as typed (`~/`,
         // `src/`) when it reads the same unquoted; else the whole word is
@@ -243,15 +271,19 @@ impl PaneState {
         let mut open = Open {
             offer,
             selected,
+            hovered,
+            drawn_at: None,
             scroll,
             start,
             keep_bytes,
             ghost: false,
             vi: report.keymap == Keymap::ViInsert,
+            enter_takes: s.enter_takes,
             zsh: false,
         };
         let drawn = place(t, &mut open, s, report.cursor == report.text.len());
         self.open = Some(open);
+        self.soon = false;
         drawn
     }
 
@@ -332,14 +364,24 @@ impl PaneState {
     }
 
     /// The list with zsh's matches, under the word at the cursor.
-    fn show_zsh(&mut self, t: &Terminal, report: &term_core::LineReport, s: &Settings) -> Drawn {
-        let Some(choices) = self.zsh.clone() else { return Drawn::default() };
+    fn show_zsh(&mut self, t: &Terminal, report: &term_core::LineReport, s: &Settings, wake: &dyn Fn() -> sources::Wake) -> Drawn {
         // zsh's redraw, with what the matches share inserted, comes after
         // the matches: wait for the screen to show it.
         if !shown_before_cursor(t, &report.text[..report.cursor]) {
             return Drawn::default();
         }
         let line = lex::read(&report.text, report.cursor);
+        // What zsh didn't describe, described from what we read: a flag's
+        // line in its man page, a subcommand's.
+        if !self.zsh_described
+            && let Some(known) = self.descriptions(&line.at, s, wake)
+        {
+            if let Some(choices) = &mut self.zsh {
+                describe(choices, &known);
+            }
+            self.zsh_described = true;
+        }
+        let Some(choices) = self.zsh.clone() else { return Drawn::default() };
         let start = line
             .words
             .iter()
@@ -353,17 +395,44 @@ impl PaneState {
                 keep: String::new(),
             }),
             selected: previous.as_ref().and_then(|o| o.selected),
+            hovered: previous.as_ref().is_some_and(|o| o.hovered),
+            drawn_at: None,
             scroll: previous.as_ref().map_or(0, |o| o.scroll),
             start,
             keep_bytes: 0,
             ghost: false,
             vi: report.keymap == Keymap::ViInsert,
+            enter_takes: s.enter_takes,
             zsh: true,
         };
         let no_ghost = Settings { ghost: false, ..*s };
         let drawn = place(t, &mut open, &no_ghost, false);
         self.open = Some(open);
         drawn
+    }
+
+    /// Names and what each is, for describing zsh's matches at `at`:
+    /// flags from the command's man page (or `--help`), subcommands from
+    /// theirs. `None` while still being read; empty when there is nothing.
+    fn descriptions(&self, at: &lex::At, s: &Settings, wake: &dyn Fn() -> sources::Wake) -> Option<Vec<(String, String)>> {
+        use lex::At;
+        let Some(env) = self.shell_env.as_deref().filter(|_| s.flags) else {
+            return Some(Vec::new());
+        };
+        let base = |c: &str| c.rsplit('/').next().unwrap_or(c).to_string();
+        match at {
+            At::Flag { command, subcommand, .. } => {
+                let m = manual_for(&env.path, &base(command), subcommand.as_deref(), wake)?;
+                Some(m.page.flags.iter().map(|f| (f.name.clone(), f.about.clone())).collect())
+            }
+            At::Argument {
+                command,
+                position: 0,
+                prefix,
+                ..
+            } if !prefix.contains('/') => Some(sources::subcommands(&env.path, &base(command), wake)?.list.clone()),
+            _ => Some(Vec::new()),
+        }
     }
 
     /// The choices for what the cursor is on, if any are worth a list.
@@ -405,15 +474,7 @@ impl PaneState {
         let mut subcommands = None;
         match (at, env) {
             (At::Flag { command, subcommand, .. }, Some(env)) if s.flags => {
-                let command = base(command);
-                manual = match subcommand {
-                    // `git fetch -`: git-fetch's page, else git's.
-                    Some(sub) => match sources::manual(&env.path, &format!("{command}-{sub}"), wake) {
-                        Some(m) if !m.found => sources::manual(&env.path, &command, wake),
-                        m => m,
-                    },
-                    None => sources::manual(&env.path, &command, wake),
-                };
+                manual = manual_for(&env.path, &base(command), subcommand.as_deref(), wake);
                 // Still being read: wait for it rather than show nothing.
                 manual.as_ref()?;
             }
@@ -481,6 +542,7 @@ impl PaneState {
                 keycode,
                 RETURN | TAB | ESCAPE | KEYPAD_ENTER | HOME | PAGE_UP | END | PAGE_DOWN | LEFT | RIGHT | DOWN | UP
             );
+        self.soon = false;
         let result = self.list_key(keycode, plain);
         // zsh's matches last until a key that isn't the list's own.
         if matches!(result, KeyResult::Pass | KeyResult::CloseAndPass) && self.zsh.take().is_some() {
@@ -496,11 +558,17 @@ impl PaneState {
             return KeyResult::Pass;
         }
         let n = open.offer.choices.len();
+        if matches!(keycode, DOWN | UP) {
+            open.hovered = false;
+        }
         match keycode {
             DOWN => {
                 open.selected = Some(open.selected.map_or(0, |i| (i + 1) % n));
                 KeyResult::Redraw
             }
+            // With the setting, Return puts in the choice moved to; with
+            // none chosen (or without it), it runs the line as typed.
+            RETURN | KEYPAD_ENTER if open.enter_takes && open.selected.is_some() => self.take(),
             // Up before Down is the shell's (its history); Up from the
             // first choice goes back to none.
             UP => match open.selected {
@@ -527,6 +595,43 @@ impl PaneState {
             }
             _ => KeyResult::Pass,
         }
+    }
+
+    /// The mouse moved to view `row`, `col`: the choice under it is
+    /// selected, and let go when it leaves the list. True if that changed
+    /// what is drawn.
+    pub fn hover(&mut self, row: usize, col: usize) -> bool {
+        let Some(open) = &mut self.open else { return false };
+        match open.choice_at(row, col) {
+            Some(i) if open.selected == Some(i) && open.hovered => false,
+            Some(i) => {
+                open.selected = Some(i);
+                open.hovered = true;
+                true
+            }
+            None if open.hovered => {
+                open.selected = None;
+                open.hovered = false;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// A click at view `row`, `col`: on a choice it is taken; elsewhere on
+    /// the list it does nothing. `None` when the click isn't on the list,
+    /// and goes on as usual.
+    pub fn click(&mut self, row: usize, col: usize) -> Option<KeyResult> {
+        let open = self.open.as_mut()?;
+        let (top, left, width, shown) = open.drawn_at?;
+        if !(top..top + shown + 2).contains(&row) || !(left..left + width).contains(&col) {
+            return None;
+        }
+        let Some(i) = open.choice_at(row, col) else {
+            return Some(KeyResult::Redraw);
+        };
+        open.selected = Some(i);
+        Some(self.take())
     }
 
     /// Close the list until the word under the cursor changes.
@@ -559,11 +664,37 @@ impl PaneState {
         } else {
             c.name.clone()
         };
-        let suffix = if c.what == What::Folder { "" } else { " " };
+        let folder = c.what == What::Folder;
+        let suffix = if folder { "" } else { " " };
         let bytes = format!("\x1b[7701~{};{};{};{suffix}\x07", open.start, open.keep_bytes, encode(&name));
-        // The word changes: what is offered next is for the new one.
+        // The word changes: what is offered next is for the new one. A
+        // folder's list opens again straight away, for what is in it.
         self.seen = None;
+        self.typing = folder;
+        self.soon = folder;
         KeyResult::Send(bytes.into_bytes())
+    }
+}
+
+/// Give each choice without a description the one `known` has for its
+/// name.
+fn describe(choices: &mut [list::Choice], known: &[(String, String)]) {
+    for c in choices.iter_mut().filter(|c| c.about.is_empty()) {
+        if let Some((_, about)) = known.iter().find(|(name, _)| *name == c.name) {
+            c.about = about.clone();
+        }
+    }
+}
+
+/// `command`'s man page, or for `git fetch -` git-fetch's, else git's.
+/// `None` while it is being read.
+fn manual_for(path: &str, command: &str, sub: Option<&str>, wake: &dyn Fn() -> sources::Wake) -> Option<Arc<sources::Manual>> {
+    match sub {
+        Some(sub) => match sources::manual(path, &format!("{command}-{sub}"), wake) {
+            Some(m) if !m.found => sources::manual(path, command, wake),
+            m => m,
+        },
+        None => sources::manual(path, command, wake),
     }
 }
 
@@ -580,6 +711,31 @@ pub struct HelpTarget {
 fn is_executable(p: &std::path::Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+impl Open {
+    /// The choice drawn at view `row`, `col`, if any.
+    fn choice_at(&self, row: usize, col: usize) -> Option<usize> {
+        let (top, left, width, shown) = self.drawn_at?;
+        let i = row.checked_sub(top + 1).filter(|&i| i < shown)?;
+        (left < col && col + 1 < left + width).then_some(self.scroll + i)
+    }
+}
+
+/// The keys the list's bottom border shows, the longest that fits in
+/// `width`: Return only puts in a choice once one is chosen.
+fn hint(open: &Open, width: usize) -> String {
+    let hints: &[&str] = if open.selected.is_some() && open.enter_takes {
+        &["⏎ put in · esc close", "⏎ put in"]
+    } else if open.selected.is_some() {
+        &["⇥ put in · esc close", "⇥ put in"]
+    } else {
+        &["⇥ put in · ↓ choose", "⇥ put in"]
+    };
+    hints
+        .iter()
+        .find(|h| h.width() + 6 <= width)
+        .map_or(String::new(), |h| h.to_string())
 }
 
 /// `%`, `;`, BEL and other control characters percent-encoded.
@@ -654,10 +810,12 @@ fn place(t: &Terminal, open: &mut Open, s: &Settings, at_end: bool) -> Drawn {
     // The text starts under the word being completed.
     let word_col = ccol.saturating_sub(offer.prefix.width());
     let col = word_col.saturating_sub(2).min(cols.saturating_sub(width));
+    open.drawn_at = Some((row, col, width, items.len()));
     let popup = Popup {
         row: row as u16,
         col: col as u16,
         width: width as u16,
+        hint: hint(open, width),
         items,
     };
     let selected = &offer.choices[current];
@@ -728,6 +886,7 @@ mod tests {
 
     fn settings() -> Settings {
         Settings {
+            as_you_type: true,
             delay: Duration::from_millis(150),
             rows: 8,
             ghost: true,
@@ -735,6 +894,7 @@ mod tests {
             commands: true,
             flags: true,
             history_order: true,
+            enter_takes: true,
         }
     }
 
@@ -826,7 +986,6 @@ mod tests {
         assert_eq!(st.key(keycode::DOWN, true, false), KeyResult::Redraw);
         assert_eq!(st.key(keycode::DOWN, true, false), KeyResult::Redraw);
         assert_eq!(st.key(keycode::UP, false, false), KeyResult::Pass, "with a modifier: the shell's");
-        assert_eq!(st.key(keycode::RETURN, true, false), KeyResult::Pass, "Return: the shell's");
         let later = Instant::now() + Duration::from_secs(1);
         let d = st.update(&t.state, &settings(), later, &no_wake);
         assert!(d.popup.unwrap().items[1].selected);
@@ -933,6 +1092,92 @@ mod tests {
             st.key(keycode::TAB, true, false),
             KeyResult::Send(b"\x1b[7701~4;4;macros/;\x07".to_vec())
         );
+        // The folder's own list opens straight away, without typing.
+        let mut t = term("cat src/macros/");
+        t.advance(format!("\x1b]7;file://host{}\x07", cwd.display()).as_bytes());
+        std::fs::write(dir.join("src/macros/one.rs"), "").unwrap();
+        std::fs::write(dir.join("src/macros/two.rs"), "").unwrap();
+        let now = Instant::now();
+        let deadline = now + Duration::from_secs(5);
+        let d = loop {
+            let d = st.update(&t.state, &settings(), now, &no_wake);
+            if d.popup.is_some() || Instant::now() > deadline {
+                break d;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        let names: Vec<String> = d.popup.expect("the folder's list").items.into_iter().map(|i| i.text).collect();
+        assert_eq!(names, ["one.rs", "two.rs"]);
+    }
+
+    #[test]
+    fn return_runs_the_line_until_a_choice_is_chosen() {
+        let path = programs("return", &["gzip", "git", "grep"]);
+        let mut st = state(&path);
+        let t = term("g");
+        let d = settle(&mut st, &t);
+        // The bottom border says what puts a choice in.
+        assert_eq!(d.popup.unwrap().hint, "⇥ put in");
+        assert_eq!(
+            st.key(keycode::RETURN, true, false),
+            KeyResult::Pass,
+            "nothing chosen: the line runs"
+        );
+        let later = Instant::now() + Duration::from_secs(1);
+        st.update(&t.state, &settings(), later, &no_wake);
+        assert_eq!(st.key(keycode::DOWN, true, false), KeyResult::Redraw);
+        let d = st.update(&t.state, &settings(), later, &no_wake);
+        assert_eq!(d.popup.unwrap().hint, "⏎ put in");
+        assert_eq!(
+            st.key(keycode::KEYPAD_ENTER, true, false),
+            KeyResult::Send(b"\x1b[7701~0;0;git; \x07".to_vec())
+        );
+        // Without the setting, Return is always the shell's.
+        let s = Settings {
+            enter_takes: false,
+            ..settings()
+        };
+        let mut st = state(&path);
+        settle(&mut st, &t);
+        st.key(keycode::DOWN, true, false);
+        let d = st.update(&t.state, &s, later, &no_wake);
+        assert_eq!(d.popup.unwrap().hint, "⇥ put in");
+        assert_eq!(st.key(keycode::RETURN, true, false), KeyResult::Pass);
+    }
+
+    #[test]
+    fn the_mouse_chooses_and_a_click_takes() {
+        let path = programs("mouse", &["gzip", "git", "grep"]);
+        let mut st = state(&path);
+        let t = term("g");
+        let p = settle(&mut st, &t).popup.unwrap();
+        // The list's border is at rows 1 and 5, its choices on 2 to 4.
+        assert_eq!((p.row, p.col), (1, 0));
+        let s = settings();
+        let later = Instant::now() + Duration::from_secs(1);
+        assert!(st.hover(3, 4));
+        assert!(!st.hover(3, 5), "the same choice");
+        let d = st.update(&t.state, &s, later, &no_wake);
+        assert!(d.popup.unwrap().items[1].selected);
+        // The grey text follows it.
+        assert_eq!(d.ghost.unwrap().text, "rep");
+        // Off the list: let go, so Return runs the line again.
+        assert!(st.hover(8, 4));
+        assert_eq!(st.key(keycode::RETURN, true, false), KeyResult::Pass);
+        // On the border: nothing, but the click is the list's.
+        st.update(&t.state, &s, later, &no_wake);
+        assert_eq!(st.click(1, 4), Some(KeyResult::Redraw));
+        assert_eq!(st.click(8, 4), None, "not on the list");
+        assert_eq!(st.click(4, 4), Some(KeyResult::Send(b"\x1b[7701~0;0;gzip; \x07".to_vec())));
+        // Typing lets go of the choice under the mouse.
+        let t = term("g");
+        let mut st = state(&path);
+        settle(&mut st, &t);
+        st.hover(2, 4);
+        st.key(b'r'.into(), true, false);
+        let t2 = term("gr");
+        st.update(&t2.state, &s, later, &no_wake);
+        assert_eq!(st.key(keycode::RETURN, true, false), KeyResult::Pass);
     }
 
     #[test]
@@ -962,6 +1207,41 @@ mod tests {
         assert_eq!(st.key(b'x'.into(), true, false), KeyResult::Pass);
         assert!(!st.is_open());
         assert_eq!(st.update(&t.state, &settings(), Instant::now(), &no_wake).popup, None);
+    }
+
+    #[test]
+    fn zshs_matches_described_from_what_we_read() {
+        let choice = |name: &str, about: &str| list::Choice {
+            name: name.into(),
+            what: What::Match,
+            about: about.into(),
+        };
+        let mut choices = vec![choice("--all", ""), choice("--tags", "zsh's own"), choice("--zzz", "")];
+        let known = [
+            ("--all".to_string(), "Fetch all remotes".to_string()),
+            ("--tags".to_string(), "Fetch all tags".to_string()),
+        ];
+        describe(&mut choices, &known);
+        let abouts: Vec<&str> = choices.iter().map(|c| c.about.as_str()).collect();
+        assert_eq!(abouts, ["Fetch all remotes", "zsh's own", ""]);
+    }
+
+    #[test]
+    fn only_tab_without_the_list_as_you_type() {
+        let path = programs("tab-only", &["gzip", "git", "grep"]);
+        let mut st = state(&path);
+        let s = Settings {
+            as_you_type: false,
+            ..settings()
+        };
+        let t = term("g");
+        let later = Instant::now() + Duration::from_secs(5);
+        st.update(&t.state, &s, Instant::now(), &no_wake);
+        assert_eq!(st.update(&t.state, &s, later, &no_wake).popup, None, "not by itself");
+        st.zsh_matches(term_core::ShellMatches {
+            shown: vec!["git".into(), "grep".into()],
+        });
+        assert!(st.update(&t.state, &s, later, &no_wake).popup.is_some(), "zsh's matches on Tab");
     }
 
     #[test]

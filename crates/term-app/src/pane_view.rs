@@ -1613,6 +1613,7 @@ impl PaneView {
     ) {
         let now = Instant::now();
         self.with(|win, _| win.last_input = now);
+        crate::idle_filters::user_input();
         if let (Some(lat), Some(w)) = (latency::get(), self.window_view()) {
             lat.scrolled(w.id(), input.t0);
         }

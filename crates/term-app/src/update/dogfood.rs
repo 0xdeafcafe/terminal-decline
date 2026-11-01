@@ -228,10 +228,10 @@ fn checked(asked: Asked, remote: Result<Remote, String>, tree: Result<Tree, Stri
             return;
         }
     };
-    let installable = remote.ahead > 0 && tree.clean && tree.branch.as_deref() == Some(source::BRANCH);
+    let installable = remote.new > 0 && tree.clean && tree.branch.as_deref() == Some(source::BRANCH);
     STATE.with(|s| {
         if let Some(st) = s.borrow_mut().as_mut() {
-            st.available = installable.then(|| (remote.ahead, remote.head.clone()));
+            st.available = installable.then(|| (remote.new, remote.head.clone()));
         }
     });
     let told_file = source::told_file(&home());

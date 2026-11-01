@@ -196,7 +196,11 @@ pub fn update_line(p: &Pending, key: Option<&Chord>, cols: usize) -> String {
     let app = crate::PRODUCT_NAME;
     let line = match p {
         Pending::Commits { ahead, .. } => {
-            format!("{} — {}", crate::update::source::available_title(*ahead), press("update"))
+            format!(
+                "{} — {}",
+                crate::update::source::available_title(crate::update::source::Relation::Behind, *ahead),
+                press("update")
+            )
         }
         Pending::Installed => format!("New build installed — {}", press("restart to update")),
         Pending::Release { version, ready: false } => format!("{app} {version} is available — {}", press("update")),

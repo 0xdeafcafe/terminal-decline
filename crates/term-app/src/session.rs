@@ -156,19 +156,28 @@ impl Events {
     }
 
     /// Fold `later` into these as if both had come in one parse slice: the
-    /// latest title, notification and progress, and the bell if either
-    /// rang.
+    /// latest title, notification and progress, the bell if either rang,
+    /// and every command, in order (each finished one may notify).
     pub fn merge(&mut self, later: Events) {
-        if later.title.is_some() {
-            self.title = later.title;
+        // Destructured so a new field can't be dropped here unnoticed.
+        let Events {
+            title,
+            bell,
+            notification,
+            progress,
+            commands,
+        } = later;
+        if title.is_some() {
+            self.title = title;
         }
-        self.bell |= later.bell;
-        if later.notification.is_some() {
-            self.notification = later.notification;
+        self.bell |= bell;
+        if notification.is_some() {
+            self.notification = notification;
         }
-        if later.progress.is_some() {
-            self.progress = later.progress;
+        if progress.is_some() {
+            self.progress = progress;
         }
+        self.commands.extend(commands);
     }
 }
 

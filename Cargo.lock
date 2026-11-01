@@ -963,6 +963,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "term-activity"
+version = "0.0.1"
+dependencies = [
+ "libc",
+ "term-core",
+ "term-pty",
+]
+
+[[package]]
 name = "term-config"
 version = "0.0.1"
 dependencies = [
@@ -1109,6 +1118,7 @@ dependencies = [
  "regex-lite",
  "serde",
  "serde_json",
+ "term-activity",
  "term-config",
  "term-core",
  "term-font",

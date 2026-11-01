@@ -5,7 +5,6 @@
 //! PTY and threads), [`keys`], [`mouse`], [`select`], [`layout`],
 //! [`frame_policy`], [`panes`], [`config`] and [`pin`].
 
-pub mod activity;
 pub mod app;
 mod background;
 pub mod control;
@@ -31,9 +30,7 @@ pub mod panes;
 pub mod paths;
 pub mod pin;
 pub mod prefs;
-pub mod prompts;
 pub mod reload;
-pub mod running;
 pub mod saved_history;
 pub mod search;
 pub mod secure_input;
@@ -46,6 +43,7 @@ mod view;
 pub mod watch;
 
 // Moved to crates of their own, under their old names here.
+pub use term_activity::{activity, prompts, running};
 pub use term_config::{config, quick, theme};
 use term_keys::ascii_layout;
 pub use term_keys::{keybind, keys};
@@ -53,10 +51,9 @@ pub use term_keys::{keybind, keys};
 pub use entry::{PinInfo, Role, run};
 pub use paths::Paths;
 
-/// The product's name as people see it, in menus, Services and questions.
-/// The one place it is spelled in the code; the bundle's own name is set
-/// in `scripts/bundle.sh`.
-pub const PRODUCT_NAME: &str = "Terminal Decline";
+/// The product's name as people see it (spelled in term-activity, whose
+/// titles end with it).
+pub use term_activity::PRODUCT_NAME;
 
 /// The app's bundle id, also its defaults domain and os_log subsystem.
 pub const BUNDLE_ID: &str = "red.forbes.terminal-decline";

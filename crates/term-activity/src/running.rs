@@ -351,7 +351,7 @@ fn bsd_info(pid: libc::pid_t) -> Option<libc::proc_bsdinfo> {
     (n == size).then_some(info)
 }
 
-pub(crate) fn name_of(pid: libc::pid_t) -> Option<String> {
+pub fn name_of(pid: libc::pid_t) -> Option<String> {
     let mut buf = [0u8; 256];
     let n = unsafe { libc::proc_name(pid, buf.as_mut_ptr().cast(), buf.len() as u32) };
     (n > 0).then(|| String::from_utf8_lossy(&buf[..n as usize]).into_owned())

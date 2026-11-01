@@ -313,12 +313,15 @@ fn compressed_history(blocks: usize, long: &str) -> Term {
 }
 
 /// A search's hits, the blocks its filters ruled out and the times it
-/// decompressed a block.
+/// decompressed a block; and, after every batch, that it holds no block
+/// decompressed.
 fn search_counting_unpacks(t: &mut Term, query: Query) -> (Vec<Hit>, usize, usize) {
     let mut job = t.state.start_search(query);
     let mut batches = Vec::new();
     while let Some(b) = job.next_batch() {
         batches.push(b);
+        let held = job.segs.iter().filter(|g| g.src.is_packed() && g.data.get().is_some()).count();
+        assert_eq!(held, 0, "decompressed blocks held between batches");
     }
     for b in batches {
         t.state.add_search_hits(b);
@@ -354,7 +357,8 @@ fn ruled_out_compressed_blocks_are_not_decompressed() {
     assert_eq!(hits.len(), 1);
     assert_eq!(skipped, blocks);
     assert!(unpacked > 2, "{unpacked}");
-    // A word in every block: each decompressed once.
+    // A word in every block: each decompressed once, and dropped once
+    // the search moved past it.
     let query = q("thread", false, WordMatch::Contains);
     let (hits, skipped, unpacked) = search_counting_unpacks(&mut t, query.clone());
     assert_eq!(hits, naive(&t, &query));

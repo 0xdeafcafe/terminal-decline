@@ -462,7 +462,8 @@ impl Cells {
 pub(crate) struct Seg {
     /// The block as history stored it when the search started.
     src: Body,
-    /// Its data, decompressed off the lock the first time it is read.
+    /// Its data, decompressed off the lock when it is read, and dropped
+    /// again once the search has moved past it ([`Seg::release`]).
     data: OnceLock<Arc<BlockData>>,
     /// Times it was decompressed.
     unpacks: AtomicUsize,
@@ -518,6 +519,15 @@ impl Seg {
         match &self.src {
             Body::Packed(p) if self.full() && self.data.get().is_none() => Some(p),
             _ => None,
+        }
+    }
+
+    /// Drop its decompressed data, if it is compressed: the search has
+    /// moved past it (it is decompressed again if read again).
+    fn release(&mut self) {
+        if self.src.is_packed() {
+            self.data = OnceLock::new();
+            self.starts = None;
         }
     }
 
@@ -909,7 +919,7 @@ impl SearchJob {
         if skip {
             self.skipped += 1;
         }
-        scan_seg(
+        let read = scan_seg(
             &m,
             &mut self.segs,
             i,
@@ -927,6 +937,12 @@ impl SearchJob {
             }
         }
         hits.sort_unstable();
+        // The search has moved past these blocks: what it reads of them
+        // again (a neighbour's edge) mostly comes from their edges, so
+        // at most a block or two is held decompressed at a time.
+        for g in &mut self.segs[read] {
+            g.release();
+        }
         let block = self.segs[i].first();
         Some(self.batch(block, hits, false))
     }

@@ -1095,6 +1095,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "term-pins"
+version = "0.0.1"
+dependencies = [
+ "libc",
+ "serde_json",
+ "term-config",
+ "term-icon",
+ "term-pin",
+ "term-prefs",
+ "term-pty",
+ "toml",
+]
+
+[[package]]
 name = "term-prefs"
 version = "0.0.1"
 dependencies = [
@@ -1186,6 +1200,7 @@ dependencies = [
  "term-import",
  "term-keys",
  "term-pin",
+ "term-pins",
  "term-prefs",
  "term-pty",
  "term-render",

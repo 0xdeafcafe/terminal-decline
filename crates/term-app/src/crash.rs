@@ -94,15 +94,7 @@ pub fn take_last_log() -> Option<PathBuf> {
     LAST_LOG.with(|l| l.borrow_mut().take())
 }
 
-/// `path` with the home directory shown as `~`.
-pub fn tilde(path: &Path) -> String {
-    if let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty())
-        && let Ok(rest) = path.strip_prefix(&home)
-    {
-        return format!("~/{}", rest.display());
-    }
-    path.display().to_string()
-}
+pub use term_pins::tilde;
 
 fn report(info: &PanicHookInfo, backtrace: &Backtrace) -> String {
     let thread = std::thread::current();

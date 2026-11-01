@@ -220,25 +220,27 @@ impl Paths {
         self.pins_dir().join(format!("{id}.toml"))
     }
 
+    /// What pins need of these paths.
+    pub fn pin_paths(&self) -> term_pins::Paths {
+        term_pins::Paths {
+            config_dir: self.config_dir.clone(),
+            apps_dir: self.apps_dir.clone(),
+            exe: self.exe.clone(),
+            app_bundle: self.app_bundle.clone(),
+        }
+    }
+
     /// The `Contents` directory of the app bundle the executable is in, if
     /// it is in one.
     pub fn contents_dir(&self) -> Option<PathBuf> {
-        let exe = self.exe.canonicalize().ok()?;
-        contents_dir_of(&exe)
+        self.pin_paths().contents_dir()
     }
 }
 
 /// The `.app` an executable at `<app>/Contents/MacOS/<name>` is in, links
 /// followed (the cask links `terminal-decline` into its bin directory).
 pub fn bundle_of(exe: &Path) -> Option<PathBuf> {
-    let exe = exe.canonicalize().ok()?;
-    contents_dir_of(&exe)?.parent().map(Path::to_path_buf)
-}
-
-fn contents_dir_of(exe: &Path) -> Option<PathBuf> {
-    let macos = exe.parent()?;
-    let contents = macos.parent()?;
-    (macos.file_name()? == "MacOS" && contents.file_name()? == "Contents").then(|| contents.to_path_buf())
+    term_pins::bundle_of(exe)
 }
 
 #[cfg(test)]

@@ -42,6 +42,7 @@ any command as its own Dock app.
 | `term-keys`   | key press → bytes (xterm, kitty protocol), the `[keybind]` config, the ASCII-capable layout (no AppKit) |
 | `term-config` | `config.toml` and its layers, themes (`themes/`), the quick terminal's settings (no AppKit; term-render and term-font for `Theme` and `FontConfig`) |
 | `term-import` | `terminal-decline import`: Ghostty and iTerm2 settings as a config or theme (AppKit only to convert iTerm2 colour spaces; its own crate so term-config stays AppKit-free) |
+| `term-pins`   | Dock pins: make, list, edit, remove, repair and update pin bundles and their records, run through an injected command runner (no AppKit; the stub itself is `term-pin`; the app passes its usage text and Secure Keyboard Entry carry-over in as hooks) |
 | `term-activity` | what a pane's shell does: OSC 133 activity, status titles, when to notify, prompts, the program running (no AppKit) |
 | `term-restore` | restarting into a new build: the saved window list, the pane tree it saves, each pane's history (no AppKit) |
 | `term-complete` | completion and colouring at the shell's prompt: the command line read into words and coloured, the list's choices, commands, folders, history, man pages and `--help` (no AppKit; docs/design/completion.md) |
@@ -53,7 +54,7 @@ any command as its own Dock app.
 
 `term-core` has no platform code and is tested and benchmarked on its own.
 
-term-keys, term-config, term-import, term-activity, term-restore,
+term-keys, term-config, term-import, term-pins, term-activity, term-restore,
 term-ctl, term-complete and term-update were split out of term-app so
 they build in parallel and their tests compile on their own; term-app
 re-exports each moved module under its old name (`crate::config`,

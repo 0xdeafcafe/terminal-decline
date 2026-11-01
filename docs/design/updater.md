@@ -619,14 +619,26 @@ module's `source` and `dogfood` parts).
   every four hours: one-shot dispatch timers re-armed after each check,
   so an idle app wakes six times a day for it. A thread runs `git fetch
   --quiet --no-tags origin main` in the checkout (no prompts:
-  `GIT_TERMINAL_PROMPT=0`, ssh in batch mode) and counts
-  `commit..origin/main`.
+  `GIT_TERMINAL_PROMPT=0`, ssh in batch mode). Agent sessions merge
+  into the checkout's `main` without always pushing, so the checkout can
+  be ahead of GitHub's `main`, behind it, or both (diverged); all three
+  are normal. The check counts the commits the build lacks on either
+  (`main origin/main ^commit`), and how the two stand (`rev-list
+  --left-right --count main...origin/main`). When diverged it works out
+  whether a merge would conflict, and in which files, with `git
+  merge-tree --write-tree` (in git's object store: the checkout isn't
+  touched).
 - **Deciding** (`source::decide`, table-tested): nothing new → nothing
-  (or "up to date" when asked); a checkout with uncommitted changes or
-  not on `main` → "Update available … Not updating: <why>", never an
-  update; `update = "notify"` → "Update available: N new commits" with
-  the newest subjects and an **Update** button, once per `origin/main`
-  (kept in `~/Library/Caches/terminal-decline/update-told`); `"auto"` →
+  (or "up to date" when asked); a checkout with uncommitted changes to
+  tracked files (untracked files never count) or not on `main` →
+  "Update available … Not updating: <why>", never an update; diverged
+  with conflicts → "Your checkout and GitHub both changed and don't
+  merge cleanly — merge them by hand", naming the files, never an
+  update; `update = "notify"` → "Update available: N new commits" (or,
+  when only the checkout has them, "Update to the checkout's latest: N
+  new commits") with the newest subjects and an **Update** button, once
+  per pair of `main`s (kept in
+  `~/Library/Caches/terminal-decline/update-told`); `"auto"` →
   updates once nobody has touched the Mac for 10 minutes
   (`CGEventSourceSecondsSinceLastEventType`), on AC power, with no
   program running in any pane, looking again every 15 minutes until
@@ -634,7 +646,14 @@ module's `source` and `dogfood` parts).
 - **Menus.** Terminal Decline › Check for Updates… (Sparkle's check in
   release builds, this one in builds from source) and, for builds from
   source, Update to Latest.
-- **Updating.** `git merge --ff-only origin/main`, then the checkout's
+- **Updating.** The tree is checked again, then the checkout's `main`
+  is brought up to GitHub's: ahead only → nothing to merge, the build is
+  of what's there; behind only → `git merge --ff-only origin/main`;
+  diverged → `git merge --no-edit origin/main` (never a rebase, never a
+  reset, no commit dropped). A merge that conflicts is undone with `git
+  merge --abort`, leaving the checkout as it was, and says so with the
+  conflicting files (as above); nothing is built. The app never pushes:
+  Alex's sessions do. Then the checkout's
   `scripts/dogfood.sh` under `taskpolicy -b` (background QoS: throttled
   CPU and disk), with `DECLINE_DOGFOOD_DIR` set to the folder the app is
   in and PATH gaining `~/.cargo/bin` and Homebrew's; output to
@@ -660,3 +679,10 @@ source's lists the new commits). Kept in
 tree, fast-forward, a passing and a failing `dogfood.sh`). Not measured
 yet: the wakeups around a check (expected: one fetch every four hours,
 0 between).
+
+**Landed** (1 Nov 2026): checkouts ahead of or diverged from GitHub's
+`main` update too (ahead: build what's there; diverged: merge, or abort
+and say which files conflict). Fake-remote tests, one per case: behind,
+ahead, diverged and merging cleanly, diverged with a conflict (aborted,
+tree unchanged, the notification's text), uncommitted changes,
+untracked files, another branch.

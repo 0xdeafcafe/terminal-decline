@@ -218,12 +218,13 @@ fn checked(asked: Asked, remote: Result<Remote, String>, tree: Result<Tree, Stri
         }
     };
     let told_file = source::told_file(&home());
-    let told = std::fs::read_to_string(&told_file).is_ok_and(|t| t.trim() == remote.head);
+    let told = std::fs::read_to_string(&told_file).is_ok_and(|t| t.trim() == remote.key());
     let situation = Situation {
         mode,
         asked,
-        ahead: remote.ahead,
+        new: remote.new,
         tree,
+        conflicts: remote.conflicts.clone(),
         told,
         idle: source::idle(),
         on_ac: source::on_ac(),
@@ -231,8 +232,10 @@ fn checked(asked: Asked, remote: Result<Remote, String>, tree: Result<Tree, Stri
     };
     let decision = source::decide(&situation);
     log(&format!(
-        "source: {} commit(s) behind {} ({}); {decision:?}",
-        remote.ahead,
+        "source: {} new commit(s); main {} is {:?} of origin/main {} ({}); {decision:?}",
+        remote.new,
+        short(&remote.local),
+        remote.relation,
         short(&remote.head),
         match asked {
             Asked::Nobody => "scheduled",
@@ -244,13 +247,11 @@ fn checked(asked: Asked, remote: Result<Remote, String>, tree: Result<Tree, Stri
         if let Some(dir) = told_file.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        let _ = std::fs::write(&told_file, &remote.head);
+        let _ = std::fs::write(&told_file, remote.key());
     };
+    let title = source::available_title(remote.relation, remote.new);
     let tell = |remote: &Remote| {
-        let mut n = note(
-            source::available_title(remote.ahead),
-            source::subjects_text(&remote.subjects, remote.ahead),
-        );
+        let mut n = note(title.clone(), source::available_text(remote));
         n.button = Some(Button::Update);
         show(n);
     };
@@ -266,7 +267,11 @@ fn checked(asked: Asked, remote: Result<Remote, String>, tree: Result<Tree, Stri
             mark_told();
         }
         Decision::Blocked(why) => {
-            show(note(source::available_title(remote.ahead), format!("Not updating: {why}.")));
+            show(note(title.clone(), format!("Not updating: {why}.")));
+            mark_told();
+        }
+        Decision::Conflict(files) => {
+            show(note(title.clone(), source::conflict_text(&files)));
             mark_told();
         }
         Decision::Wait { tell: t } => {
@@ -300,12 +305,16 @@ fn build(src: Source, remote: Remote, asked: bool) {
     }) else {
         return;
     };
-    let commits = if remote.ahead == 1 { "commit" } else { "commits" };
+    let commits = if remote.new == 1 { "commit" } else { "commits" };
+    let merging = match remote.relation {
+        source::Relation::Diverged => format!(" (merging GitHub's {} into the checkout's)", source::BRANCH),
+        _ => String::new(),
+    };
     show(note(
         format!("Updating {}", crate::PRODUCT_NAME),
         format!(
-            "Building {} new {commits} in the background; it restarts in the same windows when done, once no program is running.",
-            remote.ahead
+            "Building {} new {commits}{merging} in the background; it restarts in the same windows when done, once no program is running.",
+            remote.new
         ),
     ));
     let install = bundle
@@ -319,7 +328,7 @@ fn build(src: Source, remote: Remote, asked: bool) {
     });
 }
 
-fn built(result: Result<(), String>, log_file: PathBuf) {
+fn built(result: Result<(), source::Failure>, log_file: PathBuf) {
     STATE.with(|s| {
         if let Some(st) = s.borrow_mut().as_mut() {
             st.updating = false;
@@ -328,7 +337,13 @@ fn built(result: Result<(), String>, log_file: PathBuf) {
     match result {
         // The new build is installed: the restart follows.
         Ok(()) => log("source: built and installed"),
-        Err(e) => {
+        Err(source::Failure::Conflict(files)) => {
+            crate::app::set_update_asked(false);
+            log(&format!("source: merge conflicts, aborted: {}", files.join(", ")));
+            show(note("Not updating", source::conflict_text(&files)));
+            arm(source::CHECK_EVERY);
+        }
+        Err(source::Failure::Other(e)) => {
             crate::app::set_update_asked(false);
             log(&format!("source: update failed: {e}"));
             let shown = crate::activity::tilde(&log_file.to_string_lossy(), std::env::var("HOME").ok().as_deref());

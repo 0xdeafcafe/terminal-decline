@@ -31,10 +31,10 @@ use objc2_metal::{
 };
 use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
 use term_core::Terminal;
-use term_font::{FontConfig, Fonts, GlyphKey, RasterGlyph, Style};
+use term_font::{Features, FontConfig, Fonts, GlyphKey, RasterGlyph, RunText, ShapedGlyph, Style};
 
 use crate::frame::{Frame, FrameInput, GlyphInstance, GlyphSlot, GlyphSource, RectInstance, Rgba};
-use crate::glyph_thread::{GlyphThread, GlyphWaker, Want};
+use crate::glyph_thread::{GlyphThread, GlyphWaker, Run, Want};
 use crate::images::ImageInstance;
 use crate::packer::{NoRoom, ShelfPacker};
 use crate::pixels::{MetalPixels, PixelAlloc};
@@ -510,6 +510,16 @@ impl GlyphCache {
             if f.skipped {
                 continue;
             }
+            for (key, glyph) in f.shaped {
+                match glyph {
+                    _ if by_key.contains_key(&(id, key)) => {}
+                    None => {
+                        by_key.insert((id, key), None);
+                    }
+                    Some(_) if !thread.is_wanted(&f.want) => {}
+                    Some(g) => thread.keep(key, g),
+                }
+            }
             match (f.key, f.glyph) {
                 (None, _) => {
                     if let Want::Char(cp, style) = f.want {
@@ -521,7 +531,7 @@ impl GlyphCache {
                     by_key.insert((id, key), None);
                 }
                 // No pane wants it any more (its rows scrolled away).
-                (Some(_), Some(_)) if !thread.is_wanted(f.want) => {}
+                (Some(_), Some(_)) if !thread.is_wanted(&f.want) => {}
                 (Some(key), Some(g)) => thread.keep(key, g),
             }
         }
@@ -751,7 +761,7 @@ impl PaneGlyphs<'_> {
                     return slot;
                 }
                 // Found by the thread, its bitmap still on the way.
-                let asked = self.chars.thread.as_ref().is_some_and(|t| t.is_pending(Want::Char(cp, style)));
+                let asked = self.chars.thread.as_ref().is_some_and(|t| t.is_pending(&Want::Char(cp, style)));
                 self.ask(if asked { Want::Char(cp, style) } else { Want::Key(key) });
                 None
             }
@@ -789,12 +799,12 @@ impl PaneGlyphs<'_> {
     /// without it.
     fn ask(&mut self, want: Want) {
         self.budget.deferred = true;
-        self.budget.wanted.push(want);
+        self.budget.wanted.push(want.clone());
         let Some(waker) = &self.budget.waker else { return };
         let fonts = self.fonts;
         self.chars
             .thread
-            .get_or_insert_with(|| GlyphThread::spawn(fonts.finder(), waker.clone()))
+            .get_or_insert_with(|| GlyphThread::spawn(fonts.share(), waker.clone()))
             .ask(want);
     }
 }
@@ -868,6 +878,25 @@ impl GlyphSource for PaneGlyphs<'_> {
 
     fn fonts_key(&self) -> u64 {
         self.id.0 as u64 + 1
+    }
+
+    /// With the glyph thread on, a run not shaped before is shaped there
+    /// (Core Text's CTLine, and finding fallback fonts, can take
+    /// milliseconds): asked for once, and drawn without for now.
+    fn shape(&mut self, run: &RunText, face: Style, features: Features, out: &mut Vec<ShapedGlyph>) -> bool {
+        if self.budget.waker.is_none() {
+            self.fonts.shape(run, face, features, out);
+            return true;
+        }
+        if self.fonts.shape_kept(run, face, features, out) {
+            return true;
+        }
+        self.ask(Want::Shape(Arc::new(Run {
+            text: run.clone(),
+            face,
+            features,
+        })));
+        false
     }
 }
 
@@ -1723,9 +1752,11 @@ impl Renderer {
     /// Find and rasterise glyphs not drawn before on the font set's glyph
     /// thread (roadmap R.1), which calls `waker` when some are ready: the
     /// app then builds again the panes drawn without them
-    /// ([`PaneRender::glyphs_deferred`]). Printable ASCII, sprites and
-    /// glyphs found before (also in another style or window) stay on this
-    /// thread. `None` (the default): every glyph is found here, within the
+    /// ([`PaneRender::glyphs_deferred`]). Clusters and ligature runs not
+    /// shaped before are shaped there too. Printable ASCII, sprites,
+    /// glyphs found before (also in another style or window) and runs
+    /// shaped before stay on this thread. `None` (the default): every
+    /// glyph is found and every run shaped here, glyphs within the
     /// [budget](Self::set_glyph_budget).
     pub fn set_glyph_waker(&mut self, waker: Option<GlyphWaker>) {
         self.glyph_rules.waker = waker;

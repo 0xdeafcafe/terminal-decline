@@ -583,6 +583,77 @@ fn a_glyph_from_the_glyph_thread_appears_on_a_later_build() {
     assert!(!again.glyphs_deferred(), "glyphs found before don't wait");
 }
 
+/// JetBrains Mono (checked in to term-font), whose runs are shaped.
+fn jetbrains() -> Fonts {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../term-font/tests/fonts/JetBrainsMono-Regular.ttf");
+        assert!(term_font::register_font_file(std::path::Path::new(path)), "registering {path}");
+    });
+    Fonts::with_config(&term_font::FontConfig::new("JetBrains Mono", 13.0), 2.0)
+}
+
+/// A waker that sends on a channel.
+fn waker() -> (term_render::GlyphWaker, std::sync::mpsc::Receiver<()>) {
+    let (woke, wakes) = std::sync::mpsc::channel::<()>();
+    let woke = std::sync::Mutex::new(woke);
+    let waker: term_render::GlyphWaker = std::sync::Arc::new(move || {
+        let _ = woke.lock().unwrap().send(());
+    });
+    (waker, wakes)
+}
+
+/// Build `pane` again each time the glyph thread wakes, until it has
+/// every glyph.
+fn until_complete(r: &mut Renderer, pane: &mut PaneRender, t: &mut Term, theme: &Theme, wakes: &std::sync::mpsc::Receiver<()>) {
+    let input = input(r, theme);
+    let mut builds = 1;
+    while pane.glyphs_deferred() {
+        wakes
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .expect("the glyph thread wakes the app");
+        r.snapshot_pane(pane, &mut t.state, &input);
+        if !r.build_from_snapshot(pane, &input) {
+            r.build_pane(pane, &mut t.state, &input);
+        }
+        builds += 1;
+        assert!(builds < 30, "the glyphs never came");
+    }
+}
+
+/// Clusters (combining marks, emoji sequences) and ligature runs not
+/// shaped before are shaped on the glyph thread too: the first build
+/// leaves them out and asks, and once the thread wakes the app the pane
+/// draws as one shaped on this thread. Shaped once, they don't wait.
+#[test]
+fn clusters_and_ligatures_are_shaped_on_the_glyph_thread() {
+    if !have_gpu() {
+        return;
+    }
+    let theme = theme();
+    // Plain letters and spaces first, so only the shaping is new.
+    let plain = "a b c x y = - > ! e";
+    let text = "x -> e\u{301} \u{1F44D}\u{1F3FD} \u{1F469}\u{200D}\u{1F4BB} != y";
+    let mut r = Renderer::new(jetbrains());
+    let mut whole = Renderer::new(jetbrains());
+    let m = r.metrics();
+    let size = (24 * m.cell_width as usize, m.cell_height as usize);
+    let (waker, wakes) = waker();
+    r.set_glyph_waker(Some(waker));
+    let (mut warm, mut tw) = built(&mut r, &theme, 24, 1, plain);
+    until_complete(&mut r, &mut warm, &mut tw, &theme, &wakes);
+    let (mut pane, mut t) = built(&mut r, &theme, 24, 1, text);
+    assert!(pane.glyphs_deferred(), "clusters and stretches go to the glyph thread");
+    until_complete(&mut r, &mut pane, &mut t, &theme, &wakes);
+    let (all, _ta) = built(&mut whole, &theme, 24, 1, text);
+    assert!(
+        alone(&mut r, &pane, size) == alone(&mut whole, &all, size),
+        "drawn as shaped on this thread"
+    );
+    let (again, _t2) = built(&mut r, &theme, 24, 1, text);
+    assert!(!again.glyphs_deferred(), "runs shaped before don't wait");
+}
+
 /// Glyphs from the glyph thread that find no room in a texture make it
 /// grow, as building does, and are all drawn.
 #[test]

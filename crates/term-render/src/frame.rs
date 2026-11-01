@@ -328,6 +328,17 @@ pub trait GlyphSource {
     fn fonts_key(&self) -> u64 {
         0
     }
+
+    /// [`Fonts::shape`] `run` with [`fonts`](GlyphSource::fonts), appending
+    /// to `out`. False, adding nothing, when it isn't shaped yet (the glyph
+    /// thread shapes it, roadmap R.1): what it draws is left out for now,
+    /// and not kept.
+    fn shape(&mut self, run: &RunText, face: FontStyle, features: Features, out: &mut Vec<ShapedGlyph>) -> bool {
+        if let Some(fonts) = self.fonts() {
+            fonts.shape(run, face, features, out);
+        }
+        true
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1085,8 +1096,8 @@ impl Frame {
         for &i in &self.to_build {
             let row = &self.rows.snap.rows[i];
             let key = row.key;
-            let subs: &[ShapedGlyph] = match glyphs.fonts() {
-                Some(fonts) if shaping => {
+            let subs: &[ShapedGlyph] = match shaping {
+                true => {
                     let styles = self.rows.styles_for(row.flags.contains(RowFlags::HISTORY));
                     let snap = &self.rows.snap;
                     let cells = snap.row_cells(row).unwrap_or(&[]);
@@ -1096,9 +1107,9 @@ impl Frame {
                         styles,
                         clusters: &clusters,
                     });
-                    self.shapes.row(Some(key), cells, fonts)
+                    self.shapes.row(Some(key), cells, glyphs)
                 }
-                _ => &[],
+                false => &[],
             };
             let slot = self.rows.entry_for(key);
             let ctx = RowCtx {
@@ -1478,8 +1489,8 @@ impl Frame {
         let shaping = glyphs.fonts().is_some_and(shapes_runs);
         for line in 0..term.lines() {
             let row = term.visible_row(line);
-            let subs: &[ShapedGlyph] = match glyphs.fonts() {
-                Some(fonts) if shaping => self.shapes.row(None, row.cells(), fonts),
+            let subs: &[ShapedGlyph] = match shaping {
+                true => self.shapes.row(None, row.cells(), glyphs),
                 _ => &[],
             };
             // Selected columns on this line (history rows at another
@@ -1880,8 +1891,9 @@ fn draw_cluster(
     shaped.clear();
     run.clear();
     run.push(text, if wide { 2 } else { 1 });
-    if let Some(fonts) = glyphs.fonts() {
-        fonts.shape(run, face, Features::default(), shaped);
+    if !glyphs.shape(run, face, Features::default(), shaped) {
+        // Shaped on the glyph thread: drawn once it is.
+        return;
     }
     let start = clusters.placed.len();
     let mut complete = true;

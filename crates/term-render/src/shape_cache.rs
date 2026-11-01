@@ -23,9 +23,9 @@ use std::collections::HashMap;
 use std::hash::BuildHasherDefault;
 
 use term_core::{Content, RowKey, Snapshot};
-use term_font::{Features, Fonts, RunText, ShapedGlyph, Style as FontStyle, is_code_drawn};
+use term_font::{Features, RunText, ShapedGlyph, Style as FontStyle, is_code_drawn};
 
-use crate::frame::CellView;
+use crate::frame::{CellView, GlyphSource};
 use crate::row_cache::KeyHasher;
 
 const LINE: Features = Features { ligatures: true };
@@ -68,6 +68,10 @@ struct Entry {
     used: u64,
 }
 
+/// A stretch of a row: its cells, its neighbours that can't take part,
+/// its face.
+type Stretch = (std::ops::Range<usize>, Option<char>, Option<char>, FontStyle);
+
 /// What rows and stretches were shaped against.
 #[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
 struct Against {
@@ -92,6 +96,8 @@ pub(crate) struct ShapeCache {
     key: Vec<u16>,
     run: RunText,
     shaped: Vec<ShapedGlyph>,
+    /// The row's stretches: cells, neighbours that can't take part, face.
+    found: Vec<Stretch>,
     /// The last row shaped without a key (the reference path).
     unkeyed: Vec<ShapedGlyph>,
     /// Rows and stretches shaped (not found), for tests and benches.
@@ -169,12 +175,20 @@ impl ShapeCache {
     /// reference path), whose cells are `cells`: glyphs placed by column,
     /// in column order, for the cells that don't draw as their own
     /// character alone. Shaped unless kept.
-    pub fn row<C: CellView>(&mut self, key: Option<RowKey>, cells: impl Iterator<Item = C>, fonts: &Fonts) -> &[ShapedGlyph] {
+    /// Shaped through `glyphs` ([`GlyphSource::shape`]); a row with a
+    /// stretch it hasn't shaped yet (on the glyph thread) isn't kept, and
+    /// that stretch's cells draw as their characters alone for now.
+    pub fn row<C: CellView>(
+        &mut self,
+        key: Option<RowKey>,
+        cells: impl Iterator<Item = C>,
+        glyphs: &mut impl GlyphSource,
+    ) -> &[ShapedGlyph] {
         let frame = self.frame;
         let Some(key) = key else {
             let mut subs = std::mem::take(&mut self.unkeyed);
             subs.clear();
-            self.shape(cells, fonts, &mut subs);
+            self.shape(cells, glyphs, &mut subs);
             self.unkeyed = subs;
             return &self.unkeyed;
         };
@@ -185,8 +199,15 @@ impl ShapeCache {
         }
         let mut subs = self.spare.pop().unwrap_or_default();
         subs.clear();
-        self.shape(cells, fonts, &mut subs);
+        let complete = self.shape(cells, glyphs, &mut subs);
         self.shaped_rows += 1;
+        if !complete {
+            let old = std::mem::replace(&mut self.unkeyed, subs);
+            if self.spare.len() < SPARE {
+                self.spare.push(old);
+            }
+            return &self.unkeyed;
+        }
         let e = self.rows.entry(key).or_default();
         e.subs = subs;
         e.used = frame;
@@ -203,9 +224,12 @@ impl ShapeCache {
         self.rows.len()
     }
 
-    /// Find the row's stretches and append their substitutions to `out`.
-    fn shape<C: CellView>(&mut self, cells: impl Iterator<Item = C>, fonts: &Fonts, out: &mut Vec<ShapedGlyph>) {
+    /// Find the row's stretches and append their substitutions to `out`:
+    /// false when one isn't shaped yet (its substitutions left out).
+    fn shape<C: CellView>(&mut self, cells: impl Iterator<Item = C>, glyphs: &mut impl GlyphSource, out: &mut Vec<ShapedGlyph>) -> bool {
         self.seen.clear();
+        self.found.clear();
+        let Some(fonts) = glyphs.fonts() else { return true };
         let lig = FontStyle::ALL.map(|s| fonts.features(s).ligatures);
         let space = FontStyle::ALL.map(|s| fonts.ligates(' ', s));
         let mut last_key = None;
@@ -236,7 +260,7 @@ impl ShapeCache {
             self.seen.push(Seen { kind, face, ch });
         }
         if !any {
-            return;
+            return true;
         }
         let n = self.seen.len();
         let mut i = 0;
@@ -270,24 +294,32 @@ impl ShapeCache {
             let plain = |k: usize| self.seen[k].kind == Kind::Plain && self.seen[k].face == face;
             let left = (start > 0 && plain(start - 1)).then(|| self.seen[start - 1].ch);
             let right = (end < n && plain(end)).then(|| self.seen[end].ch);
-            self.stretch(start..end, left, right, face, fonts, out);
+            self.found.push((start..end, left, right, face));
             i = last + 1;
         }
+        let mut complete = true;
+        for k in 0..self.found.len() {
+            let (at, left, right, face) = self.found[k].clone();
+            complete &= self.stretch(at, left, right, face, glyphs, out);
+        }
+        complete
     }
 
     /// The substitutions of the stretch of cells `at`, with neighbours
     /// `left` and `right` that can't take part (stood in for by the face's
-    /// plain letter), appended to `out` by column.
+    /// plain letter), appended to `out` by column. False, adding nothing,
+    /// when it isn't shaped yet.
     fn stretch(
         &mut self,
         at: std::ops::Range<usize>,
         left: Option<char>,
         right: Option<char>,
         face: FontStyle,
-        fonts: &Fonts,
+        glyphs: &mut impl GlyphSource,
         out: &mut Vec<ShapedGlyph>,
-    ) {
-        let stand_in = |c: char| fonts.plain_char(face).unwrap_or(c);
+    ) -> bool {
+        let plain = glyphs.fonts().and_then(|f| f.plain_char(face));
+        let stand_in = |c: char| plain.unwrap_or(c);
         let (left, right) = (left.map(stand_in), right.map(stand_in));
         self.key.clear();
         self.key
@@ -299,9 +331,8 @@ impl ShapeCache {
         let base = at.start as u16;
         if let Some(subs) = self.stretches.get(&self.key[..]) {
             out.extend(subs.iter().map(|g| ShapedGlyph { cell: g.cell + base, ..*g }));
-            return;
+            return true;
         }
-        self.shaped_stretches += 1;
         let run = &mut self.run;
         run.clear();
         if let Some(c) = left {
@@ -317,7 +348,10 @@ impl ShapeCache {
             run.push_char(c, 1);
         }
         self.shaped.clear();
-        fonts.shape(run, face, LINE, &mut self.shaped);
+        if !glyphs.shape(run, face, LINE, &mut self.shaped) {
+            return false;
+        }
+        self.shaped_stretches += 1;
         // Cells of the stretch, from the run's start, and which of them
         // don't draw as their character alone: a glyph of theirs is split,
         // or a glyph before covers them.
@@ -360,6 +394,7 @@ impl ShapeCache {
             self.stretches.clear();
         }
         self.stretches.insert(self.key[..].into(), subs);
+        true
     }
 }
 
@@ -367,7 +402,7 @@ impl ShapeCache {
 mod tests {
     use super::*;
     use term_core::{Attrs, Style};
-    use term_font::{FontConfig, register_font_file};
+    use term_font::{FontConfig, Fonts, register_font_file};
 
     /// JetBrains Mono (checked in to term-font) at 26 px, runs allowed.
     fn jetbrains() -> Fonts {
@@ -404,6 +439,17 @@ mod tests {
         }
         fn is_simple(&self) -> bool {
             true
+        }
+    }
+
+    /// Glyphs from `fonts`, every run shaped at once.
+    struct Src<'a>(&'a Fonts);
+    impl GlyphSource for Src<'_> {
+        fn glyph(&mut self, _: u32, _: FontStyle) -> Option<crate::GlyphSlot> {
+            None
+        }
+        fn fonts(&self) -> Option<&Fonts> {
+            Some(self.0)
         }
     }
 
@@ -488,7 +534,7 @@ mod tests {
         for cells in rows() {
             let want = whole(&fonts, &cells);
             let mut got = Vec::new();
-            cache.shape(cells.iter().copied(), &fonts, &mut got);
+            assert!(cache.shape(cells.iter().copied(), &mut Src(&fonts), &mut got));
             let text: String = cells.iter().map(|c| c.0).collect();
             assert_eq!(got, want, "{text:?}");
             subs += got.len();

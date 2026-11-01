@@ -54,7 +54,7 @@ pub struct ShapedGlyph {
 
 /// A run's text, cell by cell, with the table that maps each UTF-16 unit
 /// back to its cell.
-#[derive(Default, Clone, Debug)]
+#[derive(Default, Clone, PartialEq, Eq, Hash, Debug)]
 pub struct RunText {
     text: Vec<u16>,
     /// UTF-16 start of each cell's text; one more at the end.
@@ -130,6 +130,36 @@ impl RunText {
 
     fn cell(&self, i: usize) -> (u16, u8) {
         (self.cells[i], (self.cells[i + 1] - self.cells[i]) as u8)
+    }
+}
+
+/// Runs shaped on one thread for another (roadmap R.1), by face, features
+/// and text: [`Fonts::shape_and_keep`] puts them in, [`Fonts::shape_kept`]
+/// reads them. Emptied when full.
+#[derive(Default)]
+pub(crate) struct RunCache {
+    map: HashMap<Box<[u16]>, Box<[ShapedGlyph]>>,
+    /// Lookup key built here, so a hit allocates nothing.
+    scratch: Vec<u16>,
+}
+
+impl RunCache {
+    /// Runs kept before the cache is emptied: more than a screen of
+    /// different clusters and stretches.
+    const CAP: usize = 4096;
+
+    /// The key of `run` in `face` with `features`: the face and features,
+    /// then each cell text's width and length and its UTF-16.
+    fn key(&mut self, run: &RunText, face: Style, features: Features) {
+        let k = &mut self.scratch;
+        k.clear();
+        k.push(face as u16 | (features.ligatures as u16) << 8);
+        for i in 0..run.len() {
+            let text = run.cluster(i);
+            k.push(run.cell(i).1 as u16);
+            k.push(text.len() as u16);
+            k.extend_from_slice(text);
+        }
     }
 }
 
@@ -367,6 +397,37 @@ impl Fonts {
         for i in 0..run.len() {
             self.shape_cell(run, face, i, out);
         }
+    }
+
+    /// [`Fonts::shape`], if these fonts or others sharing their registry
+    /// ([`Fonts::share`]) shaped the same run with
+    /// [`shape_and_keep`](Fonts::shape_and_keep): false, adding nothing, if
+    /// none did.
+    pub fn shape_kept(&self, run: &RunText, face: Style, features: Features, out: &mut Vec<ShapedGlyph>) -> bool {
+        let mut kept = self.core.kept_runs.lock().unwrap_or_else(|e| e.into_inner());
+        kept.key(run, face, features);
+        let RunCache { map, scratch } = &mut *kept;
+        match map.get(&scratch[..]) {
+            Some(glyphs) => {
+                out.extend_from_slice(glyphs);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// [`Fonts::shape`], keeping what `run` shaped into for
+    /// [`shape_kept`](Fonts::shape_kept).
+    pub fn shape_and_keep(&self, run: &RunText, face: Style, features: Features, out: &mut Vec<ShapedGlyph>) {
+        let from = out.len();
+        self.shape(run, face, features, out);
+        let mut kept = self.core.kept_runs.lock().unwrap_or_else(|e| e.into_inner());
+        if kept.map.len() >= RunCache::CAP {
+            kept.map.clear();
+        }
+        kept.key(run, face, features);
+        let key: Box<[u16]> = kept.scratch[..].into();
+        kept.map.insert(key, out[from..].into());
     }
 
     /// Cell text `i` of `run` shaped alone.

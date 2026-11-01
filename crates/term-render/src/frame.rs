@@ -1780,9 +1780,15 @@ fn put_text(
 
 /// The grey text after the cursor (completion design §2).
 fn draw_ghost(out: &mut Vec<GlyphInstance>, g: &Ghost, cols: usize, input: &FrameInput, glyphs: &mut impl GlyphSource) {
-    let paint = input.theme.paint(8);
+    // The foreground faded, not the palette's bright black: some dark
+    // themes make that the background colour, which hides the text.
+    let paint = input.theme.paint(slot::FOREGROUND).alpha(GHOST_ALPHA);
     put_text(out, glyphs, input, (g.row as usize, g.col as usize), cols, &g.text, paint);
 }
+
+/// How strongly the grey text after the cursor shows: the foreground
+/// at this alpha, about half way to the background on any theme.
+const GHOST_ALPHA: u8 = 120;
 
 /// How strongly the line above each prompt shows: the foreground at
 /// this alpha.

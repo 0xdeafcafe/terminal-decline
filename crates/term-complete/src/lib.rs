@@ -407,8 +407,7 @@ impl PaneState {
             enter_takes: s.enter_takes,
             zsh: true,
         };
-        let no_ghost = Settings { ghost: false, ..*s };
-        let drawn = place(t, &mut open, &no_ghost, false);
+        let drawn = place(t, &mut open, s, report.cursor == report.text.len());
         self.open = Some(open);
         drawn
     }
@@ -1195,7 +1194,8 @@ mod tests {
         let p = d.popup.expect("a list");
         assert_eq!(p.items[0].text, "main");
         assert!(p.items[0].detail.starts_with("the default"));
-        assert_eq!(d.ghost, None);
+        // The grey text shows the rest of the first, as for ours.
+        assert_eq!(d.ghost.map(|g| (g.row, g.col, g.text)), Some((0, 17, "in".to_string())));
         assert_eq!(st.key(keycode::DOWN, true, false), KeyResult::Redraw);
         assert_eq!(st.key(keycode::DOWN, true, false), KeyResult::Redraw);
         st.update(&t.state, &settings(), Instant::now(), &no_wake);

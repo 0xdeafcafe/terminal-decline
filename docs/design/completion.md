@@ -809,6 +809,12 @@ default it shows zsh's matches on Tab, and those zsh gave no
 description get one from the man page or `--help` (flags) or the
 subcommands' pages.
 
+The grey text for zsh's list too (1 Nov 2026), at Alex's ask: zsh's
+matches on Tab showed none, so the rest of the first (or chosen) match
+now shows after the cursor as it does for ours, and Right takes it. It
+is drawn in the foreground at a lower alpha, not bright black, which
+some dark themes make the background colour.
+
 Measured 1 Nov 2026 (load 5–8, 17 during the latency run):
 - Frames with everything idle, before colouring (b50de69) → now, µs:
   80×24 full 10.3 → 10.5, 300×100 unchanged 5.97 → 6.16, 300×100 one

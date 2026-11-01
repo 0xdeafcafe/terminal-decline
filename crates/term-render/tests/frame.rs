@@ -1323,7 +1323,7 @@ fn ink_paints_its_columns() {
 /// The completion list (`Snapshot::popup`) draws a bordered box over the
 /// cells, hiding their glyphs there (by their pixels, so a wide one
 /// reaching in from the left is hidden too), with the selected item on the selection colour; the grey text
-/// after the cursor (`Snapshot::ghost`) draws in bright black.
+/// after the cursor (`Snapshot::ghost`) draws in the foreground, faded.
 #[test]
 fn popup_covers_the_cells_under_it() {
     use term_core::{Ghost, Popup, PopupItem};
@@ -1385,10 +1385,12 @@ fn popup_covers_the_cells_under_it() {
     assert_eq!(at(1, 14), ['A']);
     // The wide 漢 under the box: hidden.
     assert!(!f.glyphs.iter().any(|g| decode_cp(g) == '漢'));
-    // The ghost text, in bright black.
+    // The ghost text, in the foreground at a lower alpha (bright black
+    // is the background on some dark themes).
     let ghost: Vec<_> = f.glyphs.iter().filter(|g| g.y / CH == 0 && g.x / CW >= 4).collect();
     assert_eq!(ghost.iter().map(|g| decode_cp(g)).collect::<String>(), "-la");
-    assert!(ghost.iter().all(|g| g.color == theme.palette[8]));
+    assert!(ghost.iter().all(|g| g.color & 0x00FF_FFFF == theme.foreground & 0x00FF_FFFF));
+    assert!(ghost.iter().all(|g| (g.color >> 24) < 255 && (g.color >> 24) > 64), "faded");
     // The selected item's row on the selection colour.
     assert!(f.rects.iter().any(|r| r.color == theme.selection && r.y == 2 * CH && r.x == 3 * CW));
     // Without the popup the rows are drawn whole again.

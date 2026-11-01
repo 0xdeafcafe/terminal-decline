@@ -9,6 +9,7 @@ mod fit;
 mod legacy_tests;
 mod list;
 mod registry;
+mod sample;
 mod shape;
 pub mod sprite;
 
@@ -16,6 +17,7 @@ pub use config::{Adjust, CellWidth, FontConfig, Tag, parse_ranges, parse_variati
 pub use fit::is_private_use;
 pub use list::{FaceInfo, FamilyInfo, format_families, list_families};
 pub use registry::{FontId, GlyphKey, SPRITE_FONT};
+pub use sample::sample;
 pub use shape::{Features, RunText, ShapedGlyph};
 pub use sprite::{SpriteId, is_code_drawn};
 

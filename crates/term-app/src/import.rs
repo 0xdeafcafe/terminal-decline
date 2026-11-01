@@ -495,6 +495,9 @@ pub fn ghostty(text: &str, path: &Path, theme_dirs: &[PathBuf]) -> GhosttyImport
     };
     let mut fonts: Vec<String> = Vec::new();
     let mut features: Vec<String> = Vec::new();
+    // font-variation, -bold, -italic, -bold-italic; font-codepoint-map.
+    let mut variations: [Vec<String>; 4] = Default::default();
+    let mut symbols: Vec<(String, String)> = Vec::new();
     let mut themes: Vec<(String, String)> = Vec::new();
     // A theme by Terminal Decline's name: built in, else a Ghostty theme made
     // into a theme file.
@@ -574,6 +577,77 @@ pub fn ghostty(text: &str, path: &Path, theme_dirs: &[PathBuf]) -> GhosttyImport
                 Some(p) => set("cell_width", quote(&format!("{p}%")), &mut top),
                 _ => skip("only a percentage maps (Ghostty's other unit is pixels, Terminal Decline's points)"),
             },
+            "font-thicken" | "bold-is-bright" => match value.as_str() {
+                "true" | "false" => set(
+                    if key == "font-thicken" { "font_thicken" } else { "bold_is_bright" },
+                    value.clone(),
+                    &mut top,
+                ),
+                _ => skip("not true or false"),
+            },
+            "bold-color" => match value.as_str() {
+                "bright" => set("bold_is_bright", "true".into(), &mut top),
+                _ => skip("only bright maps (to bold_is_bright)"),
+            },
+            "font-thicken-strength" => match value.parse::<u8>() {
+                Ok(n) => set("font_thicken_strength", n.to_string(), &mut top),
+                Err(_) => skip("not 0 to 255"),
+            },
+            "minimum-contrast" => match number.filter(|n| (1.0..=21.0).contains(n)) {
+                Some(n) => set("minimum_contrast", n.to_string(), &mut top),
+                None => skip("not 1 to 21"),
+            },
+            "font-synthetic-style" => {
+                let parts: Vec<&str> = value.split(',').map(str::trim).collect();
+                let (bold, italic) = match value.as_str() {
+                    "true" => (true, true),
+                    "false" => (false, false),
+                    _ => (!parts.contains(&"no-bold"), !parts.contains(&"no-italic")),
+                };
+                set("font_synthetic_bold", bold.to_string(), &mut top);
+                set("font_synthetic_italic", italic.to_string(), &mut top);
+            }
+            "font-variation" | "font-variation-bold" | "font-variation-italic" | "font-variation-bold-italic" => {
+                let i = match key.as_str() {
+                    "font-variation" => 0,
+                    "font-variation-bold" => 1,
+                    "font-variation-italic" => 2,
+                    _ => 3,
+                };
+                if value.is_empty() {
+                    variations[i].clear();
+                } else {
+                    match term_font::parse_variation(&value) {
+                        Some((tag, v)) => {
+                            variations[i].retain(|old| term_font::parse_variation(old).map(|(t, _)| t) != Some(tag));
+                            variations[i].push(format!("{tag}={v}"));
+                        }
+                        None => skip("not axis=value"),
+                    }
+                }
+            }
+            "font-codepoint-map" => match value.split_once('=') {
+                Some((ranges, font)) if term_font::parse_ranges(ranges).is_some() && !font.trim().is_empty() => {
+                    let ranges = ranges.trim().to_string();
+                    symbols.retain(|(r, _)| *r != ranges);
+                    symbols.push((ranges, font.trim().to_string()));
+                }
+                _ => skip("not U+XXXX-U+YYYY=font"),
+            },
+            "adjust-underline-thickness" | "adjust-strikethrough-thickness" | "adjust-cursor-thickness" => {
+                let to = match key.as_str() {
+                    "adjust-underline-thickness" => "adjust_underline_thickness",
+                    "adjust-strikethrough-thickness" => "adjust_strikethrough_thickness",
+                    _ => "adjust_cursor_thickness",
+                };
+                match value.strip_suffix('%').and_then(|p| p.trim().parse::<f64>().ok()) {
+                    Some(p) => set(to, quote(&format!("{p}%")), &mut top),
+                    None => skip("only a percentage maps (Ghostty's other unit is pixels, Terminal Decline's points)"),
+                }
+            }
+            "adjust-font-baseline" | "adjust-underline-position" | "adjust-strikethrough-position" => {
+                skip("Ghostty counts pixels from another edge; set adjust_baseline or the position in points")
+            }
             "background-opacity" => match number {
                 Some(n) => set("opacity", n.clamp(0.0, 1.0).to_string(), &mut top),
                 None => skip("not a number"),
@@ -668,9 +742,25 @@ pub fn ghostty(text: &str, path: &Path, theme_dirs: &[PathBuf]) -> GhosttyImport
         let list: Vec<String> = features.iter().map(|f| quote(f)).collect();
         set("font_features", format!("[{}]", list.join(", ")), &mut top);
     }
+    let keys = [
+        "font_variations",
+        "font_variations_bold",
+        "font_variations_italic",
+        "font_variations_bold_italic",
+    ];
+    for (key, list) in keys.into_iter().zip(&variations) {
+        if !list.is_empty() {
+            let list: Vec<String> = list.iter().map(|v| quote(v)).collect();
+            set(key, format!("[{}]", list.join(", ")), &mut top);
+        }
+    }
+    if !symbols.is_empty() {
+        let map: Vec<String> = symbols.iter().map(|(r, f)| format!("{} = {}", quote(r), quote(f))).collect();
+        set("symbol_map", format!("{{ {} }}", map.join(", ")), &mut top);
+    }
 
     let mut out = format!("# Imported from {} by `terminal-decline import ghostty`.\n", path.display());
-    const ORDER: [&str; 21] = [
+    const ORDER: [&str; 35] = [
         "theme",
         "font_family",
         "font_fallback",
@@ -679,8 +769,22 @@ pub fn ghostty(text: &str, path: &Path, theme_dirs: &[PathBuf]) -> GhosttyImport
         "font_italic",
         "font_bold_italic",
         "font_size",
+        "font_variations",
+        "font_variations_bold",
+        "font_variations_italic",
+        "font_variations_bold_italic",
+        "font_synthetic_bold",
+        "font_synthetic_italic",
+        "font_thicken",
+        "font_thicken_strength",
+        "symbol_map",
+        "bold_is_bright",
+        "minimum_contrast",
         "line_height",
         "cell_width",
+        "adjust_underline_thickness",
+        "adjust_strikethrough_thickness",
+        "adjust_cursor_thickness",
         "padding",
         "opacity",
         "blur",
@@ -1061,10 +1165,10 @@ mod tests {
         assert_eq!(get("cmd+ctrl+d"), None, "no new pane to the left");
         assert_eq!(p.divider(), 0x44475a);
         assert_eq!(c.unfocused_pane_opacity, 0.7);
+        assert!(c.font_thicken);
         // What doesn't map is listed.
         let notes = &out[out.find("# Not imported:").expect(out)..];
         for k in [
-            "font-thicken = true",
             "font-feature = nope!",
             "cursor-text = #11111b",
             "palette = 200=#123456",
@@ -1076,7 +1180,35 @@ mod tests {
         ] {
             assert!(notes.contains(&format!("# {k}  (")), "{k} missing:\n{notes}");
         }
-        assert_eq!(notes.lines().count(), 10, "{notes}");
+        assert_eq!(notes.lines().count(), 9, "{notes}");
+    }
+
+    #[test]
+    fn ghostty_text_settings_import() {
+        let text = "font-thicken = true\nfont-thicken-strength = 120\nbold-color = bright\nminimum-contrast = 1.1\n\
+                    font-synthetic-style = no-bold\nfont-variation = wght=450\nfont-variation = wght=460\nfont-variation = wdth=90\n\
+                    font-variation-italic = slnt=-10\nfont-codepoint-map = U+E000-U+F8FF=Symbols Nerd Font Mono\n\
+                    font-codepoint-map = U+1F600=Apple Color Emoji\nadjust-cursor-thickness = 50%\n\
+                    adjust-underline-thickness = 2\nadjust-font-baseline = 1\nminimum-contrast = 40\n";
+        let import = ghostty(text, Path::new("c"), &[]);
+        let (c, errors) = load_import(&import);
+        assert!(errors.is_empty(), "{errors:?}\n{}", import.config);
+        assert!(c.font_thicken && c.bold_is_bright);
+        assert_eq!((c.font_thicken_strength, c.minimum_contrast), (120, 1.1));
+        assert!(!c.font_synthetic_bold && c.font_synthetic_italic);
+        assert_eq!(c.font_variations, ["wght=460", "wdth=90"]);
+        assert_eq!(c.font_variations_italic, ["slnt=-10"]);
+        assert_eq!(c.symbol_map.len(), 2);
+        assert_eq!(c.symbol_map["U+E000-U+F8FF"], "Symbols Nerd Font Mono");
+        assert_eq!(c.adjust_cursor_thickness, term_font::CellWidth::Percent(50.0));
+        let notes = &import.config[import.config.find("# Not imported:").expect(&import.config)..];
+        for k in [
+            "adjust-underline-thickness = 2",
+            "adjust-font-baseline = 1",
+            "minimum-contrast = 40",
+        ] {
+            assert!(notes.contains(&format!("# {k}  (")), "{k} missing:\n{notes}");
+        }
     }
 
     #[test]

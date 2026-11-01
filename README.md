@@ -93,6 +93,7 @@ terminal-decline              # your login shell
 terminal-decline -e htop      # a program instead of the shell
 terminal-decline pin Rush --icon rush.png -- ./rush   # Rush.app with its own Dock icon
 terminal-decline settings     # the Settings screen, in any terminal (also `decline settings`)
+terminal-decline fonts --mono  # the installed monospaced fonts (see docs/fonts.md)
 ```
 
 ## Driving it from agents and tests
@@ -137,10 +138,15 @@ What is in the code today:
 - **Tabs and splits**: native macOS window tabs (Cmd+T, Cmd+1 to 9) and
   split panes with draggable dividers, each pane drawn in the window's one
   Metal layer.
-- **Text**: ligatures (shaped with Core Text; `font_features` turns them
-  off or picks features), font fallback and bold/italic faces, line height
-  and cell width adjustment, true colour, underline styles, graphemes and
-  emoji, box-drawing and Powerline glyphs drawn in code.
+- **Text**: any installed font, picked in Settings with a live preview in
+  every window (`terminal-decline fonts` lists them); ligatures (shaped with
+  Core Text; `ligatures = false` or `font_features` turn them off or pick
+  features), variable font axes, thickening, synthetic bold and italic,
+  font fallback, a symbol map for Nerd Font icons, an emoji font, cell,
+  baseline, underline and cursor adjustments, a minimum contrast and bold
+  as bright; true colour, underline styles, graphemes and emoji,
+  box-drawing and Powerline glyphs drawn in code. Every setting, with an
+  example: [docs/fonts.md](docs/fonts.md).
 - **Links**: OSC 8 hyperlinks and plain URLs, opened with Cmd-click.
 - **Find bar**: Cmd+F with a standard macOS search field over the whole
   scrollback; Cmd+G, Cmd+E and the shared find text work as in other apps.

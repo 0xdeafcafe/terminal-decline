@@ -494,7 +494,7 @@ impl Fonts {
         self.walk(&line, &mut LineBufs::default(), |_, font, glyph, x, y| {
             let (ox, oy) = *origin.get_or_insert((x, y));
             glyphs.push(CachedGlyph {
-                key: self.font_key(font, glyph),
+                key: self.font_key(face, font, glyph),
                 dx: (x - ox).round() as i16,
                 dy: -(y - oy).round() as i16,
             });
@@ -599,7 +599,7 @@ impl Fonts {
                     let mine = &glyphs[first..next_glyph];
                     let Some(origin) = mine.first().map(|g| (g.x, g.y)) else { continue };
                     for g in mine {
-                        let mut key = self.font_key(g.font, g.glyph);
+                        let mut key = self.font_key(face, g.font, g.glyph);
                         let split = cells > width || alone.is_none_or(|a| (a.font, a.glyph) != (key.font, key.glyph));
                         if split && self.needs_scaling(key.font, key.glyph) {
                             key.variant |= GlyphKey::SCALED;
@@ -631,13 +631,13 @@ impl Fonts {
     }
 
     /// The key for a glyph CTLine picked: 2 cells for colour glyphs.
-    fn font_key(&self, font: FontId, glyph: CGGlyph) -> GlyphKey {
+    fn font_key(&self, face: Style, font: FontId, glyph: CGGlyph) -> GlyphKey {
         let color = self.core.reg().faces[font as usize].color;
         GlyphKey {
             font,
             glyph,
             cells: if color { 2 } else { 1 },
-            variant: 0,
+            variant: self.core.embolden_flag(face, color),
         }
     }
 

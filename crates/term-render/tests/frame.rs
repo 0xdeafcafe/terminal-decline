@@ -22,6 +22,8 @@ const M: Metrics = Metrics {
     underline_offset: 2,
     underline_thickness: 1,
     strike_offset: 4,
+    strike_thickness: 0,
+    cursor_thickness: 0,
 };
 const CW: i16 = M.cell_width as i16;
 const CH: i16 = M.cell_height as i16;
@@ -740,6 +742,89 @@ fn hovered_link_is_underlined_in_the_text_colour() {
 
 fn cursor_rects(f: &Frame, theme: &Theme) -> Vec<RectInstance> {
     untagged(&f.rects).into_iter().filter(|r| r.color == theme.cursor).collect()
+}
+
+// ---- text settings -------------------------------------------------------
+
+#[test]
+fn cursor_and_strike_thickness_follow_the_metrics() {
+    let m = Metrics {
+        strike_thickness: 3,
+        cursor_thickness: 5,
+        ..M
+    };
+    // Not the text colour, so the cursor and the strikes tell apart.
+    let theme = Theme {
+        cursor: rgb(0xff8800),
+        ..Theme::default()
+    };
+    // A bar 5 wide; an underline 5 tall at the cell's foot.
+    for (shape, want) in [("\x1b[6 q", (5, CH as u16, 0)), ("\x1b[4 q", (CW as u16, 5, CH - 5))] {
+        let mut t = term(10, 2, &format!("\x1b[9mab\x1b[0m{shape}"));
+        let f = build_with(
+            &mut t.state,
+            &theme,
+            Opts {
+                metrics: m,
+                ..Opts::default()
+            },
+        );
+        let c = cursor_rects(&f, &theme);
+        assert_eq!(c.len(), 1, "{shape:?}");
+        assert_eq!((c[0].w, c[0].h, c[0].y), want, "{shape:?}");
+        let strike: Vec<_> = untagged(&f.rects).into_iter().filter(|r| r.color == theme.foreground).collect();
+        assert_eq!(strike.len(), 2, "one strike per cell");
+        assert!(strike.iter().all(|r| r.h == 3 && r.y == (M.baseline - M.strike_offset) as i16));
+    }
+    // 0: the underline's thickness and an eighth of a cell, at least 2.
+    assert_eq!((M.strike_thickness(), M.cursor_thickness()), (1, 2));
+}
+
+#[test]
+fn bold_is_bright_brightens_the_first_eight_colours() {
+    let text = format!("{NO_CURSOR}\x1b[1;31ma\x1b[0;31mb\x1b[1;91mc\x1b[1;38;5;100md\x1b[1;38;2;1;2;3me\x1b[1;39mf");
+    let mut theme = Theme::default();
+    let plain = build_with(&mut term(10, 1, &text).state, &theme, Opts::default());
+    assert_eq!(glyph_at(&plain, 0, 0).unwrap().color, theme.palette[1], "off by default");
+    theme.bold_is_bright = true;
+    let f = build_with(&mut term(10, 1, &text).state, &theme, Opts::default());
+    let colours: Vec<Rgba> = (0..6).map(|c| glyph_at(&f, c, 0).unwrap().color).collect();
+    assert_eq!(
+        colours,
+        [
+            theme.palette[9],
+            theme.palette[1],
+            theme.palette[9],
+            theme.palette[100],
+            rgb(0x010203),
+            theme.foreground
+        ]
+    );
+}
+
+#[test]
+fn minimum_contrast_keeps_text_legible() {
+    // Dark grey on a darker grey: about 1.3:1.
+    let text = format!("{NO_CURSOR}\x1b[38;2;51;51;51;48;2;34;34;34ma\x1b[0mb");
+    let mut theme = Theme::default();
+    let bg = rgb(0x222222);
+    let f = build_with(&mut term(10, 1, &text).state, &theme, Opts::default());
+    assert!(term_render::contrast(glyph_at(&f, 0, 0).unwrap().color, bg) < 1.5);
+    for min in [3.0, 4.5, 7.0] {
+        theme.minimum_contrast = min;
+        let f = build_with(&mut term(10, 1, &text).state, &theme, Opts::default());
+        let a = glyph_at(&f, 0, 0).unwrap().color;
+        // Lighter, and only as far as it takes.
+        let got = term_render::contrast(a, bg);
+        assert!(got >= min && got < min + 0.5, "{min}: {got}");
+        assert_eq!(a >> 24, 0xFF, "opaque");
+        // The theme's foreground already reads well on its background.
+        assert_eq!(glyph_at(&f, 1, 0).unwrap().color, theme.foreground, "{min}");
+    }
+    // 21:1 can't be had on grey: as far as it goes, white.
+    theme.minimum_contrast = 21.0;
+    let f = build_with(&mut term(10, 1, &text).state, &theme, Opts::default());
+    assert_eq!(glyph_at(&f, 0, 0).unwrap().color, rgb(0xffffff));
 }
 
 #[test]

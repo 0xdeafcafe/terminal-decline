@@ -2058,6 +2058,41 @@ fn smoke_shift_drag_selects_over_a_program_taking_the_mouse() {
     );
 }
 
+/// A plain click on a URL or a path that exists, not dragged, opens its
+/// menu once the double-click time has passed (listed in `menus` under
+/// this control), with the whole of it selected.
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_plain_click_on_a_link_or_path_opens_its_menu() {
+    if !have_metal() {
+        return;
+    }
+    let dir = TempDir::new("clickmenu");
+    let wait = "i=0; while [ \"$(stty size)\" != '20 80' ] && [ $i -lt 100 ]; do sleep 0.05; i=$((i+1)); done; ";
+    let script = format!(
+        "{resize}{wait}printf '\\033[H\\033[Jsee https://example.com/x and /etc/hosts:3 ok\\n'; sleep 0.3; \
+         {down1}{up1}sleep 1.5; {dump}\
+         {down2}{up2}sleep 1.5; {dump}{quit}sleep 20",
+        resize = osc("resize 80 20"),
+        down1 = osc("mouse down 0 8"),
+        up1 = osc("mouse up 0 8"),
+        down2 = osc("mouse down 0 34"),
+        up2 = osc("mouse up 0 34"),
+        dump = osc("dump"),
+        quit = osc("quit"),
+    );
+    let (status, _) = decline(&dir, &script, true);
+    assert!(status.success(), "{status}");
+    let d = dumps(&dir);
+    assert_eq!(d.len(), 2, "{d:?}");
+    eprintln!("first: menus={} selection={}", d[0]["menus"], d[0]["selection"]);
+    eprintln!("second: menus={} selection={}", d[1]["menus"], d[1]["selection"]);
+    assert_eq!(d[0]["selection"].as_str(), Some("https://example.com/x"), "{}", d[0]);
+    assert!(d[0]["menus"].to_string().contains("url https://example.com/x"), "{}", d[0]);
+    assert_eq!(d[1]["selection"].as_str(), Some("/etc/hosts:3"), "{}", d[1]);
+    assert!(d[1]["menus"].to_string().contains("path /etc/hosts:3"), "{}", d[1]);
+}
+
 /// A folder opened with the app (`open -a`, as a folder dropped on its
 /// Dock icon is): an app that isn't running starts with a window there
 /// and no other, and a running one opens another window (or a tab, as the

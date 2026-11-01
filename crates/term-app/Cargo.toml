@@ -25,6 +25,7 @@ term-render.workspace = true
 term-image.workspace = true
 term-prefs.workspace = true
 term-keys.workspace = true
+term-config.workspace = true
 term-pin = { path = "../term-pin" }
 term-icon = { path = "../term-icon" }
 objc2-core-text.workspace = true

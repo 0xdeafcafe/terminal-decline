@@ -963,6 +963,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "term-config"
+version = "0.0.1"
+dependencies = [
+ "serde",
+ "term-core",
+ "term-font",
+ "term-keys",
+ "term-prefs",
+ "term-render",
+ "toml",
+]
+
+[[package]]
 name = "term-core"
 version = "0.0.1"
 dependencies = [
@@ -1096,6 +1109,7 @@ dependencies = [
  "regex-lite",
  "serde",
  "serde_json",
+ "term-config",
  "term-core",
  "term-font",
  "term-icon",

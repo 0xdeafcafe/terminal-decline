@@ -1,0 +1,19 @@
+[package]
+name = "term-config"
+description = "The config: config.toml's settings and layers, themes and the quick terminal's settings, with no AppKit"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# No AppKit or objc2 of its own: term-render and term-font are here for
+# their types (Theme, FontConfig), which the config builds.
+[dependencies]
+term-core.workspace = true
+term-font.workspace = true
+term-render.workspace = true
+term-prefs.workspace = true
+term-keys.workspace = true
+serde = { version = "1", features = ["derive"] }
+toml = "1.1"

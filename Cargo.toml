@@ -19,6 +19,7 @@ term-render = { path = "crates/term-render" }
 term-prefs = { path = "crates/term-prefs" }
 term-image = { path = "crates/term-image" }
 term-keys = { path = "crates/term-keys" }
+term-config = { path = "crates/term-config" }
 vte = "0.15"
 libc = "0.2"
 unicode-width = "0.2"

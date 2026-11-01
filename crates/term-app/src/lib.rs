@@ -8,7 +8,6 @@
 pub mod activity;
 pub mod app;
 mod background;
-pub mod config;
 pub mod control;
 pub mod crash;
 pub mod ctl;
@@ -33,7 +32,6 @@ pub mod paths;
 pub mod pin;
 pub mod prefs;
 pub mod prompts;
-pub mod quick;
 pub mod reload;
 pub mod running;
 pub mod saved_history;
@@ -43,12 +41,12 @@ pub mod select;
 pub mod session;
 #[cfg(test)]
 mod testutil;
-pub mod theme;
 pub mod update;
 mod view;
 pub mod watch;
 
 // Moved to crates of their own, under their old names here.
+pub use term_config::{config, quick, theme};
 use term_keys::ascii_layout;
 pub use term_keys::{keybind, keys};
 

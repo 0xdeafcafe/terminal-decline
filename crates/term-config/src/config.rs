@@ -60,7 +60,7 @@ impl<'de> Deserialize<'de> for UpdateMode {
 }
 
 /// `restore_scrollback`: when a pane's history is saved, to show again
-/// above the new shell ([`crate::saved_history`]). `true` and `false`
+/// above the new shell (the app's `saved_history`). `true` and `false`
 /// mean `"always"` and `"never"`.
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
@@ -358,11 +358,11 @@ pub struct Config {
     /// The window and tab title says what the focused pane does: the
     /// command running and for how long, or waiting at the prompt in which
     /// folder (needs the shell's OSC 133 marks; see
-    /// [`crate::activity::status_title`]).
+    /// `activity::status_title`).
     pub title_status: bool,
     /// Notify when a command that ran at least `notify_after` seconds
     /// finishes in a tab or pane you aren't looking at (needs the shell's
-    /// OSC 133 marks; see [`crate::activity`]).
+    /// OSC 133 marks; see `activity`).
     pub notify_on_finish: bool,
     /// How long a command must run, in seconds, for `notify_on_finish`.
     #[serde(deserialize_with = "notify_after")]

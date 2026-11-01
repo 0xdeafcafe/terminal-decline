@@ -451,6 +451,34 @@ fn pending_events_join_while_waiting() {
     assert!(pending.push(title("four")), "taken: the next queues a block again");
 }
 
+/// Commands that start and finish while a block is waiting all reach the
+/// main thread, in order: a long one finishing notifies even when a quick
+/// one comes right after it.
+#[test]
+fn pending_events_keep_every_command() {
+    use term_core::Command;
+    use terminal_decline_app::session::{Events, PendingEvents};
+    let commands = |c: Vec<Command>| Events {
+        commands: c,
+        ..Events::default()
+    };
+    let pending = PendingEvents::default();
+    pending.push(commands(vec![Command::Started(Some("make test".into()))]));
+    pending.push(commands(vec![Command::Finished(Some(3)), Command::Prompt]));
+    pending.push(commands(vec![Command::Started(Some("true".into())), Command::Finished(Some(0))]));
+    let got = pending.take().expect("waiting");
+    assert_eq!(
+        got.commands,
+        vec![
+            Command::Started(Some("make test".into())),
+            Command::Finished(Some(3)),
+            Command::Prompt,
+            Command::Started(Some("true".into())),
+            Command::Finished(Some(0)),
+        ]
+    );
+}
+
 /// A login shell `shell` with nothing of the user's: HOME, ZDOTDIR and
 /// XDG_CONFIG_HOME at `home`, whose startup files set the prompt to
 /// [`PROMPT`] for zsh, bash and fish.

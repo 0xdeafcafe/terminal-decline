@@ -9,7 +9,7 @@ use term_core::{Content, Ink, Terminal, ViewTop, Width};
 use super::lex::{self, Kind};
 
 /// The ANSI colour a kind of stretch is drawn in, or `None` to leave it.
-/// Commands stay plain until the app knows whether they exist.
+/// Commands are coloured by whether they exist ([`line_ink`]'s `known`).
 pub fn color_of(kind: Kind) -> Option<u8> {
     match kind {
         Kind::Keyword => Some(2),
@@ -33,12 +33,14 @@ struct Placed {
     cells: u16,
 }
 
-/// Put the command line's colours in `out`: nothing unless the shell
+/// Put the command line's colours in `out`. `known` says whether a
+/// command runs something (`None` while that isn't known yet): green if
+/// it does, red if it doesn't, plain until then. Nothing unless the shell
 /// reported the line, the view is at the bottom, and the cells from the
 /// prompt's B mark show the line. Only the characters up to the first
 /// cell that differs are coloured, so a report that arrived before the
 /// shell's redraw colours what it shares with the screen and no more.
-pub fn line_ink(t: &Terminal, out: &mut Vec<Ink>) {
+pub fn line_ink(t: &Terminal, known: &dyn Fn(&str) -> Option<bool>, out: &mut Vec<Ink>) {
     let Some(report) = t.line_report() else { return };
     if report.too_long || report.text.is_empty() || t.view_top() != ViewTop::Bottom {
         return;
@@ -58,9 +60,24 @@ pub fn line_ink(t: &Terminal, out: &mut Vec<Ink>) {
         return;
     }
     let line = lex::read(&report.text, report.cursor);
+    // Only the commands on the screen are looked up.
+    let shown = placed
+        .last()
+        .map_or(0, |p| p.byte + report.text[p.byte..].chars().next().map_or(1, char::len_utf8));
+    let command_color = |at: usize| {
+        let w = line
+            .words
+            .iter()
+            .find(|w| w.role == lex::Role::Command && w.range.contains(&at) && w.range.end <= shown && !w.expands)?;
+        Some(if known(&w.text)? { 2 } else { 1 })
+    };
     let mut p = 0;
     for span in &line.spans {
-        let Some(color) = color_of(span.kind) else { continue };
+        let color = match span.kind {
+            Kind::Command => command_color(span.range.start),
+            kind => color_of(kind),
+        };
+        let Some(color) = color else { continue };
         while p < placed.len() && placed[p].byte < span.range.start {
             p += 1;
         }
@@ -159,8 +176,12 @@ mod tests {
     }
 
     fn ink(t: &Term) -> Vec<(u16, std::ops::Range<u16>, u8)> {
+        ink_knowing(t, &|_| None)
+    }
+
+    fn ink_knowing(t: &Term, known: &dyn Fn(&str) -> Option<bool>) -> Vec<(u16, std::ops::Range<u16>, u8)> {
         let mut out = Vec::new();
-        line_ink(&t.state, &mut out);
+        line_ink(&t.state, known, &mut out);
         out.into_iter().map(|i| (i.row, i.cols, i.color)).collect()
     }
 
@@ -178,6 +199,30 @@ mod tests {
                 (0, 19..21, 6), // $X
             ]
         );
+    }
+
+    #[test]
+    fn commands_green_when_they_run_something_red_when_not() {
+        let line = "ls | nope && \"ls\"";
+        let t = term(80, line, line);
+        let known = |name: &str| match name {
+            "ls" => Some(true),
+            "nope" => Some(false),
+            _ => None,
+        };
+        assert_eq!(
+            ink_knowing(&t, &known),
+            [
+                (0, 2..4, 2),   // ls
+                (0, 5..6, 5),   // |
+                (0, 7..11, 1),  // nope
+                (0, 12..14, 5), // &&
+                (0, 15..19, 3), // "ls": quoted, the string's colour
+            ]
+        );
+        // Typed past what the screen shows: not looked up.
+        let t = term(80, "nop", "nope");
+        assert_eq!(ink_knowing(&t, &known), []);
     }
 
     #[test]

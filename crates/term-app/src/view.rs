@@ -163,6 +163,8 @@ pub(crate) struct Pane {
     pub(crate) rect: PxRect,
     pub(crate) cursor_on: bool,
     pub(crate) blink_scheduled: bool,
+    /// Completion and the command line's colours (docs/design/completion.md).
+    pub(crate) completion: crate::complete::PaneState,
     sync_since: Option<Instant>,
     pub(crate) marked: String,
     /// The view's position between whole lines under a trackpad, and
@@ -408,6 +410,17 @@ pub(crate) fn show_pane(id: usize, pane: usize) {
 /// any thread).
 fn wake(id: usize, pane: PaneId) {
     DispatchQueue::main().exec_async(move || with_view(id, |v| v.output_arrived(pane)));
+}
+
+/// Something the completion worker read for pane `pane` of window `id` is
+/// ready: draw the pane again.
+fn completion_ready(id: usize, pane: PaneId) {
+    DispatchQueue::main().exec_async(move || {
+        with_view(id, |v| {
+            v.with_pane(pane, |_, p| p.session.mark_dirty());
+            v.unpause();
+        })
+    });
 }
 
 define_class!(
@@ -1655,8 +1668,17 @@ impl WindowView {
             p.session.take_image_jobs(t);
             // The command line's colours, matched against the cells with
             // the terminal still locked.
+            if let Some(env) = t.state.take_shell_env() {
+                p.completion.shell_env = Some(Arc::new(env));
+            }
             if win.config.highlight_command_line {
-                crate::complete::ink::line_ink(&t.state, &mut p.render.frame.snapshot_mut().ink);
+                use crate::complete::sources;
+                let env = p.completion.shell_env.clone();
+                let cwd = t.state.cwd().map(str::to_string);
+                // A command looked up on the worker draws the pane again.
+                let waker = move || -> sources::Wake { Box::new(move || completion_ready(window_id, id)) };
+                let known = |name: &str| sources::command_known(name, env.as_deref()?, cwd.as_deref(), waker);
+                crate::complete::ink::line_ink(&t.state, &known, &mut p.render.frame.snapshot_mut().ink);
             }
             if let Some(f) = &mut p.find {
                 let snap = p.render.frame.snapshot_mut();
@@ -3187,6 +3209,7 @@ fn spawn_pane(window: usize, config: &Config, theme: &Theme, m: term_font::Metri
         rect: PxRect::default(),
         cursor_on: true,
         blink_scheduled: false,
+        completion: crate::complete::PaneState::default(),
         sync_since: None,
         marked: String::new(),
         scroll: crate::scroll::Smooth::default(),

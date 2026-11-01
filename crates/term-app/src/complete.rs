@@ -32,6 +32,8 @@ pub struct Settings {
     pub commands: bool,
     /// Flags and subcommands from man pages.
     pub flags: bool,
+    /// Commands by how often they were run.
+    pub history_order: bool,
 }
 
 /// What a pane keeps for completion and colouring.
@@ -366,6 +368,12 @@ impl PaneState {
             (true, Some(env)) => sources::commands(&env.path, wake),
             _ => None,
         };
+        // Read at the first list of commands, not at the prompt; A–Z
+        // until it is.
+        let history = match env.and_then(|e| e.histfile.as_deref()) {
+            Some(file) if is_command && s.commands && s.history_order => sources::history(std::path::Path::new(file), wake),
+            _ => None,
+        };
         let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
         let is_flag = matches!(at, At::Flag { .. });
         let folder = match (!is_command && !is_flag && s.files)
@@ -415,6 +423,7 @@ impl PaneState {
                 folder: folder.as_deref(),
                 flags: manual.as_deref().map(|m| &m.page),
                 subcommands: subcommands.as_deref(),
+                history: history.as_deref(),
             },
         )?;
         // Nothing to add: no choices, or only what is typed already (a
@@ -689,6 +698,7 @@ mod tests {
             files: true,
             commands: true,
             flags: true,
+            history_order: true,
         }
     }
 

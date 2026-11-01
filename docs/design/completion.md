@@ -780,5 +780,10 @@ PR 7 landed (1 Nov 2026): Edit > Read Flags from --help (no
 right-click on the list yet). The output is kept as text under
 `~/Library/Caches/terminal-decline/help/<name>.txt` and read when there
 is no man page; gh, kubectl, cargo, npm and node read in 25–100 ms;
-brew's lists nothing. Not yet: history order, the `[keybind]` actions for the list's keys,
+brew's lists nothing.
+
+History order landed with it: zsh's history file read on the worker at
+the first list of commands (Alex's 57 KB in 3 ms), then only what was
+added; each command in a line counted (`git push && cargo test` counts
+both), at most the last 8 MB. Not yet: the `[keybind]` actions for the list's keys,
 bash and fish. The frame and latency benchmarks are still to run.

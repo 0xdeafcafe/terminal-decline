@@ -11,7 +11,7 @@ use term_core::ShellEnv;
 
 use super::lex::At;
 use super::man::Page;
-use super::sources::{Commands, Folder, Subcommands};
+use super::sources::{Commands, Folder, History, Subcommands};
 
 /// At most this many choices are kept.
 pub const MAX_CHOICES: usize = 200;
@@ -101,6 +101,8 @@ pub struct Listings<'a> {
     pub flags: Option<&'a Page>,
     /// The command's subcommands, for its first argument.
     pub subcommands: Option<&'a Subcommands>,
+    /// How often commands were run, to put the most used first.
+    pub history: Option<&'a History>,
 }
 
 /// The folder (absolute) the word `prefix` points into, and the part
@@ -146,7 +148,10 @@ pub fn offer(at: &At, listings: &Listings) -> Option<Offer> {
             add(&mut env.reserved_words.iter(), What::Keyword);
             add(&mut commands.names.iter(), What::Command);
             Some(Offer {
-                choices: matching(all, prefix),
+                choices: match listings.history {
+                    Some(h) => matching_ranked(all, prefix, &|name| h.count(name)),
+                    None => matching(all, prefix),
+                },
                 prefix: prefix.clone(),
                 keep: String::new(),
             })
@@ -240,6 +245,11 @@ pub fn offer(at: &At, listings: &Listings) -> Option<Offer> {
 /// then the rest, each A–Z, one per name, at most [`MAX_CHOICES`]. A
 /// choice that is exactly the prefix comes first.
 fn matching(all: Vec<Choice>, prefix: &str) -> Vec<Choice> {
+    matching_ranked(all, prefix, &|_| 0)
+}
+
+/// [`matching`], each group ordered by `rank` (higher first) before A–Z.
+fn matching_ranked(all: Vec<Choice>, prefix: &str, rank: &dyn Fn(&str) -> u32) -> Vec<Choice> {
     let lower = prefix.to_lowercase();
     let mut exact: Vec<Choice> = Vec::new();
     let mut folded: Vec<Choice> = Vec::new();
@@ -253,6 +263,7 @@ fn matching(all: Vec<Choice>, prefix: &str) -> Vec<Choice> {
     let order = |v: &mut Vec<Choice>| {
         v.sort_by(|a, b| a.name.cmp(&b.name));
         v.dedup_by(|a, b| a.name == b.name);
+        v.sort_by_key(|c| std::cmp::Reverse(rank(&c.name)));
     };
     order(&mut exact);
     order(&mut folded);
@@ -303,6 +314,7 @@ mod tests {
             folder: None,
             flags: None,
             subcommands: None,
+            history: None,
         };
         let o = offer(&At::Command { prefix: "g".into() }, &listings).unwrap();
         assert_eq!(names(&o), ["git", "gitfn", "grep", "gst", "Gzip"]);
@@ -322,6 +334,7 @@ mod tests {
             folder: None,
             flags: None,
             subcommands: None,
+            history: None,
         };
         assert_eq!(offer(&At::Command { prefix: "g".into() }, &none), None);
     }
@@ -341,6 +354,7 @@ mod tests {
             folder: Some(&f),
             flags: None,
             subcommands: None,
+            history: None,
         };
         let at = At::Argument {
             command: "cat".into(),
@@ -392,6 +406,7 @@ mod tests {
             folder: None,
             flags: None,
             subcommands: None,
+            history: None,
         };
         for at in [
             At::Flag {
@@ -431,6 +446,7 @@ mod tests {
             folder: Some(&f),
             flags: Some(&page),
             subcommands: Some(&subs),
+            history: None,
         };
         let at = At::Flag {
             command: "git".into(),
@@ -452,5 +468,25 @@ mod tests {
         assert_eq!(o.choices[0].what, What::Subcommand);
         // No subcommand matches: files.
         assert_eq!(names(&offer(&arg("feat"), &listings).unwrap()), ["feature.txt"]);
+    }
+
+    #[test]
+    fn commands_most_run_first() {
+        let env = ShellEnv::default();
+        let commands = Commands::from_names(vec!["gcc".into(), "git".into(), "grep".into(), "gzip".into()]);
+        let history = History::from_counts([("git", 40), ("grep", 3)]);
+        let listings = Listings {
+            env: Some(&env),
+            commands: Some(&commands),
+            folder: None,
+            flags: None,
+            subcommands: None,
+            history: Some(&history),
+        };
+        let o = offer(&At::Command { prefix: "g".into() }, &listings).unwrap();
+        assert_eq!(names(&o), ["git", "grep", "gcc", "gzip"]);
+        // What is typed exactly still comes first.
+        let o = offer(&At::Command { prefix: "gzip".into() }, &listings).unwrap();
+        assert_eq!(names(&o), ["gzip"]);
     }
 }

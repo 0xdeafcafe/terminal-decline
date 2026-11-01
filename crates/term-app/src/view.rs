@@ -1714,6 +1714,7 @@ impl WindowView {
                     files: c.completion_files,
                     commands: c.completion_commands,
                     flags: c.completion_flags,
+                    history_order: c.completion_history_order,
                 };
                 let drawn = p.completion.update(&t.state, &settings, Instant::now(), &waker);
                 let snap = p.render.frame.snapshot_mut();

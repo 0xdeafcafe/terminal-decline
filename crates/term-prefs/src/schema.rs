@@ -778,6 +778,13 @@ pub const SETTINGS: &[Setting] = &[
         Editor::Toggle,
         "Tab asks zsh, and what it finds shows in the list instead of zsh's own listing (new tabs)",
     ),
+    setting(
+        "completion_history_order",
+        "Most used commands first",
+        Completion,
+        Editor::Toggle,
+        "Order commands in the list by how often you ran them, from zsh's history",
+    ),
     new_windows(Setting {
         pin_only: true,
         ..unset(
@@ -1044,6 +1051,7 @@ mod tests {
                 "completion_commands",
                 "completion_flags",
                 "completion_tab_zsh",
+                "completion_history_order",
                 "title",
                 "images",
                 "image_memory",

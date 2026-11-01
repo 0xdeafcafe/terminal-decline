@@ -429,6 +429,8 @@ pub struct Config {
     /// Tab asks zsh, and its matches show in the list instead of zsh's
     /// own listing (docs/design/completion.md §7); new shells only.
     pub completion_tab_zsh: bool,
+    /// Commands in the list by how often they were run (zsh's history).
+    pub completion_history_order: bool,
     /// Window title for a pin; also shown in the Window menu.
     pub title: Option<String>,
     /// Kitty graphics, iTerm2 images and Sixel (docs/design/images.md).
@@ -591,6 +593,7 @@ impl Default for Config {
             completion_commands: true,
             completion_flags: true,
             completion_tab_zsh: true,
+            completion_history_order: true,
             title: None,
             images: true,
             image_memory: 0,

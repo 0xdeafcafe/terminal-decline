@@ -160,7 +160,9 @@ When you stop typing for a moment (300 ms, `completion_delay`), a list
 opens under the word you are typing: commands where a command goes, a
 command's subcommands (`git fet`) and flags (`ls -`, `git fetch --a`)
 with what each does, read from its man pages, and files and folders
-elsewhere. Nothing is chosen when it opens: Down moves into it, and Up
+elsewhere. Commands you run most come first (from zsh's `HISTFILE`;
+Settings > Completion > Most used commands first). Nothing is chosen
+when it opens: Down moves into it, and Up
 before that still goes to the shell's history (it closes the list). Tab
 puts the chosen one, or the first, in place of the word (zsh quotes
 it), Right at the end of the line takes the grey text after the cursor,

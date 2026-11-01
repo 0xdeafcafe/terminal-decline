@@ -97,6 +97,29 @@ pub struct Manual {
     pub page: Page,
 }
 
+/// How often each command was run, from the shell's history file.
+#[derive(Debug, Default, Clone)]
+pub struct History {
+    pub counts: HashMap<String, u32>,
+    /// How far the file was read: only what is added after is read next.
+    read_to: u64,
+}
+
+impl History {
+    pub fn count(&self, name: &str) -> u32 {
+        self.counts.get(name).copied().unwrap_or(0)
+    }
+
+    /// From counts, for tests.
+    #[cfg(test)]
+    pub fn from_counts<'a>(counts: impl IntoIterator<Item = (&'a str, u32)>) -> History {
+        History {
+            counts: counts.into_iter().map(|(n, c)| (n.to_string(), c)).collect(),
+            read_to: 0,
+        }
+    }
+}
+
 /// A command's subcommands: the man pages named `<command>-<name>`.
 #[derive(Debug, Default)]
 pub struct Subcommands {
@@ -112,6 +135,7 @@ enum Job {
     Subcommands(String, String),
     /// Run a program's `--help` (asked for from the menu) and keep it.
     Help(Help),
+    History(PathBuf),
 }
 
 /// A `--help` to read: the program, the subcommand before `--help`, the
@@ -176,6 +200,7 @@ struct State {
     manpaths: HashMap<String, Arc<Vec<PathBuf>>>,
     manuals: HashMap<(String, String), Slot<Manual>>,
     subcommands: HashMap<(String, String), Slot<Subcommands>>,
+    histories: HashMap<PathBuf, Slot<History>>,
 }
 
 static STATE: Mutex<Option<State>> = Mutex::new(None);
@@ -240,6 +265,18 @@ pub fn manual(path: &str, name: &str, wake: impl FnOnce() -> Wake) -> Option<Arc
     let (value, ask) = st.manuals.entry(key.clone()).or_default().look(wake, Instant::now());
     if ask {
         send(st, Job::Man(key.0, key.1));
+    }
+    value
+}
+
+/// How often each command in history file `file` was run, if read; asks
+/// for it otherwise, and again when the file changes.
+pub fn history(file: &Path, wake: impl FnOnce() -> Wake) -> Option<Arc<History>> {
+    let mut guard = state();
+    let st = guard.get_or_insert_with(State::default);
+    let (value, ask) = st.histories.entry(file.to_path_buf()).or_default().look(wake, Instant::now());
+    if ask {
+        send(st, Job::History(file.to_path_buf()));
     }
     value
 }
@@ -342,6 +379,87 @@ fn run(job: Job) {
             finish(|st| st.subcommands.get_mut(&key), value, mtimes);
         }
         Job::Help(job) => run_help(job),
+        Job::History(file) => {
+            let mtimes = vec![mtime(&file)];
+            // Unchanged: nothing read; grown: only what was added.
+            let (fresh, old) = state()
+                .as_ref()
+                .and_then(|st| st.histories.get(&file))
+                .map_or((false, None), |s| (s.value.is_some() && s.mtimes == mtimes, s.value.clone()));
+            let value = (!fresh).then(|| Arc::new(read_history(&file, old.as_deref())));
+            finish(|st| st.histories.get_mut(&file), value, mtimes);
+        }
+    }
+}
+
+/// The most of a history file read at once.
+const HISTORY_BYTES: u64 = 8 << 20;
+
+/// Count the commands in zsh history file `file`, carrying on from `old`
+/// when the file only grew.
+fn read_history(file: &Path, old: Option<&History>) -> History {
+    use std::io::{Read, Seek, SeekFrom};
+    let len = std::fs::metadata(file).map_or(0, |m| m.len());
+    let mut h = match old {
+        Some(o) if o.read_to <= len => o.clone(),
+        _ => History::default(),
+    };
+    let Ok(mut f) = std::fs::File::open(file) else { return h };
+    // Too big: its end only.
+    let from = h.read_to.max(len.saturating_sub(HISTORY_BYTES));
+    let mut bytes = Vec::new();
+    if f.seek(SeekFrom::Start(from)).is_err() || f.take(HISTORY_BYTES).read_to_end(&mut bytes).is_err() {
+        return h;
+    }
+    // Up to the last whole line; the rest is read next time.
+    let end = bytes.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
+    count_history(&unmetafy(&bytes[..end]), &mut h.counts);
+    h.read_to = from + end as u64;
+    h
+}
+
+/// zsh's history file bytes as written: a byte after Meta (0x83) is
+/// stored XOR 32.
+fn unmetafy(bytes: &[u8]) -> String {
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut it = bytes.iter();
+    while let Some(&b) = it.next() {
+        if b == 0x83 {
+            if let Some(&n) = it.next() {
+                out.push(n ^ 32);
+            }
+        } else {
+            out.push(b);
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Add each command run in `text` (zsh history: `: <time>:<secs>;<line>`
+/// or plain lines, a line ending in `\` continued on the next) to
+/// `counts`.
+fn count_history(text: &str, counts: &mut HashMap<String, u32>) {
+    let mut entry = String::new();
+    for line in text.lines() {
+        let line = if entry.is_empty() {
+            match line.strip_prefix(": ").and_then(|l| l.split_once(';')) {
+                Some((_, cmd)) => cmd,
+                None => line,
+            }
+        } else {
+            line
+        };
+        if let Some(head) = line.strip_suffix('\\') {
+            entry.push_str(head);
+            entry.push('\n');
+            continue;
+        }
+        entry.push_str(line);
+        let read = super::lex::read(&entry, entry.len());
+        for w in read.words.iter().filter(|w| w.role == super::lex::Role::Command && !w.expands) {
+            *counts.entry(w.text.clone()).or_default() += 1;
+        }
+        entry.clear();
     }
 }
 
@@ -971,5 +1089,52 @@ mod tests {
                 println!("  {n:<22} {a}");
             }
         }
+    }
+
+    #[test]
+    fn commands_counted_from_history() {
+        let dir = temp("history");
+        let file = dir.join(".zsh_history");
+        std::fs::write(
+            &file,
+            ": 1700000000:0;git status\n: 1700000001:0;git push && cargo test\nls -la\nfor f in x\\\ndo echo $f\\\ndone\n",
+        )
+        .unwrap();
+        let woken = Arc::new(AtomicUsize::new(0));
+        let h = ready(&woken, |w| history(&file, w));
+        assert_eq!(
+            (h.count("git"), h.count("cargo"), h.count("ls"), h.count("echo"), h.count("do")),
+            (2, 1, 1, 1, 0)
+        );
+        // Added to: only the new lines are read.
+        let mut f = std::fs::OpenOptions::new().append(true).open(&file).unwrap();
+        std::io::Write::write_all(&mut f, b": 1700000002:0;git log\n").unwrap();
+        drop(f);
+        let next = |w: &dyn Fn() -> Wake| history(&file, w).filter(|h| h.count("git") == 3);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while next(&|| Box::new(|| {})).is_none() {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(unmetafy(&[b'a', 0x83, 0xa9 ^ 32]), String::from_utf8_lossy(&[b'a', 0xa9]));
+    }
+
+    /// Times reading the real history file:
+    /// `cargo test -p terminal-decline real_history -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn real_history() {
+        let file = Path::new(&std::env::var("HOME").unwrap()).join(".zsh_history");
+        let t = Instant::now();
+        let h = read_history(&file, None);
+        let mut top: Vec<_> = h.counts.iter().collect();
+        top.sort_by_key(|(_, c)| std::cmp::Reverse(**c));
+        println!(
+            "{} commands, {} bytes in {:?}; top: {:?}",
+            h.counts.len(),
+            h.read_to,
+            t.elapsed(),
+            top[..top.len().min(5)].iter().map(|(n, _)| n).collect::<Vec<_>>()
+        );
     }
 }

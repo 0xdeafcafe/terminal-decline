@@ -403,7 +403,7 @@ fn mdoc_text(args: &str) -> String {
 
 /// The flag names in a tag line: `-r, --release`, `--color=WHEN`,
 /// `--[no-]tags` (both), `-j <n>`. Empty unless it starts with a flag.
-fn flag_names(tag: &str) -> Vec<String> {
+pub(super) fn flag_names(tag: &str) -> Vec<String> {
     let tag = tag.trim();
     if !tag.starts_with('-') {
         return Vec::new();
@@ -456,7 +456,7 @@ fn push_words(out: &mut String, text: &str) {
 }
 
 /// The first sentence of `text`, at most [`ABOUT_CELLS`] wide.
-fn sentence(text: &str) -> String {
+pub(super) fn sentence(text: &str) -> String {
     let text = text.trim();
     let mut end = text.len();
     for (i, _) in text.match_indices(". ") {

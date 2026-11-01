@@ -168,6 +168,13 @@ Esc closes it until you change the word. It only opens after you type,
 not when history or zsh's own completion changes the line. Enter, and
 every other key, go to the shell as always.
 
+For a program without a man page (brew, npm, kubectl, gh), Edit > Read
+Flags from --help runs the command at the prompt with `--help` once
+(`kubectl get --help` when the cursor is past `get`), in an empty
+folder, stopped after 2 s, and keeps what it lists in
+`~/Library/Caches/terminal-decline/help/`; its flags and subcommands
+then show in the list. It never runs by itself.
+
 Tab with no list open asks zsh, as before: with one match zsh puts it
 in; with several, zsh puts in what they share and they show in the same
 list instead of zsh's own listing (`git checkout <Tab>` shows branches,

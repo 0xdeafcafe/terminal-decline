@@ -89,6 +89,9 @@ pub enum MenuAction {
     /// clipboard, whatever the view shows.
     CopyOutput,
     CopyCommand,
+    /// Edit > Read Flags from --help: the command at the prompt's flags
+    /// for the completion list, from its `--help`.
+    ReadFlagsFromHelp,
     /// Scroll the view to the prompt above or below its top line whose
     /// command exited non-zero.
     PreviousFailed,
@@ -112,7 +115,7 @@ pub enum MenuAction {
 }
 
 impl MenuAction {
-    pub const ALL: [MenuAction; 45] = [
+    pub const ALL: [MenuAction; 46] = [
         MenuAction::NewWindow,
         MenuAction::NewTab,
         MenuAction::Close,
@@ -152,6 +155,7 @@ impl MenuAction {
         MenuAction::SelectOutput,
         MenuAction::CopyOutput,
         MenuAction::CopyCommand,
+        MenuAction::ReadFlagsFromHelp,
         MenuAction::PreviousFailed,
         MenuAction::NextFailed,
         MenuAction::CheckForUpdates,
@@ -202,6 +206,7 @@ impl MenuAction {
             MenuAction::SelectOutput => "select_output",
             MenuAction::CopyOutput => "copy_output",
             MenuAction::CopyCommand => "copy_command",
+            MenuAction::ReadFlagsFromHelp => "read_flags_from_help",
             MenuAction::PreviousFailed => "previous_failed",
             MenuAction::NextFailed => "next_failed",
             MenuAction::CheckForUpdates => "check_for_updates",
@@ -253,6 +258,7 @@ impl MenuAction {
             MenuAction::SelectOutput => "Select Command Output",
             MenuAction::CopyOutput => "Copy Last Command's Output",
             MenuAction::CopyCommand => "Copy Last Command",
+            MenuAction::ReadFlagsFromHelp => "Read Flags from --help",
             MenuAction::PreviousFailed => "Jump to Previous Failed Command",
             MenuAction::NextFailed => "Jump to Next Failed Command",
             MenuAction::CheckForUpdates => "Check for Updates…",
@@ -306,6 +312,7 @@ impl MenuAction {
             MenuAction::SelectOutput => c"selectCommandOutput:",
             MenuAction::CopyOutput => c"copyLastCommandOutput:",
             MenuAction::CopyCommand => c"copyLastCommand:",
+            MenuAction::ReadFlagsFromHelp => c"readFlagsFromHelp:",
             MenuAction::PreviousFailed => c"jumpToPreviousFailedCommand:",
             MenuAction::NextFailed => c"jumpToNextFailedCommand:",
             MenuAction::CheckForUpdates => c"checkForUpdates:",

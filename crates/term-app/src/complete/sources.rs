@@ -14,6 +14,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use term_core::ShellEnv;
 
+use super::help;
 use super::man::{self, Page};
 
 /// Called on the worker when something asked for is ready: the pane
@@ -34,6 +35,10 @@ const PAGE_BYTES: usize = 4 << 20;
 const PAGE_HEAD_BYTES: usize = 16 << 10;
 /// Subcommands kept per command.
 const SUBCOMMANDS: usize = 1000;
+/// The most of a program's `--help` kept.
+const HELP_BYTES: u64 = 256 << 10;
+/// How long a program gets to print its `--help`.
+const HELP_TIME: Duration = Duration::from_secs(2);
 
 /// The programs on a PATH.
 #[derive(Debug, Default)]
@@ -105,6 +110,19 @@ enum Job {
     /// A PATH and a command's (or `command-subcommand`'s) name.
     Man(String, String),
     Subcommands(String, String),
+    /// Run a program's `--help` (asked for from the menu) and keep it.
+    Help(Help),
+}
+
+/// A `--help` to read: the program, the subcommand before `--help`, the
+/// PATH to run it with, and the name its output is kept under.
+pub struct Help {
+    pub exe: PathBuf,
+    pub sub: Option<String>,
+    pub path: String,
+    pub name: String,
+    /// Called with how many flags and subcommands were found.
+    pub done: Box<dyn FnOnce(Result<usize, String>) + Send>,
 }
 
 /// A cached value, when it was last checked, and the wake-ups waiting
@@ -226,6 +244,14 @@ pub fn manual(path: &str, name: &str, wake: impl FnOnce() -> Wake) -> Option<Arc
     value
 }
 
+/// Run a program's `--help` on the worker and keep what it prints, for
+/// [`manual`] and [`subcommands`] to read where there is no man page.
+pub fn read_help(job: Help) {
+    let mut guard = state();
+    let st = guard.get_or_insert_with(State::default);
+    send(st, Job::Help(job));
+}
+
 /// `command`'s subcommands, if read; asks for them otherwise.
 pub fn subcommands(path: &str, command: &str, wake: impl FnOnce() -> Wake) -> Option<Arc<Subcommands>> {
     let mut guard = state();
@@ -277,35 +303,168 @@ fn run(job: Job) {
         }
         Job::Man(path, name) => {
             let file = find_page(&manpath(&path), &name);
-            let mtimes = vec![file.as_deref().and_then(mtime)];
+            let kept = help_file(&name);
+            let mtimes = vec![file.as_deref().and_then(mtime), kept.as_deref().and_then(mtime)];
             let key = (path, name);
             let fresh = state()
                 .as_ref()
                 .and_then(|st| st.manuals.get(&key))
                 .is_some_and(|s| s.value.is_some() && s.mtimes == mtimes);
             let value = (!fresh).then(|| {
+                let page = file.as_deref().and_then(|f| read_page(f, PAGE_BYTES)).map(|src| man::read(&src));
+                // Without a man page: its `--help`, if one was read.
+                let page = page.or_else(|| kept_help(&key.1).map(|h| h.page));
                 Arc::new(Manual {
-                    found: file.is_some(),
-                    page: file
-                        .and_then(|f| read_page(&f, PAGE_BYTES))
-                        .map(|src| man::read(&src))
-                        .unwrap_or_default(),
+                    found: page.is_some(),
+                    page: page.unwrap_or_default(),
                 })
             });
             finish(|st| st.manuals.get_mut(&key), value, mtimes);
         }
         Job::Subcommands(path, command) => {
             let sections: Vec<PathBuf> = manpath(&path).iter().flat_map(|d| ["man1", "man8"].map(|s| d.join(s))).collect();
-            let mtimes: Vec<_> = sections.iter().map(|d| mtime(d)).collect();
+            let mut mtimes: Vec<_> = sections.iter().map(|d| mtime(d)).collect();
+            mtimes.push(help_file(&command).as_deref().and_then(mtime));
             let key = (path, command);
             let fresh = state()
                 .as_ref()
                 .and_then(|st| st.subcommands.get(&key))
                 .is_some_and(|s| s.value.is_some() && s.mtimes == mtimes);
-            let value = (!fresh).then(|| Arc::new(read_subcommands(&sections, &key.1)));
+            let value = (!fresh).then(|| {
+                let mut subs = read_subcommands(&sections, &key.1);
+                if subs.list.is_empty()
+                    && let Some(h) = kept_help(&key.1)
+                {
+                    subs.list = h.subcommands;
+                }
+                Arc::new(subs)
+            });
             finish(|st| st.subcommands.get_mut(&key), value, mtimes);
         }
+        Job::Help(job) => run_help(job),
     }
+}
+
+fn run_help(job: Help) {
+    let shown = job.name.replace('-', " ");
+    let result = match help_output(&job) {
+        None => Err(format!("{shown} --help printed nothing")),
+        Some(text) => {
+            let read = help::read(&text);
+            let found = read.page.flags.len() + read.subcommands.len();
+            match help_file(&job.name) {
+                _ if found == 0 => Err(format!("found no flags in {shown} --help")),
+                None => Err("no home folder to keep it in".into()),
+                Some(file) => {
+                    let _ = file.parent().map(std::fs::create_dir_all);
+                    match std::fs::write(&file, &text) {
+                        Ok(()) => Ok(found),
+                        Err(e) => Err(format!("couldn't keep {}: {e}", file.display())),
+                    }
+                }
+            }
+        }
+    };
+    // What was read for it before is read again.
+    if let Some(st) = state().as_mut() {
+        st.manuals.retain(|(_, n), _| *n != job.name);
+        st.subcommands.retain(|(_, n), _| *n != job.name);
+    }
+    (job.done)(result);
+}
+
+/// Run `exe [sub] --help`: with the shell's PATH, pagers as `cat`, no
+/// colour, in an empty folder, stdin empty; its whole process group
+/// killed after [`HELP_TIME`]. What it printed (stdout, else stderr), at
+/// most [`HELP_BYTES`], with escapes and overstrikes taken out.
+fn help_output(job: &Help) -> Option<String> {
+    use std::io::Read;
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
+    let dir = std::env::temp_dir().join(format!("decline-help-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).ok()?;
+    let mut cmd = Command::new(&job.exe);
+    cmd.args(job.sub.iter())
+        .arg("--help")
+        .current_dir(&dir)
+        .env("PATH", &job.path)
+        .env("PAGER", "cat")
+        .env("GIT_PAGER", "cat")
+        .env("MANPAGER", "cat")
+        .env("NO_COLOR", "1")
+        .env("TERM", "dumb")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0);
+    let mut child = cmd.spawn().ok()?;
+    let group = child.id() as i32;
+    fn reader(r: Option<impl Read + Send + 'static>) -> std::thread::JoinHandle<Vec<u8>> {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(r) = r {
+                let _ = r.take(HELP_BYTES).read_to_end(&mut buf);
+            }
+            buf
+        })
+    }
+    let out = reader(child.stdout.take());
+    let err = reader(child.stderr.take());
+    let deadline = Instant::now() + HELP_TIME;
+    while child.try_wait().ok()?.is_none() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // Done or not: nothing it started is left holding the pipes.
+    // SAFETY: signals the process group this child leads.
+    unsafe { libc::kill(-group, libc::SIGKILL) };
+    let _ = child.wait();
+    let (out, err) = (out.join().ok()?, err.join().ok()?);
+    let bytes = if out.iter().any(|b| !b.is_ascii_whitespace()) { out } else { err };
+    let text = clean(&String::from_utf8_lossy(&bytes));
+    (!text.trim().is_empty()).then_some(text)
+}
+
+/// Text with escape sequences and backspace overstrikes taken out.
+fn clean(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\x1b' => {
+                if chars.next() == Some('[') {
+                    while chars.next().is_some_and(|c| !c.is_ascii_alphabetic()) {}
+                }
+            }
+            '\x08' => {
+                out.pop();
+            }
+            '\r' => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Where a `--help` read for `name` is kept: `~/Library/Caches/
+/// terminal-decline/help/<name>.txt`.
+fn help_file(name: &str) -> Option<PathBuf> {
+    if name.is_empty() || name.contains('/') || name.starts_with('.') {
+        return None;
+    }
+    #[cfg(test)]
+    if let Some(dir) = HELP_DIR.lock().unwrap().clone() {
+        return Some(dir.join(format!("{name}.txt")));
+    }
+    let home = std::env::var_os("HOME")?;
+    Some(Path::new(&home).join(format!("Library/Caches/terminal-decline/help/{name}.txt")))
+}
+
+#[cfg(test)]
+static HELP_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+fn kept_help(name: &str) -> Option<help::Help> {
+    let text = std::fs::read_to_string(help_file(name)?).ok()?;
+    Some(help::read(&text))
 }
 
 /// The man page folders for `path`, from `manpath` run with it (once per
@@ -721,6 +880,95 @@ mod tests {
             println!("== {command}: {} subcommands ({:?})", s.list.len(), t.elapsed());
             for (n, a) in s.list.iter().take(5) {
                 println!("  {n:<20} {a}");
+            }
+        }
+    }
+
+    #[test]
+    fn flags_from_help_when_asked() {
+        let dir = temp("help");
+        *HELP_DIR.lock().unwrap() = Some(dir.join("kept"));
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        let exe = dir.join("bin/declhelp");
+        std::fs::write(
+            &exe,
+            "#!/bin/sh\n[ \"$1\" = run ] && { echo '  -f, --fast   Go fast'; exit 0; }\necho 'Commands:'\necho '  run    Run it'\necho '  stop   Stop it'\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = format!("{}:/usr/bin:/bin", dir.join("bin").display());
+        let woken = Arc::new(AtomicUsize::new(0));
+        // Nothing before it is read.
+        assert!(!ready(&woken, |w| manual(&path, "declhelp-run", w)).found);
+        let ask = |sub: Option<&str>, name: &str| {
+            let (tx, rx) = channel();
+            read_help(Help {
+                exe: exe.clone(),
+                sub: sub.map(str::to_string),
+                path: path.clone(),
+                name: name.into(),
+                done: Box::new(move |r| tx.send(r).unwrap()),
+            });
+            rx.recv_timeout(Duration::from_secs(10)).unwrap()
+        };
+        assert_eq!(ask(None, "declhelp"), Ok(2));
+        assert_eq!(ask(Some("run"), "declhelp-run"), Ok(2));
+        let m = ready(&woken, |w| manual(&path, "declhelp-run", w));
+        assert!(m.found);
+        assert_eq!(m.page.flags[1].name, "--fast");
+        let subs = ready(&woken, |w| subcommands(&path, "declhelp", w));
+        assert_eq!(subs.list[0], ("run".to_string(), "Run it".to_string()));
+        // A program that hangs is stopped.
+        std::fs::write(&exe, "#!/bin/sh\nsleep 30\n").unwrap();
+        let t = Instant::now();
+        assert!(ask(None, "declhelp-slow").is_err());
+        assert!(t.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn escapes_and_overstrikes_taken_out() {
+        assert_eq!(clean("\x1b[1mbold\x1b[0m _\x08u\r\n"), "bold u\n");
+    }
+
+    /// Prints what real programs' `--help` gives:
+    /// `cargo test -p terminal-decline real_help -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn real_help() {
+        let path = std::env::var("PATH").unwrap();
+        for (exe, sub) in [
+            ("gh", None),
+            ("gh", Some("pr")),
+            ("kubectl", Some("get")),
+            ("npm", None),
+            ("cargo", None),
+            ("brew", None),
+            ("node", None),
+        ] {
+            let Some(exe_path) = std::env::split_paths(&path).map(|d| d.join(exe)).find(|p| p.is_file()) else {
+                continue;
+            };
+            let t = Instant::now();
+            let job = Help {
+                exe: exe_path,
+                sub: sub.map(str::to_string),
+                path: path.clone(),
+                name: exe.into(),
+                done: Box::new(|_| {}),
+            };
+            let h = help::read(&help_output(&job).unwrap_or_default());
+            println!(
+                "== {exe} {sub:?}: {} flags, {} subcommands ({:?})",
+                h.page.flags.len(),
+                h.subcommands.len(),
+                t.elapsed()
+            );
+            for f in h.page.flags.iter().take(4) {
+                println!("  {:<22} {}", f.name, f.about);
+            }
+            for (n, a) in h.subcommands.iter().take(4) {
+                println!("  {n:<22} {a}");
             }
         }
     }

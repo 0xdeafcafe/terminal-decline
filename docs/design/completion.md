@@ -774,5 +774,11 @@ zsh inserts it with all its options; matches are counted across compadd
 calls in order, and words passed quoted (`-Q`, files) are ignored both
 as written and unquoted. zsh's beep at an ambiguous completion is off
 inside the widget (`nolistbeep`). The prompt's check of Tab's binding
-costs one `bindkey` subshell. Not yet: history order, the `[keybind]` actions for the list's keys,
+costs one `bindkey` subshell.
+
+PR 7 landed (1 Nov 2026): Edit > Read Flags from --help (no
+right-click on the list yet). The output is kept as text under
+`~/Library/Caches/terminal-decline/help/<name>.txt` and read when there
+is no man page; gh, kubectl, cargo, npm and node read in 25–100 ms;
+brew's lists nothing. Not yet: history order, the `[keybind]` actions for the list's keys,
 bash and fish. The frame and latency benchmarks are still to run.

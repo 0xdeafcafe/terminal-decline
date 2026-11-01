@@ -263,6 +263,30 @@ define_class!(
             self.copy_from(crate::prompts::last_output_text);
         }
 
+        /// Edit > Read Flags from --help: run the command at the prompt
+        /// with `--help` (on the completion worker) and keep its flags
+        /// for the list (docs/design/completion.md §8).
+        #[unsafe(method(readFlagsFromHelp:))]
+        fn read_flags_from_help(&self, _sender: Option<&AnyObject>) {
+            let Some(id) = self.window_view().map(|w| w.id()) else { return };
+            let pane = self.pane();
+            let target = self.with(|_, p| {
+                let t = p.session.lock_term();
+                p.completion.help_target(&t.state)
+            });
+            match target {
+                Some(Ok(target)) => crate::complete::sources::read_help(crate::complete::sources::Help {
+                    exe: target.exe,
+                    sub: target.sub,
+                    path: target.path,
+                    name: target.name,
+                    done: Box::new(move |result| crate::view::help_read(id, pane, result)),
+                }),
+                Some(Err(why)) => self.notice(&why),
+                None => {}
+            }
+        }
+
         /// Edit > Copy Last Command: the command line last run.
         #[unsafe(method(copyLastCommand:))]
         fn copy_last_command(&self, _sender: Option<&AnyObject>) {

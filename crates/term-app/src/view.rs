@@ -412,6 +412,28 @@ fn wake(id: usize, pane: PaneId) {
     DispatchQueue::main().exec_async(move || with_view(id, |v| v.output_arrived(pane)));
 }
 
+/// Read Flags from --help finished for pane `pane` of window `id` (on any
+/// thread): the list opens with the flags, or a notice says why not.
+pub(crate) fn help_read(id: usize, pane: PaneId, result: Result<usize, String>) {
+    DispatchQueue::main().exec_async(move || {
+        with_view(id, |v| {
+            v.with_pane(pane, |_, p| {
+                match &result {
+                    Ok(_) => p.completion.help_read(),
+                    Err(why) => {
+                        let mut t = p.session.lock_term();
+                        if !t.state.alt_screen_active() {
+                            crate::session::write_late_notice(&mut t, why);
+                        }
+                    }
+                }
+                p.session.mark_dirty();
+            });
+            v.unpause();
+        })
+    });
+}
+
 /// Something the completion worker read for pane `pane` of window `id` is
 /// ready: draw the pane again.
 fn completion_ready(id: usize, pane: PaneId) {

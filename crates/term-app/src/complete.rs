@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use term_core::{Ghost, Keymap, Popup, PopupItem, Terminal};
 use unicode_width::UnicodeWidthStr;
 
+pub mod help;
 pub mod ink;
 pub mod lex;
 pub mod list;
@@ -236,6 +237,82 @@ impl PaneState {
         drawn
     }
 
+    /// After Read Flags from --help: the list may open without more
+    /// typing.
+    pub fn help_read(&mut self) {
+        self.typing = true;
+        self.quiet = false;
+        self.since = None;
+        self.seen = None;
+    }
+
+    /// What Read Flags from --help runs for the line at the prompt: the
+    /// program under (or before) the cursor, and its subcommand when the
+    /// cursor is past one (`kubectl get -` runs `kubectl get --help`).
+    /// Only programs: an alias, function or builtin can't be run alone.
+    pub fn help_target(&self, t: &Terminal) -> Result<HelpTarget, String> {
+        let at_prompt = "Read Flags from --help works at zsh's prompt, with a command typed";
+        let report = t.line_report().ok_or(at_prompt)?;
+        let env = self.shell_env.as_deref().ok_or(at_prompt)?;
+        let line = lex::read(&report.text, report.cursor);
+        let i = line
+            .words
+            .iter()
+            .rposition(|w| w.range.start <= report.cursor)
+            .ok_or("type a command first")?;
+        let c = line.words[i].command.ok_or("type a command first")?;
+        let command = &line.words[c];
+        if command.expands {
+            return Err(format!("{} isn't a program's name", command.text));
+        }
+        let name = command.text.as_str();
+        let listed = |list: &[String]| list.iter().any(|n| n == name);
+        for (list, what) in [
+            (&env.aliases, "an alias"),
+            (&env.functions, "a function"),
+            (&env.builtins, "a builtin"),
+            (&env.reserved_words, "a keyword"),
+        ] {
+            if listed(list) {
+                return Err(format!("{name} is {what}: only programs can be asked for --help"));
+            }
+        }
+        let sub = (c + 1..i)
+            .find(|&j| line.words[j].command == Some(c) && line.words[j].role == lex::Role::Argument)
+            .map(|j| line.words[j].text.clone())
+            .filter(|s| {
+                s.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
+                    && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+            });
+        let exe = if name.contains('/') {
+            let p = std::path::Path::new(name);
+            if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                std::path::Path::new(t.cwd().unwrap_or("/")).join(p)
+            }
+        } else {
+            std::env::split_paths(&env.path)
+                .filter(|d| d.is_absolute())
+                .map(|d| d.join(name))
+                .find(|p| is_executable(p))
+                .ok_or_else(|| format!("{name} isn't a program on your PATH"))?
+        };
+        if !is_executable(&exe) {
+            return Err(format!("{name} isn't a program"));
+        }
+        let base = name.rsplit('/').next().unwrap_or(name);
+        Ok(HelpTarget {
+            name: match &sub {
+                Some(s) => format!("{base}-{s}"),
+                None => base.to_string(),
+            },
+            exe,
+            sub,
+            path: env.path.clone(),
+        })
+    }
+
     /// The list with zsh's matches, under the word at the cursor.
     fn show_zsh(&mut self, t: &Terminal, report: &term_core::LineReport, s: &Settings) -> Drawn {
         let Some(choices) = self.zsh.clone() else { return Drawn::default() };
@@ -443,6 +520,21 @@ impl PaneState {
         self.seen = None;
         KeyResult::Send(bytes.into_bytes())
     }
+}
+
+/// A program and subcommand for Read Flags from --help.
+#[derive(Debug, PartialEq, Eq)]
+pub struct HelpTarget {
+    pub exe: std::path::PathBuf,
+    pub sub: Option<String>,
+    /// What its flags are kept under: `kubectl-get`.
+    pub name: String,
+    pub path: String,
+}
+
+fn is_executable(p: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
 
 /// `%`, `;`, BEL and other control characters percent-encoded.
@@ -824,6 +916,24 @@ mod tests {
         assert_eq!(st.key(b'x'.into(), true, false), KeyResult::Pass);
         assert!(!st.is_open());
         assert_eq!(st.update(&t.state, &settings(), Instant::now(), &no_wake).popup, None);
+    }
+
+    #[test]
+    fn what_read_flags_from_help_runs() {
+        let path = programs("help", &["kubectl"]);
+        let mut st = state(&path);
+        let target = |st: &PaneState, line: &str| st.help_target(&term(line).state);
+        let t = target(&st, "kubectl get -").unwrap();
+        assert_eq!((t.sub.as_deref(), t.name.as_str()), (Some("get"), "kubectl-get"));
+        assert!(t.exe.ends_with("kubectl"));
+        // On the subcommand itself: the command's own.
+        assert_eq!(target(&st, "kubectl ge").unwrap().name, "kubectl");
+        assert_eq!(target(&st, "kubectl").unwrap().sub, None);
+        assert!(target(&st, "cd -").unwrap_err().contains("builtin"));
+        assert!(target(&st, "nothere -").unwrap_err().contains("PATH"));
+        assert!(target(&st, "").is_err());
+        st.shell_env = None;
+        assert!(target(&st, "kubectl -").is_err());
     }
 
     #[test]

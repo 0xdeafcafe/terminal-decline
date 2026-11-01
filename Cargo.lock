@@ -1001,6 +1001,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "term-ctl"
+version = "0.0.1"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "term-core",
+ "term-keys",
+]
+
+[[package]]
 name = "term-dylib"
 version = "0.0.1"
 dependencies = [
@@ -1133,6 +1144,7 @@ dependencies = [
  "term-activity",
  "term-config",
  "term-core",
+ "term-ctl",
  "term-font",
  "term-icon",
  "term-image",

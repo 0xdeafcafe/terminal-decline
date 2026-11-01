@@ -429,10 +429,12 @@ fn zsh_reports_the_command_line_with_its_token() {
     // A continuation line reports nothing of its own.
     s.send("for x in 1; do\n");
     s.wait_for("the continuation's report", |s| s.text().contains(";cont;0;\x07"));
-    s.send("\x03");
-    s.wait_for("prompt 3", |s| s.count("\x1b]133;B\x07") >= 3);
+    // Finished, not interrupted: a Ctrl+C that arrives before the line
+    // editor has the terminal can be lost (CI's macOS runner), and with
+    // it the next prompt.
+    s.run("true; done", 3);
+    // The probe's output comes before the prompt after it.
     s.run("printenv DECLINE_TOKEN DECLINE_COMPLETION; echo \"<${+DECLINE_TOKEN}|$(set | grep -c 0123456789abcdef)|$(typeset | grep -c 0123456789abcdef)>\"", 4);
-    std::thread::sleep(Duration::from_millis(200));
     while let Ok(bytes) = s.rx.try_recv() {
         s.out.extend_from_slice(&bytes);
     }

@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793421512852,
+  "lastUpdate": 1793507909549,
   "repoUrl": "https://github.com/0xdeafcafe/terminal-decline",
   "entries": {
     "Time per iteration": [
@@ -1480,6 +1480,728 @@ window.BENCHMARK_DATA = {
           {
             "name": "snapshot 80x24 unchanged",
             "value": 1.17,
+            "unit": "µs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Alexander Forbes-Reed",
+            "username": "0xdeafcafe",
+            "email": "git@alex.forbes.red"
+          },
+          "committer": {
+            "name": "Alexander Forbes-Reed",
+            "username": "0xdeafcafe",
+            "email": "git@alex.forbes.red"
+          },
+          "id": "b14aa9593c843d56217f98a6331b004edfea91fc",
+          "message": "docs(design): note the glyph thread under R.1\n\nHow fonts share their registry with the glyph thread, which glyphs\nstay synchronous, how the thread wakes the app, why bitmaps are put in\nthe textures only when drawn and unwanted glyphs skipped, the numbers,\nand what is left: cluster and ligature shaping, and the upload's wait\nfor the GPU.\n\nCo-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-10-31T18:29:36Z",
+          "url": "https://github.com/0xdeafcafe/terminal-decline/commit/b14aa9593c843d56217f98a6331b004edfea91fc"
+        },
+        "date": 1793507908641,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "frame 1 pane 160x48 coloured",
+            "value": 40.035,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 1 pane 160x48 coloured unchanged",
+            "value": 3.087,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 203x50 sparse",
+            "value": 13.684,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 203x50 sparse one row",
+            "value": 2.8,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 203x50 sparse unchanged",
+            "value": 2.496,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 300x100 coloured",
+            "value": 155.183,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 300x100 coloured history",
+            "value": 198.182,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 300x100 coloured history reflowed unchanged",
+            "value": 6.726,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 300x100 coloured history unchanged",
+            "value": 9.053,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 300x100 coloured live",
+            "value": 122.464,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 300x100 coloured one row",
+            "value": 7.161,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 300x100 coloured one row live",
+            "value": 126.175,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 300x100 coloured scrolled",
+            "value": 42.152,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 300x100 coloured scrolled live",
+            "value": 126.12,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 300x100 coloured unchanged",
+            "value": 5.332,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 300x100 per-cell style",
+            "value": 185.687,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 300x100 per-cell style live",
+            "value": 166.769,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 300x100 per-cell style unchanged",
+            "value": 5.171,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 300x100 plain",
+            "value": 134.459,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 300x100 plain history",
+            "value": 132.942,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 300x100 plain history reflowed unchanged",
+            "value": 6.444,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 300x100 plain history unchanged",
+            "value": 9.183,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 300x100 plain live",
+            "value": 109.895,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 300x100 plain unchanged",
+            "value": 5.231,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 300x100 prompts history unchanged",
+            "value": 13.321,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 300x100 unicode",
+            "value": 131.599,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 300x100 unicode history",
+            "value": 314.005,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 300x100 unicode live",
+            "value": 110.781,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 300x100 unicode menlo",
+            "value": 207.031,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 300x100 unicode menlo unchanged",
+            "value": 4.995,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 300x100 unicode unchanged",
+            "value": 5.563,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 4 panes 80x24 coloured",
+            "value": 45.45,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 4 panes 80x24 coloured unchanged",
+            "value": 5.978,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 80x24 plain",
+            "value": 9.77,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 80x24 plain live",
+            "value": 7.61,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 80x24 plain one row",
+            "value": 1.88,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 80x24 plain one row live",
+            "value": 7.547,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 80x24 plain scrolled",
+            "value": 3.461,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 80x24 plain scrolled live",
+            "value": 7.409,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 80x24 plain unchanged",
+            "value": 1.394,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 80x24 unicode menlo",
+            "value": 14.984,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 80x24 unicode menlo unchanged",
+            "value": 1.375,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 80x24 with_images 10 placements",
+            "value": 2.134,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 80x24 with_images none",
+            "value": 1.646,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 80x24 with_images placeholders",
+            "value": 2.161,
+            "unit": "µs"
+          },
+          {
+            "name": "frame code 100x30 jetbrains",
+            "value": 53.747,
+            "unit": "µs"
+          },
+          {
+            "name": "frame code 100x30 jetbrains cold",
+            "value": 2252.176,
+            "unit": "µs"
+          },
+          {
+            "name": "frame code 100x30 jetbrains one row",
+            "value": 3.304,
+            "unit": "µs"
+          },
+          {
+            "name": "frame code 100x30 jetbrains rebuilt",
+            "value": 26.078,
+            "unit": "µs"
+          },
+          {
+            "name": "frame code 100x30 jetbrains scrolled",
+            "value": 6.998,
+            "unit": "µs"
+          },
+          {
+            "name": "frame code 100x30 jetbrains unchanged",
+            "value": 1.705,
+            "unit": "µs"
+          },
+          {
+            "name": "frame code 100x30 menlo",
+            "value": 16.807,
+            "unit": "µs"
+          },
+          {
+            "name": "frame code 100x30 menlo cold",
+            "value": 16.999,
+            "unit": "µs"
+          },
+          {
+            "name": "frame code 100x30 menlo one row",
+            "value": 2.118,
+            "unit": "µs"
+          },
+          {
+            "name": "frame code 100x30 menlo rebuilt",
+            "value": 16.952,
+            "unit": "µs"
+          },
+          {
+            "name": "frame code 100x30 menlo scrolled",
+            "value": 5.113,
+            "unit": "µs"
+          },
+          {
+            "name": "frame code 100x30 menlo unchanged",
+            "value": 1.701,
+            "unit": "µs"
+          },
+          {
+            "name": "frame code 300x100 jetbrains",
+            "value": 601.23,
+            "unit": "µs"
+          },
+          {
+            "name": "frame code 300x100 jetbrains cold",
+            "value": 3987.373,
+            "unit": "µs"
+          },
+          {
+            "name": "frame code 300x100 jetbrains one row",
+            "value": 11.514,
+            "unit": "µs"
+          },
+          {
+            "name": "frame code 300x100 jetbrains rebuilt",
+            "value": 273.199,
+            "unit": "µs"
+          },
+          {
+            "name": "frame code 300x100 jetbrains scrolled",
+            "value": 41.747,
+            "unit": "µs"
+          },
+          {
+            "name": "frame code 300x100 jetbrains unchanged",
+            "value": 5.445,
+            "unit": "µs"
+          },
+          {
+            "name": "frame code 300x100 menlo",
+            "value": 149.864,
+            "unit": "µs"
+          },
+          {
+            "name": "frame code 300x100 menlo cold",
+            "value": 154.212,
+            "unit": "µs"
+          },
+          {
+            "name": "frame code 300x100 menlo one row",
+            "value": 6.726,
+            "unit": "µs"
+          },
+          {
+            "name": "frame code 300x100 menlo rebuilt",
+            "value": 159.054,
+            "unit": "µs"
+          },
+          {
+            "name": "frame code 300x100 menlo scrolled",
+            "value": 34.942,
+            "unit": "µs"
+          },
+          {
+            "name": "frame code 300x100 menlo unchanged",
+            "value": 4.858,
+            "unit": "µs"
+          },
+          {
+            "name": "history decode/background",
+            "value": 811.421,
+            "unit": "µs"
+          },
+          {
+            "name": "history decode/cjk",
+            "value": 1444.635,
+            "unit": "µs"
+          },
+          {
+            "name": "history decode/emoji",
+            "value": 2042.166,
+            "unit": "µs"
+          },
+          {
+            "name": "history decode/gradient",
+            "value": 16886.113,
+            "unit": "µs"
+          },
+          {
+            "name": "history decode/ls",
+            "value": 1270.076,
+            "unit": "µs"
+          },
+          {
+            "name": "history decode/plain",
+            "value": 683.968,
+            "unit": "µs"
+          },
+          {
+            "name": "history push/background",
+            "value": 1474.017,
+            "unit": "µs"
+          },
+          {
+            "name": "history push/cjk",
+            "value": 1138.597,
+            "unit": "µs"
+          },
+          {
+            "name": "history push/emoji",
+            "value": 995.7,
+            "unit": "µs"
+          },
+          {
+            "name": "history push/gradient",
+            "value": 23009.667,
+            "unit": "µs"
+          },
+          {
+            "name": "history push/keyed/background",
+            "value": 1478.974,
+            "unit": "µs"
+          },
+          {
+            "name": "history push/keyed/cjk",
+            "value": 1182.373,
+            "unit": "µs"
+          },
+          {
+            "name": "history push/keyed/emoji",
+            "value": 1088.299,
+            "unit": "µs"
+          },
+          {
+            "name": "history push/keyed/gradient",
+            "value": 24223.815,
+            "unit": "µs"
+          },
+          {
+            "name": "history push/keyed/ls",
+            "value": 746.594,
+            "unit": "µs"
+          },
+          {
+            "name": "history push/keyed/plain",
+            "value": 339.89,
+            "unit": "µs"
+          },
+          {
+            "name": "history push/ls",
+            "value": 924.44,
+            "unit": "µs"
+          },
+          {
+            "name": "history push/plain",
+            "value": 338.931,
+            "unit": "µs"
+          },
+          {
+            "name": "history_at_width/display_offset_at_200",
+            "value": 25.143,
+            "unit": "µs"
+          },
+          {
+            "name": "history_at_width/display_offset_at_300",
+            "value": 10.102,
+            "unit": "µs"
+          },
+          {
+            "name": "history_at_width/scroll_page_at_200",
+            "value": 126.84,
+            "unit": "µs"
+          },
+          {
+            "name": "history_at_width/scroll_page_at_300",
+            "value": 35.866,
+            "unit": "µs"
+          },
+          {
+            "name": "parse/clusters",
+            "value": 42301.65,
+            "unit": "µs"
+          },
+          {
+            "name": "parse/coloured",
+            "value": 16706.878,
+            "unit": "µs"
+          },
+          {
+            "name": "parse/plain",
+            "value": 6928.599,
+            "unit": "µs"
+          },
+          {
+            "name": "parse/seq",
+            "value": 28207.615,
+            "unit": "µs"
+          },
+          {
+            "name": "parse/tui",
+            "value": 10273.006,
+            "unit": "µs"
+          },
+          {
+            "name": "parse/unicode",
+            "value": 26004.555,
+            "unit": "µs"
+          },
+          {
+            "name": "parse_1k/clusters",
+            "value": 49420.484,
+            "unit": "µs"
+          },
+          {
+            "name": "parse_1k/coloured",
+            "value": 16412.055,
+            "unit": "µs"
+          },
+          {
+            "name": "parse_1k/plain",
+            "value": 7053.031,
+            "unit": "µs"
+          },
+          {
+            "name": "parse_1k/seq",
+            "value": 26680.602,
+            "unit": "µs"
+          },
+          {
+            "name": "parse_1k/tui",
+            "value": 10679.272,
+            "unit": "µs"
+          },
+          {
+            "name": "parse_1k/unicode",
+            "value": 27470.73,
+            "unit": "µs"
+          },
+          {
+            "name": "renderer 1 pane 160x48 encode",
+            "value": 11.228,
+            "unit": "µs"
+          },
+          {
+            "name": "renderer 1 pane 160x48 encode one row",
+            "value": 16.545,
+            "unit": "µs"
+          },
+          {
+            "name": "renderer 1 pane 160x48 prepare",
+            "value": 60.017,
+            "unit": "µs"
+          },
+          {
+            "name": "renderer 1 pane 160x48 prepare unchanged",
+            "value": 2.865,
+            "unit": "µs"
+          },
+          {
+            "name": "renderer 4 panes 80x24 build",
+            "value": 62.581,
+            "unit": "µs"
+          },
+          {
+            "name": "renderer 4 panes 80x24 build unchanged",
+            "value": 6.345,
+            "unit": "µs"
+          },
+          {
+            "name": "renderer 4 panes 80x24 encode",
+            "value": 12.45,
+            "unit": "µs"
+          },
+          {
+            "name": "resize/height_300x100_ascii",
+            "value": 281.486,
+            "unit": "µs"
+          },
+          {
+            "name": "resize/height_300x100_cjk",
+            "value": 258.398,
+            "unit": "µs"
+          },
+          {
+            "name": "resize/width_300x100_ascii",
+            "value": 280.298,
+            "unit": "µs"
+          },
+          {
+            "name": "resize/width_300x100_cjk",
+            "value": 250.65,
+            "unit": "µs"
+          },
+          {
+            "name": "search_100k/filters/build_all",
+            "value": 9943.048,
+            "unit": "µs"
+          },
+          {
+            "name": "search_100k/job/absent",
+            "value": 41.672,
+            "unit": "µs"
+          },
+          {
+            "name": "search_100k/job/absent_ignore_case",
+            "value": 43.637,
+            "unit": "µs"
+          },
+          {
+            "name": "search_100k/job/common_ignore_case",
+            "value": 5588.701,
+            "unit": "µs"
+          },
+          {
+            "name": "search_100k/job/non_ascii_ignore_case",
+            "value": 108.689,
+            "unit": "µs"
+          },
+          {
+            "name": "search_100k/job/rare",
+            "value": 53.401,
+            "unit": "µs"
+          },
+          {
+            "name": "search_100k/job/rare_ignore_case",
+            "value": 57.997,
+            "unit": "µs"
+          },
+          {
+            "name": "search_100k/scan/absent",
+            "value": 323.861,
+            "unit": "µs"
+          },
+          {
+            "name": "search_100k/scan/absent_ignore_case",
+            "value": 520.303,
+            "unit": "µs"
+          },
+          {
+            "name": "search_100k/scan/common_ignore_case",
+            "value": 5476.688,
+            "unit": "µs"
+          },
+          {
+            "name": "search_100k/scan/non_ascii_ignore_case",
+            "value": 560.915,
+            "unit": "µs"
+          },
+          {
+            "name": "search_100k/scan/rare",
+            "value": 493.456,
+            "unit": "µs"
+          },
+          {
+            "name": "search_100k/scan/rare_ignore_case",
+            "value": 721.597,
+            "unit": "µs"
+          },
+          {
+            "name": "search_100k/start/absent",
+            "value": 26.648,
+            "unit": "µs"
+          },
+          {
+            "name": "search_100k/start/absent_ignore_case",
+            "value": 25.096,
+            "unit": "µs"
+          },
+          {
+            "name": "search_100k/start/common_ignore_case",
+            "value": 27.788,
+            "unit": "µs"
+          },
+          {
+            "name": "search_100k/start/non_ascii_ignore_case",
+            "value": 25.085,
+            "unit": "µs"
+          },
+          {
+            "name": "search_100k/start/rare",
+            "value": 26.983,
+            "unit": "µs"
+          },
+          {
+            "name": "search_100k/start/rare_ignore_case",
+            "value": 27.718,
+            "unit": "µs"
+          },
+          {
+            "name": "snapshot 300x100 full copy",
+            "value": 7.994,
+            "unit": "µs"
+          },
+          {
+            "name": "snapshot 300x100 history full copy",
+            "value": 62.133,
+            "unit": "µs"
+          },
+          {
+            "name": "snapshot 300x100 spinner",
+            "value": 4.562,
+            "unit": "µs"
+          },
+          {
+            "name": "snapshot 300x100 unchanged",
+            "value": 4.114,
+            "unit": "µs"
+          },
+          {
+            "name": "snapshot 80x24 full copy",
+            "value": 0.952,
+            "unit": "µs"
+          },
+          {
+            "name": "snapshot 80x24 spinner",
+            "value": 1.294,
+            "unit": "µs"
+          },
+          {
+            "name": "snapshot 80x24 unchanged",
+            "value": 1.052,
             "unit": "µs"
           }
         ]

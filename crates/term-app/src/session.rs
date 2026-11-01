@@ -270,6 +270,12 @@ pub fn lock_for_frame(term: &Mutex<Term>) -> Option<MutexGuard<'_, Term>> {
     }
 }
 
+/// Milliseconds since the first call, the clock commands are timed by.
+fn clock_ms() -> u64 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    START.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64
+}
+
 /// Terminal Decline hit a bug while parsing.
 struct Bug;
 
@@ -287,6 +293,8 @@ fn parse(
     images: Option<&SessionImages>,
 ) -> Result<(Vec<u8>, Events, bool), Bug> {
     let mut t = lock(term);
+    // For timing commands (OSC 133 C to D): term-core reads no clock.
+    t.state.set_clock(clock_ms());
     let generation = t.state.generation();
     let (mut t, parsed) = if images.is_some() {
         parse_with_head_reads(term, t, bytes)

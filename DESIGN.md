@@ -45,7 +45,7 @@ any command as its own Dock app.
 | `term-pins`   | Dock pins: make, list, edit, remove, repair and update pin bundles and their records, run through an injected command runner (no AppKit; the stub itself is `term-pin`; the app passes its usage text and Secure Keyboard Entry carry-over in as hooks) |
 | `term-activity` | what a pane's shell does: OSC 133 activity, status titles, when to notify, prompts, the program running (no AppKit) |
 | `term-restore` | restarting into a new build: the saved window list, the pane tree it saves, each pane's history (no AppKit) |
-| `term-complete` | completion and colouring at the shell's prompt: the command line read into words and coloured, the list's choices, commands, folders, history, man pages and `--help` (no AppKit; docs/design/completion.md) |
+| `term-complete` | completion and colouring at the shell's prompt: the command line read into words and coloured, the list's choices, commands, folders, history, man pages and `--help`, past command lines, the marks between commands and plain output coloured (no AppKit; docs/design/completion.md, docs/design/command-marks.md) |
 | `term-ctl`    | the agent API's protocol and `ctl` command line, its idle limit, screen read-back and keys (no AppKit; the server and its sessions are term-app's) |
 | `term-update` | the updater: whether it runs, what Sparkle is answered, updates from source (the checkout, git, the build, when to install), what is told after an update, the `update` setting (no AppKit; Sparkle.framework, its alerts and posting notifications are term-app's) |
 | `term-prefs`  | the preferences: settings schema, safe `config.toml` edits, the TUI (no platform code) |

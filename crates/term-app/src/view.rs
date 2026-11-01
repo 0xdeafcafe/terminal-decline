@@ -165,6 +165,9 @@ pub(crate) struct Pane {
     pub(crate) blink_scheduled: bool,
     /// Completion and the command line's colours (docs/design/completion.md).
     pub(crate) completion: crate::complete::PaneState,
+    /// Past command lines' colours, the lines and marks between commands,
+    /// and plain output's colours (docs/design/command-marks.md).
+    pub(crate) marks: crate::complete::marks::Marks,
     sync_since: Option<Instant>,
     pub(crate) marked: String,
     /// The view's position between whole lines under a trackpad, and
@@ -1714,11 +1717,22 @@ impl WindowView {
             }
             // Something read on the completion worker draws the pane again.
             let waker = move || -> crate::complete::sources::Wake { Box::new(move || completion_ready(window_id, id)) };
-            if win.config.highlight_command_line {
+            let marks = crate::complete::marks::Settings {
+                past_commands: win.config.highlight_command_line,
+                command_marks: win.config.command_marks,
+                colour_output: win.config.colour_output,
+            };
+            {
                 let env = p.completion.shell_env.clone();
                 let cwd = t.state.cwd().map(str::to_string);
                 let known = |name: &str| crate::complete::sources::command_known(name, env.as_deref()?, cwd.as_deref(), waker);
-                crate::complete::ink::line_ink(&t.state, &known, &mut p.render.frame.snapshot_mut().ink);
+                let snap = p.render.frame.snapshot_mut();
+                if win.config.highlight_command_line {
+                    crate::complete::ink::line_ink(&t.state, &known, &mut snap.ink);
+                }
+                // Past commands, the lines and marks between them, and
+                // plain output (docs/design/command-marks.md).
+                p.marks.update(&t.state, marks, &known, snap);
             }
             // The completion list, in the focused pane only.
             if win.config.completion && focused {
@@ -3283,6 +3297,7 @@ fn spawn_pane(window: usize, config: &Config, theme: &Theme, m: term_font::Metri
         cursor_on: true,
         blink_scheduled: false,
         completion: crate::complete::PaneState::default(),
+        marks: crate::complete::marks::Marks::default(),
         sync_since: None,
         marked: String::new(),
         scroll: crate::scroll::Smooth::default(),

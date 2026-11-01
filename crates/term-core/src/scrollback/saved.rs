@@ -261,6 +261,7 @@ fn read_body(body: &[u8]) -> Option<(Vec<BlockEntry>, u64, u32, u64)> {
             p.set_head_continues(false);
         }
         let d = p.try_unpack()?;
+        p.set_edges(&d.text);
         if len == 0 || len as usize > d.lines() || !sound(&d, &p) {
             return None;
         }

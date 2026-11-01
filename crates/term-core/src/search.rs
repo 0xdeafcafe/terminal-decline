@@ -16,13 +16,13 @@
 //! The terminal's side (start the search, add the worker's hits, keep up
 //! with output, find next and previous, highlight) is in `term/search.rs`.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use memchr::memmem;
 
 use crate::cell::Row;
-use crate::scrollback::{BlockData, Body, SEARCH_SLOW_FLAGS, text_end};
+use crate::scrollback::{BlockData, Body, Packed, SEARCH_SLOW_FLAGS, scalars_back, scalars_fwd, text_end};
 use crate::term::Point;
 use crate::unicode::{self, Gcb};
 
@@ -464,6 +464,8 @@ pub(crate) struct Seg {
     src: Body,
     /// Its data, decompressed off the lock the first time it is read.
     data: OnceLock<Arc<BlockData>>,
+    /// Times it was decompressed.
+    unpacks: AtomicUsize,
     pub len: usize,
     /// Lines at the start hidden by the limit.
     pub hidden: usize,
@@ -479,6 +481,7 @@ impl Seg {
         Seg {
             src,
             data: OnceLock::new(),
+            unpacks: AtomicUsize::new(0),
             len,
             hidden,
             starts: None,
@@ -490,7 +493,12 @@ impl Seg {
     /// The block's data (a compressed block's decompressed, the first
     /// time: §13.5).
     pub fn data(&self) -> &Arc<BlockData> {
-        self.data.get_or_init(|| self.src.unpack())
+        self.data.get_or_init(|| {
+            if self.src.is_packed() {
+                self.unpacks.fetch_add(1, Ordering::Relaxed);
+            }
+            self.src.unpack()
+        })
     }
 
     /// Stable line number of its first line, without decompressing it.
@@ -498,9 +506,25 @@ impl Seg {
         self.src.first()
     }
 
+    /// Whether the whole of its text is searched: no line hidden, none
+    /// popped since it was sealed.
+    fn full(&self) -> bool {
+        self.hidden == 0 && self.len == self.src.lines()
+    }
+
+    /// The compressed block, when its uncompressed edges stand for its
+    /// window's (and it isn't decompressed already).
+    fn edges(&self) -> Option<&Packed> {
+        match &self.src {
+            Body::Packed(p) if self.full() && self.data.get().is_none() => Some(p),
+            _ => None,
+        }
+    }
+
     fn starts(&mut self) -> &[u32] {
         let len = self.len;
-        let data = self.data.get_or_init(|| self.src.unpack());
+        self.data();
+        let data = self.data.get().expect("decompressed");
         self.starts.get_or_insert_with(|| data.line_starts(len))
     }
 
@@ -510,8 +534,8 @@ impl Seg {
         if let Some(w) = self.window {
             return w;
         }
-        let w = if self.hidden == 0 && self.len == self.src.lines() {
-            (0, self.data().text().len())
+        let w = if self.full() {
+            (0, self.src.text_len())
         } else {
             let (h, len) = (self.hidden, self.len);
             let s = self.starts();
@@ -519,6 +543,50 @@ impl Seg {
         };
         self.window = Some(w);
         w
+    }
+
+    /// The first `n` scalars of its window (all of it if it has no more),
+    /// and the scalar after them, None if the window ends there. A
+    /// compressed block answers from its edges when they reach.
+    fn head(&mut self, n: usize) -> (&[u8], Option<char>) {
+        let (a, b) = self.window();
+        let this = &*self;
+        if let Some(p) = this.edges() {
+            let t = p.head();
+            let end = scalars_fwd(t, n);
+            if end < t.len() {
+                return (&t[..end], Some(char_at(t, end).0));
+            }
+            if t.len() == p.text_len() {
+                return (t, None);
+            }
+        }
+        let t = &this.data().text()[a..b];
+        let end = scalars_fwd(t, n);
+        (&t[..end], (end < t.len()).then(|| char_at(t, end).0))
+    }
+
+    /// The last `n` scalars of its window, starting no earlier than
+    /// offset `from` in its text: where they start, them, and the scalar
+    /// before them, None if the window starts there. As [`Seg::head`].
+    fn tail(&mut self, n: usize, from: usize) -> (usize, &[u8], Option<char>) {
+        let (a, b) = self.window();
+        let this = &*self;
+        if from == 0
+            && let Some(p) = this.edges()
+        {
+            let t = p.tail();
+            let start = scalars_back(t, n);
+            if start > 0 {
+                return (p.text_len() - t.len() + start, &t[start..], char_before(t, start));
+            }
+            if t.len() == p.text_len() {
+                return (0, t, None);
+            }
+        }
+        let t = &this.data().text()[a..b];
+        let start = align(t, scalars_back(t, n).max(from.saturating_sub(a)));
+        (a + start, &t[start..], char_before(t, start))
     }
 
     /// The stored line holding byte `off` (by index), and where its text
@@ -591,31 +659,35 @@ impl Mapper {
     }
 }
 
-/// The last scalar of the windows before segment `i`.
-fn last_char_before(segs: &mut [Seg], i: usize) -> Option<char> {
+/// The last scalar of the windows before segment `i`, and the lowest
+/// segment read for it.
+fn last_char_before(segs: &mut [Seg], i: usize) -> (Option<char>, usize) {
     for j in (0..i).rev() {
-        let (a, b) = segs[j].window();
-        if b > a {
-            return char_before(&segs[j].data().text()[a..b], b - a);
+        if let (_, _, Some(c)) = segs[j].tail(0, 0) {
+            return (Some(c), j);
         }
     }
-    None
+    (None, 0)
 }
 
-/// The first scalar of the first non-empty window in `segs`, else `after`.
-fn first_char_from(segs: &mut [Seg], after: Option<char>) -> Option<char> {
-    for g in segs {
-        let (a, b) = g.window();
-        if b > a {
-            return Some(char_at(g.data().text(), a).0);
+/// The first scalar of the first non-empty window from segment `j` on,
+/// else `after`, and one past the last segment read for it.
+fn first_char_from(segs: &mut [Seg], j: usize, after: Option<char>) -> (Option<char>, usize) {
+    for (k, g) in segs.iter_mut().enumerate().skip(j) {
+        if let (_, Some(c)) = g.head(0) {
+            return (Some(c), k + 1);
         }
     }
-    after
+    (after, segs.len().max(j))
 }
 
 /// Find matches starting in segment `i` at or after `from` (an offset in
 /// its text), ending in it or in the segments after it: `out` gets their
 /// (start, end) places. `after` is the scalar after the last segment.
+/// With `boundary_only`, only those crossing its end (§13.5), read from
+/// its edges and its neighbours' when they are compressed, so a block
+/// its filter rules out isn't decompressed. Returns the segments it read
+/// (the places it found are in them too).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn scan_seg(
     m: &Matcher,
@@ -627,64 +699,75 @@ pub(crate) fn scan_seg(
     scratch: &mut Vec<u8>,
     raw: &mut Vec<(usize, usize)>,
     out: &mut Vec<(Pos, Pos)>,
-) {
+) -> std::ops::Range<usize> {
     let (wa, wb) = segs[i].window();
-    let from = from.map_or(wa, |f| align(segs[i].data().text(), f.clamp(wa, wb)));
-    if from >= wb && !boundary_only {
-        return;
-    }
-    let before = if from > wa {
-        char_before(segs[i].data().text(), from)
-    } else {
-        last_char_before(segs, i)
+    let mut read = i..i + 1;
+    let from = match from {
+        Some(f) if !boundary_only => align(segs[i].data().text(), f.clamp(wa, wb)),
+        _ => wa,
     };
-    // The scalar after this window: the next window's first.
-    let next_first = first_char_from(&mut segs[i + 1..], after);
+    if from >= wb && !boundary_only {
+        return read;
+    }
     if !boundary_only {
+        let before = if from > wa {
+            char_before(segs[i].data().text(), from)
+        } else {
+            let (c, lo) = last_char_before(segs, i);
+            read.start = read.start.min(lo);
+            c
+        };
+        // The scalar after this window: the next window's first.
+        let (next_first, hi) = first_char_from(segs, i + 1, after);
+        read.end = read.end.max(hi);
         raw.clear();
         m.find(&segs[i].data().text()[from..wb], before, next_first, scratch, raw);
         out.extend(raw.iter().map(|&(s, e)| ((i, from + s), (i, from + e))));
     }
-    let from = if boundary_only { wa } else { from };
 
-    // The boundary with what follows (§13.5): the end of this window and
-    // the start of the next ones, searched together; only matches that
-    // cross it are kept (the others are found in their own windows).
-    let reach = m.reach();
-    let tail_at = align(segs[i].data().text(), wb.saturating_sub(reach).max(from));
-    let mut buf: Vec<u8> = segs[i].data().text()[tail_at..wb].to_vec();
+    // The boundary with what follows (§13.5): this window's last `n`
+    // scalars and the next windows' first `n`, searched together; only
+    // matches that cross it are kept (the others are found in their own
+    // windows). A match of `n + 1` scalars has at most `n` either side.
+    let n = m.chars.saturating_sub(1);
+    if n == 0 || i + 1 >= segs.len() {
+        return read;
+    }
+    let (tail_at, piece, before) = segs[i].tail(n, from);
+    let mut buf: Vec<u8> = piece.to_vec();
     let tail = buf.len();
+    let before = match before {
+        Some(c) => Some(c),
+        None => {
+            let (c, lo) = last_char_before(segs, i);
+            read.start = read.start.min(lo);
+            c
+        }
+    };
     // (segment, its window start, where its piece starts in buf)
     let mut pieces = Vec::new();
     let mut tail_after = None;
-    let mut j = i + 1;
-    while j < segs.len() && buf.len() - tail < reach {
-        let (a, b) = segs[j].window();
-        let want = reach - (buf.len() - tail);
-        let text = segs[j].data().text();
-        let end = align(text, (a + want).min(b));
+    let (mut got, mut j) = (0, i + 1);
+    while j < segs.len() && got < n {
+        let (a, _) = segs[j].window();
+        let (piece, next) = segs[j].head(n - got);
         pieces.push((j, a, buf.len()));
-        buf.extend_from_slice(&text[a..end]);
-        if end < b {
-            tail_after = Some(Some(char_at(text, end).0));
+        got += piece.iter().filter(|&&b| b & 0xC0 != 0x80).count();
+        buf.extend_from_slice(piece);
+        j += 1;
+        if let Some(c) = next {
+            tail_after = Some(c);
             break;
         }
-        j += 1;
     }
-    if pieces.is_empty() {
-        return;
-    }
+    read.end = read.end.max(j);
     let tail_after = match tail_after {
-        Some(c) => c,
+        Some(c) => Some(c),
         None => {
-            let j = j.min(segs.len());
-            first_char_from(&mut segs[j..], after)
+            let (c, hi) = first_char_from(segs, j, after);
+            read.end = read.end.max(hi);
+            c
         }
-    };
-    let before = if tail_at > wa {
-        char_before(segs[i].data().text(), tail_at)
-    } else {
-        last_char_before(segs, i)
     };
     raw.clear();
     m.find(&buf, before, tail_after, scratch, raw);
@@ -695,6 +778,7 @@ pub(crate) fn scan_seg(
             out.push(((i, tail_at + s), (seg, a + (e - at))));
         }
     }
+    read
 }
 
 /// Hits the worker found in one block, for [`crate::Terminal::add_search_hits`].
@@ -790,6 +874,13 @@ impl SearchJob {
         self.skipped
     }
 
+    /// Times it decompressed a compressed block so far (a test and
+    /// measuring aid).
+    #[doc(hidden)]
+    pub fn unpacked(&self) -> usize {
+        self.segs.iter().map(|g| g.unpacks.load(Ordering::Relaxed)).sum()
+    }
+
     /// Blocks still to search.
     pub fn remaining(&self) -> usize {
         self.order.len() - self.next
@@ -812,7 +903,8 @@ impl SearchJob {
         self.next += 1;
         self.found.clear();
         // A block its filter rules out still has its boundary with the
-        // next searched: a match crossing it isn't in either filter.
+        // next searched: a match crossing it isn't in either filter. That
+        // reads the uncompressed ends of compressed blocks.
         let skip = self.segs[i].filter.as_ref().is_some_and(|f| !m.may_match(f));
         if skip {
             self.skipped += 1;

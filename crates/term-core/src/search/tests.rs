@@ -279,6 +279,89 @@ fn filters_and_search_work_on_compressed_blocks() {
     assert!(skipped >= 6, "{skipped} blocks skipped");
 }
 
+/// History of `blocks` compressed blocks of short log lines with filters,
+/// "needle" written across the boundary of blocks 3 and 4, and `long`
+/// written across that of blocks 6 and 7.
+fn compressed_history(blocks: usize, long: &str) -> Term {
+    let mut t = Term::new(60, 3, 100_000, crate::ImagePool::process());
+    for b in 0..blocks {
+        for i in 0..40 {
+            t.advance(format!("block {b} line {i} thread ok\r\n").as_bytes());
+        }
+        let (head, tail) = match b {
+            3 => ("xx nee", "dle yy"),
+            6 => long.split_at(long.len() / 2),
+            _ => {
+                t.state.seal_history_for_test();
+                continue;
+            }
+        };
+        // A row ending in `head` wraps onto `tail`; two line feeds take
+        // the first row into history (the screen is 3 rows), and the
+        // block is sealed before the second follows it.
+        let pad = "p".repeat(60 - head.len());
+        t.advance(format!("{pad}{head}{tail}\r\n\r\n").as_bytes());
+        t.state.seal_history_for_test();
+    }
+    t.advance(b"\r\n\r\n\r\n\r\n");
+    t.state.shrink_history();
+    build_filters(&mut t);
+    let sb = t.state.history_for_test();
+    assert_eq!(sb.packed_blocks(), sb.sealed().count());
+    assert_eq!(sb.filtered_blocks(), sb.packed_blocks());
+    t
+}
+
+/// A search's hits, the blocks its filters ruled out and the times it
+/// decompressed a block.
+fn search_counting_unpacks(t: &mut Term, query: Query) -> (Vec<Hit>, usize, usize) {
+    let mut job = t.state.start_search(query);
+    let mut batches = Vec::new();
+    while let Some(b) = job.next_batch() {
+        batches.push(b);
+    }
+    for b in batches {
+        t.state.add_search_hits(b);
+    }
+    (t.state.search_hits(), job.skipped(), job.unpacked())
+}
+
+#[test]
+fn ruled_out_compressed_blocks_are_not_decompressed() {
+    let long = "a forty-scalar query: well past the edges kept";
+    assert!(long.chars().count() > crate::scrollback::EDGE);
+    let mut t = compressed_history(12, long);
+    let blocks = t.state.history_for_test().packed_blocks();
+    // In no block: every compressed block ruled out, none decompressed.
+    let (hits, skipped, unpacked) = search_counting_unpacks(&mut t, q("zebra crossing", false, WordMatch::Contains));
+    assert!(hits.is_empty());
+    assert_eq!(skipped, blocks);
+    assert_eq!(unpacked, 0);
+    // Across a boundary: found from the blocks' edges, and only the two
+    // blocks it is in decompressed, to place it.
+    for query in [q("needle", false, WordMatch::Contains), q("NEEDLE", true, WordMatch::FullWord)] {
+        let (hits, skipped, unpacked) = search_counting_unpacks(&mut t, query.clone());
+        assert_eq!(hits, naive(&t, &query));
+        assert_eq!(hits.len(), 1);
+        assert_eq!(skipped, blocks);
+        assert_eq!(unpacked, 2, "{query:?}");
+    }
+    // A query longer than the edges reads the blocks either side of a
+    // boundary instead, and still finds what crosses it.
+    let query = q(long, false, WordMatch::Contains);
+    let (hits, skipped, unpacked) = search_counting_unpacks(&mut t, query.clone());
+    assert_eq!(hits, naive(&t, &query));
+    assert_eq!(hits.len(), 1);
+    assert_eq!(skipped, blocks);
+    assert!(unpacked > 2, "{unpacked}");
+    // A word in every block: each decompressed once.
+    let query = q("thread", false, WordMatch::Contains);
+    let (hits, skipped, unpacked) = search_counting_unpacks(&mut t, query.clone());
+    assert_eq!(hits, naive(&t, &query));
+    assert_eq!(skipped, 0);
+    assert_eq!(unpacked, blocks);
+}
+
 #[test]
 fn filters_go_with_their_blocks() {
     let mut t = Term::new(20, 3, 60, crate::ImagePool::process());
@@ -574,9 +657,13 @@ proptest! {
         query in query(),
         resize in prop::option::of((4usize..16, 1usize..6)),
         filters in any::<bool>(),
+        compress in any::<bool>(),
     ) {
         let mut t = Term::new(cols, 3, limit, crate::ImagePool::process());
         feed(&mut t, &before);
+        if compress {
+            t.state.shrink_history();
+        }
         if filters {
             build_filters(&mut t);
         }
@@ -606,5 +693,11 @@ proptest! {
         let filtered = search(&mut t, query.clone());
         prop_assert_eq!(&filtered, &plain);
         prop_assert_eq!(&filtered, &naive(&t, &query));
+        // Compressed, with and without filters: the boundaries of blocks
+        // ruled out read from the blocks' edges.
+        t.state.shrink_history();
+        prop_assert_eq!(&search(&mut t, query.clone()), &plain);
+        build_filters(&mut t);
+        prop_assert_eq!(&search(&mut t, query.clone()), &plain);
     }
 }

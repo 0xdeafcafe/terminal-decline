@@ -60,8 +60,10 @@ use crate::unicode;
 
 mod packed;
 mod saved;
-pub(crate) use packed::Body;
-use packed::{Cache, Packed};
+use packed::Cache;
+#[cfg(test)]
+pub(crate) use packed::EDGE;
+pub(crate) use packed::{Body, Packed, scalars_back, scalars_fwd};
 pub use saved::{RestoreError, Restored};
 
 /// The most bytes in one part of a block (meta, text, the dictionary), so

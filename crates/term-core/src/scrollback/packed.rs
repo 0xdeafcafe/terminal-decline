@@ -37,6 +37,57 @@ pub struct Packed {
     /// Meta, text, styles and the offsets (as deltas, low bytes then
     /// high), each compressed on its own, back to back.
     lz: Box<[u8]>,
+    /// The text's first and last [`EDGE`] scalars (the whole text if it
+    /// is shorter), uncompressed, then where the last ones start in it:
+    /// a search reads a block's boundaries with its neighbours from these
+    /// without decompressing it (§13.5).
+    edges: Box<[u8]>,
+    tail_at: u16,
+}
+
+/// Scalars of text kept uncompressed at each end of a compressed block:
+/// a query of up to this many scalars searches a block's boundaries
+/// without decompressing it.
+pub const EDGE: usize = 32;
+
+/// The first `n` scalars of `text`: where they end.
+pub(crate) fn scalars_fwd(text: &[u8], n: usize) -> usize {
+    let mut i = 0;
+    for _ in 0..n {
+        if i >= text.len() {
+            break;
+        }
+        i += 1;
+        while i < text.len() && text[i] & 0xC0 == 0x80 {
+            i += 1;
+        }
+    }
+    i
+}
+
+/// The last `n` scalars of `text`: where they start.
+pub(crate) fn scalars_back(text: &[u8], n: usize) -> usize {
+    let mut i = text.len();
+    for _ in 0..n {
+        if i == 0 {
+            break;
+        }
+        i -= 1;
+        while i > 0 && text[i] & 0xC0 == 0x80 {
+            i -= 1;
+        }
+    }
+    i
+}
+
+/// [`Packed`]'s edges of `text`, and where the tail starts in them.
+fn edges_of(text: &[u8]) -> (Box<[u8]>, u16) {
+    let head = &text[..scalars_fwd(text, EDGE)];
+    let tail = &text[scalars_back(text, EDGE)..];
+    let mut e = Vec::with_capacity(head.len() + tail.len());
+    e.extend_from_slice(head);
+    e.extend_from_slice(tail);
+    (e.into_boxed_slice(), head.len() as u16)
 }
 
 impl Packed {
@@ -67,6 +118,7 @@ impl Packed {
             }
             debug_assert_eq!(offsets.len() - start, 2 * v.len());
         }
+        let (edges, tail_at) = edges_of(&d.text);
         let mut lz = Vec::new();
         let mut sizes = [0u32; 3];
         // Each part on its own: they have little in common.
@@ -89,6 +141,8 @@ impl Packed {
             parts,
             sizes,
             lz: lz.into_boxed_slice(),
+            edges,
+            tail_at,
         }
     }
 
@@ -194,6 +248,28 @@ impl Packed {
         self.head_continues = on;
     }
 
+    /// Keep `text`'s edges (a saved block read back, whose text is only
+    /// known once it is decompressed).
+    pub(super) fn set_edges(&mut self, text: &[u8]) {
+        (self.edges, self.tail_at) = edges_of(text);
+    }
+
+    /// The length of its text, without decompressing it.
+    pub fn text_len(&self) -> usize {
+        self.parts[2] as usize
+    }
+
+    /// The text's first scalars, uncompressed: up to [`EDGE`] of them, all
+    /// of it if it has no more.
+    pub fn head(&self) -> &[u8] {
+        &self.edges[..self.tail_at as usize]
+    }
+
+    /// The text's last scalars, uncompressed, as [`Packed::head`].
+    pub fn tail(&self) -> &[u8] {
+        &self.edges[self.tail_at as usize..]
+    }
+
     /// Append it to `out` as a restart saves it ([`super::saved`]): its
     /// compressed parts as they are, its links by value, no images
     /// (they don't outlive the process) and no line numbers (a restored
@@ -296,6 +372,9 @@ impl Packed {
             parts,
             sizes,
             lz,
+            // Set by the caller once the text is decompressed.
+            edges: Box::new([]),
+            tail_at: 0,
         })
     }
 
@@ -304,6 +383,7 @@ impl Packed {
         std::mem::size_of::<Packed>()
             + 2 * std::mem::size_of::<usize>()
             + self.lz.len()
+            + self.edges.len()
             + self.flags.bytes()
             + self.links.iter().map(|l| super::link_bytes(l)).sum::<usize>()
             + self.images.len() * std::mem::size_of::<ImageKey>()
@@ -404,6 +484,14 @@ impl Body {
 
     pub fn is_packed(&self) -> bool {
         matches!(self, Body::Packed(_))
+    }
+
+    /// The length of its text, without decompressing it.
+    pub fn text_len(&self) -> usize {
+        match self {
+            Body::Plain(d) => d.text.len(),
+            Body::Packed(p) => p.text_len(),
+        }
     }
 
     /// The same block (the same shared data).

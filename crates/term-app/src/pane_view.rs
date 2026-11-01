@@ -1014,6 +1014,12 @@ impl PaneView {
     /// command line ([`crate::prompts::input_steps`]), type the arrow keys
     /// that take the shell's cursor there. False if it isn't, and nothing
     /// was typed.
+    /// View cell `line`, `col` is on the shell's command line, where an
+    /// Option-click moves the shell's cursor.
+    fn on_command_line(&self, line: usize, col: usize) -> bool {
+        self.with(|_, p| crate::prompts::input_steps(&p.session.lock_term().state, line, col).is_some()) == Some(true)
+    }
+
     pub(crate) fn move_shell_cursor(&self, line: usize, col: usize) -> bool {
         let Some((steps, app_cursor)) = self
             .with(|_, p| {
@@ -1607,7 +1613,21 @@ impl PaneView {
         // menu once a double-click can no longer come.
         if button == mouse::LEFT && !press && self.with(|_, p| p.selecting.is_some()) == Some(true) {
             let clicked = self.with(|_, p| p.pending.is_some() && p.selecting == Some(Gesture::Start)) == Some(true);
+            // An Option-click on the command line that wasn't dragged
+            // moves the shell's cursor there.
+            let cursor_click = self
+                .with(|_, p| {
+                    p.cursor_click
+                        .take()
+                        .filter(|_| p.pending.is_some() && p.selecting == Some(Gesture::Block))
+                })
+                .flatten();
             self.end_selection();
+            if let Some((line, col)) = cursor_click {
+                self.move_shell_cursor(line, col);
+                self.ivars().click.replace(None);
+                return;
+            }
             if clicked && self.ivars().click.borrow().is_some() {
                 self.schedule_click_menu();
             } else {
@@ -1630,18 +1650,17 @@ impl PaneView {
             }
             return;
         }
-        // Option-click on the shell's command line moves its cursor there;
-        // the rest of the click (drag, release) goes nowhere.
+        // Option-click on the shell's command line moves its cursor there
+        // when the button comes up without a drag; dragged, it makes a
+        // rectangle as anywhere else.
         let flags = event.modifierFlags();
-        if button == mouse::LEFT
+        let cursor_click = button == mouse::LEFT
             && press
+            && event.clickCount() <= 1
             && flags.contains(NSEventModifierFlags::Option)
             && !flags.intersects(NSEventModifierFlags::Shift | NSEventModifierFlags::Command | NSEventModifierFlags::Control)
-            && self.move_shell_cursor(line, col)
-        {
-            self.with(|_, p| p.swallow_click = true);
-            return;
-        }
+            && self.on_command_line(line, col);
+        self.with(|_, p| p.cursor_click = cursor_click.then_some((line, col)));
         if press && mouse::opens_menu(false, button, event.modifierFlags().contains(NSEventModifierFlags::Control)) {
             self.show_context_menu(event);
             return;

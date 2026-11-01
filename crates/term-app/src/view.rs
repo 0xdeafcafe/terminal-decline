@@ -188,6 +188,9 @@ pub(crate) struct Pane {
     /// Where the drag making the selection left the mouse, so its end
     /// goes back under it when output scrolls the selection.
     pub(crate) drag_at: Option<crate::select::DragAt>,
+    /// An Option-click on the shell's command line: it moves the shell's
+    /// cursor there if the button comes up without a drag.
+    pub(crate) cursor_click: Option<(usize, usize)>,
     /// Scrolling while a selection is dragged past the top or bottom edge.
     pub(crate) autoscroll: Option<AutoScroll>,
     /// An auto-scroll step is waiting to run.
@@ -3290,6 +3293,7 @@ fn spawn_pane(window: usize, config: &Config, theme: &Theme, m: term_font::Metri
         block: None,
         pending: None,
         drag_at: None,
+        cursor_click: None,
         autoscroll: None,
         autoscroll_scheduled: false,
         held: false,

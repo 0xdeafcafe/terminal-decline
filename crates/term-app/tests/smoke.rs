@@ -2108,6 +2108,60 @@ fn smoke_drag_keeps_to_a_panel_and_follows_a_region_scroll() {
     assert_eq!(selection(&d[2]).as_deref(), Some("ghi ││jkl │\n│mno ││pqr │\n"), "{}", d[2]);
 }
 
+/// Option-drag makes a rectangle: over output, on the command line being
+/// typed, and over a program taking the mouse. An Option-click on the
+/// command line that isn't dragged still moves the shell's cursor.
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_option_drag_makes_a_rectangle() {
+    if !have_metal() {
+        return;
+    }
+    let dir = TempDir::new("optiondrag");
+    let wait = "i=0; while [ \"$(stty size)\" != '20 80' ] && [ $i -lt 100 ]; do sleep 0.05; i=$((i+1)); done; ";
+    let screen_text = "printf '\\033[H\\033[Jhello world\\r\\nsecond line\\r\\n\\033]133;A\\007$ \\033]133;B\\007echo hi'; ";
+    let script = format!(
+        "{resize}{wait}stty raw -echo; \
+         {screen_text}{out_down}{out_drag}{out_up}{pause}{dump}{pause}\
+         {line_down}{line_drag}{line_up}{pause}{dump}{pause}\
+         printf '\\033[?1002h\\033[?1006h'; {prog_down}{prog_drag}{prog_up}{pause}{dump}{pause}\
+         printf '\\033[?1002l\\033[?1006l'; {screen_text}{pause}{click_down}{click_up}\
+         stty min 0 time 10; r=$(dd bs=1 count=24 2>/dev/null); \
+         printf '\\033[H\\033[J'; printf 'r=%s\\n' \"$r\" | tr -d '\\033'; {dump}\
+         {quit}sleep 20",
+        resize = osc("resize 80 20"),
+        pause = "sleep 0.3; ",
+        out_down = osc("mouse down 0 0 option"),
+        out_drag = osc("mouse drag 1 4 option"),
+        out_up = osc("mouse up 1 4 option"),
+        line_down = osc("mouse down 2 2 option"),
+        line_drag = osc("mouse drag 2 5 option"),
+        line_up = osc("mouse up 2 5 option"),
+        prog_down = osc("mouse down 0 0 option"),
+        prog_drag = osc("mouse drag 0 4 option"),
+        prog_up = osc("mouse up 0 4 option"),
+        // The cursor ends the line at column 9: 5 characters left.
+        click_down = osc("mouse down 2 4 option"),
+        click_up = osc("mouse up 2 4 option"),
+        dump = osc("dump"),
+        quit = osc("quit"),
+    );
+    let (status, _) = decline(&dir, &script, true);
+    assert!(status.success(), "{status}");
+    let d = dumps(&dir);
+    assert_eq!(d.len(), 4, "{d:?}");
+    let selection = |x: &Value| x["selection"].as_str().map(str::to_owned);
+    // The dump shows the run of text between the corners term-core holds.
+    assert_eq!(selection(&d[0]).as_deref(), Some("hello world\nsecon"), "over output: {}", d[0]);
+    assert_eq!(selection(&d[1]).as_deref(), Some("echo"), "on the command line: {}", d[1]);
+    assert_eq!(selection(&d[2]).as_deref(), Some("hello"), "over a program: {}", d[2]);
+    let s = screen(&d[3]);
+    assert!(
+        s.starts_with(&format!("r={}|", "[D".repeat(5))),
+        "only the click moved the cursor: {s}"
+    );
+}
+
 /// A plain click on a URL or a path that exists, not dragged, opens its
 /// menu once the double-click time has passed (listed in `menus` under
 /// this control), with the whole of it selected.

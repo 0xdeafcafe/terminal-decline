@@ -1671,14 +1671,34 @@ impl WindowView {
             if let Some(env) = t.state.take_shell_env() {
                 p.completion.shell_env = Some(Arc::new(env));
             }
+            // Something read on the completion worker draws the pane again.
+            let waker = move || -> crate::complete::sources::Wake { Box::new(move || completion_ready(window_id, id)) };
             if win.config.highlight_command_line {
-                use crate::complete::sources;
                 let env = p.completion.shell_env.clone();
                 let cwd = t.state.cwd().map(str::to_string);
-                // A command looked up on the worker draws the pane again.
-                let waker = move || -> sources::Wake { Box::new(move || completion_ready(window_id, id)) };
-                let known = |name: &str| sources::command_known(name, env.as_deref()?, cwd.as_deref(), waker);
+                let known = |name: &str| crate::complete::sources::command_known(name, env.as_deref()?, cwd.as_deref(), waker);
                 crate::complete::ink::line_ink(&t.state, &known, &mut p.render.frame.snapshot_mut().ink);
+            }
+            // The completion list, in the focused pane only.
+            if win.config.completion && focused {
+                let c = &win.config;
+                let settings = crate::complete::Settings {
+                    delay: Duration::from_millis(c.completion_delay as u64),
+                    rows: c.completion_rows as usize,
+                    ghost: c.completion_ghost_text,
+                    files: c.completion_files,
+                    commands: c.completion_commands,
+                };
+                let drawn = p.completion.update(&t.state, &settings, Instant::now(), &waker);
+                let snap = p.render.frame.snapshot_mut();
+                (snap.popup, snap.ghost) = (drawn.popup, drawn.ghost);
+                if let Some(after) = drawn.wake_after {
+                    // When the pause will have lasted: draw again, to open it.
+                    let at = DispatchTime::NOW.time(after.as_nanos().min(i64::MAX as u128) as i64 + 1_000_000);
+                    let _ = DispatchQueue::main().after(at, move || completion_ready(window_id, id));
+                }
+            } else {
+                p.completion.close();
             }
             if let Some(f) = &mut p.find {
                 let snap = p.render.frame.snapshot_mut();

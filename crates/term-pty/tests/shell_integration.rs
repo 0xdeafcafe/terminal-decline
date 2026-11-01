@@ -442,6 +442,34 @@ fn zsh_reports_the_command_line_with_its_token() {
     assert!(ran_files(&home).contains("pre"), "the user's own pre-redraw widget ran");
 }
 
+/// A choice taken from the app's completion list (`ESC [ 7701 ~` and its
+/// payload) replaces the word in zsh, quoted by zsh, keeping the folder
+/// typed; a payload that doesn't fit the line is ignored.
+#[test]
+fn zsh_takes_a_choice_from_the_list() {
+    let home = TempDir::new("zsh-take");
+    zsh_files(&home.0, "");
+    let reports = Reports {
+        token: TOKEN.into(),
+        features: "highlight,list".into(),
+    };
+    let mut s = Session::start_with(ZSH, &home, &[], Some(reports));
+    s.wait_for("the first prompt", |s| s.count("\x1b]133;B\x07") >= 1);
+    let line = |s: &Session| parsed(s).state.line_report().map(|r| r.text.clone());
+    s.send("cat src/ma");
+    s.wait_for("the typed line", |s| line(s).as_deref() == Some("cat src/ma"));
+    s.send("\x1b[7701~4;4;macros/;\x07");
+    s.wait_for("the folder taken", |s| line(s).as_deref() == Some("cat src/macros/"));
+    // Ctrl+U clears the line; a name zsh must quote, with `;` encoded.
+    s.send("\x15echo my");
+    s.wait_for("the second line", |s| line(s).as_deref() == Some("echo my"));
+    s.send("\x1b[7701~5;0;my file%3Bx; \x07");
+    s.wait_for("the quoted name", |s| line(s).as_deref() == Some("echo 'my file;x' "));
+    // Past the line's end: nothing changes, and typing carries on.
+    s.send("\x1b[7701~99;0;zzz; \x07z");
+    s.wait_for("typing after it", |s| line(s).as_deref() == Some("echo 'my file;x' z"));
+}
+
 /// Without a token (another terminal, or nothing in the app wants the
 /// reports) zsh sends none.
 #[test]

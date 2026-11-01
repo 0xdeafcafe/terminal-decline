@@ -15,16 +15,18 @@ pub enum Section {
     Window,
     Pins,
     Advanced,
+    Completion,
 }
 
 impl Section {
-    pub const ALL: [Section; 6] = [
+    pub const ALL: [Section; 7] = [
         Section::Appearance,
         Section::Font,
         Section::Keys,
         Section::Window,
         Section::Pins,
         Section::Advanced,
+        Section::Completion,
     ];
 
     pub fn name(self) -> &'static str {
@@ -34,6 +36,7 @@ impl Section {
             Section::Keys => "Keys",
             Section::Window => "Window",
             Section::Pins => "Pins",
+            Section::Completion => "Completion",
             Section::Advanced => "Advanced",
         }
     }
@@ -527,21 +530,52 @@ pub const SETTINGS: &[Setting] = &[
     setting(
         "highlight_command_line",
         "Colour the command line",
-        Advanced,
+        Completion,
         Editor::Toggle,
-        "Colour flags, strings, variables and pipes as you type at zsh's prompt (needs shell integration; new tabs)",
+        "Colour commands, flags, strings, variables and pipes as you type at zsh's prompt (needs shell integration; new tabs)",
     ),
-    // Hidden until the list lands (docs/design/completion.md).
-    Setting {
-        hidden: true,
-        ..setting(
-            "completion",
-            "Completion",
-            Advanced,
-            Editor::Toggle,
-            "A list of files, commands and flags under the cursor as you type at the shell's prompt",
-        )
-    },
+    setting(
+        "completion",
+        "Completion list",
+        Completion,
+        Editor::Toggle,
+        "A list of files, folders and commands under the cursor after a pause in typing at zsh's prompt (new tabs)",
+    ),
+    setting(
+        "completion_delay",
+        "Pause before the list",
+        Completion,
+        integer(0.0, 2000.0, 50.0),
+        "How long typing pauses before the list opens, in milliseconds",
+    ),
+    setting(
+        "completion_rows",
+        "List rows",
+        Completion,
+        integer(3.0, 20.0, 1.0),
+        "Choices shown before the list scrolls",
+    ),
+    setting(
+        "completion_ghost_text",
+        "Grey text after the cursor",
+        Completion,
+        Editor::Toggle,
+        "The first choice's rest shown grey after the cursor; Right takes it",
+    ),
+    setting(
+        "completion_files",
+        "Files and folders",
+        Completion,
+        Editor::Toggle,
+        "Offer files and folders in the list",
+    ),
+    setting(
+        "completion_commands",
+        "Commands",
+        Completion,
+        Editor::Toggle,
+        "Offer commands, aliases, functions and builtins in the list",
+    ),
     new_windows(Setting {
         pin_only: true,
         ..unset(
@@ -777,6 +811,11 @@ mod tests {
                 "shell_integration",
                 "highlight_command_line",
                 "completion",
+                "completion_delay",
+                "completion_rows",
+                "completion_ghost_text",
+                "completion_files",
+                "completion_commands",
                 "title",
                 "images",
                 "image_memory",

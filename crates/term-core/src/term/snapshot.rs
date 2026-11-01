@@ -122,6 +122,35 @@ pub struct Ink {
     pub color: u8,
 }
 
+/// The completion list: a box with a border, one row per item, over the
+/// cells (they are hidden under it, not changed).
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct Popup {
+    /// View row and column of its top-left corner, border included.
+    pub row: u16,
+    pub col: u16,
+    /// Width in cells, border included.
+    pub width: u16,
+    pub items: Vec<PopupItem>,
+}
+
+/// A row of the completion list.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct PopupItem {
+    pub text: String,
+    /// Drawn dim at the right: what the choice is.
+    pub detail: String,
+    pub selected: bool,
+}
+
+/// Text drawn dim in blank cells from a view row and column.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct Ghost {
+    pub row: u16,
+    pub col: u16,
+    pub text: String,
+}
+
 /// The cursor, as the renderer draws it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct SnapCursor {
@@ -186,6 +215,11 @@ pub struct Snapshot {
     /// §5). Not taken from the terminal: the app puts them in after the
     /// snapshot, and each snapshot starts with none.
     pub ink: Vec<Ink>,
+    /// The completion list over the cells, and the first choice's rest
+    /// grey after the cursor (completion design §2); put in by the app
+    /// after the snapshot, as `ink`.
+    pub popup: Option<Popup>,
+    pub ghost: Option<Ghost>,
     /// kitty direct placements that reach into the view, ready images only
     /// (images.md §4.4). Empty until kitty graphics lands (I.2).
     pub placements: Vec<SnapPlacement>,
@@ -347,6 +381,8 @@ impl Terminal {
         out.highlights.clear();
         out.failed.clear();
         out.ink.clear();
+        out.popup = None;
+        out.ghost = None;
         out.placements.clear();
         out.virtual_placements.clear();
         // Images the pool evicted since the last command or snapshot are

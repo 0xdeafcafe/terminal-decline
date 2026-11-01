@@ -198,8 +198,10 @@ fn moving_and_sections() {
     // Title is a pin's setting only.
     assert!(!s.has("Title"));
     s.send(&mut app, RIGHT);
+    assert!(s.has("┬─ Completion ─") && s.has("Completion list"), "{}", s.text());
+    s.send(&mut app, RIGHT);
     assert!(s.has("┬─ Appearance ─"));
-    s.send(&mut app, LEFT);
+    s.send(&mut app, &LEFT.repeat(2));
     assert!(s.has("┬─ Advanced ─"));
     // Mouse: click "Keys" in the sections pane.
     s.send(&mut app, "\x1b[<0;5;5M\x1b[<0;5;5m");
@@ -530,7 +532,7 @@ fn small_screens_and_resizes() {
     let mut s = Screen::new(&mut app, 20, 5);
     let t = s.text();
     // One column: the section, its settings, the description, the keys.
-    assert_eq!(s.row(0), " Appearance 1/6", "{t}");
+    assert_eq!(s.row(0), " Appearance 1/7", "{t}");
     assert_eq!(s.row(1), " ▸ Appearan… system", "{t}");
     assert_eq!(s.row(2), "   Light th… none …", "{t}");
     assert_eq!(s.row(3), " Follow macOS, or …", "{t}");
@@ -539,11 +541,11 @@ fn small_screens_and_resizes() {
     s.send(&mut app, DOWN);
     assert!(s.row(2).contains("▸ Light"), "{}", s.text());
     s.send(&mut app, RIGHT);
-    assert_eq!(s.row(0), " Font 2/6", "{}", s.text());
+    assert_eq!(s.row(0), " Font 2/7", "{}", s.text());
     s.resize(&mut app, 80, 24);
     assert!(s.has("│ ▸ Font        │") && s.cursor_row().contains("▸ Family"), "{}", s.text());
     s.resize(&mut app, 50, 12);
-    assert!(s.row(0) == " Font 2/6" && s.cursor_row().contains("▸ Family"), "{}", s.text());
+    assert!(s.row(0) == " Font 2/7" && s.cursor_row().contains("▸ Family"), "{}", s.text());
     s.resize(&mut app, 12, 4);
     s.resize(&mut app, 11, 3);
     assert!(s.has("too small"));

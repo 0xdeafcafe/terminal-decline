@@ -18,8 +18,10 @@ use super::{Point, Terminal, percent_bytes};
 /// zle's keymap when the line was reported (`$KEYMAP`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Keymap {
-    /// `main`, `emacs` or `viins`: keys type text.
+    /// `main` or `emacs`: keys type text.
     Insert,
+    /// `viins`: keys type text; Esc goes to vi's command mode.
+    ViInsert,
     /// `vicmd`: keys are vi commands.
     ViCommand,
     /// Any other keymap (`isearch`, `menuselect`, a user's own).
@@ -115,7 +117,8 @@ impl Terminal {
             return;
         };
         let (keymap, too_long) = match *keymap {
-            b"main" | b"emacs" | b"viins" => (Keymap::Insert, false),
+            b"main" | b"emacs" => (Keymap::Insert, false),
+            b"viins" => (Keymap::ViInsert, false),
             b"vicmd" => (Keymap::ViCommand, false),
             b"long" => (Keymap::Other, true),
             _ => (Keymap::Other, false),

@@ -1226,3 +1226,77 @@ fn ink_paints_only_default_coloured_text() {
         assert_ne!(colour_of(&f, 'e'), Some(blue));
     }
 }
+
+/// The completion list (`Snapshot::popup`) draws a bordered box over the
+/// cells, hiding their glyphs there (by their pixels, so a wide one
+/// reaching in from the left is hidden too), with the selected item on the selection colour; the grey text
+/// after the cursor (`Snapshot::ghost`) draws in bright black.
+#[test]
+fn popup_covers_the_cells_under_it() {
+    use term_core::{Ghost, Popup, PopupItem};
+    let mut t = term(
+        20,
+        6,
+        "$ ls\r\nAAAAAAAAAAAAAAAAAAAA\r\nBBB漢BBBBBBBBBBBBBBB\r\nCCCCCCCCCCCCCCCCCCCC",
+    );
+    let theme = Theme::default();
+    let o = Opts::default();
+    let input = input(&theme, &o);
+    let mut f = Frame::default();
+    f.snapshot(&mut t.state, &input, 0);
+    let snap = f.snapshot_mut();
+    snap.popup = Some(Popup {
+        row: 1,
+        col: 2,
+        width: 12,
+        items: vec![
+            PopupItem {
+                text: "main.rs".into(),
+                detail: "file".into(),
+                selected: true,
+            },
+            PopupItem {
+                text: "macros/".into(),
+                detail: "folder".into(),
+                selected: false,
+            },
+        ],
+    });
+    snap.ghost = Some(Ghost {
+        row: 0,
+        col: 4,
+        text: "-la".into(),
+    });
+    assert!(f.build_snapshot(&input, &mut Fake));
+    let at = |row: i16, col: i16| -> Vec<char> {
+        f.glyphs
+            .iter()
+            .filter(|g| g.y / CH == row && g.x / CW == col)
+            .map(decode_cp)
+            .collect()
+    };
+    // The border and the items.
+    assert_eq!(at(1, 2), ['┌']);
+    assert_eq!(at(1, 13), ['┐']);
+    assert_eq!(at(4, 2), ['└']);
+    assert_eq!(at(2, 3), ['▸']);
+    assert_eq!(at(2, 4), ['m']);
+    assert_eq!(at(3, 2), ['│']);
+    // The cells' own glyphs under it are gone, beside it they stay.
+    assert_eq!(at(1, 5), ['─']);
+    assert_eq!(at(1, 1), ['A']);
+    assert_eq!(at(1, 14), ['A']);
+    // The wide 漢 under the box: hidden.
+    assert!(!f.glyphs.iter().any(|g| decode_cp(g) == '漢'));
+    // The ghost text, in bright black.
+    let ghost: Vec<_> = f.glyphs.iter().filter(|g| g.y / CH == 0 && g.x / CW >= 4).collect();
+    assert_eq!(ghost.iter().map(|g| decode_cp(g)).collect::<String>(), "-la");
+    assert!(ghost.iter().all(|g| g.color == theme.palette[8]));
+    // The selected item's row on the selection colour.
+    assert!(f.rects.iter().any(|r| r.color == theme.selection && r.y == 2 * CH && r.x == 3 * CW));
+    // Without the popup the rows are drawn whole again.
+    f.snapshot(&mut t.state, &input, 0);
+    assert!(f.build_snapshot(&input, &mut Fake));
+    assert!(f.glyphs.iter().any(|g| decode_cp(g) == '漢'));
+    assert_eq!(f.glyphs.iter().filter(|g| decode_cp(g) == 'A').count(), 20);
+}

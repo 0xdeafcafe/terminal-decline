@@ -148,9 +148,23 @@ left in the default colour is coloured, so a prompt theme or
 zsh-autosuggestions keeps its own colours; what is copied is unchanged.
 zsh tells the app the line it is editing with a sequence of its own
 (OSC 7701) carrying a token only that shell was given, so other output
-can't fake it. `highlight_command_line = false` (Settings > Advanced >
-Colour the command line) turns it off; new tabs only take it back on.
-bash and fish aren't coloured yet.
+can't fake it. Commands are green when they run something (an alias, function,
+builtin, a program on your PATH, an executable path) and red when they
+don't. `highlight_command_line = false` (Settings > Completion > Colour
+the command line) turns it off; new tabs only take it back on. bash and
+fish aren't coloured yet.
+
+## The completion list
+
+When you stop typing for a moment (150 ms, `completion_delay`), a list
+opens under the word you are typing: commands where a command goes,
+files and folders elsewhere, each with what it is on the right. Up and
+Down move in it, Tab puts the choice in place of the word (zsh quotes
+it), Right at the end of the line takes the grey text after the cursor,
+Esc closes it until you change the word. Enter, and every other key, go
+to the shell as always. It shows in the focused pane only, and never on
+an empty word. Settings > Completion turns it, or its parts, off; zsh
+only for now.
 
 ## Checking it works
 

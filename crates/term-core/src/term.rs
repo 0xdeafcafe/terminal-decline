@@ -33,7 +33,7 @@ mod watch;
 pub use graphics::HeadRead;
 pub use replies::DynamicColor;
 pub use search::SearchCount;
-pub use snapshot::{Highlight, HighlightKind, Ink, RowFlags, RowKey, ScreenId, SnapCursor, SnapRow, Snapshot};
+pub use snapshot::{Ghost, Highlight, HighlightKind, Ink, Popup, PopupItem, RowFlags, RowKey, ScreenId, SnapCursor, SnapRow, Snapshot};
 
 /// A style table holding more ids than this gives its memory back when
 /// the screen is cleared.

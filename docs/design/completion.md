@@ -723,3 +723,38 @@ that one frame.
 Not measured yet: the frame benchmark before and after, the latency at
 a zsh prompt, held while other agents' build-timing and frame benchmarks
 ran (load 60–180 all morning).
+
+### PR 4 (1 Nov 2026): the list, files and commands
+
+What landed:
+- `complete::sources`: the programs on the shell's PATH and folder
+  listings, read on one worker thread for the process, cached (checked
+  against the disk at most every 2 s, 64 folders, 10,000 entries a
+  folder), waking the pane that asked; the worker exits after a minute
+  with nothing asked. Commands in the colours are now green when they
+  run something, red when not, plain while being read.
+- `complete::list`: commands (aliases, functions, builtins, reserved
+  words, PATH) where a command goes, files and folders elsewhere,
+  matched by prefix (case first), folders first, one per name.
+- `complete::PaneState`: the list opens once the line has stayed the
+  same for `completion_delay` (one wake-up per pause), not on an empty
+  word, never on a word closed with Esc; it is placed under the cursor
+  (over it near the bottom) with its text under the word, scrolled to
+  the selected choice, in the focused pane only. Up/Down move, Tab takes,
+  Right at the line's end takes the grey text, Esc closes (and goes to
+  the shell in vi insert mode); every other key goes to the shell.
+- Taking a choice types `ESC [ 7701 ~ start;keep;name;suffix BEL`;
+  decline.zsh's `_decline_take` (bound only with a token and the `list`
+  feature) replaces the word, keeping the folder as typed and quoting
+  the name with `(q-)`.
+- term-render draws the box (`Snapshot::popup`) and the grey text
+  (`Snapshot::ghost`) last, hiding the cells' glyphs under the box by
+  their pixels.
+- Settings: a Completion section (after Advanced) with
+  `highlight_command_line`, `completion`, `completion_delay`,
+  `completion_rows`, `completion_ghost_text`, `completion_files` and
+  `completion_commands`; all on by default.
+
+Not yet: flags and subcommands from man pages (PR 5), Tab asking zsh
+(PR 6), history order, the `[keybind]` actions for the list's keys,
+bash and fish. The frame and latency benchmarks are still to run.

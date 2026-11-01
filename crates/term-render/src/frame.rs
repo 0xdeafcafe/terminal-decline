@@ -1,7 +1,9 @@
 //! Turns terminal state into GPU instances. No Metal here, so it can be
 //! tested and benchmarked on its own.
 
-use term_core::{Attrs, Cell, CellRef, ColorKind, Content, CursorShape, HighlightKind, RowFlags, StyleKey, Terminal, Underline, Width};
+use term_core::{
+    Attrs, Cell, CellRef, ColorKind, Content, CursorShape, Ghost, HighlightKind, Popup, RowFlags, StyleKey, Terminal, Underline, Width,
+};
 use term_font::{Features, Fonts, GlyphKey, Metrics, RunText, SPRITE_FONT, ShapedGlyph, SpriteId, Style as FontStyle};
 use unicode_width::UnicodeWidthChar;
 
@@ -1388,6 +1390,16 @@ impl Frame {
         if let Some((text, at)) = preedit {
             draw_preedit(tail, gtail, text, at, cols, input, source);
         }
+        // The completion list over everything, and the grey text after
+        // the cursor.
+        if let Some(g) = &snap.ghost {
+            draw_ghost(gtail, g, cols, input, source);
+        }
+        let lines = snap.lines as usize;
+        let boxed = snap
+            .popup
+            .as_ref()
+            .and_then(|p| draw_popup(tail, gtail, p, cols, lines, input, source));
         kept.tail = out.put(*tail == kept.tail_rects, Some(kept.tail), tail);
         std::mem::swap(tail, &mut kept.tail_rects);
         let rects_dirty = out.finish();
@@ -1406,7 +1418,10 @@ impl Frame {
             // The command line's colours on this row, if any.
             let ink = snap.ink.iter().filter(|i| i.row as usize == line);
             let inked = ink.clone().next().is_some();
-            if on.is_empty() && hidden.is_empty() && !inked {
+            // Pixels under the completion list on this row: glyphs reaching
+            // into them are hidden (a wide one from the left too).
+            let under = boxed.as_ref().filter(|(rows, _)| rows.contains(&line)).map(|(_, x)| x.clone());
+            if on.is_empty() && hidden.is_empty() && !inked && under.is_none() {
                 l.glyphs = out.put(same, p.map(|p| p.glyphs), &e.glyphs);
                 continue;
             }
@@ -1415,6 +1430,12 @@ impl Frame {
             for g in &e.glyphs {
                 let col = g.col();
                 if hidden.contains(&col) {
+                    continue;
+                }
+                if under
+                    .as_ref()
+                    .is_some_and(|x| g.x as i32 + g.w as i32 > x.start && (g.x as i32) < x.end)
+                {
                     continue;
                 }
                 let inked_as = || {
@@ -1636,6 +1657,145 @@ fn draw_preedit(
         }
         col += width;
     }
+}
+
+/// One glyph for `c` in the cell at view `row`, `col`, in `paint`.
+fn put_glyph(
+    out: &mut Vec<GlyphInstance>,
+    glyphs: &mut impl GlyphSource,
+    input: &FrameInput,
+    (row, col): (usize, usize),
+    c: char,
+    paint: Paint,
+) {
+    let m = input.metrics;
+    let Some(g) = glyphs.glyph(c as u32, FontStyle::Regular) else {
+        return;
+    };
+    let x = input.padding.0 as i32 + col as i32 * m.cell_width as i32;
+    let y = input.padding.1 as i32 + row as i32 * m.cell_height as i32;
+    out.push(GlyphInstance {
+        x: s16(x + g.left as i32),
+        y: s16(y + m.baseline as i32 - g.top as i32),
+        w: g.w,
+        h: g.h,
+        u: g.u,
+        v: g.v,
+        color: paint.rgba,
+        is_color: g.color as u32 | paint.tag << GlyphInstance::TAG_SHIFT,
+    });
+}
+
+/// `text` from view `row`, `col` up to column `end` (exclusive), in
+/// `paint`; cut short with `…` when it doesn't fit.
+fn put_text(
+    out: &mut Vec<GlyphInstance>,
+    glyphs: &mut impl GlyphSource,
+    input: &FrameInput,
+    (row, mut col): (usize, usize),
+    end: usize,
+    text: &str,
+    paint: Paint,
+) {
+    let total: usize = text.chars().map(char_cells).sum();
+    let fits = col + total <= end;
+    for c in text.chars() {
+        let w = char_cells(c);
+        if w == 0 {
+            continue;
+        }
+        if !fits && col + w >= end {
+            if col < end {
+                put_glyph(out, glyphs, input, (row, col), '…', paint);
+            }
+            return;
+        }
+        put_glyph(out, glyphs, input, (row, col), c, paint);
+        col += w;
+    }
+}
+
+/// The grey text after the cursor (completion design §2).
+fn draw_ghost(out: &mut Vec<GlyphInstance>, g: &Ghost, cols: usize, input: &FrameInput, glyphs: &mut impl GlyphSource) {
+    let paint = input.theme.paint(8);
+    put_text(out, glyphs, input, (g.row as usize, g.col as usize), cols, &g.text, paint);
+}
+
+/// The completion list (completion design §2): a box in the theme's
+/// background with a border in its bright black, the selected item on
+/// the selection colour with a `▸`, what each item is dim at its right.
+/// Kept inside `cols` and `lines`. Returns the view rows it covers and
+/// the pixels it spans across them, for hiding the cells' glyphs there.
+fn draw_popup(
+    rects: &mut Vec<RectInstance>,
+    out: &mut Vec<GlyphInstance>,
+    p: &Popup,
+    cols: usize,
+    lines: usize,
+    input: &FrameInput,
+    glyphs: &mut impl GlyphSource,
+) -> Option<(std::ops::Range<usize>, std::ops::Range<i32>)> {
+    let m = input.metrics;
+    let (cw, ch) = (m.cell_width as i32, m.cell_height as i32);
+    let (px, py) = (input.padding.0 as i32, input.padding.1 as i32);
+    let (col0, row0) = (p.col as usize, p.row as usize);
+    if col0 >= cols || row0 >= lines || p.items.is_empty() {
+        return None;
+    }
+    let w = (p.width as usize).min(cols - col0);
+    let h = (p.items.len() + 2).min(lines - row0);
+    if w < 6 || h < 3 {
+        return None;
+    }
+    let theme = input.theme;
+    let (fg, dim, bg, sel) = (
+        theme.paint(slot::FOREGROUND),
+        theme.paint(8),
+        theme.paint(slot::BACKGROUND),
+        theme.paint(slot::SELECTION),
+    );
+    let (x0, y0) = (px + col0 as i32 * cw, py + row0 as i32 * ch);
+    rects.push(RectInstance::painted(
+        s16(x0),
+        s16(y0),
+        (w as i32 * cw) as u16,
+        (h as i32 * ch) as u16,
+        bg,
+    ));
+    let (last, bottom) = (col0 + w - 1, row0 + h - 1);
+    for (row, (left, mid, right)) in [(row0, ('┌', '─', '┐')), (bottom, ('└', '─', '┘'))] {
+        put_glyph(out, glyphs, input, (row, col0), left, dim);
+        for c in col0 + 1..last {
+            put_glyph(out, glyphs, input, (row, c), mid, dim);
+        }
+        put_glyph(out, glyphs, input, (row, last), right, dim);
+    }
+    for (i, item) in p.items.iter().take(h - 2).enumerate() {
+        let row = row0 + 1 + i;
+        put_glyph(out, glyphs, input, (row, col0), '│', dim);
+        put_glyph(out, glyphs, input, (row, last), '│', dim);
+        if item.selected {
+            let y = py + row as i32 * ch;
+            rects.push(RectInstance::painted(
+                s16(x0 + cw),
+                s16(y),
+                ((w - 2) as i32 * cw) as u16,
+                ch as u16,
+                sel,
+            ));
+            put_glyph(out, glyphs, input, (row, col0 + 1), '▸', fg);
+        }
+        // `│▸text      detail │`: the detail ends a cell before the border.
+        let detail_w: usize = item.detail.chars().map(char_cells).sum();
+        let text_start = col0 + 2;
+        let detail_start = (last - 1).saturating_sub(detail_w).max(text_start);
+        let text_end = if detail_w > 0 { detail_start.saturating_sub(1) } else { last - 1 };
+        put_text(out, glyphs, input, (row, text_start), text_end.max(text_start), &item.text, fg);
+        if detail_w > 0 && detail_start > text_start + 1 {
+            put_text(out, glyphs, input, (row, detail_start), last - 1, &item.detail, dim);
+        }
+    }
+    Some((row0..row0 + h, x0..x0 + w as i32 * cw))
 }
 
 /// `cells` up to and with its last cell that draws something if the row

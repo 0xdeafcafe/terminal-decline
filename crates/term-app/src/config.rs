@@ -360,9 +360,23 @@ pub struct Config {
     /// and redirects, reserved words. A zsh started with the integration
     /// reports its line for it; new shells only (§10).
     pub highlight_command_line: bool,
-    /// The completion list at the prompt (docs/design/completion.md §9).
-    /// Hidden and off until the list lands.
+    /// The completion list at zsh's prompt (docs/design/completion.md
+    /// §9): files, folders and commands under the cursor after a pause in
+    /// typing. A zsh started with the integration reports its line for
+    /// it; new shells only (§10).
     pub completion: bool,
+    /// How long typing pauses before the list opens, in milliseconds.
+    #[serde(deserialize_with = "completion_delay")]
+    pub completion_delay: u32,
+    /// Choices shown before the list scrolls.
+    #[serde(deserialize_with = "completion_rows")]
+    pub completion_rows: u32,
+    /// The first choice's rest grey after the cursor; Right takes it.
+    pub completion_ghost_text: bool,
+    /// Files and folders in the list.
+    pub completion_files: bool,
+    /// Commands in the list.
+    pub completion_commands: bool,
     /// Window title for a pin; also shown in the Window menu.
     pub title: Option<String>,
     /// Kitty graphics, iTerm2 images and Sixel (docs/design/images.md).
@@ -493,7 +507,12 @@ impl Default for Config {
             env: BTreeMap::new(),
             shell_integration: true,
             highlight_command_line: true,
-            completion: false,
+            completion: true,
+            completion_delay: 150,
+            completion_rows: 8,
+            completion_ghost_text: true,
+            completion_files: true,
+            completion_commands: true,
             title: None,
             images: true,
             image_memory: 0,
@@ -557,6 +576,27 @@ fn transition_ms<'de, D: Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
     match u32::try_from(v) {
         Ok(v) if v <= THEME_TRANSITION_MS_MAX => Ok(v),
         _ => Err(serde::de::Error::custom(format!("{v} is not 0–{THEME_TRANSITION_MS_MAX}"))),
+    }
+}
+
+/// The longest `completion_delay`, in milliseconds.
+pub const COMPLETION_DELAY_MAX: u32 = 2000;
+
+fn completion_delay<'de, D: Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
+    let v = i64::deserialize(d)?;
+    match u32::try_from(v) {
+        Ok(v) if v <= COMPLETION_DELAY_MAX => Ok(v),
+        _ => Err(serde::de::Error::custom(format!(
+            "{v} is not a number of milliseconds from 0 to {COMPLETION_DELAY_MAX}"
+        ))),
+    }
+}
+
+fn completion_rows<'de, D: Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
+    let v = i64::deserialize(d)?;
+    match u32::try_from(v) {
+        Ok(v @ 3..=20) => Ok(v),
+        _ => Err(serde::de::Error::custom(format!("{v} is not a number of rows from 3 to 20"))),
     }
 }
 

@@ -153,7 +153,40 @@ if [[ -n ${_decline_token-} && -n ${_decline_features-} && -n $TTY ]] \
     print -rnu $_decline_fd -- $'\e]7701;env;'"$_decline_token$out"$'\a'
   }
 
+  # A choice taken from the app's completion list: the app types
+  #   ESC [ 7701 ~ <start>;<keep>;<name>;<suffix> BEL
+  # and this puts <name>, quoted by zsh, in place of the word that starts
+  # at byte <start>, keeping its first <keep> bytes as typed (`src/`,
+  # `~/`), then <suffix> (a space after a file). The name is
+  # percent-encoded like the reports. Bound only while the app gave a
+  # token, so another terminal never sends it.
+  _decline_take() {
+    emulate -L zsh -o extendedglob +o multibyte
+    local c payload=
+    while read -rk 1 c && [[ $c != $'\a' ]]; do
+      payload+=$c
+      (( ${#payload} > 4096 )) && return 0
+    done
+    local -a f=("${(@s:;:)payload}")
+    (( ${#f} == 4 )) || return 0
+    local start=$f[1] keep=$f[2] suffix=$f[4]
+    [[ $start == <-> && $keep == <-> && ( -z $suffix || $suffix == ' ' ) ]] || return 0
+    (( start + keep <= ${#LBUFFER} )) || return 0
+    local name=${f[3]//(#b)%([[:xdigit:]](#c2))/${(#):-0x$match[1]}}
+    local head=${LBUFFER[1,start+keep]}
+    # Quoted as text, not bytes.
+    setopt multibyte
+    LBUFFER=$head${(q-)name}$suffix
+  }
+
   zle -N _decline_line
+  if [[ ,$_decline_features, == *,list,* ]]; then
+    zle -N _decline_take
+    for _decline_km in main emacs viins; do
+      bindkey -M $_decline_km $'\e[7701~' _decline_take
+    done
+    unset _decline_km
+  fi
   autoload -Uz add-zle-hook-widget
   # line-init too: a new line (the prompt's, or a continuation's) is
   # drawn before any redraw hook runs.

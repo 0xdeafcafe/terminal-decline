@@ -744,6 +744,30 @@ impl PaneView {
             }
             None => {}
         }
+        // The completion list's own keys while it is open
+        // (docs/design/completion.md §9); anything else goes on.
+        if !modes.composing {
+            use crate::complete::KeyResult;
+            use crate::keys::flags::{COMMAND, CONTROL, OPTION, SHIFT};
+            let plain = input.flags & (SHIFT | CONTROL | OPTION | COMMAND) == 0;
+            let result = self.with(|_, p| {
+                let r = p.completion.key(input.keycode, plain);
+                if r != KeyResult::Pass {
+                    p.session.mark_dirty();
+                }
+                r
+            });
+            if result.as_ref().is_some_and(|r| *r != KeyResult::Pass)
+                && let Some(w) = self.window_view()
+            {
+                w.unpause();
+            }
+            match result {
+                Some(KeyResult::Redraw) => return,
+                Some(KeyResult::Send(bytes)) => return self.send_input(bytes),
+                _ => {}
+            }
+        }
         let action = crate::keys::translate(&input, modes);
         if input.flags & crate::keys::flags::COMMAND == 0 {
             NSCursor::setHiddenUntilMouseMoves(true);

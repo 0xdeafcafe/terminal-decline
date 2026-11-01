@@ -40,6 +40,11 @@ impl Commands {
         self.set.contains(name)
     }
 
+    /// From names in any order, duplicates allowed.
+    pub fn from_names(names: Vec<String>) -> Commands {
+        Commands::new(names)
+    }
+
     fn new(mut names: Vec<String>) -> Commands {
         names.sort_unstable();
         names.dedup();

@@ -172,6 +172,21 @@ fn headless_sessions_end_to_end() {
     not_an_app(server);
 }
 
+/// `wait-for --command` until the command that finishes is `command`.
+/// Commands typed before it may finish after a `wait-for` starts (under
+/// load, `unset HISTFILE` did, and was taken for the next command): each
+/// is skipped by its text, which the marks carry. `command` sleeps first,
+/// so it can't finish before the first `wait-for` starts.
+fn finished(env: &Env, command: &str) -> Value {
+    for _ in 0..4 {
+        let w = env.ok(&["wait-for", "sh", "--command", "--timeout", "10000"]);
+        if w["command"] == command {
+            return w;
+        }
+    }
+    panic!("{command:?} never finished");
+}
+
 /// `wait-for --command`: the next command a shell finishes, with its
 /// status and duration from the OSC 133 marks.
 #[test]
@@ -196,17 +211,15 @@ fn wait_for_the_next_command_to_finish() {
     // No history: zsh would save it in the checkout the integration is
     // read from.
     env.ok(&["send", "sh", "--text", "unset HISTFILE\n"]);
-    env.ok(&["wait-for", "sh", "--idle", "700", "--timeout", "15000"]);
     env.ok(&["send", "sh", "--text", "sleep 1; (exit 3)\n"]);
-    let w = env.ok(&["wait-for", "sh", "--command", "--timeout", "10000"]);
+    let w = finished(&env, "sleep 1; (exit 3)");
     assert_eq!((w["matched"].clone(), w["reason"].clone()), (true.into(), "command".into()), "{w}");
     assert_eq!(w["status"], 3, "{w}");
     let ms = w["duration_ms"].as_u64().unwrap();
     assert!((800..8000).contains(&ms), "{w}");
-    assert_eq!(w["command"], "sleep 1; (exit 3)", "{w}");
     // The next one, a success.
     env.ok(&["send", "sh", "--text", "sleep 1; true\n"]);
-    let w = env.ok(&["wait-for", "sh", "--command", "--timeout", "10000"]);
+    let w = finished(&env, "sleep 1; true");
     assert_eq!(w["status"], 0, "{w}");
     // Nothing finishes: a timeout (3).
     let (code, _) = env.run(&["wait-for", "sh", "--command", "--timeout", "300"]);

@@ -1672,12 +1672,25 @@ rasterising new glyphs.
     early frame of the flood in both, not spent on glyphs; idle
     wakeups after 0; footprint 42–45 against 42–44 MB. The ASCII path
     is unchanged (renderer bench `prepare` 60.1 against 59.8 µs).
+- **Shaping on the glyph thread.** The longest draw left (13–16 ms on
+  glyphs-30k) was shaping a few clusters (letters with combining
+  marks, emoji with skin tones) on the main thread. A cluster or a
+  ligature stretch not shaped before now goes to the thread like a
+  new glyph (`Want::Shape`): it shapes the run with fonts sharing the
+  registry (`Fonts::share`), keeps the result where the main thread's
+  fonts find it (`Fonts::shape_kept`) and sends the glyphs' bitmaps
+  back; the cluster cell draws empty and a stretch's cells as their
+  characters until then. Longest draw 2.4–8.4 ms (the 8.4 ms one in
+  presenting), total 10–19 ms against 30–38 ms (load 11–18).
+- **Bookkeeping.** A pane dropped while waiting takes its wants with
+  it; a complete build drops only bitmaps no other pane waits for.
 - **Not measured:** key latency under the flood (the latency harness
-  opens windows in front). Left: shaping clusters (emoji sequences,
-  combining marks) and ligature runs on the glyph thread, which
-  still happens on the main thread for rows not shaped before; the
-  upload's wait for the GPU (`Atlas::insert` waits for frames in
-  flight before `replaceRegion`).
+  opens windows in front). Left: the upload's wait for the GPU
+  (`Atlas::insert` waits for frames in flight before `replaceRegion`).
+  Staging glyphs and copying them in with a blit removed the wait but,
+  in background windows where the GPU is idle when glyphs come (the
+  wait was 0.3 ms a flood), cost more in presenting than it saved; it
+  needs a cheaper flush and a measurement with frames in flight.
 
 ### 9.3 The renderer's row cache (R.2)
 

@@ -31,10 +31,10 @@ use objc2_metal::{
 };
 use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
 use term_core::Terminal;
-use term_font::{FontConfig, Fonts, GlyphKey, RasterGlyph, Style};
+use term_font::{Features, FontConfig, Fonts, GlyphKey, RasterGlyph, RunText, ShapedGlyph, Style};
 
 use crate::frame::{Frame, FrameInput, GlyphInstance, GlyphSlot, GlyphSource, RectInstance, Rgba};
-use crate::glyph_thread::{GlyphThread, GlyphWaker, Want};
+use crate::glyph_thread::{GlyphThread, GlyphWaker, Run, Want};
 use crate::images::ImageInstance;
 use crate::packer::{NoRoom, ShelfPacker};
 use crate::pixels::{MetalPixels, PixelAlloc};
@@ -510,6 +510,16 @@ impl GlyphCache {
             if f.skipped {
                 continue;
             }
+            for (key, glyph) in f.shaped {
+                match glyph {
+                    _ if by_key.contains_key(&(id, key)) => {}
+                    None => {
+                        by_key.insert((id, key), None);
+                    }
+                    Some(_) if !thread.is_wanted(&f.want) => {}
+                    Some(g) => thread.keep(key, g, f.want.clone()),
+                }
+            }
             match (f.key, f.glyph) {
                 (None, _) => {
                     if let Want::Char(cp, style) = f.want {
@@ -521,22 +531,35 @@ impl GlyphCache {
                     by_key.insert((id, key), None);
                 }
                 // No pane wants it any more (its rows scrolled away).
-                (Some(_), Some(_)) if !thread.is_wanted(f.want) => {}
-                (Some(key), Some(g)) => thread.keep(key, g),
+                (Some(_), Some(_)) if !thread.is_wanted(&f.want) => {}
+                (Some(key), Some(g)) => thread.keep(key, g, f.want),
             }
         }
     }
 
     /// A build of font set `id` drew every glyph: if nothing else is on its
-    /// way, bitmaps the glyph thread sent back that no build drew (rows
-    /// scrolled away first) go now rather than wait out their time.
-    /// Another pane waiting for some asks again.
+    /// way, bitmaps the glyph thread sent back that no build drew and no
+    /// pane waits for (rows scrolled away first) go now rather than wait
+    /// out their time.
     fn settle(&mut self, id: FontsId) {
         if let Some((_, chars)) = self.by_char.iter_mut().find(|(f, _)| *f == id)
             && let Some(t) = &mut chars.thread
             && !t.busy()
         {
-            t.drop_ready();
+            t.drop_unwanted();
+        }
+    }
+
+    /// A pane of font set `id` whose last build went without `wanted` is
+    /// gone.
+    fn forget_wants(&mut self, id: FontsId, wanted: &[Want]) {
+        if let Some((_, chars)) = self.by_char.iter_mut().find(|(f, _)| *f == id)
+            && let Some(t) = &mut chars.thread
+        {
+            t.retarget(wanted, &[]);
+            if !t.busy() {
+                t.drop_unwanted();
+            }
         }
     }
 
@@ -751,7 +774,7 @@ impl PaneGlyphs<'_> {
                     return slot;
                 }
                 // Found by the thread, its bitmap still on the way.
-                let asked = self.chars.thread.as_ref().is_some_and(|t| t.is_pending(Want::Char(cp, style)));
+                let asked = self.chars.thread.as_ref().is_some_and(|t| t.is_pending(&Want::Char(cp, style)));
                 self.ask(if asked { Want::Char(cp, style) } else { Want::Key(key) });
                 None
             }
@@ -768,7 +791,7 @@ impl PaneGlyphs<'_> {
     /// for the build again after the texture grows).
     fn sent_back(&mut self, key: GlyphKey) -> Option<Option<GlyphSlot>> {
         let thread = self.chars.thread.as_mut()?;
-        let g = thread.ready(key)?;
+        let (g, want) = thread.ready(key)?;
         match upload(self.mask, self.color, self.in_flight, &g) {
             Ok(slot) => {
                 self.by_key.insert((self.id, key), Some(slot));
@@ -779,7 +802,7 @@ impl PaneGlyphs<'_> {
                 Some(None)
             }
             Err(NoRoom::Full) => {
-                thread.keep(key, g);
+                thread.keep(key, g, want);
                 Some(None)
             }
         }
@@ -789,12 +812,12 @@ impl PaneGlyphs<'_> {
     /// without it.
     fn ask(&mut self, want: Want) {
         self.budget.deferred = true;
-        self.budget.wanted.push(want);
+        self.budget.wanted.push(want.clone());
         let Some(waker) = &self.budget.waker else { return };
         let fonts = self.fonts;
         self.chars
             .thread
-            .get_or_insert_with(|| GlyphThread::spawn(fonts.finder(), waker.clone()))
+            .get_or_insert_with(|| GlyphThread::spawn(fonts.share(), waker.clone()))
             .ask(want);
     }
 }
@@ -868,6 +891,25 @@ impl GlyphSource for PaneGlyphs<'_> {
 
     fn fonts_key(&self) -> u64 {
         self.id.0 as u64 + 1
+    }
+
+    /// With the glyph thread on, a run not shaped before is shaped there
+    /// (Core Text's CTLine, and finding fallback fonts, can take
+    /// milliseconds): asked for once, and drawn without for now.
+    fn shape(&mut self, run: &RunText, face: Style, features: Features, out: &mut Vec<ShapedGlyph>) -> bool {
+        if self.budget.waker.is_none() {
+            self.fonts.shape(run, face, features, out);
+            return true;
+        }
+        if self.fonts.shape_kept(run, face, features, out) {
+            return true;
+        }
+        self.ask(Want::Shape(Arc::new(Run {
+            text: run.clone(),
+            face,
+            features,
+        })));
+        false
     }
 }
 
@@ -973,6 +1015,28 @@ impl PaneBuffers {
             self.held[k].1 = version;
         }
         (rects, glyph_buf)
+    }
+}
+
+/// A pane dropped while waiting for glyphs no longer wants them: the
+/// glyph thread skips them, and their bitmaps go, unless another pane
+/// waits for them too.
+impl Drop for PaneRender {
+    fn drop(&mut self) {
+        let (Some(id), wanted) = (self.wanted.0, std::mem::take(&mut self.wanted.1)) else {
+            return;
+        };
+        if wanted.is_empty() {
+            return;
+        }
+        let _ = SHARED.try_with(|weak| {
+            let Some(shared) = weak.try_borrow().ok().and_then(|w| w.upgrade()) else {
+                return;
+            };
+            if let Ok(mut cache) = shared.glyphs.try_borrow_mut() {
+                cache.forget_wants(id, &wanted);
+            }
+        });
     }
 }
 
@@ -1723,12 +1787,27 @@ impl Renderer {
     /// Find and rasterise glyphs not drawn before on the font set's glyph
     /// thread (roadmap R.1), which calls `waker` when some are ready: the
     /// app then builds again the panes drawn without them
-    /// ([`PaneRender::glyphs_deferred`]). Printable ASCII, sprites and
-    /// glyphs found before (also in another style or window) stay on this
-    /// thread. `None` (the default): every glyph is found here, within the
+    /// ([`PaneRender::glyphs_deferred`]). Clusters and ligature runs not
+    /// shaped before are shaped there too. Printable ASCII, sprites,
+    /// glyphs found before (also in another style or window) and runs
+    /// shaped before stay on this thread. `None` (the default): every
+    /// glyph is found and every run shaped here, glyphs within the
     /// [budget](Self::set_glyph_budget).
     pub fn set_glyph_waker(&mut self, waker: Option<GlyphWaker>) {
         self.glyph_rules.waker = waker;
+    }
+
+    /// How many glyphs some pane's last build of this window's fonts went
+    /// without. Test aid.
+    #[doc(hidden)]
+    pub fn glyphs_wanted(&self) -> usize {
+        let cache = self.shared.glyphs.borrow();
+        cache
+            .by_char
+            .iter()
+            .find(|(f, _)| *f == self.fonts_id)
+            .and_then(|(_, c)| c.thread.as_ref())
+            .map_or(0, |t| t.wanted_len())
     }
 
     /// Whether the glyph thread of this window's fonts has glyphs asked

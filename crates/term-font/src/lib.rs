@@ -98,6 +98,9 @@ struct Core {
     /// The regular face's advance in pixels, which [`GlyphKey::SCALED`]
     /// glyphs are stretched from to the cell width.
     advance: f64,
+    /// Runs shaped by [`Fonts::shape_and_keep`] (on the glyph thread), for
+    /// [`Fonts::shape_kept`] (on the main thread).
+    kept_runs: Mutex<shape::RunCache>,
 }
 
 // Core Text fonts and colour spaces are immutable and documented as
@@ -242,6 +245,7 @@ impl Fonts {
                 fallback_ids,
                 rgb: CGColorSpace::new_device_rgb().expect("rgb colour space"),
                 advance,
+                kept_runs: Mutex::new(shape::RunCache::default()),
             }),
             clusters: RefCell::new(shape::ClusterCache::new(shape::ClusterCache::CAP)),
             metrics,
@@ -517,6 +521,26 @@ impl Fonts {
     /// `Some(None)` when no font has it.
     pub fn cached_glyph_key(&self, ch: char, style: Style) -> Option<Option<GlyphKey>> {
         self.core.cached_glyph_key(ch, style)
+    }
+
+    /// Fonts for another thread (roadmap R.1) that are these fonts: the
+    /// same faces, features and registry (so the same font ids and lookup
+    /// cache), and the same kept runs ([`Fonts::shape_and_keep`]), with
+    /// their own shaped-cluster cache and buffers.
+    pub fn share(&self) -> Fonts {
+        Fonts {
+            core: self.core.clone(),
+            clusters: RefCell::new(shape::ClusterCache::new(shape::ClusterCache::CAP)),
+            metrics: self.metrics,
+            missing: self.missing.clone(),
+            face_ids: self.face_ids,
+            runs: self.runs,
+            ligating: self.ligating.clone(),
+            allow_runs: self.allow_runs,
+            line_attrs: self.line_attrs.clone(),
+            scratch: RefCell::new(shape::Scratch::default()),
+            scaled: RefCell::new(HashMap::new()),
+        }
     }
 
     /// The part of these fonts that finds and rasterises glyphs, for

@@ -785,6 +785,42 @@ fn a_complete_build_keeps_what_another_pane_waits_for() {
     assert!(!b.glyphs_deferred(), "the second pane's glyphs were kept for it");
 }
 
+/// With the glyph thread on and builds finding glyphs themselves first (a
+/// scroll frame), new glyphs within the budget are drawn by the first
+/// build, as without the thread; past it (a budget of nothing: only the
+/// first new glyph), the rest go to the thread.
+#[test]
+fn scroll_frames_find_new_glyphs_first_within_the_budget() {
+    if !have_gpu() {
+        return;
+    }
+    let theme = theme();
+    let text = "漢字😀αβ";
+    let mut r = Renderer::new(Fonts::new("Menlo", 24.0));
+    let mut whole = Renderer::new(Fonts::new("Menlo", 24.0));
+    let m = r.metrics();
+    let size = (8 * m.cell_width as usize, m.cell_height as usize);
+    r.set_glyph_waker(Some(std::sync::Arc::new(|| {})));
+    r.set_glyph_sync_first(true);
+    r.set_glyph_budget(Some(std::time::Duration::from_secs(5)));
+    let (pane, _t) = built(&mut r, &theme, 8, 1, text);
+    assert!(!pane.glyphs_deferred(), "all found within the budget");
+    let (all, _ta) = built(&mut whole, &theme, 8, 1, text);
+    assert!(
+        alone(&mut r, &pane, size) == alone(&mut whole, &all, size),
+        "every glyph drawn at once"
+    );
+    // Past the budget, they go to the glyph thread.
+    r.set_glyph_budget(Some(std::time::Duration::ZERO));
+    let (later, _tl) = built(&mut r, &theme, 8, 1, "片仮名平仮名");
+    assert!(later.glyphs_deferred(), "the rest left for the thread");
+    // Off again: new glyphs all go to the thread.
+    r.set_glyph_sync_first(false);
+    r.set_glyph_budget(Some(std::time::Duration::from_secs(5)));
+    let (off, _to) = built(&mut r, &theme, 8, 1, "語句");
+    assert!(off.glyphs_deferred(), "to the glyph thread");
+}
+
 /// Glyphs from the glyph thread that find no room in a texture make it
 /// grow, as building does, and are all drawn.
 #[test]

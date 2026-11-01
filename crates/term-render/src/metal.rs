@@ -351,6 +351,10 @@ struct GlyphRules {
     /// Set: they are found and rasterised on the font set's glyph thread
     /// instead, which calls this when they are ready.
     waker: Option<GlyphWaker>,
+    /// With the glyph thread: a build first finds them on this thread
+    /// within the budget, the rest on the glyph thread (scroll frames,
+    /// whose rows coming in would show empty cells for a frame or two).
+    sync_first: bool,
 }
 
 /// The process's glyph textures: one coverage (R8) and one colour (BGRA)
@@ -397,8 +401,10 @@ struct Budget {
     /// `None`: no limit (tests, and anything that isn't a window's frame).
     limit: Option<Duration>,
     /// Set: new glyphs other than sprites go to the glyph thread instead,
-    /// and the limit isn't used.
+    /// and the limit isn't used, unless `sync_first`: then those within
+    /// the limit are found here first.
     waker: Option<GlyphWaker>,
+    sync_first: bool,
     /// Set by the first new glyph.
     deadline: Option<Instant>,
     /// A glyph was left for a later frame.
@@ -415,6 +421,7 @@ impl Budget {
         *self = Budget {
             limit: rules.budget,
             waker: rules.waker.clone(),
+            sync_first: rules.sync_first && rules.budget.is_some(),
             ..Budget::default()
         };
     }
@@ -911,9 +918,10 @@ impl GlyphSource for PaneGlyphs<'_> {
             return *slot;
         }
         if self.budget.waker.is_some() {
-            return self.glyph_later(cp, style);
-        }
-        if self.budget.spent() {
+            if !self.budget.sync_first || self.budget.spent() {
+                return self.glyph_later(cp, style);
+            }
+        } else if self.budget.spent() {
             return None;
         }
         let slot = self.lookup(cp, style)?;
@@ -1917,6 +1925,15 @@ impl Renderer {
     /// ([`PaneRender::glyphs_deferred`]); `None` (the default): no limit.
     pub fn set_glyph_budget(&mut self, limit: Option<Duration>) {
         self.glyph_rules.budget = limit;
+    }
+
+    /// With the [glyph thread](Self::set_glyph_waker) on: let builds find
+    /// new glyphs on this thread first, within the
+    /// [budget](Self::set_glyph_budget), and leave only the rest to the
+    /// glyph thread. For frames of a view being scrolled, whose rows coming
+    /// in would otherwise show empty cells until the thread has them.
+    pub fn set_glyph_sync_first(&mut self, on: bool) {
+        self.glyph_rules.sync_first = on;
     }
 
     /// Find and rasterise glyphs not drawn before on the font set's glyph

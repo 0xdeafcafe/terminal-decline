@@ -94,5 +94,52 @@ fn bench(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench);
+/// Past command lines, the marks between commands and plain output
+/// coloured (docs/design/command-marks.md), worked out after the
+/// snapshot of a 120 × 40 view of eight commands with output: when
+/// nothing changed (an idle frame), after a change, and from cold (new
+/// caches).
+fn marks(c: &mut Criterion) {
+    use term_complete::marks::{Marks, Settings};
+    let mut t = term_core::Term::new(120, 40, 1000, term_core::ImagePool::process());
+    for i in 0..8 {
+        let cmd = format!("git log --oneline -n 3 \"$HOME\" | grep -v x{i}");
+        t.advance(format!("\x1b]133;A\x07~/src \x1b]133;B\x07{cmd}\r\n").as_bytes());
+        t.state.set_clock(i * 1000);
+        let enc = cmd.replace('%', "%25").replace(';', "%3B").replace(' ', "%20");
+        t.advance(format!("\x1b]133;C;cmdline_url={enc}\x07").as_bytes());
+        t.advance(b"3f2a9c1 fix: error when 12% done -> https://example.com/a\r\n");
+        t.advance(b"\x1b[33mab12cd3\x1b[0m ok 4.5ms warning: deprecated\r\n");
+        t.advance(b"plain words and nothing more to see here at all\r\n");
+        t.state.set_clock(i * 1000 + 1500);
+        t.advance(format!("\x1b]133;D;{}\x07", i % 2).as_bytes());
+    }
+    t.advance(b"\x1b]133;A\x07~/src \x1b]133;B\x07");
+    let known = |name: &str| Some(name == "git");
+    for (name, colour_output) in [("marks", false), ("marks with output", true)] {
+        let s = Settings {
+            past_commands: true,
+            command_marks: true,
+            colour_output,
+        };
+        let mut snap = term_core::Snapshot::default();
+        let mut m = Marks::default();
+        let mut frame = |t: &term_core::Term, m: &mut Marks| {
+            snap.ink.clear();
+            snap.separators.clear();
+            snap.command_marks.clear();
+            m.update(&t.state, s, &known, &mut snap);
+        };
+        c.bench_function(&format!("{name} idle"), |b| b.iter(|| frame(&t, &mut m)));
+        c.bench_function(&format!("{name} changed"), |b| {
+            b.iter(|| {
+                t.advance(b" \x08");
+                frame(&t, &mut m);
+            })
+        });
+        c.bench_function(&format!("{name} cold"), |b| b.iter(|| frame(&t, &mut Marks::default())));
+    }
+}
+
+criterion_group!(benches, bench, marks);
 criterion_main!(benches);

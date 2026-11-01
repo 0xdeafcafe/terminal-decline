@@ -17,6 +17,8 @@ pub mod ink;
 pub mod lex;
 pub mod list;
 pub mod man;
+pub mod marks;
+pub mod output;
 pub mod sources;
 
 use list::{Listings, Offer, What};

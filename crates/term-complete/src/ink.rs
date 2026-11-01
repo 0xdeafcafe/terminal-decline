@@ -58,21 +58,42 @@ pub fn line_ink(t: &Terminal, known: &dyn Fn(&str) -> Option<bool>, out: &mut Ve
     if row >= t.lines() {
         return;
     }
-    let placed = place(t, &report.text, row, report.at.col);
-    if placed.is_empty() {
-        return;
-    }
     let line = lex::read(&report.text, report.cursor);
+    text_ink(t, &report.text, &line, (row, report.at.col), known, out);
+}
+
+/// Colour `text`, read as `line`, in the cells from view row and column
+/// `at` where it is drawn: by kind, commands by `known`, only over plain
+/// cells, up to the first cell that doesn't match. Also used for
+/// command lines already run (docs/design/command-marks.md). Returns
+/// whether a command was coloured plain because `known` didn't know yet.
+pub fn text_ink(
+    t: &Terminal,
+    text: &str,
+    line: &lex::Line,
+    at: (usize, usize),
+    known: &dyn Fn(&str) -> Option<bool>,
+    out: &mut Vec<Ink>,
+) -> bool {
+    let placed = place(t, text, at.0, at.1);
+    if placed.is_empty() {
+        return false;
+    }
     // Only the commands on the screen are looked up.
     let shown = placed
         .last()
-        .map_or(0, |p| p.byte + report.text[p.byte..].chars().next().map_or(1, char::len_utf8));
+        .map_or(0, |p| p.byte + text[p.byte..].chars().next().map_or(1, char::len_utf8));
+    let unknown = std::cell::Cell::new(false);
     let command_color = |at: usize| {
         let w = line
             .words
             .iter()
             .find(|w| w.role == lex::Role::Command && w.range.contains(&at) && w.range.end <= shown && !w.expands)?;
-        Some(if known(&w.text)? { 2 } else { 1 })
+        let Some(k) = known(&w.text) else {
+            unknown.set(true);
+            return None;
+        };
+        Some(if k { 2 } else { 1 })
     };
     let mut p = 0;
     for span in &line.spans {
@@ -97,6 +118,7 @@ pub fn line_ink(t: &Terminal, known: &dyn Fn(&str) -> Option<bool>, out: &mut Ve
             }
         }
     }
+    unknown.get()
 }
 
 /// Where each character of `text` is drawn, from view row `row`, column

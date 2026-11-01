@@ -389,6 +389,13 @@ define_class!(
             crate::update::dogfood::update_now();
         }
 
+        /// Terminal Decline > Update Now (Cmd+U), as the welcome line
+        /// says: whichever update waits ([`crate::welcome::update_now`]).
+        #[unsafe(method(updateNow:))]
+        fn update_now_item(&self, _sender: Option<&AnyObject>) {
+            crate::welcome::update_now();
+        }
+
         /// Terminal Decline > Restart to Update (a dogfood build waiting
         /// to take over).
         #[unsafe(method(restartToUpdate:))]
@@ -429,6 +436,9 @@ define_class!(
         fn validate_menu_item(&self, item: &NSMenuItem) -> bool {
             if item.action() == Some(sel!(restartToUpdate:)) {
                 return self.ivars().new_build.borrow().pending.into();
+            }
+            if item.action() == Some(sel!(updateNow:)) {
+                return crate::welcome::pending().is_some().into();
             }
             if item.action() == Some(sel!(toggleSecureKeyboardEntry:)) {
                 let on = self.ivars().secure.borrow().wanted();
@@ -925,6 +935,10 @@ impl AppDelegate {
     /// the same panes, and type the command each pane was running at its
     /// shell's prompt.
     fn restore(&self, saved: Vec<SavedWindow>) {
+        crate::welcome::restoring(|| self.restore_groups(saved));
+    }
+
+    fn restore_groups(&self, saved: Vec<SavedWindow>) {
         for group in crate::reload::tab_groups(saved) {
             let mut first: Option<Retained<NSWindow>> = None;
             let mut front = None;
@@ -1207,6 +1221,7 @@ impl AppDelegate {
         was_running: Option<String>,
     ) -> Option<Retained<NSWindow>> {
         let mtm = MainThreadMarker::from(self);
+        let (layout_restored, history_restored) = (layout.is_some(), history.is_some() || was_running.is_some());
         let (config, hosted_command, adopt) = match hosted {
             Some(h) => (Rc::new(h.config), Some(h.command), Some(h.adopt)),
             None => (self.ivars().config.borrow().clone(), None, None),
@@ -1353,6 +1368,9 @@ impl AppDelegate {
             eprintln!("terminal-decline: window {}", window.windowNumber());
         }
 
+        // The login shell, not a command (`-e`, a pin's, an editor tab),
+        // Settings or an agent API session.
+        let login_shell = !settings && !quiet && command.argv.is_empty();
         if let Err(e) = view.start(
             config,
             Launch {
@@ -1366,6 +1384,12 @@ impl AppDelegate {
                 settings,
                 layout,
                 adopt,
+                welcome: Some(crate::welcome::Opening {
+                    shell: login_shell,
+                    quick: is_quick,
+                    restored: layout_restored || history_restored,
+                    tabs: 1 + self.terminal_tabs(),
+                }),
                 history,
                 was_running,
             },
@@ -1390,6 +1414,20 @@ impl AppDelegate {
         };
         self.ivars().windows.borrow_mut().push((window.clone(), view));
         Some(window)
+    }
+}
+
+impl AppDelegate {
+    /// Tabs open with a terminal in them: not Settings, nor the quick
+    /// terminal.
+    fn terminal_tabs(&self) -> usize {
+        let settings = self.ivars().settings.borrow().clone();
+        self.ivars()
+            .windows
+            .borrow()
+            .iter()
+            .filter(|(w, _)| !self.is_quick(w) && !settings.as_ref().is_some_and(|s| std::ptr::eq::<NSWindow>(&**s, &**w)))
+            .count()
     }
 }
 
@@ -1608,6 +1646,12 @@ pub(crate) fn set_update_asked(asked: bool) {
     }
 }
 
+/// A new dogfood build is installed and this one waits to restart into
+/// it (the welcome line says so).
+pub(crate) fn new_build_pending() -> bool {
+    delegate().is_some_and(|d| d.ivars().new_build.borrow().pending)
+}
+
 /// Whether Terminal Decline › Restart to Update is in the menu: a
 /// dogfood build watching for new ones.
 pub(crate) fn restart_menu_shown() -> bool {
@@ -1763,6 +1807,10 @@ fn fixed(mtm: MainThreadMarker, title: &str, action: Sel, chord: &str, binds: &K
     it
 }
 
+fn test_control() -> bool {
+    std::env::var_os(crate::control::ENV).is_some_and(|v| !v.is_empty())
+}
+
 /// The standard Services submenu, which macOS fills.
 fn services_item(mtm: MainThreadMarker) -> Retained<NSMenuItem> {
     let menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("Services"));
@@ -1787,6 +1835,7 @@ pub fn build_menus(mtm: MainThreadMarker, app_name: &str, binds: &Keybinds) -> R
             match (crate::update::sparkle::menu_shown(), crate::update::dogfood::shown()) {
                 (true, _) => [
                     b(MenuAction::CheckForUpdates.label(), MenuAction::CheckForUpdates),
+                    b(MenuAction::UpdateNow.label(), MenuAction::UpdateNow),
                     vec![NSMenuItem::separatorItem(mtm)],
                 ]
                 .concat(),
@@ -1806,8 +1855,14 @@ pub fn build_menus(mtm: MainThreadMarker, app_name: &str, binds: &Keybinds) -> R
                     } else {
                         Vec::new()
                     },
-                    if source || restart_menu_shown() {
-                        vec![NSMenuItem::separatorItem(mtm)]
+                    // What the welcome line's Cmd+U runs; under the test
+                    // control too, for its fake updates.
+                    if source || restart_menu_shown() || test_control() {
+                        [
+                            b(MenuAction::UpdateNow.label(), MenuAction::UpdateNow),
+                            vec![NSMenuItem::separatorItem(mtm)],
+                        ]
+                        .concat()
                     } else {
                         Vec::new()
                     },

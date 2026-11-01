@@ -721,6 +721,9 @@ pub struct Launch {
     /// The command its shell was running before the restart, said in
     /// the faint line under that history; with `layout`, each pane's own.
     pub was_running: Option<String>,
+    /// What kind of tab this is, for the welcome line
+    /// ([`crate::welcome`]); `None` for none.
+    pub welcome: Option<crate::welcome::Opening>,
 }
 
 /// The renderer's theme for a window: the Settings tab stays opaque
@@ -807,6 +810,7 @@ impl WindowView {
                 let pad = padding_for(&config, titlebar, scale);
                 let grid = layout::grid_size((size.width, size.height), scale, m.into(), pad);
                 let pane_id = first_tree.focused();
+                let welcome = launch.welcome.as_ref().map(|o| crate::welcome::lines(&config, o, grid.0));
                 let pane = spawn(NewPane {
                     id: pane_id,
                     view: first_view,
@@ -818,6 +822,7 @@ impl WindowView {
                     adopt: adopt.take(),
                     history: launch.history.as_deref(),
                     was_running: launch.was_running.as_deref(),
+                    welcome: welcome.as_ref(),
                 })?;
                 panes.insert(pane_id, pane);
                 first_tree
@@ -854,6 +859,7 @@ impl WindowView {
                         adopt: None,
                         history: saved.history.as_deref(),
                         was_running: saved.command.as_deref().filter(|_| !saved.program),
+                        welcome: None,
                     });
                     match made {
                         Ok(pane) => {
@@ -2304,6 +2310,7 @@ impl WindowView {
                     adopt: None,
                     history: None,
                     was_running: None,
+                    welcome: None,
                 },
             );
             match pane {
@@ -3122,6 +3129,9 @@ struct NewPane<'a> {
     history: Option<&'a str>,
     /// The command its shell was running then.
     was_running: Option<&'a str>,
+    /// The welcome line, and the update line under it
+    /// ([`crate::welcome::lines`]).
+    welcome: Option<&'a crate::welcome::Lines>,
 }
 
 /// Start pane `n` of window `window`: its terminal and program.
@@ -3141,6 +3151,9 @@ fn spawn_pane(window: usize, config: &Config, theme: &Theme, m: term_font::Metri
                 crate::saved_history::write_restored_line(&mut t, crate::saved_history::now(), Some(command));
             }
         }
+    }
+    if let Some(lines) = n.welcome {
+        crate::welcome::write(&mut t, lines);
     }
     for notice in n.notices {
         crate::session::write_notice(&mut t, notice);
@@ -3488,6 +3501,7 @@ impl WindowView {
                 Some(Control::Settings) => crate::app::show_settings_now(),
                 Some(Control::EditConfig) => crate::app::edit_config_now(),
                 Some(Control::UpdateCheck) => crate::update::sparkle::check_in_background(),
+                Some(Control::FakeUpdate(p)) => crate::welcome::fake(p),
                 Some(Control::MemoryPressure) => {
                     crate::memory::relieve("memory pressure (test control)");
                 }
@@ -3863,6 +3877,7 @@ fn write_dump(st: &mut State, window: Window) {
         settings_ready: window.settings.0,
         settings_recording: window.settings.1,
         update: crate::update::status(),
+        update_now: crate::welcome::fake_runs(),
         screen,
         cols,
         lines,

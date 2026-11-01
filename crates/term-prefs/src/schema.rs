@@ -586,6 +586,20 @@ pub const SETTINGS: &[Setting] = &[
         Editor::Choice(&["notify", "auto", "off"]),
         "notify: say when there is one; auto: builds from source also update when idle; release builds install on quit",
     ),
+    setting(
+        "welcome",
+        "Welcome line",
+        Advanced,
+        Editor::Choice(&["full", "update-only", "off"]),
+        "The faint line a new tab starts with: version, tabs, memory, a tip and a waiting update (⌘U installs it)",
+    ),
+    setting(
+        "welcome_update_snooze",
+        "Update notice snooze",
+        Advanced,
+        integer(0.0, 720.0, 1.0),
+        "Hours the welcome line stops naming an update once it has been shown in 3 tabs; a newer one shows at once",
+    ),
     unset(
         setting(
             "editor",
@@ -771,6 +785,8 @@ mod tests {
                 "image_memory",
                 "image_file_transfer",
                 "update",
+                "welcome",
+                "welcome_update_snooze",
                 "editor",
                 "agent_api",
                 "agent_api_idle_timeout",

@@ -65,6 +65,10 @@
 //!   order), as the mouse does;
 //! - `update-check`: a background update check now, as the daily one is
 //!   (nothing while the updater is off; see [`crate::update`]);
+//! - `fake-update none|installed|commits N HEAD|release VERSION [ready]`:
+//!   pretend that update waits (or none does), for the welcome line and
+//!   Update Now (Cmd+U), which then only counts in the dump's
+//!   `update_now` (see [`crate::welcome`]);
 //! - `memory-pressure`: give memory back as a memory-pressure warning
 //!   from macOS does, in every window (see [`crate::memory`]);
 //! - `quit`: quit the app, without asking.
@@ -302,6 +306,8 @@ pub enum Control {
     Clipboard(String),
     /// A background update check.
     UpdateCheck,
+    /// Pretend this update waits (`None`: none does).
+    FakeUpdate(Option<crate::welcome::Pending>),
     /// Give memory back as a memory-pressure warning does.
     MemoryPressure,
     Quit,
@@ -364,6 +370,26 @@ impl Control {
             "dump" => Control::Dump,
             "quit" => Control::Quit,
             "update-check" => Control::UpdateCheck,
+            "fake-update" => {
+                use crate::welcome::Pending;
+                Control::FakeUpdate(match words.next()? {
+                    "none" => None,
+                    "installed" => Some(Pending::Installed),
+                    "commits" => Some(Pending::Commits {
+                        ahead: words.next()?.parse().ok()?,
+                        head: words.next()?.to_string(),
+                    }),
+                    "release" => Some(Pending::Release {
+                        version: words.next()?.to_string(),
+                        ready: match words.next() {
+                            None => false,
+                            Some("ready") => true,
+                            Some(_) => return None,
+                        },
+                    }),
+                    _ => return None,
+                })
+            }
             "memory-pressure" => Control::MemoryPressure,
             "tab" => Control::Tab,
             "front" => Control::Front,
@@ -521,6 +547,8 @@ pub struct Dump {
     /// `on`, `checking`, `found`, `none`, `ready` (installs on quit) or
     /// `error: …`. For the whole app.
     pub update: String,
+    /// Times Update Now ran with a fake update waiting (`fake-update`).
+    pub update_now: u32,
     /// `Terminal::dump()` of the focused pane: the visible rows and a
     /// status line.
     pub screen: String,
@@ -777,6 +805,28 @@ mod tests {
             ("edit-config", Some(Control::EditConfig)),
             ("update-check", Some(Control::UpdateCheck)),
             ("update-check now", None),
+            ("fake-update none", Some(Control::FakeUpdate(None))),
+            (
+                "fake-update installed",
+                Some(Control::FakeUpdate(Some(crate::welcome::Pending::Installed))),
+            ),
+            (
+                "fake-update commits 5 abc123",
+                Some(Control::FakeUpdate(Some(crate::welcome::Pending::Commits {
+                    ahead: 5,
+                    head: "abc123".into(),
+                }))),
+            ),
+            (
+                "fake-update release 0.6.0 ready",
+                Some(Control::FakeUpdate(Some(crate::welcome::Pending::Release {
+                    version: "0.6.0".into(),
+                    ready: true,
+                }))),
+            ),
+            ("fake-update commits x y", None),
+            ("fake-update release 0.6.0 soon", None),
+            ("fake-update", None),
             (
                 "key 45 cmd+shift",
                 Some(Control::Key {

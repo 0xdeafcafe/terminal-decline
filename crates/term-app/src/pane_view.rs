@@ -1228,6 +1228,11 @@ impl PaneView {
     /// Cmd-click or Open Link: open `uri` if it is a link that may open
     /// ([`crate::links::to_open`]); else say why not in the terminal.
     pub(crate) fn open_link(&self, uri: &str) {
+        // The welcome line's own link (never a program's): Update Now.
+        if crate::welcome::is_own_link(uri) {
+            crate::welcome::update_now();
+            return;
+        }
         let url = match crate::links::to_open(uri, &crate::links::host_name()) {
             Ok(url) => url,
             Err(why) => return self.notice(&why.notice(uri)),

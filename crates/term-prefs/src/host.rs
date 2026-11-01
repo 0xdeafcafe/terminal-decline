@@ -209,6 +209,7 @@ font_features = []
 ambiguous_width = 1
 padding = 6.0
 scrollback = 10000
+scroll_multiplier = 1.0
 option_as_meta = "none"
 opacity = 1.0
 blur = false

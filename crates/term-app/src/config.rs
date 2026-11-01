@@ -296,6 +296,11 @@ pub struct Config {
     /// Space around the text, in points.
     pub padding: f64,
     pub scrollback: usize,
+    /// Lines a mouse wheel's click scrolls (times its own, accelerated,
+    /// count), above 0 and at most 100. A trackpad moves the view by its
+    /// own pixels, whatever this is.
+    #[serde(deserialize_with = "scroll_multiplier")]
+    pub scroll_multiplier: f64,
     /// Show each pane's history again after `"restarts"` (the default:
     /// restarts into a new build), `"always"` (`true`: quitting too, and
     /// the next launch reopens the windows) or `"never"` (`false`).
@@ -442,6 +447,7 @@ impl Default for Config {
             ambiguous_width: 1,
             padding: 6.0,
             scrollback: 10_000,
+            scroll_multiplier: 1.0,
             restore_scrollback: RestoreScrollback::Restarts,
             restore_scrollback_limit: 10_000,
             option_as_meta: OptionAsMeta::None,
@@ -582,6 +588,15 @@ fn quick_terminal_animation_ms<'de, D: Deserializer<'de>>(d: D) -> Result<u32, D
             "{v} is not a number of milliseconds from 0 to {}",
             crate::quick::MAX_ANIMATION_MS
         ))),
+    }
+}
+
+fn scroll_multiplier<'de, D: Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
+    let v = f64::deserialize(d)?;
+    if v > 0.0 && v <= 100.0 {
+        Ok(v)
+    } else {
+        Err(serde::de::Error::custom(format!("{v} is not above 0 and at most 100")))
     }
 }
 
@@ -1388,6 +1403,18 @@ mod tests {
         let (c, errors) = parse("cursor_style = 'beam'");
         assert_eq!(c.cursor_style, CursorStyle::Block);
         assert!(errors[0].starts_with("config: cursor_style: "), "{errors:?}");
+    }
+
+    #[test]
+    fn scroll_multiplier_is_one_unless_set() {
+        assert_eq!(Config::default().scroll_multiplier, 1.0);
+        assert_eq!(parse("scroll_multiplier = 3").0.scroll_multiplier, 3.0);
+        assert_eq!(parse("scroll_multiplier = 0.5").0.scroll_multiplier, 0.5);
+        for bad in ["0", "-1", "101", "'fast'"] {
+            let (c, errors) = parse(&format!("scroll_multiplier = {bad}"));
+            assert_eq!(c.scroll_multiplier, 1.0, "{bad}");
+            assert!(errors[0].starts_with("config: scroll_multiplier: "), "{bad}: {errors:?}");
+        }
     }
 
     #[test]

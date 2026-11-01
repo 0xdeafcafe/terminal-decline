@@ -388,6 +388,13 @@ pub const SETTINGS: &[Setting] = &[
         "Lines kept above the screen",
     )),
     setting(
+        "scroll_multiplier",
+        "Wheel lines",
+        Window,
+        number(0.25, 100.0, 0.25),
+        "Lines a mouse wheel's click scrolls; a trackpad moves the text by its own pixels",
+    ),
+    setting(
         "restore_scrollback",
         "Restore scrollback",
         Window,
@@ -735,6 +742,7 @@ mod tests {
                 "columns",
                 "lines",
                 "scrollback",
+                "scroll_multiplier",
                 "restore_scrollback",
                 "restore_scrollback_limit",
                 "cursor_style",

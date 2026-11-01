@@ -71,6 +71,7 @@ pub fn decide(
             idle_ticks,
             last_input_elapsed,
             animating: false,
+            scrolling: false,
         },
     )
 }
@@ -82,6 +83,9 @@ pub enum PaneFrame {
     Build,
     /// Unchanged: draw its last frame.
     Reuse,
+    /// Unchanged, but its content moved between whole lines (smooth
+    /// scrolling): draw its last frame where it now is.
+    Moved,
     /// Changed, but its program is mid synchronized update: draw its last
     /// frame and keep the change.
     Held,
@@ -130,6 +134,10 @@ pub struct WindowTick {
     /// the frames already built. A window that can't be seen drops it
     /// (the caller, taking the new theme at once).
     pub animating: bool,
+    /// A trackpad gesture or its momentum moves a pane's view, or its
+    /// shift between lines eases to a whole line: the display link keeps
+    /// ticking (each tick may bring a move) without counting as idle.
+    pub scrolling: bool,
 }
 
 /// The window's decision from its visible panes' (panes hidden by a zoom
@@ -139,7 +147,8 @@ pub struct WindowTick {
 /// any number of idle panes cost no wake-ups.
 pub fn combine(panes: &[PaneFrame], w: &WindowTick) -> Decision {
     let builds = panes.contains(&PaneFrame::Build);
-    let busy = builds || panes.iter().any(|p| matches!(p, PaneFrame::Held | PaneFrame::Waiting));
+    let draws = builds || panes.contains(&PaneFrame::Moved);
+    let busy = draws || panes.iter().any(|p| matches!(p, PaneFrame::Held | PaneFrame::Waiting));
     if !busy && w.animating {
         // Seen or not comes first: a hidden window never draws, so it
         // doesn't play the rest of a transition either.
@@ -150,6 +159,10 @@ pub fn combine(panes: &[PaneFrame], w: &WindowTick) -> Decision {
         } else {
             Decision::Pause { trim_after: IDLE_TRIM }
         };
+    }
+    if !busy && w.scrolling && w.visible {
+        // Mid-gesture with nothing new this tick: the next may move.
+        return Decision::Hold;
     }
     if !busy {
         // Nothing new: stop the display link until something changes.
@@ -162,7 +175,7 @@ pub fn combine(panes: &[PaneFrame], w: &WindowTick) -> Decision {
     if !w.visible {
         return Decision::Hide { keep_surface: w.minimised };
     }
-    if !builds {
+    if !draws {
         return Decision::Hold;
     }
     Decision::Draw { rate: rate(w) }
@@ -452,6 +465,7 @@ mod tests {
             idle_ticks,
             last_input_elapsed: Duration::from_secs(5),
             animating: false,
+            scrolling: false,
         }
     }
 
@@ -481,6 +495,29 @@ mod tests {
                 Decision::Pause { trim_after: IDLE_TRIM },
             ),
             ("all clean, later", &[Reuse, Reuse], tick(2), Decision::Skip),
+            // Smooth scrolling: a move draws the frames already built; mid
+            // gesture the link keeps ticking without going idle.
+            ("one moved", &[Reuse, Moved], tick(1), Decision::Draw { rate: 60 }),
+            (
+                "mid gesture, nothing moved this tick",
+                &[Reuse],
+                WindowTick {
+                    scrolling: true,
+                    ..tick(1)
+                },
+                Decision::Hold,
+            ),
+            (
+                "mid gesture, hidden",
+                &[Reuse],
+                WindowTick {
+                    scrolling: true,
+                    visible: false,
+                    ..tick(1)
+                },
+                Decision::Pause { trim_after: IDLE_TRIM },
+            ),
+            ("gesture over", &[Reuse], tick(1), Decision::Pause { trim_after: IDLE_TRIM }),
             // A zoom hides the flooding pane: it isn't passed in.
             (
                 "zoomed, the shown pane clean",

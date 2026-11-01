@@ -159,6 +159,7 @@ fn bench(c: &mut Criterion) {
                 w: 80 * cw,
                 h: 24 * ch,
             },
+            scroll: None,
         })
         .collect();
     let clear = draws[0].pane.frame.clear;

@@ -317,6 +317,27 @@ Oct 2026, 1.90 → 2.16 MB) and no measurable parse speed.
   and dragging after a double- or triple-click grows by words or lines), wheel
   scrolls scrollback, or when the program asks for mouse reporting (1000/1002/
   1003 + SGR 1006) events go to the program; Shift or Option overrides to select.
+  A trackpad (precise deltas) moves the view by its exact pixels
+  (`scroll::Smooth`): whole lines are the terminal's view offset, the
+  rest a shift of the pane's content drawn up to a line higher on the
+  GPU (`term_render::Scroll`, clipped to the rows), with the row below
+  the view in the snapshot (`Terminal::set_view_overscan`). A new shift
+  only draws the last frame again (`PaneFrame::Moved`); a new whole line
+  builds it, the rows that only moved reused. The display link ticks
+  through the gesture and its momentum (`WindowTick::scrolling`, not
+  idle then). Its events come at the trackpad's rate, out of step with
+  the display, so a frame took one, two or three events' pixels as their
+  times fell (a steady scroll moving 16, 48, 32 px a frame, on and off as
+  the two drift): each event's pixels are spread over the time since the
+  one before, and each tick moves the view by the movement up to its
+  refresh (the display link's timestamp) less about one event's gap,
+  4–17 ms (`scroll::Resample`). Once the gesture and its momentum end the shift eases to the nearest whole
+  line over a few ticks; a click snaps to it at once (cells are hit at
+  whole lines). A mouse wheel moves whole lines, `scroll_multiplier`
+  (default 1) times its own count; the program's mouse reports and the
+  arrow keys on the alternate screen stay in whole lines. Scroll frames
+  find new glyphs themselves for up to 1.5 ms before leaving the rest
+  to the glyph thread, so rows coming in don't show empty cells first.
   A plain click clears the selection and selects nothing: a selection
   starts only once the mouse has moved half a cell width (at least 4
   pixels) from where the button went down (`select::Pending`), so a click
@@ -801,7 +822,7 @@ contents, so only a real change reloads. A reload reads every layer again
   (`font_family`, `font_size`, `font_fallback`, `font_bold`/`_italic`/`_bold_italic`,
   `line_height`, `cell_width`, `font_features`; Fonts rebuilt as Cmd+= does; a new
   `font_size` replaces a size set with Cmd+= / Cmd+-), `padding`,
-  `opacity`, `option_as_meta`, `copy_on_select` and `[keybind]` (the menus
+  `opacity`, `option_as_meta`, `copy_on_select`, `scroll_multiplier` and `[keybind]` (the menus
   are rebuilt);
 - to new windows only: `command`, `cwd`, `env`, `columns`, `lines`,
   `blur` (a view set up with the window), `title`, and `scrollback`

@@ -1120,6 +1120,36 @@ impl AppDelegate {
                     view.latency_type(bytes);
                 }
             }
+            C::Gesture(g) => {
+                let events = g
+                    .events()
+                    .into_iter()
+                    .map(|(dy, phase, momentum)| crate::scroll::Input {
+                        precise: true,
+                        dy,
+                        phase,
+                        momentum,
+                        t0: 0.0,
+                    })
+                    .collect();
+                let view = self.ivars().windows.borrow().first().map(|(_, v)| v.clone());
+                if let Some(view) = view {
+                    view.latency_scroll(events, g.hz);
+                }
+            }
+            C::Wheel { lines, events, hz } => {
+                let events = (0..events)
+                    .map(|_| crate::scroll::Input {
+                        precise: false,
+                        dy: lines,
+                        ..Default::default()
+                    })
+                    .collect();
+                let view = self.ivars().windows.borrow().first().map(|(_, v)| v.clone());
+                if let Some(view) = view {
+                    view.latency_scroll(events, hz);
+                }
+            }
             C::Open(argv) => {
                 // Behind the window being typed in, which stays key.
                 let key = NSApplication::sharedApplication(mtm).keyWindow();

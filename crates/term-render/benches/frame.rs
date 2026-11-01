@@ -398,6 +398,31 @@ fn bench(c: &mut Criterion) {
             });
         }
     }
+    // A trackpad scrolling through history: the view a line further
+    // back or on each frame, with the row below it (the overscan smooth
+    // scrolling draws), the rows that only moved kept.
+    for (name, cols, lines, colours) in [cases[1], cases[2]] {
+        let mut t = Term::new(cols, lines, 10_000, term_core::ImagePool::process());
+        let mut s = String::new();
+        for l in 0..lines * 3 {
+            line(l, cols, colours, &mut s);
+            s.push_str("\x1b[0m\r\n");
+        }
+        t.advance(s.as_bytes());
+        t.state.set_view_overscan(true);
+        t.state.scroll_view(lines as isize * 2);
+        let mut frame = Frame::default();
+        frame.build(&mut t.state, &input, &mut Cached);
+        let mut back = 1;
+        c.bench_function(&format!("frame {name} history smooth line"), |b| {
+            b.iter(|| {
+                back = -back;
+                t.state.scroll_view(back);
+                frame.build(&mut t.state, black_box(&input), &mut Cached);
+                black_box(frame.glyphs.len())
+            })
+        });
+    }
     // Shell integration in history, scrolled back and still: a prompt
     // (OSC 133 marks) every 4 lines, every other command failed, so each
     // frame looks for the failed prompts in view.

@@ -1684,6 +1684,13 @@ rasterising new glyphs.
   presenting), total 10–19 ms against 30–38 ms (load 11–18).
 - **Bookkeeping.** A pane dropped while waiting takes its wants with
   it; a complete build drops only bitmaps no other pane waits for.
+- **Scroll frames find their glyphs first.** While a trackpad scrolls
+  the view (`WindowTick::scrolling`), builds find new glyphs on the
+  main thread for up to 1.5 ms (`Renderer::set_glyph_sync_first`,
+  `GLYPH_BUDGET_SCROLLING`) and leave only the rest to the glyph
+  thread: rows coming into view otherwise showed empty cells for a
+  frame or two, the pop-in moving with the text. (Measured with
+  `scripts/latency/scroll.py`, see DESIGN.md's Mouse notes.)
 - **Not measured:** key latency under the flood (the latency harness
   opens windows in front). Left: the upload's wait for the GPU
   (`Atlas::insert` waits for frames in flight before `replaceRegion`).

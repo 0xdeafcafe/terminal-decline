@@ -43,21 +43,39 @@ pub fn due(quiet_for: Duration, frame_pending: bool) -> bool {
     !frame_pending && quiet_for >= IDLE_BEFORE
 }
 
+/// Input that reads history without making output (a scroll of the
+/// view), counted: idle work stops for it too.
+static INPUT: AtomicU64 = AtomicU64::new(0);
+
+/// The user is reading history (scrolling the view): the filters thread
+/// stops after its batch, leaving the terminal's lock to the frames and
+/// the blocks uncompressed until the next idle spell. Its background
+/// thread, holding the lock when the busy machine leaves it waiting,
+/// held up scroll frames that wait for the lock.
+pub fn user_input() {
+    INPUT.fetch_add(1, Ordering::Relaxed);
+}
+
 /// A pane's output counter as it was when the view saw it idle: the pane
-/// is still idle while it hasn't moved.
+/// is still idle while it hasn't moved, and nobody scrolled.
 pub struct Quiet {
     counter: Arc<AtomicU64>,
     seen: u64,
+    input: u64,
 }
 
 impl Quiet {
     pub fn new(counter: Arc<AtomicU64>) -> Quiet {
         let seen = counter.load(Ordering::Relaxed);
-        Quiet { counter, seen }
+        Quiet {
+            counter,
+            seen,
+            input: INPUT.load(Ordering::Relaxed),
+        }
     }
 
     pub fn still(&self) -> bool {
-        self.counter.load(Ordering::Relaxed) == self.seen
+        self.counter.load(Ordering::Relaxed) == self.seen && INPUT.load(Ordering::Relaxed) == self.input
     }
 }
 
@@ -172,6 +190,15 @@ mod tests {
         assert!(q.still());
         n.fetch_add(1, Ordering::Relaxed);
         assert!(!q.still());
+    }
+
+    #[test]
+    fn quiet_ends_when_the_view_scrolls() {
+        let q = Quiet::new(Arc::new(AtomicU64::new(0)));
+        assert!(q.still());
+        user_input();
+        assert!(!q.still());
+        assert!(Quiet::new(Arc::new(AtomicU64::new(0))).still(), "quiet again from then on");
     }
 
     #[test]

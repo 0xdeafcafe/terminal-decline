@@ -1334,7 +1334,7 @@ impl PaneView {
         };
         let at = self.px_at(event);
         self.clear_other_selections();
-        self.with(|_, p| {
+        self.with(|win, p| {
             p.selecting = Some(gesture);
             p.dragged = false;
             p.autoscroll = None;
@@ -1342,6 +1342,14 @@ impl PaneView {
             let block = p.block.take();
             let mut t = p.session.lock_term();
             let s = &mut t.state;
+            // Cells are hit at whole lines: a view between two goes to the
+            // nearer one first.
+            let snap = p.scroll.snap(win.renderer.metrics().cell_height as f64);
+            if snap != 0 {
+                s.scroll_view(snap);
+                p.session.mark_dirty();
+            }
+            p.moved = true;
             let point = s.point_at(line, col);
             match gesture {
                 // A click clears the selection; one starts at the cell
@@ -1353,7 +1361,7 @@ impl PaneView {
                         at,
                         block: gesture == Gesture::Block,
                     });
-                    p.scroll_accum = 0.0;
+                    p.scroll.forget_carry();
                 }
                 Gesture::Word => s.select_word(point),
                 Gesture::Line => s.select_line(point),
@@ -1566,45 +1574,124 @@ impl PaneView {
     }
 
     fn handle_scroll(&self, event: &NSEvent) {
-        self.with(|win, _| win.last_input = Instant::now());
-        let precise = event.hasPreciseScrollingDeltas();
-        let reporting = self.reporting(event);
-        let Some((line, col)) = self.cell_at(event) else { return };
-        let lines = self.with(|win, p| {
-            let dy = event.scrollingDeltaY();
-            let delta = if precise {
-                dy * win.scale / win.renderer.metrics().cell_height as f64
-            } else {
-                dy
-            };
-            p.scroll_accum += delta;
-            let whole = p.scroll_accum.trunc();
-            p.scroll_accum -= whole;
-            whole as isize
-        });
-        let Some(lines) = lines.filter(|&l| l != 0) else { return };
-        if let Some((_, sgr)) = reporting {
-            let code = mouse::wheel_code(lines, Self::mods_of(event));
-            for _ in 0..lines.unsigned_abs().min(mouse::MAX_WHEEL_REPORTS) {
-                self.send_mouse(code, line, col, true, sgr);
-            }
+        let Some(at) = self.cell_at(event) else { return };
+        let input = crate::scroll::Input {
+            precise: event.hasPreciseScrollingDeltas(),
+            dy: event.scrollingDeltaY(),
+            phase: crate::scroll::Phase::of(event.phase().0),
+            momentum: crate::scroll::Phase::of(event.momentumPhase().0),
+            t0: event.timestamp(),
+        };
+        self.scroll_by(input, self.reporting(event), Self::mods_of(event), at);
+    }
+
+    /// A scroll event made up by the latency harness, over the middle of
+    /// the pane, without modifiers.
+    pub(crate) fn scroll_synthetic(&self, mut input: crate::scroll::Input) {
+        input.t0 = latency::now();
+        let Some((reporting, at)) = self.with(|_, p| {
+            let t = p.session.lock_term();
+            let m = t.state.modes();
+            let reporting = (m.mouse != term_core::MouseMode::Off).then_some((m.mouse, m.mouse_sgr));
+            (reporting, (t.state.lines() / 2, t.state.cols() / 2))
+        }) else {
             return;
+        };
+        self.scroll_by(input, reporting, 0, at);
+    }
+
+    /// A scroll event over cell `at`: to the program when it takes the
+    /// mouse (`reporting`), as arrow keys to a full-screen program
+    /// without, otherwise the view's. The latency harness plays its
+    /// gestures through here.
+    pub(crate) fn scroll_by(
+        &self,
+        input: crate::scroll::Input,
+        reporting: Option<(term_core::MouseMode, bool)>,
+        mods: u8,
+        (line, col): (usize, usize),
+    ) {
+        let now = Instant::now();
+        self.with(|win, _| win.last_input = now);
+        crate::idle_filters::user_input();
+        if let (Some(lat), Some(w)) = (latency::get(), self.window_view()) {
+            lat.scrolled(w.id(), input.t0);
         }
+        // Whole lines when the program takes the scrolling (its mouse
+        // reports, or arrow keys on the alternate screen); otherwise a
+        // wheel moves the view by lines and a trackpad by its pixels.
         let alt = self.with(|_, p| {
             let t = p.session.lock_term();
             t.state.alt_screen_active().then_some(t.state.modes().app_cursor)
         });
-        if let Some(Some(app_cursor)) = alt {
-            // Full-screen programs without mouse support get arrow keys.
-            let key = if lines > 0 { crate::keys::Key::Up } else { crate::keys::Key::Down };
-            let bytes = encode_key(key, Mods::default(), app_cursor);
-            for _ in 0..lines.unsigned_abs() {
-                self.send_raw(bytes.clone());
+        let Some(alt) = alt else { return };
+        if reporting.is_some() || alt.is_some() {
+            let lines = self
+                .with(|win, p| {
+                    let cell = win.renderer.metrics().cell_height as f64;
+                    p.scroll.reset();
+                    p.scroll.whole(if input.precise {
+                        input.dy * win.scale / cell
+                    } else {
+                        input.dy * win.config.scroll_multiplier
+                    })
+                })
+                .unwrap_or(0);
+            if lines == 0 {
+                return;
+            }
+            if let Some((_, sgr)) = reporting {
+                let code = mouse::wheel_code(lines, mods);
+                for _ in 0..lines.unsigned_abs().min(mouse::MAX_WHEEL_REPORTS) {
+                    self.send_mouse(code, line, col, true, sgr);
+                }
+            } else if let Some(app_cursor) = alt {
+                // Full-screen programs without mouse support get arrow keys.
+                let key = if lines > 0 { crate::keys::Key::Up } else { crate::keys::Key::Down };
+                let bytes = encode_key(key, Mods::default(), app_cursor);
+                for _ in 0..lines.unsigned_abs() {
+                    self.send_raw(bytes.clone());
+                }
             }
             return;
         }
-        self.with(|_, p| p.session.lock_term().state.scroll_view(lines));
-        self.request_redraw();
+        let changed = self.with(|win, p| {
+            if input.precise {
+                // Shown at the coming refreshes, in even steps (the tick
+                // moves the view: crate::view::move_view).
+                p.scroll.event(&input, now);
+                p.scroll.queue(input.t0, input.dy * win.scale);
+                return false;
+            }
+            let cell = win.renderer.metrics().cell_height as f64;
+            let locking = latency::get().map(|_| latency::now());
+            let mut t = p.session.lock_term();
+            if let (Some(lat), Some(at)) = (latency::get(), locking) {
+                lat.lock_waited(latency::now() - at);
+            }
+            let before = (t.state.display_offset(), p.scroll.shift_px(cell));
+            // A wheel: whole lines, from the nearest one.
+            let snap = p.scroll.snap(cell);
+            let lines = p.scroll.whole(input.dy * win.config.scroll_multiplier);
+            t.state.scroll_view(snap + lines);
+            let after = (t.state.display_offset(), p.scroll.shift_px(cell));
+            // A new whole-line view is built; a new shift only drawn again.
+            if after.0 != before.0 {
+                p.session.mark_dirty();
+            }
+            p.moved |= after.1 != before.1;
+            after != before
+        });
+        if changed == Some(true)
+            && let Some(w) = self.window_view()
+        {
+            w.unpause();
+        } else if self.with(|_, p| p.scroll.active(now)) == Some(true)
+            && let Some(w) = self.window_view()
+        {
+            // Nothing moved, but the gesture goes on: keep ticking.
+            w.unpause();
+        }
     }
 }
 

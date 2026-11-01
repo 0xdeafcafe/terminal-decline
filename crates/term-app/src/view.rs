@@ -60,6 +60,10 @@ pub(crate) const BLINK_INTERVAL: Duration = Duration::from_millis(530);
 /// fills in within a second at 30 Hz (with 3 ms always, it took ~4 s).
 pub(crate) const GLYPH_BUDGET_TYPING: Duration = Duration::from_millis(3);
 pub(crate) const GLYPH_BUDGET: Duration = Duration::from_millis(8);
+/// While a trackpad scrolls the view, new glyphs are found in the frame
+/// (not on the glyph thread) for this long: rows coming in show them at
+/// once, and a frame still fits well inside a 120 Hz refresh.
+pub(crate) const GLYPH_BUDGET_SCROLLING: Duration = Duration::from_micros(1500);
 
 /// A call to [`glyphs_ready`] is queued on the main queue.
 static GLYPHS_READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -109,6 +113,9 @@ pub(crate) struct Win {
     /// Last key, paste, scroll or click in any pane: typing gets the full
     /// refresh rate.
     pub(crate) last_input: Instant,
+    /// The display refresh a display-link tick draws for (its timestamp,
+    /// host seconds), until that tick draws.
+    refresh_at: Option<f64>,
     /// Only with `DECLINE_TEST_DUMP` set: see [`crate::control`].
     test: Option<TestControl>,
     /// The title bar's height, plus the tab bar's while one shows (points),
@@ -158,7 +165,12 @@ pub(crate) struct Pane {
     pub(crate) blink_scheduled: bool,
     sync_since: Option<Instant>,
     pub(crate) marked: String,
-    pub(crate) scroll_accum: f64,
+    /// The view's position between whole lines under a trackpad, and
+    /// wheel lines not yet whole (see [`crate::scroll`]).
+    pub(crate) scroll: crate::scroll::Smooth,
+    /// Its content moved between whole lines since its last frame: drawn
+    /// again (its frame not built) next tick.
+    pub(crate) moved: bool,
     /// Mouse button held while reporting to the program.
     pub(crate) mouse_button: Option<u8>,
     /// The gesture that started the selection while the left button is
@@ -455,7 +467,10 @@ define_class!(
         }
 
         #[unsafe(method(tick:))]
-        fn tick(&self, _link: &CADisplayLink) {
+        fn tick(&self, link: &CADisplayLink) {
+            // Trackpad movement is shown as of this refresh.
+            let at = link.timestamp();
+            self.with_state(|st| st.win.refresh_at = Some(at));
             self.draw();
         }
 
@@ -885,6 +900,7 @@ impl WindowView {
                 frames: 0,
                 rate: 0,
                 last_input: Instant::now(),
+                refresh_at: None,
                 test,
                 top_inset: titlebar,
                 hidden: 0,
@@ -1355,8 +1371,31 @@ impl WindowView {
             .filter_map(|id| panes.get(id).map(|p| (*id, p.session.term().clone())))
             .collect();
         let mut ticks = Vec::with_capacity(terms.len());
+        let cell = win.renderer.metrics().cell_height as f64;
+        let tick_start = Instant::now();
+        let refresh_at = win.refresh_at.take().unwrap_or_else(latency::now);
+        // A trackpad gesture moves a pane's view, or its shift between
+        // lines eases to a whole line (see [`crate::scroll`]).
+        let mut scrolling = false;
         for (id, term) in &terms {
             let p = panes.get_mut(id).expect("shown pane");
+            let queued = p.scroll.queued();
+            let px = p.scroll.due(refresh_at);
+            if px != 0.0 {
+                move_view(p, &mut crate::session::lock(term).state, px, cell);
+            }
+            // All shown: drawn once more even if the last of it moved
+            // nothing whole (a dump waits for this frame).
+            p.moved |= queued && !p.scroll.queued();
+            if let Some(lines) = p.scroll.settle(tick_start, cell) {
+                if lines != 0 {
+                    crate::session::lock(term).state.scroll_view(lines);
+                    p.session.mark_dirty();
+                }
+                p.moved = true;
+            }
+            scrolling |= p.scroll.active(tick_start) || p.scroll.shift() != 0.0;
+            let moved = std::mem::take(&mut p.moved);
             let dirty = p.session.take_dirty();
             let echo = p.awaiting_echo.map(|sent| sent.elapsed());
             let waited_out = echo.is_some_and(|e| e >= ECHO_WAIT);
@@ -1368,8 +1407,18 @@ impl WindowView {
             // and never waits long for it (roadmap R.1): a pane whose
             // reader still holds it is held for a tick, its change kept.
             let wants = (dirty || waited_out) && visible;
-            let t = wants.then(|| crate::session::lock_for_frame(term)).flatten();
+            let mut t = wants.then(|| crate::session::lock_for_frame(term)).flatten();
             let busy = wants && t.is_none();
+            if let Some(t) = t.as_mut() {
+                // Snapshots scrolled back hold the row below the view, for
+                // drawing it part of a line higher.
+                t.state.set_view_overscan(true);
+                if t.state.display_offset() == 0 && p.scroll.shift() != 0.0 {
+                    // Back to following output by other means (typing, a
+                    // search): nothing between lines.
+                    p.scroll.reset();
+                }
+            }
             let synchronized = t.as_ref().is_some_and(|t| t.state.modes().synchronized);
             let sync_elapsed = if synchronized {
                 p.sync_since.get_or_insert_with(Instant::now).elapsed()
@@ -1384,6 +1433,15 @@ impl WindowView {
                 PaneFrame::Held
             } else {
                 frame_policy::pane(dirty || waited_out, synchronized, sync_elapsed, echo.filter(|_| !waited_out))
+            };
+            let frame = match frame {
+                PaneFrame::Reuse if moved => PaneFrame::Moved,
+                PaneFrame::Held | PaneFrame::Waiting if moved => {
+                    // Drawn once it is drawn at all.
+                    p.moved = true;
+                    frame
+                }
+                f => f,
             };
             ticks.push((*id, frame, t));
         }
@@ -1406,6 +1464,7 @@ impl WindowView {
                 idle_ticks: win.idle_ticks,
                 last_input_elapsed: win.last_input.elapsed(),
                 animating,
+                scrolling,
             },
         );
         let now = Instant::now();
@@ -1417,6 +1476,13 @@ impl WindowView {
                 }
             }
         };
+        let window_id = self.ivars().id;
+        let scroll_log = latency::get().filter(|l| l.scrolling(window_id));
+        if let Some(l) = scroll_log
+            && !matches!(decision, Decision::Draw { .. })
+        {
+            l.tick(window_id, format!("{decision:?}"));
+        }
         let rate = match decision {
             Decision::Skip => {
                 win.idle_ticks = win.idle_ticks.saturating_add(1);
@@ -1453,11 +1519,22 @@ impl WindowView {
             Decision::Draw { rate } => latency::get().and_then(|l| l.hz()).unwrap_or(rate),
         };
         keep_held(panes, &ticks);
+        // While the view scrolls, the harness's record of this frame.
+        let mut scroll_frame = scroll_log.map(|l| l.scroll_frame(window_id, rate));
         win.idle_ticks = 0;
         win.renderer.show();
         let typing = win.last_input.elapsed() < frame_policy::INPUT_BOOST;
-        win.renderer
-            .set_glyph_budget(Some(if typing { GLYPH_BUDGET_TYPING } else { GLYPH_BUDGET }));
+        win.renderer.set_glyph_budget(Some(if scrolling {
+            GLYPH_BUDGET_SCROLLING
+        } else if typing {
+            GLYPH_BUDGET_TYPING
+        } else {
+            GLYPH_BUDGET
+        }));
+        // Rows scrolled into view get their new glyphs in this frame, as
+        // many as the budget allows, rather than popping in from the
+        // glyph thread a frame or two later.
+        win.renderer.set_glyph_sync_first(scrolling);
         images_shown(win, panes, true);
         if rate != win.rate {
             win.rate = rate;
@@ -1548,10 +1625,20 @@ impl WindowView {
             // that may be half-updated is replaced before it is released,
             // so its reader never parses into it.
             let panic_snapshot = p.panic_next.take_if(|snapshot| *snapshot).is_some();
+            let snap_start = latency::now();
             let snap = crate::crash::contain(|| {
                 test_build_panic(panic_snapshot);
                 win.renderer.snapshot_pane(&mut p.render, &mut t.state, &input)
             });
+            if let Some(f) = scroll_frame.as_mut().filter(|_| id == focused_pane && snap.is_ok()) {
+                f.snapshot_us = (latency::now() - snap_start) * 1e6;
+                f.built = true;
+                f.offset = t.state.display_offset();
+                let s = p.render.frame.last_snapshot();
+                f.copied = s.rows.iter().filter(|r| r.cells.is_some()).count() as u32;
+                (f.rows, f.cols) = (s.rows.len() as u32, s.cols);
+                f.cell_h = input.metrics.cell_height;
+            }
             if snap.is_err() {
                 crate::session::replace_term(t);
                 p.render.forget();
@@ -1600,11 +1687,18 @@ impl WindowView {
                 preedit: Some(p.marked.as_str()),
             };
             let panic_now = p.panic_next.take().is_some();
+            let build_start = latency::now();
+            let wait_start = term_render::glyph_upload_wait();
             // Unlocked, the terminal is untouched by a panic here.
             let built = crate::crash::contain(|| {
                 test_build_panic(panic_now);
                 win.renderer.build_from_snapshot(&mut p.render, &input)
             });
+            if let Some(f) = scroll_frame.as_mut().filter(|_| id == focused_pane) {
+                f.build_us = (latency::now() - build_start) * 1e6;
+                f.upload_wait_us = (term_render::glyph_upload_wait() - wait_start).as_secs_f64() * 1e6;
+                f.deferred = p.render.glyphs_deferred();
+            }
             let ok = match built {
                 Ok(true) => true,
                 Ok(false) => {
@@ -1664,6 +1758,7 @@ impl WindowView {
                     pane: &p.render,
                     origin: (r.x, r.y),
                     scissor: r.clamped(w, h)?,
+                    scroll: pane_scroll(win, p, titlebar),
                 })
             })
             .collect();
@@ -1680,10 +1775,23 @@ impl WindowView {
             win.transition = None;
         }
         win.renderer.set_blend(blend);
+        if let (Some(f), Some(p)) = (scroll_frame.as_mut(), panes.get(&focused_pane)) {
+            f.shift_px = draws
+                .iter()
+                .find(|d| std::ptr::eq(d.pane, &p.render))
+                .and_then(|d| d.scroll)
+                .map_or(0, |s| s.up);
+        }
         match timed {
-            Some((lat, keys)) if !keys.is_empty() => {
-                present_timed(&mut win.renderer, &self.ivars().layer, clear, &draws, dividers, lat, keys)
-            }
+            Some((lat, keys)) if !keys.is_empty() || scroll_frame.is_some() => present_timed(
+                &mut win.renderer,
+                &self.ivars().layer,
+                clear,
+                &draws,
+                dividers,
+                lat,
+                FrameKeys::with_scroll(keys, scroll_frame),
+            ),
             _ => win.renderer.present_panes(&self.ivars().layer, clear, &draws, dividers),
         }
         drop(draws);
@@ -1694,8 +1802,12 @@ impl WindowView {
         }
         win.frames += 1;
         let mut poll_dump = false;
-        // A dump shows every glyph: it waits for the frame that has them.
-        let complete = !shown.iter().filter_map(|id| panes.get(id)).any(|p| p.render.glyphs_deferred());
+        // A dump shows every glyph, and all of a trackpad's movement: it
+        // waits for the frame that has them.
+        let complete = !shown
+            .iter()
+            .filter_map(|id| panes.get(id))
+            .any(|p| p.render.glyphs_deferred() || p.scroll.queued());
         if let Some(test) = &mut win.test
             && test.dump == DumpState::Requested
             && complete
@@ -2515,6 +2627,12 @@ impl WindowView {
         view.with(|_, p| p.key_t0 = None);
     }
 
+    /// Play scroll events in the focused pane for the latency harness, one
+    /// every `1 / hz` seconds from now, each stamped when it is handled.
+    pub fn latency_scroll(&self, events: Vec<crate::scroll::Input>, hz: f64) {
+        play_scroll(self.ivars().id, Arc::new(events), 0, Instant::now(), hz);
+    }
+
     /// The programs running in the panes' foregrounds, other than their
     /// shells (see [`crate::running`]), in pane order. Never the Settings
     /// pane's: closing it loses nothing, each edit being written at once.
@@ -2849,6 +2967,23 @@ fn pane_hooks(id: usize, pane: PaneId, test: bool, settings: bool) -> Hooks {
     hooks
 }
 
+/// Event `i` of `events` in window `id`'s focused pane at its time, then
+/// the next: each scheduled from the one before, as a timer far ahead
+/// may fire late by a share of its delay (and they would come in bunches).
+fn play_scroll(id: usize, events: Arc<Vec<crate::scroll::Input>>, i: usize, start: Instant, hz: f64) {
+    let Some(&input) = events.get(i) else { return };
+    let due = start + Duration::from_secs_f64(i as f64 / hz);
+    let wait = due.saturating_duration_since(Instant::now());
+    let _ = DispatchQueue::main().after(DispatchTime::NOW.time(wait.as_nanos() as i64), move || {
+        with_view(id, |v| {
+            if let Some(view) = v.focused_view() {
+                view.scroll_synthetic(input);
+            }
+        });
+        play_scroll(id, events, i + 1, start, hz);
+    });
+}
+
 /// Present `panes` like [`Renderer::present_panes`], with handlers that
 /// time the frame for the keys it shows (latency harness only). The
 /// renderer doesn't see this drawable, so a window hidden right after such
@@ -2860,14 +2995,15 @@ fn present_timed(
     panes: &[PaneDraw],
     dividers: &[RectInstance],
     lat: &'static Latency,
-    keys: Vec<latency::Key>,
+    frame: FrameKeys,
 ) {
     let Some(drawable) = layer.nextDrawable() else {
-        lat.write(&keys);
+        frame.presented(lat, 0.0);
+        frame.gpu_done(lat, 0.0);
         return;
     };
     let cmd = renderer.encode_panes(&drawable.texture(), clear, panes, dividers);
-    let frame = Arc::new(FrameKeys::new(keys));
+    let frame = Arc::new(frame);
     let on_gpu = frame.clone();
     let done = RcBlock::new(move |cb: NonNull<ProtocolObject<dyn MTLCommandBuffer>>| {
         on_gpu.gpu_done(lat, unsafe { cb.as_ref() }.GPUEndTime());
@@ -2896,6 +3032,44 @@ pub(crate) fn rows_under_find_bar(win: &Win, p: &Pane, titlebar: f64) -> usize {
     let grid_top = pane_padding(&win.config, titlebar, win.scale, p.rect).top as f64;
     let cell = win.renderer.metrics().cell_height.max(1) as f64;
     ((bottom - grid_top) / cell).ceil().max(0.0) as usize
+}
+
+/// Move `p`'s view (of its terminal `t`) by a trackpad's `px` device
+/// pixels: whole lines scroll the terminal's view, the rest is the shift.
+fn move_view(p: &mut Pane, t: &mut term_core::Terminal, px: f64, cell: f64) {
+    let before = (t.display_offset(), p.scroll.shift_px(cell));
+    let lines = p.scroll.pixels(px, cell, before.0);
+    t.scroll_view(lines);
+    let offset = t.display_offset();
+    p.scroll.landed((before.0 as isize + lines).max(0) as usize, offset);
+    // A new whole-line view is built; a new shift only drawn again.
+    if offset != before.0 {
+        p.session.mark_dirty();
+    }
+    p.moved |= p.scroll.shift_px(cell) != before.1;
+}
+
+/// How `p`'s content is drawn when its frame has the row below the view
+/// (scrolled back, for smooth scrolling): moved up by its shift between
+/// whole lines, and inside its rows, so that row shows only as it comes
+/// up, never in the padding below. `None` without that row.
+fn pane_scroll(win: &Win, p: &Pane, titlebar: f64) -> Option<term_render::Scroll> {
+    let cell = win.renderer.metrics().cell_height;
+    let up = p.scroll.shift_px(cell as f64);
+    let snap = p.render.frame.last_snapshot();
+    if snap.rows.len() <= snap.lines as usize {
+        return None;
+    }
+    let pad = pane_padding(&win.config, titlebar, win.scale, p.rect);
+    Some(term_render::Scroll {
+        up,
+        clip: term_render::PxRect {
+            x: p.rect.x,
+            y: p.rect.y + pad.top as i32,
+            w: p.rect.w,
+            h: snap.lines as i32 * cell as i32,
+        },
+    })
 }
 
 pub(crate) fn pane_padding(config: &Config, titlebar: f64, scale: f64, rect: PxRect) -> Padding {
@@ -3002,7 +3176,8 @@ fn spawn_pane(window: usize, config: &Config, theme: &Theme, m: term_font::Metri
         blink_scheduled: false,
         sync_since: None,
         marked: String::new(),
-        scroll_accum: 0.0,
+        scroll: crate::scroll::Smooth::default(),
+        moved: false,
         mouse_button: None,
         selecting: None,
         dragged: false,
@@ -3370,6 +3545,17 @@ impl WindowView {
                         self.request_redraw(pane);
                     }
                 }
+                Some(Control::ScrollPx(points)) => {
+                    if let Some(view) = self.focused_view() {
+                        use crate::scroll::{Input, Phase};
+                        view.scroll_synthetic(Input {
+                            precise: true,
+                            dy: points.unwrap_or(0) as f64,
+                            phase: if points.is_some() { Phase::Changed } else { Phase::Ended },
+                            ..Input::default()
+                        });
+                    }
+                }
                 Some(Control::Close) => {
                     if let Some(window) = self.window() {
                         window.performClose(None);
@@ -3686,6 +3872,7 @@ fn write_dump(st: &mut State, window: Window) {
         copied: test.copied.clone(),
         failed_rows: p.render.frame.last_snapshot().failed.clone(),
         view_offset,
+        view_shift: p.scroll.shift_px(m.cell_height as f64),
         selection,
         find,
         dividers,

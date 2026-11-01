@@ -173,7 +173,9 @@ impl GlyphThread {
             for w in gone {
                 live.remove(w);
             }
+            shrink_drained(&mut *live);
         }
+        shrink_drained(&mut self.wanted);
     }
 
     /// Whether some pane's last build went without `want`.
@@ -203,6 +205,8 @@ impl GlyphThread {
             self.pending.remove(&f.want);
             out.push(f);
         }
+        shrink_drained(&mut self.pending);
+        shrink_drained(&mut self.ready);
         out
     }
 
@@ -222,15 +226,40 @@ impl GlyphThread {
     pub fn drop_unwanted(&mut self) {
         let wanted = &self.wanted;
         self.ready.retain(|_, (_, _, w)| wanted.contains_key(w));
-        if self.ready.is_empty() {
-            self.ready = HashMap::new();
-        }
+        shrink_drained(&mut self.ready);
     }
 
     /// Whether anything asked for isn't back yet: the panes drawn without
     /// it will be woken for.
     pub fn busy(&self) -> bool {
         !self.pending.is_empty()
+    }
+}
+
+/// A set or map a flood filled (tens of thousands of glyphs asked for)
+/// keeps its room once drained; give it back then.
+trait Drained: Default {
+    fn drained(&self) -> bool;
+}
+
+impl<T> Drained for HashSet<T> {
+    fn drained(&self) -> bool {
+        self.is_empty() && self.capacity() > DRAINED_ROOM
+    }
+}
+
+impl<K, V> Drained for HashMap<K, V> {
+    fn drained(&self) -> bool {
+        self.is_empty() && self.capacity() > DRAINED_ROOM
+    }
+}
+
+/// Room an empty set keeps: a screenful of new glyphs.
+const DRAINED_ROOM: usize = 1024;
+
+fn shrink_drained<T: Drained>(t: &mut T) {
+    if t.drained() {
+        *t = T::default();
     }
 }
 
@@ -253,6 +282,9 @@ fn run(fonts: Fonts, wants: Receiver<Want>, found: Sender<Found>, wake: GlyphWak
         let want = match stack.pop() {
             Some(w) => w,
             None => {
+                if stack.capacity() > DRAINED_ROOM {
+                    stack = Vec::new();
+                }
                 if unsent {
                     // Nothing more asked for: show what is done.
                     woken = Instant::now();

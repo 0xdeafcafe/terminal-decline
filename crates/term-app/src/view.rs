@@ -1736,9 +1736,28 @@ impl WindowView {
                     v.with_state(|st| st.win.frames == token && st.win.link.isPaused() && !st.panes.values().any(|p| p.blink_scheduled));
                 if idle == Some(true) {
                     v.trim_drawables();
+                    v.trim_glyphs();
                 }
             })
         });
+    }
+
+    /// Once no window is drawing, let the glyph textures every window
+    /// shares go back to their starting sizes if a flood of new glyphs
+    /// grew them (up to 16 MB each, kept for good before), and draw every
+    /// window again at once, its glyphs rasterised here while nothing
+    /// else happens, so none shows a cell without its glyph.
+    fn trim_glyphs(&self) {
+        let views = all_views();
+        if !views.iter().all(|v| v.with_state(|st| st.win.link.isPaused()).unwrap_or(true)) {
+            return;
+        }
+        if self.with_state(|st| st.win.renderer.shrink_glyph_textures()) != Some(true) {
+            return;
+        }
+        for v in views {
+            v.redraw_all();
+        }
     }
 
     /// Once the display link has stayed paused (no output, no frame) for

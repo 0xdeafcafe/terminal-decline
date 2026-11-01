@@ -2993,6 +2993,11 @@ fn smoke_memory_pressure_gives_memory_back_and_redraws() {
         return;
     }
     let dir = TempDir::new("pressure");
+    // History large enough that compressing it matters (the default keeps
+    // 10,000 lines, about 0.7 MB of this log).
+    let config = dir.config_home().join("terminal-decline");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(config.join("config.toml"), "scrollback = 100000\n").unwrap();
     let script = format!(
         "seq 1 100000 | sed 's/^/2026-10-30T09:00:00Z INFO request served path=\\/api\\/v1\\/items id=/'; echo done; {}{}{}{}sleep 20",
         osc("dump"),
@@ -3014,7 +3019,7 @@ fn smoke_memory_pressure_gives_memory_back_and_redraws() {
     assert!(num(&d[1], "frames") > num(&d[0], "frames"));
     assert_eq!(screen(&d[1]), screen(&d[0]));
     assert_eq!(num(&d[1], "glyphs"), num(&d[0], "glyphs"));
-    // The footprint drops (44 -> 37.5 MB on an M-series Mac).
+    // The footprint drops (49 -> 45 MB on an M-series Mac).
     let footprint = |x: &Value| num(x, "phys_footprint");
     assert!(
         footprint(&d[1]) < footprint(&d[0]),

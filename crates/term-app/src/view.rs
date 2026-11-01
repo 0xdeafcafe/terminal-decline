@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use block2::RcBlock;
 use dispatch2::{DispatchQueue, DispatchTime};
-use objc2::rc::{Retained, Weak};
+use objc2::rc::{Retained, Weak, autoreleasepool};
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
@@ -3559,157 +3559,165 @@ impl WindowView {
                 }
                 test.queue.pop_front()
             });
-            match next.flatten() {
-                None => return,
-                Some(Control::Dump) => {
-                    self.with_state(|st| {
-                        if let Some(test) = &mut st.win.test {
-                            test.dump = DumpState::Requested;
-                        }
-                    });
-                    self.redraw_all();
-                }
-                Some(Control::Resize { cols, lines }) => self.set_grid(cols as usize, lines as usize),
-                Some(Control::Font(delta)) => {
-                    let size = self.with_state(|st| (st.win.font_size + delta as f64).max(6.0));
-                    self.reload_fonts(size);
-                }
-                Some(Control::Tab) => {
-                    if let Some(window) = self.window() {
-                        crate::app::open_tab_beside(&window);
-                    }
-                }
-                Some(Control::Front) => bring_to_front(self.ivars().id),
-                Some(Control::Drop(paths)) => {
-                    if let Some(view) = self.focused_view() {
-                        view.paste_text(&crate::desktop::dropped_text(&paths));
-                    }
-                }
-                Some(Control::Settings) => crate::app::show_settings_now(),
-                Some(Control::EditConfig) => crate::app::edit_config_now(),
-                Some(Control::UpdateCheck) => crate::update::sparkle::check_in_background(),
-                Some(Control::FakeUpdate(p)) => crate::welcome::fake(p),
-                Some(Control::MemoryPressure) => {
-                    crate::memory::relieve("memory pressure (test control)");
-                }
-                Some(Control::TypeSettings(bytes)) => crate::app::type_into_settings(bytes),
-                Some(Control::Key { keycode, flags }) => post_key(MainThreadMarker::from(self), keycode, flags),
-                Some(Control::Menu(action)) => {
-                    let app = NSApplication::sharedApplication(MainThreadMarker::from(self));
-                    let sent = unsafe { app.sendAction_to_from(objc2::runtime::Sel::register(action.selector()), None, None) };
-                    if !sent {
-                        NSBeep();
-                    }
-                }
-                Some(Control::Hover(cell)) => {
-                    if let Some(view) = self.focused_view() {
-                        view.set_hover(cell);
-                    }
-                }
-                Some(Control::Click(line, col, true)) => {
-                    if !self.focused_view().is_some_and(|view| view.move_shell_cursor(line, col)) {
-                        NSBeep();
-                    }
-                }
-                Some(Control::Click(line, col, false)) => {
-                    let pane = self.focused_pane();
-                    let uri = pane.and_then(|pane| {
-                        self.with_pane(pane, |_, p| {
-                            let t = p.session.lock_term();
-                            crate::links::under(&t.state, t.state.point_at(line, col))
-                        })
-                    });
-                    match (self.focused_view(), uri.flatten()) {
-                        (Some(view), Some(uri)) => view.open_link(&uri),
-                        _ => NSBeep(),
-                    }
-                }
-                Some(Control::Mouse {
-                    kind,
-                    line,
-                    col,
-                    shift,
-                    option,
-                }) => {
-                    if let Some(view) = self.focused_view() {
-                        view.test_mouse(kind, line, col, shift, option);
-                    }
-                }
-                Some(Control::Scroll(lines)) => {
-                    if let Some(pane) = self.focused_pane() {
-                        self.with_pane(pane, |_, p| p.session.lock_term().state.scroll_view(lines));
-                        self.request_redraw(pane);
-                    }
-                }
-                Some(Control::ScrollPx(points)) => {
-                    if let Some(view) = self.focused_view() {
-                        use crate::scroll::{Input, Phase};
-                        view.scroll_synthetic(Input {
-                            precise: true,
-                            dy: points.unwrap_or(0) as f64,
-                            phase: if points.is_some() { Phase::Changed } else { Phase::Ended },
-                            ..Input::default()
+            // A pool per command: a queue of resizes would otherwise hold
+            // every drawable it presented until the whole queue was run.
+            let go = autoreleasepool(|_| {
+                match next.flatten() {
+                    None => return false,
+                    Some(Control::Dump) => {
+                        self.with_state(|st| {
+                            if let Some(test) = &mut st.win.test {
+                                test.dump = DumpState::Requested;
+                            }
                         });
+                        self.redraw_all();
                     }
-                }
-                Some(Control::Close) => {
-                    if let Some(window) = self.window() {
-                        window.performClose(None);
+                    Some(Control::Resize { cols, lines }) => self.set_grid(cols as usize, lines as usize),
+                    Some(Control::Font(delta)) => {
+                        let size = self.with_state(|st| (st.win.font_size + delta as f64).max(6.0));
+                        self.reload_fonts(size);
                     }
-                }
-                Some(Control::Split(dir)) => self.split(dir),
-                Some(Control::ClosePane) => self.close_focused_pane(),
-                Some(Control::Drag { index, to }) => self.drag_divider(index, to),
-                Some(Control::ResizePane(dir)) => self.resize_pane(dir),
-                Some(Control::Equalize) => self.equalize(),
-                Some(Control::Zoom) => self.toggle_zoom(),
-                Some(Control::BuildPanic { index, snapshot }) => {
-                    let pane = self.with_state(|st| st.tree.ids().get(index).copied()).flatten();
-                    if let Some(pane) = pane {
-                        self.with_pane(pane, |_, p| p.panic_next = Some(snapshot));
-                        self.request_redraw(pane);
+                    Some(Control::Tab) => {
+                        if let Some(window) = self.window() {
+                            crate::app::open_tab_beside(&window);
+                        }
                     }
-                }
-                Some(Control::FindClick(index)) => {
-                    let view = self
-                        .with_state(|st| st.tree.ids().get(index).and_then(|id| st.panes.get(id)).map(|p| p.view.clone()))
-                        .flatten();
-                    match view {
-                        Some(view) => view.click_find_bar(),
-                        None => NSBeep(),
+                    Some(Control::Front) => bring_to_front(self.ivars().id),
+                    Some(Control::Drop(paths)) => {
+                        if let Some(view) = self.focused_view() {
+                            view.paste_text(&crate::desktop::dropped_text(&paths));
+                        }
                     }
-                }
-                Some(Control::Quick) => crate::app::toggle_quick_now(),
-                Some(Control::Save) => {
-                    let path = self.with_state(|st| st.win.test.as_ref().map(|t| t.path.clone())).flatten();
-                    if let Some(path) = path {
-                        let mut name = path.into_os_string();
-                        name.push(".saved");
-                        crate::app::write_saved_windows(std::path::Path::new(&name));
+                    Some(Control::Settings) => crate::app::show_settings_now(),
+                    Some(Control::EditConfig) => crate::app::edit_config_now(),
+                    Some(Control::UpdateCheck) => crate::update::sparkle::check_in_background(),
+                    Some(Control::FakeUpdate(p)) => crate::welcome::fake(p),
+                    Some(Control::MemoryPressure) => {
+                        crate::memory::relieve("memory pressure (test control)");
                     }
-                }
-                Some(Control::Focus(target)) => match target {
-                    FocusTarget::Next => self.focus_in_order(true),
-                    FocusTarget::Previous => self.focus_in_order(false),
-                    FocusTarget::Towards(dir) => self.focus_towards(dir),
-                    FocusTarget::Index(n) => match self.with_state(|st| st.tree.ids().get(n).copied()).flatten() {
-                        Some(pane) => self.focus_pane(pane),
+                    Some(Control::TypeSettings(bytes)) => crate::app::type_into_settings(bytes),
+                    Some(Control::Key { keycode, flags }) => post_key(MainThreadMarker::from(self), keycode, flags),
+                    Some(Control::Menu(action)) => {
+                        let app = NSApplication::sharedApplication(MainThreadMarker::from(self));
+                        let sent = unsafe { app.sendAction_to_from(objc2::runtime::Sel::register(action.selector()), None, None) };
+                        if !sent {
+                            NSBeep();
+                        }
+                    }
+                    Some(Control::Hover(cell)) => {
+                        if let Some(view) = self.focused_view() {
+                            view.set_hover(cell);
+                        }
+                    }
+                    Some(Control::Click(line, col, true)) => {
+                        if !self.focused_view().is_some_and(|view| view.move_shell_cursor(line, col)) {
+                            NSBeep();
+                        }
+                    }
+                    Some(Control::Click(line, col, false)) => {
+                        let pane = self.focused_pane();
+                        let uri = pane.and_then(|pane| {
+                            self.with_pane(pane, |_, p| {
+                                let t = p.session.lock_term();
+                                crate::links::under(&t.state, t.state.point_at(line, col))
+                            })
+                        });
+                        match (self.focused_view(), uri.flatten()) {
+                            (Some(view), Some(uri)) => view.open_link(&uri),
+                            _ => NSBeep(),
+                        }
+                    }
+                    Some(Control::Mouse {
+                        kind,
+                        line,
+                        col,
+                        shift,
+                        option,
+                    }) => {
+                        if let Some(view) = self.focused_view() {
+                            view.test_mouse(kind, line, col, shift, option);
+                        }
+                    }
+                    Some(Control::Scroll(lines)) => {
+                        if let Some(pane) = self.focused_pane() {
+                            self.with_pane(pane, |_, p| p.session.lock_term().state.scroll_view(lines));
+                            self.request_redraw(pane);
+                        }
+                    }
+                    Some(Control::ScrollPx(points)) => {
+                        if let Some(view) = self.focused_view() {
+                            use crate::scroll::{Input, Phase};
+                            view.scroll_synthetic(Input {
+                                precise: true,
+                                dy: points.unwrap_or(0) as f64,
+                                phase: if points.is_some() { Phase::Changed } else { Phase::Ended },
+                                ..Input::default()
+                            });
+                        }
+                    }
+                    Some(Control::Close) => {
+                        if let Some(window) = self.window() {
+                            window.performClose(None);
+                        }
+                    }
+                    Some(Control::Split(dir)) => self.split(dir),
+                    Some(Control::ClosePane) => self.close_focused_pane(),
+                    Some(Control::Drag { index, to }) => self.drag_divider(index, to),
+                    Some(Control::ResizePane(dir)) => self.resize_pane(dir),
+                    Some(Control::Equalize) => self.equalize(),
+                    Some(Control::Zoom) => self.toggle_zoom(),
+                    Some(Control::BuildPanic { index, snapshot }) => {
+                        let pane = self.with_state(|st| st.tree.ids().get(index).copied()).flatten();
+                        if let Some(pane) = pane {
+                            self.with_pane(pane, |_, p| p.panic_next = Some(snapshot));
+                            self.request_redraw(pane);
+                        }
+                    }
+                    Some(Control::FindClick(index)) => {
+                        let view = self
+                            .with_state(|st| st.tree.ids().get(index).and_then(|id| st.panes.get(id)).map(|p| p.view.clone()))
+                            .flatten();
+                        match view {
+                            Some(view) => view.click_find_bar(),
+                            None => NSBeep(),
+                        }
+                    }
+                    Some(Control::Quick) => crate::app::toggle_quick_now(),
+                    Some(Control::Save) => {
+                        let path = self.with_state(|st| st.win.test.as_ref().map(|t| t.path.clone())).flatten();
+                        if let Some(path) = path {
+                            let mut name = path.into_os_string();
+                            name.push(".saved");
+                            crate::app::write_saved_windows(std::path::Path::new(&name));
+                        }
+                    }
+                    Some(Control::Focus(target)) => match target {
+                        FocusTarget::Next => self.focus_in_order(true),
+                        FocusTarget::Previous => self.focus_in_order(false),
+                        FocusTarget::Towards(dir) => self.focus_towards(dir),
+                        FocusTarget::Index(n) => match self.with_state(|st| st.tree.ids().get(n).copied()).flatten() {
+                            Some(pane) => self.focus_pane(pane),
+                            None => NSBeep(),
+                        },
+                    },
+                    Some(Control::Clipboard(text)) => {
+                        let pb = crate::pane_view::clipboard();
+                        pb.clearContents();
+                        pb.setString_forType(&NSString::from_str(&text), unsafe { NSPasteboardTypeString });
+                    }
+                    Some(Control::Find(text)) => match self.focused_view() {
+                        Some(view) => view.find_text(&text),
                         None => NSBeep(),
                     },
-                },
-                Some(Control::Clipboard(text)) => {
-                    let pb = crate::pane_view::clipboard();
-                    pb.clearContents();
-                    pb.setString_forType(&NSString::from_str(&text), unsafe { NSPasteboardTypeString });
+                    Some(Control::Quit) => {
+                        crate::app::quit_now();
+                        return false;
+                    }
                 }
-                Some(Control::Find(text)) => match self.focused_view() {
-                    Some(view) => view.find_text(&text),
-                    None => NSBeep(),
-                },
-                Some(Control::Quit) => {
-                    crate::app::quit_now();
-                    return;
-                }
+                true
+            });
+            if !go {
+                return;
             }
         }
     }

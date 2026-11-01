@@ -18,6 +18,14 @@
 (( ${+_decline_integration} )) && return 0
 typeset -g _decline_integration=1
 
+# `decline` for the app this came with (decline pin, decline ctl, …),
+# last in PATH so an installed one wins: bundled, this file is in
+# Contents/Resources/shell-integration and the link in Contents/Resources/bin.
+() {
+  local bin=${${(%):-%x}:A:h:h}/bin
+  [[ -x $bin/decline ]] && (( ! ${+commands[decline]} )) && path+=($bin)
+}
+
 # The marks go in PS1, inside %{ %} so zsh doesn't count them in the
 # prompt's width, rather than being printed by precmd: zsh clears the
 # line after precmd (PROMPT_SP), which would take a mark there with it.

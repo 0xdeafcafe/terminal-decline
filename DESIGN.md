@@ -730,6 +730,15 @@ removed, and it is registered with LaunchServices. The program runs through a
 login shell, so it gets the user's `PATH` even when started from the Dock.
 A missing or nonexistent `cwd` starts in `HOME` (the app's own working
 directory is `/` when started from the Dock).
+`terminal-decline pin rush` (no `--`) runs the program named like the pin.
+Without `--icon`, the pin takes the program's own icon when it has one: its
+app bundle's `CFBundleIconFile` if it lives in a `.app`, else `NAME.icns`,
+`NAME.png`, `icon.icns` or `icon.png` beside it (the program found on
+`PATH`, links followed); otherwise a generated one. A relative `--icon` not
+found in the current folder is looked for beside the program.
+The bundle has `Contents/Resources/bin/decline`, a link to the launcher,
+and the shell integration adds that folder last to `PATH` when no `decline`
+is found, so `decline pin …` works in the app's shells without the cask.
 `terminal-decline pin --update` re-clones the binary after upgrades, and
 rewrites each pin's Info.plist (name from the bundle's file name, its icon
 if it has one), so pins made before the rename (ids

@@ -301,7 +301,7 @@ pub fn parse_args(args: &[String], apps_dir: &Path) -> Result<Request, String> {
         dock: false,
         command: Vec::new(),
     };
-    let mut i = 0;
+    let (mut i, mut dashes) = (0, false);
     while i < args.len() {
         let a = args[i].as_str();
         let mut value = || {
@@ -316,6 +316,7 @@ pub fn parse_args(args: &[String], apps_dir: &Path) -> Result<Request, String> {
             "--dock" => o.dock = true,
             "--" => {
                 o.command = args[i + 1..].to_vec();
+                dashes = true;
                 break;
             }
             a if a.starts_with('-') => return Err(format!("unknown option {a}")),
@@ -329,7 +330,11 @@ pub fn parse_args(args: &[String], apps_dir: &Path) -> Result<Request, String> {
     }
     check_name(&o.name)?;
     if o.command.is_empty() {
-        return Err("give the program to run after --".into());
+        if dashes {
+            return Err("give the program to run after --".into());
+        }
+        // `pin rush`: the name is the program too.
+        o.command = vec![o.name.clone()];
     }
     Ok(Request::Create(o))
 }
@@ -486,6 +491,8 @@ pub fn create(o: Options, paths: &Paths, run: &mut Runner) -> Result<Created, St
             other.display()
         ));
     }
+    let given_icon = o.icon.is_some();
+    let icon = pin_icon(&o)?;
     let table = pin_table(&o, &app)?;
     std::fs::create_dir_all(paths.pins_dir()).map_err(|e| e.to_string())?;
     let pin_toml = format!(
@@ -497,7 +504,7 @@ pub fn create(o: Options, paths: &Paths, run: &mut Runner) -> Result<Created, St
         // An existing stub pin of this id: only its settings change, so
         // it keeps its permissions (§5.2).
         Some(_) if stub_pin_id(&app).as_deref() == Some(slug.as_str()) => {
-            if o.icon.is_some() {
+            if given_icon {
                 eprintln!("warning: {} keeps its icon; to change it, remove the pin and make it again", o.name);
             }
             std::fs::write(&config_path, pin_toml).map_err(|e| e.to_string())?;
@@ -505,11 +512,11 @@ pub fn create(o: Options, paths: &Paths, run: &mut Runner) -> Result<Created, St
         }
         Some(src) => {
             std::fs::write(&config_path, pin_toml).map_err(|e| e.to_string())?;
-            let (icns, plan) = match &o.icon {
+            let (icns, plan) = match &icon {
                 Some(_) => (None, None),
                 None => generated_icon(&o.name),
             };
-            let icon = match (&o.icon, &icns) {
+            let icon = match (&icon, &icns) {
                 (Some(file), _) => bundle::Icon::Image(file),
                 (None, Some(bytes)) => bundle::Icon::Icns(bytes),
                 (None, None) => bundle::Icon::None,
@@ -520,7 +527,7 @@ pub fn create(o: Options, paths: &Paths, run: &mut Runner) -> Result<Created, St
         }
         None => {
             std::fs::write(&config_path, pin_toml).map_err(|e| e.to_string())?;
-            make_clone(&o.name, &slug, &app, o.icon.as_deref(), &paths.exe, run)?;
+            make_clone(&o.name, &slug, &app, icon.as_deref(), &paths.exe, run)?;
             clone_record(&app).write(&paths.pins_dir(), &slug)?;
             true
         }
@@ -533,6 +540,60 @@ pub fn create(o: Options, paths: &Paths, run: &mut Runner) -> Result<Created, St
         config: config_path,
         dock: o.dock,
         rebuilt,
+    })
+}
+
+/// Where the program `p` is: a path made absolute, or a bare name found
+/// on `PATH`, symlinks followed (a Homebrew link leads to its keg).
+fn program_path(p: &str) -> Option<PathBuf> {
+    if p.contains('/') {
+        return std::fs::canonicalize(p).ok();
+    }
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|dir| dir.join(p))
+        .find(|f| f.is_file())
+        .and_then(|f| std::fs::canonicalize(f).ok())
+}
+
+/// The image for a new pin: `--icon FILE` (a relative one looked for in
+/// the current folder, then beside the program), or else one found with
+/// the program (see [`find_icon`]). `None` means a generated icon.
+fn pin_icon(o: &Options) -> Result<Option<PathBuf>, String> {
+    let program = o.command.first().and_then(|p| program_path(p));
+    match &o.icon {
+        Some(file) if file.is_absolute() || file.exists() => Ok(Some(file.clone())),
+        Some(file) => program
+            .as_deref()
+            .and_then(Path::parent)
+            .map(|dir| dir.join(file))
+            .filter(|f| f.exists())
+            .map(Some)
+            .ok_or(format!("{}: no such file here or beside the program", file.display())),
+        None => Ok(program.as_deref().and_then(find_icon)),
+    }
+}
+
+/// An icon that comes with the program at `program` (absolute): its app
+/// bundle's icon if it lives in one, else `NAME.icns`, `NAME.png`,
+/// `icon.icns` or `icon.png` beside it.
+pub fn find_icon(program: &Path) -> Option<PathBuf> {
+    let bundled = program
+        .ancestors()
+        .find(|a| a.extension().is_some_and(|e| e == "app"))
+        .and_then(|app| {
+            let file = term_pin::cf::InfoPlist::read(app)?.string("CFBundleIconFile")?;
+            let res = app.join("Contents/Resources");
+            [res.join(&file), res.join(format!("{file}.icns"))]
+                .into_iter()
+                .find(|f| f.is_file())
+        });
+    bundled.or_else(|| {
+        let dir = program.parent()?;
+        let name = program.file_name()?.to_string_lossy().into_owned();
+        [name.as_str(), "icon"]
+            .iter()
+            .flat_map(|stem| ["icns", "png"].map(|ext| dir.join(format!("{stem}.{ext}"))))
+            .find(|f| f.is_file())
     })
 }
 
@@ -1164,6 +1225,48 @@ mod tests {
         v.iter().map(|x| x.to_string()).collect()
     }
 
+    /// A program's icon is found in its app bundle or beside it, and a
+    /// relative `--icon` is looked for beside the program too.
+    #[test]
+    fn icons_found_with_the_program() {
+        let dir = TempDir::new("find-icon");
+        let tool = dir.join("bin/tool");
+        std::fs::create_dir_all(tool.parent().unwrap()).unwrap();
+        std::fs::write(&tool, b"").unwrap();
+        assert_eq!(find_icon(&tool), None);
+        std::fs::write(dir.join("bin/icon.png"), b"").unwrap();
+        assert_eq!(find_icon(&tool), Some(dir.join("bin/icon.png")));
+        std::fs::write(dir.join("bin/tool.icns"), b"").unwrap();
+        assert_eq!(find_icon(&tool), Some(dir.join("bin/tool.icns")), "its own name first");
+
+        let app = dir.join("Tool.app/Contents");
+        std::fs::create_dir_all(app.join("MacOS")).unwrap();
+        std::fs::create_dir_all(app.join("Resources")).unwrap();
+        std::fs::write(app.join("MacOS/tool"), b"").unwrap();
+        std::fs::write(app.join("Resources/AppIcon.icns"), b"").unwrap();
+        std::fs::write(
+            app.join("Info.plist"),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict><key>CFBundleIconFile</key><string>AppIcon</string></dict></plist>"#,
+        )
+        .unwrap();
+        assert_eq!(find_icon(&app.join("MacOS/tool")), Some(app.join("Resources/AppIcon.icns")));
+
+        let opts = |icon: &str| Options {
+            name: "tool".into(),
+            icon: Some(icon.into()),
+            config: None,
+            cwd: None,
+            dir: dir.path().into(),
+            dock: false,
+            command: vec![tool.to_string_lossy().into_owned()],
+        };
+        assert_eq!(pin_icon(&opts("icon.png")), Ok(Some(dir.join("bin/icon.png"))));
+        assert!(pin_icon(&opts("nope.png")).unwrap_err().contains("beside the program"));
+        let detected = Options { icon: None, ..opts("") };
+        assert_eq!(pin_icon(&detected), Ok(Some(dir.join("bin/tool.icns"))));
+    }
+
     /// A temp home with a config dir, an apps dir and a small fake binary.
     struct Env {
         dir: TempDir,
@@ -1267,7 +1370,12 @@ mod tests {
         assert!(err(&["--remove"]).contains("needs a name"));
         assert!(err(&["--remove", "a", "b"]).contains("unexpected"));
         assert!(err(&["--remove", "../x"]).contains("'/'"));
-        assert!(err(&["Rush"]).contains("after --"));
+        assert!(err(&["Rush", "--icon", "i.png", "--"]).contains("after --"));
+        // No program given: the name is the program.
+        match parse_args(&s(&["rush", "--icon", "i.png"]), apps) {
+            Ok(Request::Create(o)) => assert_eq!((o.name.as_str(), o.command), ("rush", s(&["rush"]))),
+            other => panic!("{other:?}"),
+        }
         assert!(err(&["Rush", "--"]).contains("after --"));
         assert!(err(&["--", "./rush"]).contains("name"));
         assert!(err(&["--bogus", "Rush", "--", "x"]).contains("unknown option --bogus"));

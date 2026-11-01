@@ -2804,6 +2804,11 @@ and where it differs from the plan above:
   1.25 / 1.25, `seq` 1.35 / 1.35, coloured 1.04 / 1.08, unicode 1.06
   / 0.97, clusters 1.04 / 1.00, `tui` the same (6 more rounds:
   medians 11464 and 11453 µs). `Row` grows from 48 to 56 bytes.
+  Clearing a row whose written part is at most 32 cells is a fixed
+  block of stores rather than a call to `memset`, which with its
+  caller was 12% of `seq`: `seq` 1.05 / 1.06 (best / median of 5
+  interleaved rounds, `parse_1k`, load average 23–33), the rest within
+  two points.
 
 ---
 

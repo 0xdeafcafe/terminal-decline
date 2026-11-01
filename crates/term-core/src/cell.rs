@@ -296,7 +296,18 @@ impl Cells {
     #[inline]
     pub fn fill_all(&mut self, fill: Cell) {
         if fill == Cell::BLANK {
-            self.v[..self.blank_from as usize].fill(Cell::BLANK);
+            const SHORT: usize = 32;
+            let n = self.blank_from as usize;
+            if n <= SHORT
+                && let Some(head) = self.v.first_chunk_mut::<SHORT>()
+            {
+                // A short line: a fixed block of stores, cheaper than the
+                // call to memset (12% of `seq`). The cells past `n` are
+                // blank already.
+                *head = [Cell::BLANK; SHORT];
+            } else {
+                self.v[..n].fill(Cell::BLANK);
+            }
             self.blank_from = 0;
         } else {
             self.v.fill(fill);

@@ -1671,6 +1671,9 @@ impl WindowView {
             if let Some(env) = t.state.take_shell_env() {
                 p.completion.shell_env = Some(Arc::new(env));
             }
+            if let Some(m) = t.state.take_shell_matches() {
+                p.completion.zsh_matches(m);
+            }
             // Something read on the completion worker draws the pane again.
             let waker = move || -> crate::complete::sources::Wake { Box::new(move || completion_ready(window_id, id)) };
             if win.config.highlight_command_line {
@@ -3454,10 +3457,14 @@ fn resize_cursor(dir: Dir) -> Retained<NSCursor> {
 /// each shell, and what the reports are for. `None` when nothing would
 /// use them, so the shell sets up no hook and sends nothing.
 fn line_reports(config: &Config) -> Option<term_pty::Reports> {
-    let features: Vec<&str> = [("highlight", config.highlight_command_line), ("list", config.completion)]
-        .into_iter()
-        .filter_map(|(name, on)| on.then_some(name))
-        .collect();
+    let features: Vec<&str> = [
+        ("highlight", config.highlight_command_line),
+        ("list", config.completion),
+        ("tab", config.completion && config.completion_tab_zsh),
+    ]
+    .into_iter()
+    .filter_map(|(name, on)| on.then_some(name))
+    .collect();
     if features.is_empty() {
         return None;
     }

@@ -29,6 +29,8 @@ pub enum What {
     Executable,
     Subcommand,
     Flag,
+    /// One of zsh's own matches.
+    Match,
 }
 
 impl What {
@@ -45,6 +47,7 @@ impl What {
             What::Executable => "executable",
             What::Subcommand => "subcommand",
             What::Flag => "flag",
+            What::Match => "",
         }
     }
 }

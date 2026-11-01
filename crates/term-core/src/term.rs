@@ -16,7 +16,7 @@ use crate::scrollback::{HistoryStats, Scrollback};
 use crate::style::{Attrs, LinkId, Style, Underline};
 use crate::style_table::{StyleStats, StyleTable};
 use crate::unicode::{self, Segmenter};
-pub use shell_report::{Keymap, LineReport, ShellEnv, TOKEN_LEN};
+pub use shell_report::{Keymap, LineReport, MAX_MATCHES, ShellEnv, ShellMatches, TOKEN_LEN};
 
 mod compress;
 mod graphics;
@@ -458,6 +458,7 @@ pub struct Terminal {
     report_token: Option<[u8; shell_report::TOKEN_LEN]>,
     line_report: Option<LineReport>,
     shell_env: Option<ShellEnv>,
+    shell_matches: Option<shell_report::ShellMatches>,
     report_seen: bool,
     /// The palette and foreground, background and cursor colours: the
     /// theme's, with what programs set (OSC 4, 10–12) on top.
@@ -615,6 +616,7 @@ impl Terminal {
             report_token: None,
             line_report: None,
             shell_env: None,
+            shell_matches: None,
             report_seen: false,
             colors: Box::new(replies::ColorTable::new([0xd8dee9, 0x16181c, 0xd8dee9])),
             colors_changed: false,

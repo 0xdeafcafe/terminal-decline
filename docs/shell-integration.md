@@ -166,7 +166,16 @@ puts the chosen one, or the first, in place of the word (zsh quotes
 it), Right at the end of the line takes the grey text after the cursor,
 Esc closes it until you change the word. It only opens after you type,
 not when history or zsh's own completion changes the line. Enter, and
-every other key, go to the shell as always. It shows in the focused pane only, and never on
+every other key, go to the shell as always.
+
+Tab with no list open asks zsh, as before: with one match zsh puts it
+in; with several, zsh puts in what they share and they show in the same
+list instead of zsh's own listing (`git checkout <Tab>` shows branches,
+`kill <Tab>` processes). Taking one has zsh put it in, with its own
+quoting. Over 1,000 matches zsh lists them itself. This keeps whatever
+Tab ran before (Oh My Zsh's widget, say), and stays out of the way of
+fzf-tab and zsh-autocomplete. Settings > Completion > Tab shows zsh's
+matches in the list turns it off (new tabs). It shows in the focused pane only, and never on
 an empty word. Settings > Completion turns it, or its parts, off; zsh
 only for now.
 

@@ -57,6 +57,7 @@ _decline_precmd() {
   fi
   PS1=$_decline_d$_decline_a$PS1$_decline_b
   (( ${+functions[_decline_env]} )) && _decline_env
+  (( ${+functions[_decline_check_tab]} )) && _decline_check_tab
   # A hook added after this one (a theme loaded later) would set PS1
   # after the marks went in: be the last again from the next prompt.
   if [[ ${precmd_functions[-1]} != _decline_precmd ]]; then
@@ -160,13 +161,24 @@ if [[ -n ${_decline_token-} && -n ${_decline_features-} && -n $TTY ]] \
   # `~/`), then <suffix> (a space after a file). The name is
   # percent-encoded like the reports. Bound only while the app gave a
   # token, so another terminal never sends it.
+  # A payload `#<n>` is zsh's own match number <n> from the last Tab
+  # (_decline_tab below), which zsh inserts itself.
   _decline_take() {
-    emulate -L zsh -o extendedglob +o multibyte
     local c payload=
     while read -rk 1 c && [[ $c != $'\a' ]]; do
       payload+=$c
       (( ${#payload} > 4096 )) && return 0
     done
+    if [[ $payload == '#'<1-> ]]; then
+      (( ${+functions[_decline_pick]} )) && _decline_pick ${payload#\#}
+      return 0
+    fi
+    _decline_take_word $payload
+  }
+
+  _decline_take_word() {
+    emulate -L zsh -o extendedglob +o multibyte
+    local payload=$1
     local -a f=("${(@s:;:)payload}")
     (( ${#f} == 4 )) || return 0
     local start=$f[1] keep=$f[2] suffix=$f[4]
@@ -178,6 +190,167 @@ if [[ -n ${_decline_token-} && -n ${_decline_features-} && -n $TTY ]] \
     setopt multibyte
     LBUFFER=$head${(q-)name}$suffix
   }
+
+  # Tab asks zsh (docs/design/completion.md §7): the widget that was on
+  # Tab runs as before, with compadd wrapped so each match is kept as
+  # zsh would show it. With several, zsh inserts what they share and
+  # lists nothing, and the app shows them in its list:
+  #   ESC ] 7701 ; matches ; <token> ; <count> ; <shown, one per line> BEL
+  # Taking one sends its number back (`#<n>` to _decline_take), and the
+  # completion runs again adding only that match, so zsh inserts it
+  # with its own quoting, prefixes and suffixes. Over 1,000 matches or
+  # 32 KB, zsh lists them itself as before.
+  if [[ ,$_decline_features, == *,tab,* ]]; then
+    typeset -gHA _decline_tab_orig
+    typeset -gHa _decline_hits
+    typeset -gH _decline_mode= _decline_send=0 _decline_want=0 _decline_seen=0 _decline_picked=0
+
+    _decline_compadd() {
+      # Not ours, or another completer asking what would match: as is.
+      if [[ $_decline_mode != (capture|pick) ]] || (( ${@[(I)-[OAD]*]} )); then
+        builtin compadd "$@"
+        return
+      fi
+      (( ${comppostfuncs[(I)_decline_post]} )) || comppostfuncs+=(_decline_post)
+      # The display array (-d), if any, to show what zsh would.
+      # -Q: the words come quoted already (files), shown unquoted.
+      local a dname= fname= quoted=0 i
+      for (( i = 1; i <= $#; i++ )); do
+        a=${@[i]}
+        case $a in
+          (--) break ;;
+          (-d) dname=${@[i+1]}; (( i++ )) ;;
+          (-F) fname=${@[i+1]}; (( i++ )) ;;
+          (-[PSpsiIWJVXxrRDOAEM]) (( i++ )) ;;
+          (-d*) dname=${a#-d} ;;
+          (-F*) fname=${a#-F} ;;
+          (-[[:alnum:]]#Q[[:alnum:]]#) quoted=1 ;;
+          (-*) ;;
+          (*) break ;;
+        esac
+      done
+      local -a hits shown
+      [[ -n $dname ]] && shown=("${(@P)dname}")
+      if [[ -n $dname ]]; then
+        builtin compadd -O hits -D shown "$@"
+      else
+        builtin compadd -O hits "$@"
+      fi
+      if [[ $_decline_mode == capture ]]; then
+        for (( i = 1; i <= $#hits; i++ )); do
+          if [[ -n $shown[i] ]]; then
+            a=$shown[i]
+          elif (( quoted )); then
+            a=${(Q)hits[i]}
+          else
+            a=$hits[i]
+          fi
+          _decline_hits+=("${a//[[:cntrl:]]/ }")
+        done
+        builtin compadd "$@"
+        return
+      fi
+      # Picking: only the one wanted, the rest ignored (-F).
+      local from=$_decline_seen
+      (( _decline_seen += $#hits ))
+      if (( _decline_picked || _decline_want <= from || _decline_want > _decline_seen )); then
+        return 1
+      fi
+      _decline_picked=1
+      local want=${hits[_decline_want-from]}
+      local -a _decline_ignore old others
+      others=("${(@)hits:#${~${(b)want}}}")
+      _decline_ignore=("${(@b)others}")
+      # Quoted words: ignored as written and unquoted.
+      (( quoted )) && _decline_ignore+=("${(@b)${(@Q)others}}")
+      if [[ -n $fname ]]; then
+        old=("${(@P)fname}")
+        set -A $fname "${old[@]}" "${_decline_ignore[@]}"
+        builtin compadd "$@"
+        set -A $fname "${old[@]}"
+      else
+        builtin compadd -F _decline_ignore "$@"
+      fi
+    }
+
+    _decline_post() {
+      case $_decline_mode in
+        (capture)
+          if (( compstate[nmatches] > 1 && $#_decline_hits > 1 && $#_decline_hits <= 1000 )) \
+              && (( ${#${(pj:\n:)_decline_hits}} <= 32768 )); then
+            compstate[list]=
+            compstate[insert]=unambiguous
+            _decline_send=1
+          fi ;;
+        (pick)
+          compstate[list]= ;;
+      esac
+    }
+
+    # The widget Tab ran before, run with compadd wrapped.
+    _decline_complete() {
+      local orig=${_decline_tab_orig[$KEYMAP]:-${_decline_tab_orig[main]:-expand-or-complete}}
+      functions[compadd]='_decline_compadd "$@"'
+      zle $orig
+      local ret=$?
+      unfunction compadd
+      _decline_mode=
+      return ret
+    }
+
+    _decline_tab() {
+      # zsh beeps at an ambiguous completion; the list shows instead.
+      setopt localoptions nolistbeep
+      _decline_mode=capture _decline_send=0 _decline_hits=()
+      _decline_complete
+      local ret=$?
+      (( _decline_send )) && _decline_send_matches
+      _decline_hits=()
+      _decline_line
+      return ret
+    }
+
+    _decline_send_matches() {
+      emulate -L zsh -o extendedglob +o multibyte
+      local text=${(pj:\n:)_decline_hits}
+      text=${text//(#m)[%;[:cntrl:]]/%${(l:2::0:)$(( [##16] #MATCH ))}}
+      print -rnu $_decline_fd -- $'\e]7701;matches;'"$_decline_token;$#_decline_hits;$text"$'\a'
+    }
+
+    _decline_pick() {
+      _decline_mode=pick _decline_want=$1 _decline_seen=0 _decline_picked=0
+      _decline_complete
+    }
+
+    # Bind Tab where it leads to zsh's completion, remembering what it
+    # ran; not over fzf-tab or zsh-autocomplete, which show their own
+    # list. Again at each prompt: a plugin loaded later may rebind it.
+    _decline_bind_tab() {
+      local km w
+      for km in main emacs viins; do
+        w=${${(z)"$(bindkey -M $km '^I' 2>/dev/null)"}[2]}
+        case $w in
+          (_decline_tab|undefined-key|'') ;;
+          (fzf-tab-complete|*autocomplete*) return ;;
+          (*)
+            _decline_tab_orig[$km]=$w
+            bindkey -M $km '^I' _decline_tab ;;
+        esac
+      done
+    }
+    # At each prompt, one look at the main keymap's Tab.
+    _decline_check_tab() {
+      local w=${${(z)"$(bindkey -M main '^I' 2>/dev/null)"}[2]}
+      [[ $w == (_decline_tab|fzf-tab-complete|*autocomplete*) ]] || _decline_bind_tab
+    }
+    # Not when something else already wraps compadd.
+    if (( ! ${+functions[compadd]} )); then
+      zle -N _decline_tab
+      _decline_bind_tab
+    else
+      unfunction _decline_check_tab
+    fi
+  fi
 
   zle -N _decline_line
   if [[ ,$_decline_features, == *,list,* ]]; then

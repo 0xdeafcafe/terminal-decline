@@ -771,6 +771,13 @@ pub const SETTINGS: &[Setting] = &[
         Editor::Toggle,
         "Offer a command's flags and subcommands, with what each does, from its man pages",
     ),
+    setting(
+        "completion_tab_zsh",
+        "Tab shows zsh's matches in the list",
+        Completion,
+        Editor::Toggle,
+        "Tab asks zsh, and what it finds shows in the list instead of zsh's own listing (new tabs)",
+    ),
     new_windows(Setting {
         pin_only: true,
         ..unset(
@@ -1036,6 +1043,7 @@ mod tests {
                 "completion_files",
                 "completion_commands",
                 "completion_flags",
+                "completion_tab_zsh",
                 "title",
                 "images",
                 "image_memory",

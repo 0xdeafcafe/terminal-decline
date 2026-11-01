@@ -470,6 +470,47 @@ fn zsh_takes_a_choice_from_the_list() {
     s.wait_for("typing after it", |s| line(s).as_deref() == Some("echo 'my file;x' z"));
 }
 
+/// Tab asks zsh: with several matches zsh inserts what they share, lists
+/// nothing itself, and reports them; taking one by its number has zsh
+/// insert it, quoted by zsh. With one match zsh inserts it as before.
+#[test]
+fn zsh_tab_reports_its_matches_and_takes_one() {
+    let home = TempDir::new("zsh-tab");
+    zsh_files(&home.0, "autoload -Uz compinit\ncompinit -u -D\n");
+    for f in ["alpha1.txt", "alpha2.txt", "x a;b", "x c", "only.md"] {
+        write(home.join(f), "");
+    }
+    let reports = Reports {
+        token: TOKEN.into(),
+        features: "highlight,list,tab".into(),
+    };
+    let mut s = Session::start_with(ZSH, &home, &[], Some(reports));
+    s.wait_for("the first prompt", |s| s.count("\x1b]133;B\x07") >= 1);
+    let line = |s: &Session| parsed(s).state.line_report().map(|r| r.text.clone());
+    let matches = |s: &Session| parsed(s).state.take_shell_matches().map(|m| m.shown);
+    s.send("cat al");
+    s.wait_for("the typed line", |s| line(s).as_deref() == Some("cat al"));
+    s.send("\t");
+    s.wait_for("what they share", |s| line(s).as_deref() == Some("cat alpha"));
+    s.wait_for("the matches", |s| matches(s).is_some());
+    assert_eq!(matches(&s).unwrap(), ["alpha1.txt", "alpha2.txt"]);
+    s.send("\x1b[7701~#2\x07");
+    s.wait_for("the second taken", |s| line(s).as_deref() == Some("cat alpha2.txt "));
+    // A name zsh must quote.
+    s.send("\x15cat x");
+    s.wait_for("the second line", |s| line(s).as_deref() == Some("cat x"));
+    let before = s.count("\x1b]7701;matches;");
+    s.send("\t");
+    s.wait_for("the second matches", |s| s.count("\x1b]7701;matches;") > before);
+    s.send("\x1b[7701~#1\x07");
+    s.wait_for("the quoted name", |s| line(s).as_deref() == Some("cat x\\ a\\;b "));
+    // One match: inserted, nothing reported.
+    let before = s.count("\x1b]7701;matches;");
+    s.send("\x15cat on\t");
+    s.wait_for("the one match", |s| line(s).as_deref() == Some("cat only.md "));
+    assert_eq!(s.count("\x1b]7701;matches;"), before);
+}
+
 /// Without a token (another terminal, or nothing in the app wants the
 /// reports) zsh sends none.
 #[test]

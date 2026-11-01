@@ -765,6 +765,14 @@ pause is 300 ms. Flags and subcommands come from man pages
 (`complete::man`, mdoc and man(7)); pages are read on the worker in
 8–30 ms (git-fetch 8 ms, curl's 317 flags 20 ms, the first one 30 ms
 with `manpath`), git's 202 subcommands with their NAME lines in 68 ms.
-Kept in memory only for now, not on disk. Not yet: Tab asking zsh
-(PR 6), history order, the `[keybind]` actions for the list's keys,
+Kept in memory only for now, not on disk.
+
+PR 6 landed (1 Nov 2026): Tab asks zsh. Taking a match runs the
+completion again with compadd's `-F` ignoring every match but the one
+wanted (appended to the caller's own `-F` array when it passes one), so
+zsh inserts it with all its options; matches are counted across compadd
+calls in order, and words passed quoted (`-Q`, files) are ignored both
+as written and unquoted. zsh's beep at an ambiguous completion is off
+inside the widget (`nolistbeep`). The prompt's check of Tab's binding
+costs one `bindkey` subshell. Not yet: history order, the `[keybind]` actions for the list's keys,
 bash and fish. The frame and latency benchmarks are still to run.

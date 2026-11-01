@@ -53,6 +53,9 @@ pub struct PaneState {
     /// The line last changed by something other than typing (history, a
     /// widget, zsh's own completion): the list waits for typing.
     quiet: bool,
+    /// What zsh's completion found on Tab (§7), shown until a key that
+    /// isn't the list's own.
+    zsh: Option<Vec<list::Choice>>,
     open: Option<Open>,
 }
 
@@ -73,6 +76,8 @@ struct Open {
     ghost: bool,
     /// Esc also goes to the shell (vi insert mode).
     vi: bool,
+    /// zsh's matches: taking one sends its number for zsh to insert.
+    zsh: bool,
 }
 
 /// What a key did to the list.
@@ -122,6 +127,29 @@ impl PaneState {
     /// Close the list (the setting was turned off, the pane lost focus).
     pub fn close(&mut self) {
         self.open = None;
+        self.zsh = None;
+    }
+
+    /// zsh's matches from Tab: shown in the list straight away.
+    pub fn zsh_matches(&mut self, m: term_core::ShellMatches) {
+        let choices = m
+            .shown
+            .into_iter()
+            .map(|shown| {
+                // `_describe`'s `name  -- what it is`.
+                let (name, about) = match shown.split_once(" -- ") {
+                    Some((n, a)) => (n.trim_end().to_string(), a.trim().to_string()),
+                    None => (shown, String::new()),
+                };
+                list::Choice {
+                    name,
+                    what: What::Match,
+                    about,
+                }
+            })
+            .collect();
+        self.zsh = Some(choices);
+        self.open = None;
     }
 
     /// Bring the list up to date with the line the shell reported, for
@@ -142,6 +170,9 @@ impl PaneState {
             self.seen = Some(key);
             self.since = Some(now);
             self.quiet = !self.typing;
+        }
+        if self.zsh.is_some() {
+            return self.show_zsh(t, report, s);
         }
         let since = self.since.unwrap_or(now);
         if self.open.is_none() && self.quiet {
@@ -198,8 +229,44 @@ impl PaneState {
             keep_bytes,
             ghost: false,
             vi: report.keymap == Keymap::ViInsert,
+            zsh: false,
         };
         let drawn = place(t, &mut open, s, report.cursor == report.text.len());
+        self.open = Some(open);
+        drawn
+    }
+
+    /// The list with zsh's matches, under the word at the cursor.
+    fn show_zsh(&mut self, t: &Terminal, report: &term_core::LineReport, s: &Settings) -> Drawn {
+        let Some(choices) = self.zsh.clone() else { return Drawn::default() };
+        // zsh's redraw, with what the matches share inserted, comes after
+        // the matches: wait for the screen to show it.
+        if !shown_before_cursor(t, &report.text[..report.cursor]) {
+            return Drawn::default();
+        }
+        let line = lex::read(&report.text, report.cursor);
+        let start = line
+            .words
+            .iter()
+            .find(|w| w.range.start <= report.cursor && report.cursor <= w.range.end)
+            .map_or(report.cursor, |w| w.range.start);
+        let previous = self.open.take().filter(|o| o.zsh);
+        let mut open = Open {
+            offer: Offer {
+                choices,
+                prefix: report.text[start..report.cursor].to_string(),
+                keep: String::new(),
+            },
+            selected: previous.as_ref().and_then(|o| o.selected),
+            scroll: previous.as_ref().map_or(0, |o| o.scroll),
+            start,
+            keep_bytes: 0,
+            ghost: false,
+            vi: report.keymap == Keymap::ViInsert,
+            zsh: true,
+        };
+        let no_ghost = Settings { ghost: false, ..*s };
+        let drawn = place(t, &mut open, &no_ghost, false);
         self.open = Some(open);
         drawn
     }
@@ -292,6 +359,16 @@ impl PaneState {
                 keycode,
                 RETURN | TAB | ESCAPE | KEYPAD_ENTER | HOME | PAGE_UP | END | PAGE_DOWN | LEFT | RIGHT | DOWN | UP
             );
+        let result = self.list_key(keycode, plain);
+        // zsh's matches last until a key that isn't the list's own.
+        if matches!(result, KeyResult::Pass | KeyResult::CloseAndPass) && self.zsh.take().is_some() {
+            self.open = None;
+        }
+        result
+    }
+
+    fn list_key(&mut self, keycode: u16, plain: bool) -> KeyResult {
+        use keycode::*;
         let Some(open) = &mut self.open else { return KeyResult::Pass };
         if !plain {
             return KeyResult::Pass;
@@ -322,6 +399,7 @@ impl PaneState {
             RIGHT if open.ghost => self.take(),
             ESCAPE => {
                 let vi = open.vi;
+                self.zsh = None;
                 self.close_on_word();
                 if vi { KeyResult::CloseAndPass } else { KeyResult::Redraw }
             }
@@ -344,9 +422,16 @@ impl PaneState {
     /// BEL, read by decline.zsh's widget, which quotes the name itself).
     fn take(&mut self) -> KeyResult {
         let Some(open) = self.open.take() else { return KeyResult::Pass };
-        let Some(c) = open.offer.choices.get(open.selected.unwrap_or(0)) else {
+        let index = open.selected.unwrap_or(0);
+        let Some(c) = open.offer.choices.get(index) else {
             return KeyResult::Pass;
         };
+        if open.zsh {
+            // zsh inserts its own match, by its number.
+            self.zsh = None;
+            self.seen = None;
+            return KeyResult::Send(format!("\x1b[7701~#{}\x07", index + 1).into_bytes());
+        }
         let name = if open.keep_bytes == 0 {
             format!("{}{}", open.offer.keep, c.name)
         } else {
@@ -710,6 +795,35 @@ mod tests {
             st.key(keycode::TAB, true, false),
             KeyResult::Send(b"\x1b[7701~4;4;macros/;\x07".to_vec())
         );
+    }
+
+    #[test]
+    fn zshs_matches_show_at_once_and_are_taken_by_number() {
+        let mut st = state("/nonexistent");
+        st.typing = false;
+        let t = term("git checkout ma");
+        st.zsh_matches(term_core::ShellMatches {
+            shown: vec!["main  -- the default".into(), "master".into()],
+        });
+        // No pause, even after a key that didn't type.
+        let d = st.update(&t.state, &settings(), Instant::now(), &no_wake);
+        let p = d.popup.expect("a list");
+        assert_eq!(p.items[0].text, "main");
+        assert!(p.items[0].detail.starts_with("the default"));
+        assert_eq!(d.ghost, None);
+        assert_eq!(st.key(keycode::DOWN, true, false), KeyResult::Redraw);
+        assert_eq!(st.key(keycode::DOWN, true, false), KeyResult::Redraw);
+        st.update(&t.state, &settings(), Instant::now(), &no_wake);
+        assert_eq!(st.key(keycode::TAB, true, false), KeyResult::Send(b"\x1b[7701~#2\x07".to_vec()));
+        // Any other key ends them.
+        st.zsh_matches(term_core::ShellMatches {
+            shown: vec!["a".into(), "b".into()],
+        });
+        st.update(&t.state, &settings(), Instant::now(), &no_wake);
+        assert!(st.is_open());
+        assert_eq!(st.key(b'x'.into(), true, false), KeyResult::Pass);
+        assert!(!st.is_open());
+        assert_eq!(st.update(&t.state, &settings(), Instant::now(), &no_wake).popup, None);
     }
 
     #[test]

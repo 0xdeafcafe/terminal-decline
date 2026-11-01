@@ -5,6 +5,7 @@
 //! ```text
 //! ESC ] 7701 ; line ; <token> ; <keymap> ; <cursor> ; <line> BEL
 //! ESC ] 7701 ; env ; <token> ; path=… ; alias=… ; … BEL
+//! ESC ] 7701 ; matches ; <token> ; <count> ; <shown, one per line> BEL
 //! ```
 //!
 //! Values are percent-encoded (`%`, `;` and control bytes); lists are
@@ -63,6 +64,17 @@ pub struct ShellEnv {
     pub histfile: Option<String>,
 }
 
+/// What zsh's own completion found when Tab was pressed, for the list
+/// to show (docs/design/completion.md §7): each as zsh would show it, in
+/// zsh's order; taking one tells zsh its number.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ShellMatches {
+    pub shown: Vec<String>,
+}
+
+/// The most matches kept from one report.
+pub const MAX_MATCHES: usize = 1000;
+
 /// Hex digits in a token (128 bits).
 pub const TOKEN_LEN: usize = 32;
 
@@ -91,6 +103,12 @@ impl Terminal {
         self.shell_env.take()
     }
 
+    /// What zsh's completion found on Tab, if it reported it since the
+    /// last call.
+    pub fn take_shell_matches(&mut self) -> Option<ShellMatches> {
+        self.shell_matches.take()
+    }
+
     /// Whether any OSC 7701 sequence was parsed since the last call: the
     /// reader doesn't wake the view for output that was only reports.
     pub fn take_report_seen(&mut self) -> bool {
@@ -105,6 +123,7 @@ impl Terminal {
         match kind {
             b"line" => self.line_reported(rest),
             b"env" => self.shell_env = Some(shell_env(rest)),
+            b"matches" => self.shell_matches = shell_matches(rest),
             _ => {}
         }
     }
@@ -144,6 +163,15 @@ impl Terminal {
             at: Point { line: line_at, col },
         });
     }
+}
+
+fn shell_matches(fields: &[&[u8]]) -> Option<ShellMatches> {
+    let [count, shown] = fields else { return None };
+    let count: usize = std::str::from_utf8(count).ok()?.parse().ok()?;
+    let text = String::from_utf8_lossy(&percent_bytes(shown)).into_owned();
+    let shown: Vec<String> = text.split('\n').take(MAX_MATCHES).map(str::to_string).collect();
+    // A report cut short, or not what it says: none.
+    (shown.len() == count && count > 0).then_some(ShellMatches { shown })
 }
 
 fn shell_env(fields: &[&[u8]]) -> ShellEnv {
@@ -284,6 +312,21 @@ mod tests {
         // A malformed report changes nothing.
         feed(&mut t, &format!("\x1b]7701;line;{tok};main;1\x07"));
         assert!(t.state.line_report().unwrap().too_long);
+    }
+
+    #[test]
+    fn matches_from_tab() {
+        let tok = std::str::from_utf8(TOKEN).unwrap();
+        let mut t = term();
+        feed(&mut t, &format!("\x1b]7701;matches;{tok};3;alpha%0Abeta  -- the b%3Bc%0Agamma\x07"));
+        let m = t.state.take_shell_matches().unwrap();
+        assert_eq!(m.shown, ["alpha", "beta  -- the b;c", "gamma"]);
+        assert_eq!(t.state.take_shell_matches(), None);
+        // The wrong count, or the wrong token: none.
+        feed(&mut t, &format!("\x1b]7701;matches;{tok};2;alpha\x07"));
+        assert_eq!(t.state.take_shell_matches(), None);
+        feed(&mut t, "\x1b]7701;matches;ffffffffffffffffffffffffffffffff;1;alpha\x07");
+        assert_eq!(t.state.take_shell_matches(), None);
     }
 
     #[test]

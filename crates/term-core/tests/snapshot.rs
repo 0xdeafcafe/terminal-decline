@@ -320,6 +320,38 @@ fn a_new_renderer_is_sent_each_table_whole() {
     assert!(new.style_updates.is_empty());
 }
 
+/// With the overscan on, a view scrolled back is snapshotted with the
+/// row below its last too: the one a line further down shows last. While
+/// following output, or with it off, the view's own rows only.
+#[test]
+fn overscan_adds_the_row_below_a_scrolled_view() {
+    let mut t = filled(10, 3);
+    t.advance(b"\r\nfour\r\nfive\r\nsix");
+    let mut snap = Snapshot::default();
+    t.state.set_view_overscan(true);
+    t.state.snapshot(&mut snap, |_| false);
+    assert_eq!(snap.rows.len(), 3, "following output");
+    let first = |s: &Snapshot, r: usize| s.row_cells(&s.rows[r]).map(|c| c.first().map(|c| c.ch()));
+    for back in 1..=3 {
+        t.state.scroll_view_to_bottom();
+        t.state.scroll_view(back - 1);
+        let below = t.state.visible_row(2).cell(0).ch();
+        t.state.scroll_view(1);
+        t.state.snapshot(&mut snap, |_| false);
+        assert_eq!(snap.rows.len(), 4, "{back} back");
+        assert_eq!(snap.lines, 3);
+        assert_eq!(first(&snap, 3), Some(Some(below)), "{back} back");
+    }
+    // A screen row below the view keeps its key, so the renderer's cached row is reused.
+    t.state.scroll_view_to_bottom();
+    t.state.scroll_view(1);
+    t.state.snapshot(&mut snap, |_| false);
+    assert!(matches!(snap.rows[3].key, RowKey::Screen(_)));
+    t.state.set_view_overscan(false);
+    t.state.snapshot(&mut snap, |_| false);
+    assert_eq!(snap.rows.len(), 3, "off");
+}
+
 #[test]
 fn history_rows_bring_their_own_styles() {
     let mut t = Term::new(10, 2, 100, term_core::ImagePool::process());

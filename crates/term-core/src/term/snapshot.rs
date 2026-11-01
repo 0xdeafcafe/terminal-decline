@@ -374,7 +374,8 @@ impl Terminal {
             .and_then(|p| self.url_at(p))
             .map(|(a, b, _)| (a, b));
         let history_first = self.history_first();
-        let view_rows = self.view_rows();
+        let below = (self.view_overscan && self.view.is_some()) as usize;
+        let view_rows = self.view_rows_n(self.lines + below);
         // History rows are read one after another.
         let mut reader = HistoryReader::default();
         let mut found = Vec::new();

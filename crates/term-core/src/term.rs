@@ -359,6 +359,10 @@ pub struct Terminal {
     /// row of history at the current width, §12.3); `None` while following
     /// output.
     view: Option<Point>,
+    /// While scrolled back, snapshots take one row more than the view,
+    /// the one below its last: smooth scrolling draws the view up to a
+    /// line higher, showing part of it ([`Terminal::set_view_overscan`]).
+    view_overscan: bool,
     /// History laid out at the current width, kept between reads.
     layouts: history::LayoutCache,
     /// Buffer line number ([`Point::line`]) of the screen's first row: the
@@ -556,6 +560,7 @@ impl Terminal {
             primary_stale: false,
             scrollback: Box::new(Scrollback::with_widths_as_written(scrollback_limit)),
             view: None,
+            view_overscan: false,
             layouts: Default::default(),
             top_line: 0,
             other_top_line: 0,
@@ -685,6 +690,18 @@ impl Terminal {
         if new != self.view {
             self.view = new;
             self.touch();
+        }
+    }
+
+    /// Whether snapshots taken while scrolled back hold one row more than
+    /// the view: the one below its last, for drawing the view part of a
+    /// line higher (smooth scrolling). Following output, they never do.
+    pub fn set_view_overscan(&mut self, on: bool) {
+        if self.view_overscan != on {
+            self.view_overscan = on;
+            if self.view.is_some() {
+                self.touch();
+            }
         }
     }
 

@@ -439,30 +439,44 @@ impl Terminal {
         if line < self.lines {
             return self.view_rows()[line];
         }
+        if line == self.lines {
+            return self.view_rows_n(line + 1)[line];
+        }
         self.walk_view(line + 1)[line]
     }
 
     /// The rows the view shows, top to bottom.
     pub(super) fn view_rows(&self) -> Vec<ViewRow> {
+        self.view_rows_n(self.lines)
+    }
+
+    /// The view's first `n` rows, at most one past its last (the row
+    /// smooth scrolling draws below it). The walk is kept for the next
+    /// call, one row longer than the view.
+    pub(super) fn view_rows_n(&self, n: usize) -> Vec<ViewRow> {
+        let walked = self.lines + 1;
+        debug_assert!(n <= walked);
+        let n = n.min(walked);
         let key = self.cache_key();
         {
             let cache = self.layouts.lock().expect("layouts");
             if cache.key == Some(key)
                 && let Some((v, lines, rows)) = &cache.view
                 && *v == self.view
-                && *lines == self.lines
+                && *lines == walked
             {
-                return rows.clone();
+                return rows[..n].to_vec();
             }
         }
-        let rows = self.walk_view(self.lines);
+        let rows = self.walk_view(walked);
+        let out = rows[..n].to_vec();
         let mut cache = self.layouts.lock().expect("layouts");
         if cache.key != Some(key) {
             cache.clear_layouts();
             cache.key = Some(key);
         }
-        cache.view = Some((self.view, self.lines, rows.clone()));
-        rows
+        cache.view = Some((self.view, walked, rows));
+        out
     }
 
     /// The view's first `n` rows.

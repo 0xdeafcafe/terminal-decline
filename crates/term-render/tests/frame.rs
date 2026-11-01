@@ -1397,3 +1397,59 @@ fn popup_covers_the_cells_under_it() {
     assert!(f.glyphs.iter().any(|g| decode_cp(g) == '漢'));
     assert_eq!(f.glyphs.iter().filter(|g| decode_cp(g) == 'A').count(), 20);
 }
+
+/// The faint line above each prompt (`Snapshot::separators`) is one
+/// pixel across the pane at the top of its row, and a finished
+/// command's mark (`Snapshot::command_marks`) draws in dim green or red
+/// where the app placed it. Both go when the snapshot has none.
+#[test]
+fn separator_lines_and_command_marks() {
+    use term_core::CommandMark;
+    let mut t = term(20, 4, &format!("{NO_CURSOR}$ ls\r\na\r\n$ false\r\n$ "));
+    let theme = Theme::default();
+    let o = Opts::default();
+    let input = input(&theme, &o);
+    let mut f = Frame::default();
+    f.snapshot(&mut t.state, &input, 0);
+    let snap = f.snapshot_mut();
+    snap.separators = vec![2, 3];
+    snap.command_marks = vec![
+        CommandMark {
+            row: 0,
+            col: 16,
+            text: "✓ 2s".into(),
+            ok: true,
+        },
+        CommandMark {
+            row: 2,
+            col: 16,
+            text: "✗ 1".into(),
+            ok: false,
+        },
+    ];
+    assert!(f.build_snapshot(&input, &mut Fake));
+    let lines: Vec<_> = f.rects.iter().filter(|r| r.h == 1).map(|r| (r.x, r.y, r.w)).collect();
+    assert_eq!(lines, [(0, 2 * CH, 20 * CW as u16), (0, 3 * CH, 20 * CW as u16)]);
+    let row = |f: &Frame, row: i16| -> Vec<(i16, char, Rgba)> {
+        let mut g: Vec<_> = f
+            .glyphs
+            .iter()
+            .filter(|g| g.y / CH == row && g.x / CW >= 15)
+            .map(|g| (g.x / CW, decode_cp(g), g.color))
+            .collect();
+        g.sort_by_key(|g| g.0);
+        g
+    };
+    let dim = |c: Rgba| (c & 0x00FF_FFFF) | 150 << 24;
+    let green = dim(theme.palette[2]);
+    let red = dim(theme.palette[1]);
+    assert_eq!(row(&f, 0), [(16, '✓', green), (18, '2', green), (19, 's', green)]);
+    assert_eq!(row(&f, 2), [(16, '✗', red), (18, '1', red)]);
+    // The row's own text is untouched.
+    assert!(f.glyphs.iter().any(|g| decode_cp(g) == 'f' && g.color == theme.foreground));
+    // Without them, nothing of either.
+    f.snapshot(&mut t.state, &input, 0);
+    assert!(f.build_snapshot(&input, &mut Fake));
+    assert!(!f.rects.iter().any(|r| r.h == 1));
+    assert!(row(&f, 0).is_empty() && row(&f, 2).is_empty());
+}

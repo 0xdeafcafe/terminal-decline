@@ -2,7 +2,8 @@
 //! tested and benchmarked on its own.
 
 use term_core::{
-    Attrs, Cell, CellRef, ColorKind, Content, CursorShape, Ghost, HighlightKind, Popup, RowFlags, StyleKey, Terminal, Underline, Width,
+    Attrs, Cell, CellRef, ColorKind, CommandMark, Content, CursorShape, Ghost, HighlightKind, Popup, RowFlags, StyleKey, Terminal,
+    Underline, Width,
 };
 use term_font::{Features, Fonts, GlyphKey, Metrics, RunText, SPRITE_FONT, ShapedGlyph, SpriteId, Style as FontStyle};
 use unicode_width::UnicodeWidthChar;
@@ -1383,6 +1384,17 @@ impl Frame {
         for &line in &snap.failed {
             over.push(failed_mark(line as usize, input));
         }
+        // The faint line above each prompt (command-marks design).
+        let rule = theme.paint(slot::FOREGROUND).alpha(SEPARATOR_ALPHA);
+        for &line in snap.separators.iter().filter(|&&l| l < snap.lines) {
+            over.push(RectInstance::painted(
+                s16(px),
+                s16(row_y(line as usize)),
+                (cols as i32 * cw) as u16,
+                1,
+                rule,
+            ));
+        }
         kept.over = out.put(*over == kept.over_rects, Some(kept.over), over);
         std::mem::swap(over, &mut kept.over_rects);
 
@@ -1436,6 +1448,9 @@ impl Frame {
         if let Some(g) = &snap.ghost {
             draw_ghost(gtail, g, cols, input, source);
         }
+        for mark in snap.command_marks.iter().filter(|m| m.row < snap.lines) {
+            draw_command_mark(gtail, mark, cols, input, source);
+        }
         let lines = snap.lines as usize;
         let boxed = snap
             .popup
@@ -1457,8 +1472,8 @@ impl Frame {
             let on = cells_on(&block, line);
             let hidden = cells_on(&covered, line);
             // The command line's colours on this row, if any.
-            let ink = snap.ink.iter().filter(|i| i.row as usize == line);
-            let inked = ink.clone().next().is_some();
+            let ink = row_ink(&snap.ink, line);
+            let inked = !ink.is_empty();
             // Pixels under the completion list on this row: glyphs reaching
             // into them are hidden (a wide one from the left too).
             let under = boxed.as_ref().filter(|(rows, _)| rows.contains(&line)).map(|(_, x)| x.clone());
@@ -1482,7 +1497,7 @@ impl Frame {
                 // The app only inks cells drawn in the default colour, so
                 // a glyph in those columns is painted as it is.
                 let inked_as = || {
-                    ink.clone()
+                    ink.iter()
                         .find(|i| (i.cols.start as usize..i.cols.end as usize).contains(&col))
                         .map(|i| theme.paint(i.color as usize & 15))
                 };
@@ -1764,6 +1779,27 @@ fn put_text(
 fn draw_ghost(out: &mut Vec<GlyphInstance>, g: &Ghost, cols: usize, input: &FrameInput, glyphs: &mut impl GlyphSource) {
     let paint = input.theme.paint(8);
     put_text(out, glyphs, input, (g.row as usize, g.col as usize), cols, &g.text, paint);
+}
+
+/// How strongly the line above each prompt shows: the foreground at
+/// this alpha.
+const SEPARATOR_ALPHA: u8 = 48;
+
+/// The worked/failed mark's alpha over its green or red.
+const COMMAND_MARK_ALPHA: u8 = 150;
+
+/// `ink`'s entries for view row `line`: the app keeps them sorted by row.
+fn row_ink(ink: &[term_core::Ink], line: usize) -> &[term_core::Ink] {
+    debug_assert!(ink.is_sorted_by_key(|i| i.row), "ink sorted by row");
+    let a = ink.partition_point(|i| (i.row as usize) < line);
+    let n = ink[a..].partition_point(|i| i.row as usize == line);
+    &ink[a..a + n]
+}
+
+/// A finished command's mark (`✓ 1.2s`, `✗ 2`), dim green or red.
+fn draw_command_mark(out: &mut Vec<GlyphInstance>, m: &CommandMark, cols: usize, input: &FrameInput, glyphs: &mut impl GlyphSource) {
+    let paint = input.theme.paint(if m.ok { 2 } else { 1 }).alpha(COMMAND_MARK_ALPHA);
+    put_text(out, glyphs, input, (m.row as usize, m.col as usize), cols, &m.text, paint);
 }
 
 /// The completion list (completion design §2): a box in the theme's

@@ -270,11 +270,19 @@ assignments, and after the precommand words `sudo`, `env` (with its
 cursor is on:
 
 ```rust
-enum At { Command { prefix }, Subcommand { cmd, prefix }, Flag { cmd, sub, prefix },
-          Path { prefix, quote }, Variable { prefix }, Nothing }
+enum At { Command { prefix }, Argument { command, position, prefix, quote },
+          Flag { command, subcommand, prefix }, Path { prefix, quote },
+          Variable { prefix }, Nothing }
 ```
 
-`quote` is an open quote in the word (`"my f`), so a taken name is
+The reader can't tell a subcommand from a file (`git ch` and `cat ch`
+look the same), so an argument says how many arguments come before it,
+flags aside, and the sources (§6) treat position 0 as a subcommand when
+the command has some. `Path` is for words that are files whatever the
+command: after a redirect, after `--flag=` or `NAME=`, in a `for` list
+and a `[[ ]]` test. A lone `-` being typed is the start of a flag.
+
+`quote` is the quote the cursor is inside (`"my f`), so a taken name is
 quoted to match (§9). Anything it doesn't understand (here-docs,
 `case`, unbalanced quotes across lines) gives `Nothing` and plain
 colours, so it can't do worse than today. Lines over 4 KB aren't read.
@@ -674,3 +682,16 @@ throughout, so the numbers are noisy):
   Alex to say when. Its `zsh` scenario sets the hidden
   `highlight_command_line = true` in its own config, so the shell does
   report, and `zsh-off` doesn't.
+
+### PR 2 (1 Nov 2026): reading the line
+
+What landed: `complete::lex` in term-app (`read(line, cursor)`): words
+with their roles and commands, spans for colouring, and what the cursor
+is on, as §4 has it; process substitution (`<(…)`) is one word; a
+here-document or `case` gives nothing. Tests: tables for the cursor,
+quotes and escapes, roles, spans and redirects, every prefix of broken
+input, and a property test that any line reads without a panic with its
+spans in order. The benchmark is `cargo bench -p terminal-decline
+--bench complete` (lines of 20, 200 and 4,000 bytes); not run yet: it
+needs a release build, held while another agent's frame-timing
+benchmarks ran.

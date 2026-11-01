@@ -52,5 +52,10 @@ test-hooks = []
 
 [dev-dependencies]
 terminal-decline = { path = ".", features = ["test-hooks"] }
+criterion = { version = "0.7", default-features = false }
 proptest = { version = "1.12", default-features = false, features = ["std"] }
 png = "0.18"
+
+[[bench]]
+name = "complete"
+harness = false

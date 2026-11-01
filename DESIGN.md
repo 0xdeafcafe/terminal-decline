@@ -1236,6 +1236,14 @@ builds:
 | 10 windows idle (separate processes) | – | 0% | – | 286 MB total |
 | 56 resizes during 1 GB output; 60 in htop | – | – | – | survived |
 
+Heavier campaigns against the real app live beside it in `scripts/pressure/`
+(each opens real windows and runs for minutes, so they are run by hand, not
+in CI; `--help` or `--list` shows the options): `hostile.py` (streams meant
+to break a terminal, several instances at once, each repeated), `campaign.py`
+(many instances at once, many tabs in one, and a mixed soak), `storms.py`
+(resize, font and tab storms while output floods) and `latency_load.py`
+(keypress-to-present latency while other instances or a tab flood).
+
 ### Frame building after the cell interface (F3.1)
 
 `cargo bench -p term-render --bench frame`, best of 5 alternating runs under

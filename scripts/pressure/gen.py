@@ -2,7 +2,7 @@
 """Generators for pressure-test inputs. Deterministic (fixed seeds).
 
 usage: gen.py big PATH [BYTES]     # text for flood-1gb (default 100 MB)
-       gen.py fuzz PATH BYTES      # escape-sequence soup for fuzz-64mb
+       gen.py fuzz PATH BYTES [SEED]  # escape-sequence soup for fuzz-64mb (seed 42)
        gen.py glyphs PATH          # every CJK/emoji/symbol, for glyphs-30k
        gen.py sync SECONDS         # writes synchronized-update frames to stdout
        gen.py images-flood [N]     # N id-less 1600x1000 PNG frames, like mpv (default 500)
@@ -18,9 +18,9 @@ APC and DCS strings the terminal ignores.
 """
 import base64, os, random, struct, sys, zlib
 
-def fuzz(path, size):
+def fuzz(path, size, seed=42):
     """Random soup of escape sequences, UTF-8 and control bytes."""
-    r = random.Random(42)
+    r = random.Random(seed)
     parts, n = [], 0
     csi_finals = "@ABCDEFGHIJKLMPSTXZ`abcdefghilmnpqrstu"
     while n < size:
@@ -190,7 +190,7 @@ def sixel_huge(n):
 if __name__ == "__main__":
     cmd = sys.argv[1]
     if cmd == "fuzz":
-        fuzz(sys.argv[2], int(sys.argv[3]))
+        fuzz(sys.argv[2], int(sys.argv[3]), int(sys.argv[4]) if len(sys.argv) > 4 else 42)
     elif cmd == "big":
         big(sys.argv[2], int(sys.argv[3]) if len(sys.argv) > 3 else 100_000_000)
     elif cmd == "glyphs":

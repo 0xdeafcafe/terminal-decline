@@ -196,5 +196,9 @@ cargo bench -p term-render          # frame building
 scripts/pressure/run.py target/release/terminal-decline "$TMPDIR"
 ```
 
+`scripts/pressure/` also holds heavier campaigns that open real windows
+(`hostile.py`, `campaign.py`, `storms.py`, `latency_load.py`); DESIGN.md's
+pressure tests section says what each does.
+
 Commits follow Conventional Commits (see [CLAUDE.md](CLAUDE.md)); the
 [changelog](CHANGELOG.md) is generated from them with `git cliff`.

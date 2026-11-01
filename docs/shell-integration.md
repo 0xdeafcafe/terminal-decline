@@ -156,13 +156,17 @@ fish aren't coloured yet.
 
 ## The completion list
 
-When you stop typing for a moment (150 ms, `completion_delay`), a list
-opens under the word you are typing: commands where a command goes,
-files and folders elsewhere, each with what it is on the right. Up and
-Down move in it, Tab puts the choice in place of the word (zsh quotes
+When you stop typing for a moment (300 ms, `completion_delay`), a list
+opens under the word you are typing: commands where a command goes, a
+command's subcommands (`git fet`) and flags (`ls -`, `git fetch --a`)
+with what each does, read from its man pages, and files and folders
+elsewhere. Nothing is chosen when it opens: Down moves into it, and Up
+before that still goes to the shell's history (it closes the list). Tab
+puts the chosen one, or the first, in place of the word (zsh quotes
 it), Right at the end of the line takes the grey text after the cursor,
-Esc closes it until you change the word. Enter, and every other key, go
-to the shell as always. It shows in the focused pane only, and never on
+Esc closes it until you change the word. It only opens after you type,
+not when history or zsh's own completion changes the line. Enter, and
+every other key, go to the shell as always. It shows in the focused pane only, and never on
 an empty word. Settings > Completion turns it, or its parts, off; zsh
 only for now.
 

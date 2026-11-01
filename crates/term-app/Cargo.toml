@@ -24,6 +24,7 @@ unicode-width.workspace = true
 term-font.workspace = true
 term-render.workspace = true
 term-image.workspace = true
+miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
 term-prefs.workspace = true
 term-keys.workspace = true
 term-config.workspace = true

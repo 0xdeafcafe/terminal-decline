@@ -751,7 +751,7 @@ impl PaneView {
             use crate::keys::flags::{COMMAND, CONTROL, OPTION, SHIFT};
             let plain = input.flags & (SHIFT | CONTROL | OPTION | COMMAND) == 0;
             let result = self.with(|_, p| {
-                let r = p.completion.key(input.keycode, plain);
+                let r = p.completion.key(input.keycode, plain, input.flags & (CONTROL | COMMAND) != 0);
                 if r != KeyResult::Pass {
                     p.session.mark_dirty();
                 }

@@ -1,6 +1,6 @@
 //! Where the completion list's choices come from, and whether a command
-//! exists (docs/design/completion.md §6). Programs on PATH and folder
-//! listings are read on one worker thread for the whole process, never
+//! exists (docs/design/completion.md §6). Programs on PATH, folder
+//! listings and man pages are read on one worker thread for the whole process, never
 //! on the main thread or a PTY reader; the main thread only looks in the
 //! cache, and asks for what isn't there. The worker exits after a minute
 //! with nothing asked, its caches with it, so a terminal nobody types
@@ -14,6 +14,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 use term_core::ShellEnv;
 
+use super::man::{self, Page};
+
 /// Called on the worker when something asked for is ready: the pane
 /// that asked draws again.
 pub type Wake = Box<dyn FnOnce() + Send>;
@@ -26,6 +28,12 @@ const RECHECK: Duration = Duration::from_secs(2);
 const FOLDERS_KEPT: usize = 64;
 /// Entries kept per folder: a huge one is cut short, not held whole.
 const FOLDER_ENTRIES: usize = 10_000;
+/// The most of a man page read: a bigger one is cut short.
+const PAGE_BYTES: usize = 4 << 20;
+/// Enough of a page for its NAME line.
+const PAGE_HEAD_BYTES: usize = 16 << 10;
+/// Subcommands kept per command.
+const SUBCOMMANDS: usize = 1000;
 
 /// The programs on a PATH.
 #[derive(Debug, Default)]
@@ -76,9 +84,27 @@ impl Folder {
     }
 }
 
+/// A command's man page, read.
+#[derive(Debug, Default)]
+pub struct Manual {
+    /// It has one.
+    pub found: bool,
+    pub page: Page,
+}
+
+/// A command's subcommands: the man pages named `<command>-<name>`.
+#[derive(Debug, Default)]
+pub struct Subcommands {
+    /// Names and their pages' descriptions, sorted by name.
+    pub list: Vec<(String, String)>,
+}
+
 enum Job {
     Path(String),
     Folder(PathBuf),
+    /// A PATH and a command's (or `command-subcommand`'s) name.
+    Man(String, String),
+    Subcommands(String, String),
 }
 
 /// A cached value, when it was last checked, and the wake-ups waiting
@@ -128,6 +154,10 @@ struct State {
     folders: HashMap<PathBuf, Slot<Folder>>,
     /// Folders oldest first, for dropping.
     folder_order: VecDeque<PathBuf>,
+    /// The man page folders for a PATH, as `manpath` says.
+    manpaths: HashMap<String, Arc<Vec<PathBuf>>>,
+    manuals: HashMap<(String, String), Slot<Manual>>,
+    subcommands: HashMap<(String, String), Slot<Subcommands>>,
 }
 
 static STATE: Mutex<Option<State>> = Mutex::new(None);
@@ -183,6 +213,31 @@ pub fn folder(dir: &Path, wake: impl FnOnce() -> Wake) -> Option<Arc<Folder>> {
     value
 }
 
+/// `name`'s man page on `path`'s man folders, if read; asks for it
+/// otherwise, as [`commands`].
+pub fn manual(path: &str, name: &str, wake: impl FnOnce() -> Wake) -> Option<Arc<Manual>> {
+    let mut guard = state();
+    let st = guard.get_or_insert_with(State::default);
+    let key = (path.to_string(), name.to_string());
+    let (value, ask) = st.manuals.entry(key.clone()).or_default().look(wake, Instant::now());
+    if ask {
+        send(st, Job::Man(key.0, key.1));
+    }
+    value
+}
+
+/// `command`'s subcommands, if read; asks for them otherwise.
+pub fn subcommands(path: &str, command: &str, wake: impl FnOnce() -> Wake) -> Option<Arc<Subcommands>> {
+    let mut guard = state();
+    let st = guard.get_or_insert_with(State::default);
+    let key = (path.to_string(), command.to_string());
+    let (value, ask) = st.subcommands.entry(key.clone()).or_default().look(wake, Instant::now());
+    if ask {
+        send(st, Job::Subcommands(key.0, key.1));
+    }
+    value
+}
+
 fn worker(rx: Receiver<Job>) {
     loop {
         let job = match rx.recv_timeout(IDLE_EXIT) {
@@ -220,7 +275,164 @@ fn run(job: Job) {
             let value = (!fresh).then(|| Arc::new(read_folder(&dir)));
             finish(|st| st.folders.get_mut(&dir), value, mtimes);
         }
+        Job::Man(path, name) => {
+            let file = find_page(&manpath(&path), &name);
+            let mtimes = vec![file.as_deref().and_then(mtime)];
+            let key = (path, name);
+            let fresh = state()
+                .as_ref()
+                .and_then(|st| st.manuals.get(&key))
+                .is_some_and(|s| s.value.is_some() && s.mtimes == mtimes);
+            let value = (!fresh).then(|| {
+                Arc::new(Manual {
+                    found: file.is_some(),
+                    page: file
+                        .and_then(|f| read_page(&f, PAGE_BYTES))
+                        .map(|src| man::read(&src))
+                        .unwrap_or_default(),
+                })
+            });
+            finish(|st| st.manuals.get_mut(&key), value, mtimes);
+        }
+        Job::Subcommands(path, command) => {
+            let sections: Vec<PathBuf> = manpath(&path).iter().flat_map(|d| ["man1", "man8"].map(|s| d.join(s))).collect();
+            let mtimes: Vec<_> = sections.iter().map(|d| mtime(d)).collect();
+            let key = (path, command);
+            let fresh = state()
+                .as_ref()
+                .and_then(|st| st.subcommands.get(&key))
+                .is_some_and(|s| s.value.is_some() && s.mtimes == mtimes);
+            let value = (!fresh).then(|| Arc::new(read_subcommands(&sections, &key.1)));
+            finish(|st| st.subcommands.get_mut(&key), value, mtimes);
+        }
     }
+}
+
+/// The man page folders for `path`, from `manpath` run with it (once per
+/// PATH while the worker runs), as `man` itself would search.
+fn manpath(path: &str) -> Arc<Vec<PathBuf>> {
+    if let Some(dirs) = state().as_ref().and_then(|st| st.manpaths.get(path)) {
+        return dirs.clone();
+    }
+    let out = std::process::Command::new("/usr/bin/manpath")
+        .env("PATH", path)
+        .env_remove("MANPATH")
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output();
+    let mut dirs: Vec<PathBuf> = match out {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .trim()
+            .split(':')
+            .filter(|d| d.starts_with('/'))
+            .map(PathBuf::from)
+            .collect(),
+        _ => Vec::new(),
+    };
+    if dirs.is_empty() {
+        // Without `manpath`: each PATH folder's `../share/man`.
+        dirs = std::env::split_paths(path)
+            .filter_map(|d| d.parent().map(|p| p.join("share/man")))
+            .chain([PathBuf::from("/usr/share/man")])
+            .filter(|d| d.is_dir())
+            .collect();
+    }
+    let dirs = Arc::new(dirs);
+    if let Some(st) = state().as_mut() {
+        st.manpaths.insert(path.to_string(), dirs.clone());
+    }
+    dirs
+}
+
+/// `name`'s page in `dirs`: the first in sections 1, 8 and 6, plain or
+/// gzipped.
+fn find_page(dirs: &[PathBuf], name: &str) -> Option<PathBuf> {
+    if name.is_empty() || name.contains('/') || name.starts_with('.') {
+        return None;
+    }
+    for dir in dirs {
+        for sec in ["1", "8", "6"] {
+            for gz in ["", ".gz"] {
+                let p = dir.join(format!("man{sec}/{name}.{sec}{gz}"));
+                if p.is_file() {
+                    return Some(p);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// A page's text, at most `cap` bytes of it (inflated, for `.gz`).
+fn read_page(path: &Path, cap: usize) -> Option<String> {
+    use std::io::Read;
+    let gz = path.extension().is_some_and(|e| e == "gz");
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(if gz { PAGE_BYTES as u64 } else { cap as u64 })
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if gz {
+        bytes = gunzip(&bytes, cap)?;
+    }
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// A gzip file's contents, at most `cap` bytes of them.
+fn gunzip(data: &[u8], cap: usize) -> Option<Vec<u8>> {
+    let [0x1f, 0x8b, 8, flags, ..] = *data else { return None };
+    let mut at = 10;
+    if flags & 4 != 0 {
+        let n = u16::from_le_bytes([*data.get(at)?, *data.get(at + 1)?]) as usize;
+        at += 2 + n;
+    }
+    for bit in [8, 16] {
+        if flags & bit != 0 {
+            at += data.get(at..)?.iter().position(|b| *b == 0)? + 1;
+        }
+    }
+    if flags & 2 != 0 {
+        at += 2;
+    }
+    match miniz_oxide::inflate::decompress_to_vec_with_limit(data.get(at..)?, cap) {
+        Ok(v) => Some(v),
+        // Cut short at the cap: what was inflated is kept.
+        Err(e) if e.status == miniz_oxide::inflate::TINFLStatus::HasMoreOutput => Some(e.output),
+        Err(_) => None,
+    }
+}
+
+/// The subcommands of `command` in the man `sections` folders: pages
+/// named `<command>-<name>.<n>`, each with its NAME line.
+fn read_subcommands(sections: &[PathBuf], command: &str) -> Subcommands {
+    let lead = format!("{command}-");
+    let mut found: Vec<(String, PathBuf)> = Vec::new();
+    for dir in sections {
+        let Ok(rd) = std::fs::read_dir(dir) else { continue };
+        for e in rd.flatten() {
+            let Ok(file) = e.file_name().into_string() else { continue };
+            let Some(rest) = file.strip_prefix(&lead) else { continue };
+            let rest = rest.strip_suffix(".gz").unwrap_or(rest);
+            let Some((name, sec)) = rest.rsplit_once('.') else { continue };
+            if name.is_empty() || !matches!(sec, "1" | "8") || found.iter().any(|(n, _)| n == name) {
+                continue;
+            }
+            found.push((name.to_string(), e.path()));
+            if found.len() >= SUBCOMMANDS {
+                break;
+            }
+        }
+    }
+    found.sort_by(|a, b| a.0.cmp(&b.0));
+    let list = found
+        .into_iter()
+        .map(|(name, path)| {
+            let about = read_page(&path, PAGE_HEAD_BYTES).map(|src| man::about(&src)).unwrap_or_default();
+            (name, about)
+        })
+        .collect();
+    Subcommands { list }
 }
 
 fn with_slot_paths(path: &str, f: impl FnOnce(&Slot<Commands>) -> bool) -> bool {
@@ -444,5 +656,72 @@ mod tests {
         assert!(!known("data", &autocd));
         // An expansion can't be known.
         assert_eq!(command_known("$EDITOR", &env, Some(&cwd_s), || Box::new(|| {})), None);
+    }
+
+    #[test]
+    fn flags_and_subcommands_from_man_pages() {
+        let dir = temp("man");
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        std::fs::create_dir_all(dir.join("share/man/man1")).unwrap();
+        let page = |name: &str, about: &str, flag: &str| {
+            format!(".TH X 1\n.SH NAME\n{name} \\- {about}\n.SH OPTIONS\n.TP\n\\fB{flag}\\fR\nDoes it.\n")
+        };
+        let man1 = dir.join("share/man/man1");
+        std::fs::write(man1.join("decltool.1"), page("decltool", "A tool", "\\-\\-top")).unwrap();
+        std::fs::write(man1.join("decltool-run.1"), page("decltool-run", "Run it", "\\-\\-fast")).unwrap();
+        // Gzipped, as some packages install them.
+        let gz = gzip(page("decltool-stop", "Stop it", "\\-q").as_bytes());
+        std::fs::write(man1.join("decltool-stop.1.gz"), gz).unwrap();
+        let path = format!("{}:/usr/bin", dir.join("bin").display());
+        let woken = Arc::new(AtomicUsize::new(0));
+        let m = ready(&woken, |w| manual(&path, "decltool-run", w));
+        assert!(m.found);
+        assert_eq!(m.page.about, "Run it");
+        assert_eq!(m.page.flags[0].name, "--fast");
+        let m = ready(&woken, |w| manual(&path, "decltool-stop", w));
+        assert_eq!(m.page.flags[0].name, "-q");
+        assert!(!ready(&woken, |w| manual(&path, "decltool-none", w)).found);
+        let subs = ready(&woken, |w| subcommands(&path, "decltool", w));
+        assert_eq!(
+            subs.list,
+            [
+                ("run".to_string(), "Run it".to_string()),
+                ("stop".to_string(), "Stop it".to_string())
+            ]
+        );
+    }
+
+    /// A gzip file of `data`.
+    fn gzip(data: &[u8]) -> Vec<u8> {
+        let mut out = vec![0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 3];
+        out.extend(miniz_oxide::deflate::compress_to_vec(data, 6));
+        // CRC and size: not checked here.
+        out.extend([0; 8]);
+        out
+    }
+
+    /// Prints what the real pages on this Mac give, to check by eye:
+    /// `cargo test -p terminal-decline real_man_pages -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn real_man_pages() {
+        let path = std::env::var("PATH").unwrap();
+        let woken = Arc::new(AtomicUsize::new(0));
+        for name in ["ls", "git-fetch", "rg", "cargo-build", "grep", "curl", "ssh", "tar", "less"] {
+            let t = Instant::now();
+            let m = ready(&woken, |w| manual(&path, name, w));
+            println!("== {name}: {} ({} flags, {:?})", m.page.about, m.page.flags.len(), t.elapsed());
+            for f in m.page.flags.iter().take(6) {
+                println!("  {:<24} {}", f.name, f.about);
+            }
+        }
+        for command in ["git", "cargo"] {
+            let t = Instant::now();
+            let s = ready(&woken, |w| subcommands(&path, command, w));
+            println!("== {command}: {} subcommands ({:?})", s.list.len(), t.elapsed());
+            for (n, a) in s.list.iter().take(5) {
+                println!("  {n:<20} {a}");
+            }
+        }
     }
 }

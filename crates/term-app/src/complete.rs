@@ -1,7 +1,8 @@
 //! Completion and colouring at the shell's prompt
 //! (docs/design/completion.md): [`lex`] reads the command line into
 //! words and says what the cursor is on; [`ink`] colours it;
-//! [`sources`] reads what can be offered, off the main thread; [`list`]
+//! [`sources`] reads what can be offered, off the main thread, and
+//! [`man`] a command's flags from its man page; [`list`]
 //! picks the choices; [`PaneState`] opens the list after a pause, places
 //! it, and handles its keys.
 
@@ -14,6 +15,7 @@ use unicode_width::UnicodeWidthStr;
 pub mod ink;
 pub mod lex;
 pub mod list;
+pub mod man;
 pub mod sources;
 
 use list::{Listings, Offer, What};
@@ -27,6 +29,8 @@ pub struct Settings {
     pub ghost: bool,
     pub files: bool,
     pub commands: bool,
+    /// Flags and subcommands from man pages.
+    pub flags: bool,
 }
 
 /// What a pane keeps for completion and colouring.
@@ -43,6 +47,12 @@ pub struct PaneState {
     /// The word the list was closed on with Esc (its start and text): it
     /// stays closed until the word changes.
     closed: Option<(usize, String)>,
+    /// The last key typed text (or deleted it), rather than moving
+    /// through history or the line.
+    typing: bool,
+    /// The line last changed by something other than typing (history, a
+    /// widget, zsh's own completion): the list waits for typing.
+    quiet: bool,
     open: Option<Open>,
 }
 
@@ -50,7 +60,9 @@ pub struct PaneState {
 #[derive(Debug)]
 struct Open {
     offer: Offer,
-    selected: usize,
+    /// The choice moved to with Down; none until then, so Up still goes
+    /// to the shell's history.
+    selected: Option<usize>,
     /// The first choice shown.
     scroll: usize,
     /// The word's start in the line (bytes), and how much of it to keep
@@ -78,8 +90,15 @@ pub enum KeyResult {
 
 /// macOS key codes of the list's keys.
 pub mod keycode {
+    pub const RETURN: u16 = 36;
     pub const TAB: u16 = 48;
     pub const ESCAPE: u16 = 53;
+    pub const KEYPAD_ENTER: u16 = 76;
+    pub const HOME: u16 = 115;
+    pub const PAGE_UP: u16 = 116;
+    pub const END: u16 = 119;
+    pub const PAGE_DOWN: u16 = 121;
+    pub const LEFT: u16 = 123;
     pub const RIGHT: u16 = 124;
     pub const DOWN: u16 = 125;
     pub const UP: u16 = 126;
@@ -122,8 +141,12 @@ impl PaneState {
         if self.seen.as_ref() != Some(&key) {
             self.seen = Some(key);
             self.since = Some(now);
+            self.quiet = !self.typing;
         }
         let since = self.since.unwrap_or(now);
+        if self.open.is_none() && self.quiet {
+            return Drawn::default();
+        }
         if self.open.is_none() {
             let waited = now.saturating_duration_since(since);
             if waited < s.delay {
@@ -146,6 +169,12 @@ impl PaneState {
             self.open = None;
             return Drawn::default();
         }
+        // A report the screen doesn't show yet (zsh's own completion
+        // changed the line without one): nothing until it does.
+        if !shown_before_cursor(t, &report.text[..report.cursor]) {
+            self.open = None;
+            return Drawn::default();
+        }
         self.closed = None;
         let Some(offer) = self.offer(&line.at, t, s, wake) else {
             self.open = None;
@@ -154,9 +183,8 @@ impl PaneState {
         // Keep the selected choice when it is still offered.
         let previous = self.open.as_ref().filter(|o| o.start == start);
         let selected = previous
-            .and_then(|o| o.offer.choices.get(o.selected))
-            .and_then(|c| offer.choices.iter().position(|x| x.name == c.name))
-            .unwrap_or(0);
+            .and_then(|o| o.offer.choices.get(o.selected?))
+            .and_then(|c| offer.choices.iter().position(|x| x.name == c.name));
         let scroll = previous.map_or(0, |o| o.scroll);
         // What is typed before the matched part is kept as typed (`~/`,
         // `src/`) when it reads the same unquoted; else the whole word is
@@ -180,7 +208,7 @@ impl PaneState {
     fn offer(&self, at: &lex::At, t: &Terminal, s: &Settings, wake: &dyn Fn() -> sources::Wake) -> Option<Offer> {
         use lex::At;
         let prefix = match at {
-            At::Command { prefix } | At::Argument { prefix, .. } | At::Path { prefix, .. } => prefix,
+            At::Command { prefix } | At::Argument { prefix, .. } | At::Path { prefix, .. } | At::Flag { prefix, .. } => prefix,
             _ => return None,
         };
         // Not on an empty word: a list at every prompt and after every
@@ -195,66 +223,128 @@ impl PaneState {
             _ => None,
         };
         let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-        let folder = match (!is_command && s.files)
+        let is_flag = matches!(at, At::Flag { .. });
+        let folder = match (!is_command && !is_flag && s.files)
             .then(|| list::folder_of(prefix, t.cwd(), home.as_deref()))
             .flatten()
         {
             Some((dir, _)) => sources::folder(&dir, wake),
             None => None,
         };
+        // A command's own name, for its man pages: `/usr/bin/ls` is `ls`.
+        let base = |c: &str| c.rsplit('/').next().unwrap_or(c).to_string();
+        let mut manual = None;
+        let mut subcommands = None;
+        match (at, env) {
+            (At::Flag { command, subcommand, .. }, Some(env)) if s.flags => {
+                let command = base(command);
+                manual = match subcommand {
+                    // `git fetch -`: git-fetch's page, else git's.
+                    Some(sub) => match sources::manual(&env.path, &format!("{command}-{sub}"), wake) {
+                        Some(m) if !m.found => sources::manual(&env.path, &command, wake),
+                        m => m,
+                    },
+                    None => sources::manual(&env.path, &command, wake),
+                };
+                // Still being read: wait for it rather than show nothing.
+                manual.as_ref()?;
+            }
+            (
+                At::Argument {
+                    command,
+                    position: 0,
+                    prefix,
+                    ..
+                },
+                Some(env),
+            ) if s.flags && !prefix.contains('/') => {
+                subcommands = sources::subcommands(&env.path, &base(command), wake);
+                subcommands.as_ref()?;
+            }
+            _ => {}
+        }
         let offer = list::offer(
             at,
             &Listings {
                 env,
                 commands: commands.as_deref(),
                 folder: folder.as_deref(),
+                flags: manual.as_deref().map(|m| &m.page),
+                subcommands: subcommands.as_deref(),
             },
         )?;
-        // Nothing to add: no choices, or only what is typed already.
+        // Nothing to add: no choices, or only what is typed already (a
+        // folder's name without its `/` counts).
         match offer.choices.as_slice() {
             [] => None,
-            [only] if only.name == offer.prefix => None,
+            [only] if only.name.strip_suffix('/').unwrap_or(&only.name) == offer.prefix => None,
             _ => Some(offer),
         }
     }
 
-    /// A key while the list may be open; `plain` when no modifier is held.
-    pub fn key(&mut self, keycode: u16, plain: bool) -> KeyResult {
+    /// A key, before it goes to the shell: `plain` when no modifier is
+    /// held, `chord` when Control or Command is. Every key comes here, so
+    /// the list knows whether the line changes from typing.
+    pub fn key(&mut self, keycode: u16, plain: bool, chord: bool) -> KeyResult {
+        use keycode::*;
+        self.typing = !chord
+            && !matches!(
+                keycode,
+                RETURN | TAB | ESCAPE | KEYPAD_ENTER | HOME | PAGE_UP | END | PAGE_DOWN | LEFT | RIGHT | DOWN | UP
+            );
         let Some(open) = &mut self.open else { return KeyResult::Pass };
         if !plain {
             return KeyResult::Pass;
         }
         let n = open.offer.choices.len();
         match keycode {
-            keycode::DOWN => {
-                open.selected = (open.selected + 1) % n;
+            DOWN => {
+                open.selected = Some(open.selected.map_or(0, |i| (i + 1) % n));
                 KeyResult::Redraw
             }
-            keycode::UP => {
-                open.selected = (open.selected + n - 1) % n;
-                KeyResult::Redraw
-            }
-            keycode::TAB => self.take(),
-            keycode::RIGHT if open.ghost => self.take(),
-            keycode::ESCAPE => {
-                let (vi, start) = (open.vi, open.start);
-                self.closed = self
-                    .seen
-                    .as_ref()
-                    .map(|(text, cursor)| (start, text[start.min(*cursor)..*cursor].to_string()));
-                self.open = None;
+            // Up before Down is the shell's (its history); Up from the
+            // first choice goes back to none.
+            UP => match open.selected {
+                None => {
+                    self.close_on_word();
+                    KeyResult::CloseAndPass
+                }
+                Some(0) => {
+                    open.selected = None;
+                    KeyResult::Redraw
+                }
+                Some(i) => {
+                    open.selected = Some(i - 1);
+                    KeyResult::Redraw
+                }
+            },
+            TAB => self.take(),
+            RIGHT if open.ghost => self.take(),
+            ESCAPE => {
+                let vi = open.vi;
+                self.close_on_word();
                 if vi { KeyResult::CloseAndPass } else { KeyResult::Redraw }
             }
             _ => KeyResult::Pass,
         }
     }
 
-    /// Take the selected choice: the bytes that have zsh put it in place
+    /// Close the list until the word under the cursor changes.
+    fn close_on_word(&mut self) {
+        let Some(open) = self.open.take() else { return };
+        let start = open.start;
+        self.closed = self
+            .seen
+            .as_ref()
+            .map(|(text, cursor)| (start, text[start.min(*cursor)..*cursor].to_string()));
+    }
+
+    /// Take the selected choice (the first when none is): the bytes that have zsh put it in place
     /// of the word (`ESC [ 7701 ~`, then `start;keep;name;suffix` and
     /// BEL, read by decline.zsh's widget, which quotes the name itself).
     fn take(&mut self) -> KeyResult {
         let Some(open) = self.open.take() else { return KeyResult::Pass };
-        let Some(c) = open.offer.choices.get(open.selected) else {
+        let Some(c) = open.offer.choices.get(open.selected.unwrap_or(0)) else {
             return KeyResult::Pass;
         };
         let name = if open.keep_bytes == 0 {
@@ -307,23 +397,37 @@ fn place(t: &Terminal, open: &mut Open, s: &Settings, at_end: bool) -> Drawn {
         return Drawn::default();
     }
     let shown = rows - 2;
-    if open.selected < open.scroll {
-        open.scroll = open.selected;
-    } else if open.selected >= open.scroll + shown {
-        open.scroll = open.selected + 1 - shown;
+    let current = open.selected.unwrap_or(0);
+    if current < open.scroll {
+        open.scroll = current;
+    } else if current >= open.scroll + shown {
+        open.scroll = current + 1 - shown;
     }
     open.scroll = open.scroll.min(n.saturating_sub(shown));
-    let items: Vec<PopupItem> = offer.choices[open.scroll..(open.scroll + shown).min(n)]
+    let rows_shown = &offer.choices[open.scroll..(open.scroll + shown).min(n)];
+    let detail = |c: &list::Choice| if c.about.is_empty() { c.what.label() } else { c.about.as_str() }.to_string();
+    let widest_text = rows_shown.iter().map(|c| c.name.width()).max().unwrap_or(0);
+    // `│▸` text, two spaces, detail ` │`; details too wide for the
+    // screen are cut short.
+    let room = cols.saturating_sub(widest_text + 7);
+    let mut details: Vec<String> = rows_shown.iter().map(|c| fit(&detail(c), room)).collect();
+    let widest_detail = details.iter().map(|d| d.width()).max().unwrap_or(0);
+    // Each padded to the widest, so they line up on the left.
+    for d in &mut details {
+        let pad = widest_detail - d.width();
+        d.extend(std::iter::repeat_n(' ', pad));
+    }
+    let items: Vec<PopupItem> = rows_shown
         .iter()
+        .zip(details)
         .enumerate()
-        .map(|(i, c)| PopupItem {
+        .map(|(i, (c, detail))| PopupItem {
             text: c.name.clone(),
-            detail: c.what.label().to_string(),
-            selected: open.scroll + i == open.selected,
+            detail,
+            selected: open.selected == Some(open.scroll + i),
         })
         .collect();
-    let widest = items.iter().map(|i| i.text.width() + 1 + i.detail.width()).max().unwrap_or(0);
-    // `│▸` text … detail ` │`.
+    let widest = widest_text + if widest_detail > 0 { 2 + widest_detail } else { 0 };
     let width = (widest + 5).clamp(16.min(cols), cols.max(1));
     // The text starts under the word being completed.
     let word_col = ccol.saturating_sub(offer.prefix.width());
@@ -334,7 +438,7 @@ fn place(t: &Terminal, open: &mut Open, s: &Settings, at_end: bool) -> Drawn {
         width: width as u16,
         items,
     };
-    let selected = &offer.choices[open.selected];
+    let selected = &offer.choices[current];
     let ghost = (s.ghost && at_end)
         .then(|| selected.name.strip_prefix(offer.prefix.as_str()))
         .flatten()
@@ -349,6 +453,40 @@ fn place(t: &Terminal, open: &mut Open, s: &Settings, at_end: bool) -> Drawn {
         popup: Some(popup),
         ghost,
         wake_after: None,
+    }
+}
+
+/// `s` cut to `cells` wide, ending in `…` when cut.
+fn fit(s: &str, cells: usize) -> String {
+    if s.width() <= cells {
+        return s.to_string();
+    }
+    let mut out = String::new();
+    let mut w = 0;
+    for c in s.chars() {
+        let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        if w + cw + 1 > cells {
+            break;
+        }
+        w += cw;
+        out.push(c);
+    }
+    if cells > 0 {
+        out.push('…');
+    }
+    out
+}
+
+/// Whether the screen shows the end of `before` (the line up to the
+/// cursor) just before the cursor.
+fn shown_before_cursor(t: &Terminal, before: &str) -> bool {
+    let Some(last) = before.chars().next_back() else { return true };
+    let Some((row, col)) = t.cursor_in_view() else { return false };
+    let cells = UnicodeWidthStr::width(last.encode_utf8(&mut [0; 4]) as &str).max(1);
+    match col.checked_sub(cells) {
+        Some(c) => t.visible_row(row).cell(c).ch() == last,
+        // Wrapped to the next row: the last character is on the row above.
+        None => row > 0 && t.visible_row(row - 1).cell(t.cols().saturating_sub(cells)).ch() == last,
     }
 }
 
@@ -373,6 +511,7 @@ mod tests {
             ghost: true,
             files: true,
             commands: true,
+            flags: true,
         }
     }
 
@@ -398,6 +537,7 @@ mod tests {
                 builtins: vec!["cd".into()],
                 ..ShellEnv::default()
             })),
+            typing: true,
             ..PaneState::default()
         }
     }
@@ -446,7 +586,7 @@ mod tests {
         let p = d.popup.expect("a list");
         let names: Vec<&str> = p.items.iter().map(|i| i.text.as_str()).collect();
         assert_eq!(names, ["git", "grep", "gzip"]);
-        assert!(p.items[0].selected);
+        assert!(p.items.iter().all(|i| !i.selected), "none until Down");
         assert_eq!(p.items[0].detail, "command");
         // Below the cursor's row, its text under the word (column 2).
         assert_eq!((p.row, p.col + 2), (1, 2));
@@ -460,24 +600,78 @@ mod tests {
         let mut st = state(&path);
         let t = term("g");
         settle(&mut st, &t);
-        assert_eq!(st.key(keycode::DOWN, true), KeyResult::Redraw);
-        assert_eq!(st.key(keycode::UP, false), KeyResult::Pass, "with a modifier: the shell's");
-        assert_eq!(st.key(36, true), KeyResult::Pass, "Return: the shell's");
+        assert_eq!(st.key(keycode::DOWN, true, false), KeyResult::Redraw);
+        assert_eq!(st.key(keycode::DOWN, true, false), KeyResult::Redraw);
+        assert_eq!(st.key(keycode::UP, false, false), KeyResult::Pass, "with a modifier: the shell's");
+        assert_eq!(st.key(keycode::RETURN, true, false), KeyResult::Pass, "Return: the shell's");
         let later = Instant::now() + Duration::from_secs(1);
         let d = st.update(&t.state, &settings(), later, &no_wake);
         assert!(d.popup.unwrap().items[1].selected);
         // Tab takes grep: zsh's widget gets the word's start, nothing kept,
         // the name and a space after it.
-        assert_eq!(st.key(keycode::TAB, true), KeyResult::Send(b"\x1b[7701~0;0;grep; \x07".to_vec()));
+        assert_eq!(
+            st.key(keycode::TAB, true, false),
+            KeyResult::Send(b"\x1b[7701~0;0;grep; \x07".to_vec())
+        );
         assert!(!st.is_open());
         // Esc closes it, and it stays closed on the same word.
+        st.key(b'i'.into(), true, false);
         let t = term("gi");
         settle(&mut st, &t);
         assert!(st.is_open());
-        assert_eq!(st.key(keycode::ESCAPE, true), KeyResult::Redraw);
+        assert_eq!(st.key(keycode::ESCAPE, true, false), KeyResult::Redraw);
         let later = Instant::now() + Duration::from_secs(5);
         assert_eq!(st.update(&t.state, &settings(), later, &no_wake).popup, None);
-        assert_eq!(st.key(keycode::DOWN, true), KeyResult::Pass);
+        assert_eq!(st.key(keycode::DOWN, true, false), KeyResult::Pass);
+    }
+
+    #[test]
+    fn up_before_down_is_the_shells() {
+        let path = programs("history", &["gzip", "git", "grep"]);
+        let mut st = state(&path);
+        let t = term("g");
+        settle(&mut st, &t);
+        // Down, then Up back to none: still the list's.
+        assert_eq!(st.key(keycode::DOWN, true, false), KeyResult::Redraw);
+        assert_eq!(st.key(keycode::UP, true, false), KeyResult::Redraw);
+        // Up with none chosen closes it and goes to the shell.
+        assert_eq!(st.key(keycode::UP, true, false), KeyResult::CloseAndPass);
+        assert!(!st.is_open());
+        // The line history brings back doesn't open it again.
+        let t = term("grep foo");
+        let later = Instant::now() + Duration::from_secs(5);
+        st.update(&t.state, &settings(), Instant::now(), &no_wake);
+        assert_eq!(st.update(&t.state, &settings(), later, &no_wake).popup, None);
+        // Typing does.
+        st.key(b'o'.into(), true, false);
+        assert!(settle(&mut st, &term("gr")).popup.is_some());
+    }
+
+    #[test]
+    fn tab_takes_the_first_when_none_is_chosen() {
+        let path = programs("first", &["gzip", "git", "grep"]);
+        let mut st = state(&path);
+        settle(&mut st, &term("g"));
+        assert_eq!(
+            st.key(keycode::TAB, true, false),
+            KeyResult::Send(b"\x1b[7701~0;0;git; \x07".to_vec())
+        );
+    }
+
+    #[test]
+    fn not_before_the_screen_shows_the_line() {
+        let path = programs("stale", &["gzip", "git", "grep"]);
+        let mut st = state(&path);
+        let mut t = Term::new(40, 10, 100, ImagePool::process());
+        t.state.set_report_token(TOKEN.as_bytes().try_into().ok());
+        // The report says `gi`, the screen still shows `g`.
+        t.advance(format!("\x1b]133;A\x07$ \x1b]133;B\x07g\x1b]7701;line;{TOKEN};main;2;gi\x07").as_bytes());
+        let later = Instant::now() + Duration::from_secs(5);
+        st.update(&t.state, &settings(), Instant::now(), &no_wake);
+        for _ in 0..50 {
+            assert_eq!(st.update(&t.state, &settings(), later, &no_wake).popup, None);
+            std::thread::sleep(Duration::from_millis(2));
+        }
     }
 
     #[test]
@@ -512,7 +706,10 @@ mod tests {
         assert_eq!(names, ["macros/", "main.rs"]);
         // Taking the folder keeps `src/` as typed (4 bytes from the word's
         // start at 4), with no space after it.
-        assert_eq!(st.key(keycode::TAB, true), KeyResult::Send(b"\x1b[7701~4;4;macros/;\x07".to_vec()));
+        assert_eq!(
+            st.key(keycode::TAB, true, false),
+            KeyResult::Send(b"\x1b[7701~4;4;macros/;\x07".to_vec())
+        );
     }
 
     #[test]

@@ -438,7 +438,7 @@ that doesn't know `--help` would just run.
 
 ## 9. Keys and taking a choice
 
-- The list opens after `completion_delay` ms with no key (default 150)
+- The list opens after `completion_delay` ms with no key (default 300)
   when the cursor is on a word with choices, or right after `-` on a
   flag. It closes on Esc, a key that isn't text or one of its own, the
   cursor leaving the word, a C mark, or the window losing focus. After
@@ -495,7 +495,7 @@ Each part can be turned off by itself, in `config.toml` and in Settings
 | `completion_commands` | true | bool | live | commands in the list |
 | `completion_flags` | true | bool | live | flags and subcommands from man pages |
 | `completion_tab_zsh` | true | bool | new windows | Tab asks zsh (§7); off leaves Tab to zsh as today |
-| `completion_delay` | 150 | 0–2000 ms | live | pause before the list opens |
+| `completion_delay` | 300 | 0–2000 ms | live | pause before the list opens |
 | `completion_rows` | 8 | 3–20 | live | choices shown before it scrolls |
 | `completion_ghost_text` | true | bool | live | the top choice grey after the cursor |
 | `completion_history_order` | true | bool | live | commands by how often you ran them |
@@ -755,6 +755,16 @@ What landed:
   `completion_rows`, `completion_ghost_text`, `completion_files` and
   `completion_commands`; all on by default.
 
-Not yet: flags and subcommands from man pages (PR 5), Tab asking zsh
+PR 5 landed (1 Nov 2026), with changes from trying PR 4: the list
+opened while moving through history and took Up from it. Now nothing is
+chosen when it opens, Down moves into it, Up before that goes to the
+shell; it opens only after a key that types (not arrows, Return, Tab or
+Control/Command chords); it waits until the screen shows the reported
+line (zsh's own completion changes the line without a report); and the
+pause is 300 ms. Flags and subcommands come from man pages
+(`complete::man`, mdoc and man(7)); pages are read on the worker in
+8–30 ms (git-fetch 8 ms, curl's 317 flags 20 ms, the first one 30 ms
+with `manpath`), git's 202 subcommands with their NAME lines in 68 ms.
+Kept in memory only for now, not on disk. Not yet: Tab asking zsh
 (PR 6), history order, the `[keybind]` actions for the list's keys,
 bash and fish. The frame and latency benchmarks are still to run.

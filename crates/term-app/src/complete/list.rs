@@ -1,7 +1,8 @@
 //! What the completion list offers for the word under the cursor
 //! (docs/design/completion.md §6, §9): commands where a command goes,
-//! files and folders elsewhere, matched by prefix (case-sensitive ones
-//! first, then the rest). Pure: the sources' listings come in already
+//! a command's subcommands and flags from its man pages, files and
+//! folders elsewhere, matched by prefix (case-sensitive ones first, then
+//! the rest; flags in their page's order). Pure: the sources' listings come in already
 //! read; nothing here touches the disk.
 
 use std::path::{Path, PathBuf};
@@ -9,7 +10,8 @@ use std::path::{Path, PathBuf};
 use term_core::ShellEnv;
 
 use super::lex::At;
-use super::sources::{Commands, Folder};
+use super::man::Page;
+use super::sources::{Commands, Folder, Subcommands};
 
 /// At most this many choices are kept.
 pub const MAX_CHOICES: usize = 200;
@@ -25,6 +27,8 @@ pub enum What {
     Folder,
     File,
     Executable,
+    Subcommand,
+    Flag,
 }
 
 impl What {
@@ -39,6 +43,8 @@ impl What {
             What::Folder => "folder",
             What::File => "file",
             What::Executable => "executable",
+            What::Subcommand => "subcommand",
+            What::Flag => "flag",
         }
     }
 }
@@ -50,6 +56,8 @@ pub struct Choice {
     /// file), with a `/` after a folder.
     pub name: String,
     pub what: What,
+    /// What it does, from its man page; empty when unknown.
+    pub about: String,
 }
 
 /// The choices for a word, and how to put one in its place.
@@ -86,6 +94,10 @@ pub struct Listings<'a> {
     pub commands: Option<&'a Commands>,
     /// The folder a file prefix points into, read.
     pub folder: Option<&'a Folder>,
+    /// The command's man page, for a flag.
+    pub flags: Option<&'a Page>,
+    /// The command's subcommands, for its first argument.
+    pub subcommands: Option<&'a Subcommands>,
 }
 
 /// The folder (absolute) the word `prefix` points into, and the part
@@ -119,7 +131,11 @@ pub fn offer(at: &At, listings: &Listings) -> Option<Offer> {
             let commands = listings.commands?;
             let mut all: Vec<Choice> = Vec::new();
             let mut add = |names: &mut dyn Iterator<Item = &String>, what| {
-                all.extend(names.map(|n| Choice { name: n.clone(), what }));
+                all.extend(names.map(|n| Choice {
+                    name: n.clone(),
+                    what,
+                    about: String::new(),
+                }));
             };
             add(&mut env.aliases.iter(), What::Alias);
             add(&mut env.functions.iter(), What::Function);
@@ -128,6 +144,49 @@ pub fn offer(at: &At, listings: &Listings) -> Option<Offer> {
             add(&mut commands.names.iter(), What::Command);
             Some(Offer {
                 choices: matching(all, prefix),
+                prefix: prefix.clone(),
+                keep: String::new(),
+            })
+        }
+        At::Flag { prefix, .. } => {
+            let page = listings.flags?;
+            let choices = page
+                .flags
+                .iter()
+                .filter(|f| f.name.starts_with(prefix.as_str()))
+                .take(MAX_CHOICES)
+                .map(|f| Choice {
+                    name: f.name.clone(),
+                    what: What::Flag,
+                    about: f.about.clone(),
+                })
+                .collect();
+            Some(Offer {
+                choices,
+                prefix: prefix.clone(),
+                keep: String::new(),
+            })
+        }
+        At::Argument { position: 0, prefix, .. }
+            if listings
+                .subcommands
+                .is_some_and(|s| s.list.iter().any(|(n, _)| n.starts_with(prefix.as_str()))) =>
+        {
+            let all = listings
+                .subcommands
+                .into_iter()
+                .flat_map(|s| &s.list)
+                .map(|(name, about)| Choice {
+                    name: name.clone(),
+                    what: What::Subcommand,
+                    about: about.clone(),
+                })
+                .collect();
+            Some(Offer {
+                choices: matching(all, prefix)
+                    .into_iter()
+                    .filter(|c| c.name.starts_with(prefix.as_str()))
+                    .collect(),
                 prefix: prefix.clone(),
                 keep: String::new(),
             })
@@ -147,14 +206,17 @@ pub fn offer(at: &At, listings: &Listings) -> Option<Offer> {
                     _ if e.dir => Choice {
                         name: format!("{}/", e.name),
                         what: What::Folder,
+                        about: String::new(),
                     },
                     _ if e.executable => Choice {
                         name: e.name.clone(),
                         what: What::Executable,
+                        about: String::new(),
                     },
                     _ => Choice {
                         name: e.name.clone(),
                         what: What::File,
+                        about: String::new(),
                     },
                 })
                 .collect();
@@ -236,6 +298,8 @@ mod tests {
             env: Some(&env),
             commands: Some(&commands),
             folder: None,
+            flags: None,
+            subcommands: None,
         };
         let o = offer(&At::Command { prefix: "g".into() }, &listings).unwrap();
         assert_eq!(names(&o), ["git", "gitfn", "grep", "gst", "Gzip"]);
@@ -253,6 +317,8 @@ mod tests {
             env: Some(&env),
             commands: None,
             folder: None,
+            flags: None,
+            subcommands: None,
         };
         assert_eq!(offer(&At::Command { prefix: "g".into() }, &none), None);
     }
@@ -270,6 +336,8 @@ mod tests {
             env: None,
             commands: None,
             folder: Some(&f),
+            flags: None,
+            subcommands: None,
         };
         let at = At::Argument {
             command: "cat".into(),
@@ -314,11 +382,13 @@ mod tests {
     }
 
     #[test]
-    fn nothing_for_flags_or_variables_yet() {
+    fn nothing_for_variables_or_flags_not_read() {
         let listings = Listings {
             env: None,
             commands: None,
             folder: None,
+            flags: None,
+            subcommands: None,
         };
         for at in [
             At::Flag {
@@ -331,5 +401,53 @@ mod tests {
         ] {
             assert_eq!(offer(&at, &listings), None, "{at:?}");
         }
+    }
+
+    #[test]
+    fn flags_and_subcommands_from_man_pages() {
+        use super::super::man::Flag;
+        let flag = |name: &str, about: &str| Flag {
+            name: name.into(),
+            about: about.into(),
+        };
+        let page = Page {
+            about: String::new(),
+            flags: vec![
+                flag("--all", "Fetch all remotes"),
+                flag("-a", "Append"),
+                flag("--atomic", "Atomically"),
+            ],
+        };
+        let subs = Subcommands {
+            list: vec![("fetch".into(), "Download objects".into()), ("fetch-pack".into(), String::new())],
+        };
+        let f = folder(&[("feature.txt", false, false)]);
+        let listings = Listings {
+            env: None,
+            commands: None,
+            folder: Some(&f),
+            flags: Some(&page),
+            subcommands: Some(&subs),
+        };
+        let at = At::Flag {
+            command: "git".into(),
+            subcommand: Some("fetch".into()),
+            prefix: "--a".into(),
+        };
+        let o = offer(&at, &listings).unwrap();
+        // In the page's order.
+        assert_eq!(names(&o), ["--all", "--atomic"]);
+        assert_eq!((o.choices[0].what, o.choices[0].about.as_str()), (What::Flag, "Fetch all remotes"));
+        let arg = |prefix: &str| At::Argument {
+            command: "git".into(),
+            position: 0,
+            prefix: prefix.into(),
+            quote: None,
+        };
+        let o = offer(&arg("fet"), &listings).unwrap();
+        assert_eq!(names(&o), ["fetch", "fetch-pack"]);
+        assert_eq!(o.choices[0].what, What::Subcommand);
+        // No subcommand matches: files.
+        assert_eq!(names(&offer(&arg("feat"), &listings).unwrap()), ["feature.txt"]);
     }
 }

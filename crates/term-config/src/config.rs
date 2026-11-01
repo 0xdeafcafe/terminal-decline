@@ -424,6 +424,8 @@ pub struct Config {
     pub completion_files: bool,
     /// Commands in the list.
     pub completion_commands: bool,
+    /// A command's flags and subcommands in the list, from its man pages.
+    pub completion_flags: bool,
     /// Window title for a pin; also shown in the Window menu.
     pub title: Option<String>,
     /// Kitty graphics, iTerm2 images and Sixel (docs/design/images.md).
@@ -579,11 +581,12 @@ impl Default for Config {
             shell_integration: true,
             highlight_command_line: true,
             completion: true,
-            completion_delay: 150,
+            completion_delay: 300,
             completion_rows: 8,
             completion_ghost_text: true,
             completion_files: true,
             completion_commands: true,
+            completion_flags: true,
             title: None,
             images: true,
             image_memory: 0,

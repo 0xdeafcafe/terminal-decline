@@ -1688,6 +1688,7 @@ impl WindowView {
                     ghost: c.completion_ghost_text,
                     files: c.completion_files,
                     commands: c.completion_commands,
+                    flags: c.completion_flags,
                 };
                 let drawn = p.completion.update(&t.state, &settings, Instant::now(), &waker);
                 let snap = p.render.frame.snapshot_mut();

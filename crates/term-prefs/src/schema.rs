@@ -764,6 +764,13 @@ pub const SETTINGS: &[Setting] = &[
         Editor::Toggle,
         "Offer commands, aliases, functions and builtins in the list",
     ),
+    setting(
+        "completion_flags",
+        "Flags and subcommands",
+        Completion,
+        Editor::Toggle,
+        "Offer a command's flags and subcommands, with what each does, from its man pages",
+    ),
     new_windows(Setting {
         pin_only: true,
         ..unset(
@@ -1028,6 +1035,7 @@ mod tests {
                 "completion_ghost_text",
                 "completion_files",
                 "completion_commands",
+                "completion_flags",
                 "title",
                 "images",
                 "image_memory",

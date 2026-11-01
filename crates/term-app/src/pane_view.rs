@@ -1347,6 +1347,20 @@ impl PaneView {
     fn mouse_button_event(&self, event: &NSEvent, button: u8, press: bool) {
         self.with(|win, _| win.last_input = Instant::now());
         let Some((line, col)) = self.cell_at(event) else { return };
+        // A click on the completion list takes the choice under it; the
+        // rest of the click (drag, release) goes nowhere.
+        if button == mouse::LEFT && press && event.modifierFlags().is_empty() {
+            let taken = self.with(|_, p| {
+                let r = p.completion.click(line, col)?;
+                p.swallow_click = true;
+                Some(r)
+            });
+            match taken.flatten() {
+                Some(crate::complete::KeyResult::Send(bytes)) => return self.send_input(bytes),
+                Some(_) => return self.request_redraw(),
+                None => {}
+            }
+        }
         // Cmd-click on a link opens it, even while the program takes the
         // mouse; the rest of the click (drag, release) goes nowhere.
         if button == mouse::LEFT
@@ -1612,6 +1626,10 @@ impl PaneView {
 
     fn mouse_motion(&self, event: &NSEvent, button: Option<u8>) {
         let Some((line, col)) = self.cell_at(event) else { return };
+        // Over the completion list, the choice under the mouse is chosen.
+        if button.is_none() && self.with(|_, p| p.completion.hover(line, col)) == Some(true) {
+            self.request_redraw();
+        }
         let cmd = event.modifierFlags().contains(NSEventModifierFlags::Command);
         self.set_hover((cmd && button.is_none()).then_some((line, col)));
         let selecting = self.with(|_, p| p.selecting.is_some()) == Some(true);

@@ -785,6 +785,13 @@ pub const SETTINGS: &[Setting] = &[
         Editor::Toggle,
         "Order commands in the list by how often you ran them, from zsh's history",
     ),
+    setting(
+        "completion_enter_puts_in",
+        "Return puts in the chosen item",
+        Completion,
+        Editor::Toggle,
+        "Once you move to an item in the list (with Down or the mouse), Return puts it in instead of running the line",
+    ),
     new_windows(Setting {
         pin_only: true,
         ..unset(
@@ -1052,6 +1059,7 @@ mod tests {
                 "completion_flags",
                 "completion_tab_zsh",
                 "completion_history_order",
+                "completion_enter_puts_in",
                 "title",
                 "images",
                 "image_memory",

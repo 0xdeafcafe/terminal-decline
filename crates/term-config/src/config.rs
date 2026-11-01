@@ -431,6 +431,9 @@ pub struct Config {
     pub completion_tab_zsh: bool,
     /// Commands in the list by how often they were run (zsh's history).
     pub completion_history_order: bool,
+    /// Return puts in the choice chosen in the list (with Down or the
+    /// mouse) instead of running the line. Off: Return always runs it.
+    pub completion_enter_puts_in: bool,
     /// Window title for a pin; also shown in the Window menu.
     pub title: Option<String>,
     /// Kitty graphics, iTerm2 images and Sixel (docs/design/images.md).
@@ -594,6 +597,7 @@ impl Default for Config {
             completion_flags: true,
             completion_tab_zsh: true,
             completion_history_order: true,
+            completion_enter_puts_in: false,
             title: None,
             images: true,
             image_memory: 0,

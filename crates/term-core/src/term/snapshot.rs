@@ -132,6 +132,9 @@ pub struct Popup {
     /// Width in cells, border included.
     pub width: u16,
     pub items: Vec<PopupItem>,
+    /// Drawn dim at the right of the bottom border, when it fits: the
+    /// keys that work (`⏎ put in · esc close`).
+    pub hint: String,
 }
 
 /// A row of the completion list.

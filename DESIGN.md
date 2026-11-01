@@ -326,6 +326,10 @@ Oct 2026, 1.90 → 2.16 MB) and no measurable parse speed.
   Cmd+= / Cmd+- font size, Ctrl+Cmd+F full screen. These are the
   defaults of the `[keybind]` config (below), which remaps or unbinds them
   and makes keys send text; pins may override it in their own config.
+  One exception: Cmd+V with no text on the clipboard (only an image, say)
+  goes to a program using the kitty keyboard protocol as super+v
+  (`CSI 118;9u`), as Ghostty passes on a paste it can't perform, so the
+  program (rush, Claude Code) can paste the image itself.
 - Secure Keyboard Entry (Terminal Decline menu, with a checkmark; kept in user
   defaults as `SecureKeyboardEntry`): `EnableSecureEventInput` so no other
   process sees the keys typed, as in Terminal.app. macOS has one switch

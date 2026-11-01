@@ -240,7 +240,13 @@ define_class!(
                     "macOS didn't let Terminal Decline read the clipboard: allow it in \
                      System Settings > Privacy & Security > Paste from Other Apps",
                 ),
-                None => NSBeep(),
+                // No text (an image, say): Cmd+V goes to a program using
+                // the kitty keyboard protocol, which can paste it itself.
+                None => {
+                    if !self.pass_on_cmd_key() {
+                        NSBeep();
+                    }
+                }
             }
         }
 
@@ -853,6 +859,26 @@ impl PaneView {
                 self.interpretKeyEvents(&events);
                 self.with(|_, p| p.text_key = None);
             }
+        }
+    }
+
+    /// The Cmd shortcut being handled, if it came from the keyboard and the
+    /// program asked for the kitty keyboard protocol: sent to it (as super
+    /// and the key) instead, since the app had nothing to do. False if not
+    /// sent, as for a menu click or a program without the protocol.
+    fn pass_on_cmd_key(&self) -> bool {
+        let app = NSApplication::sharedApplication(MainThreadMarker::from(self));
+        let Some(event) = app.currentEvent() else { return false };
+        if event.r#type() != NSEventType::KeyDown {
+            return false;
+        }
+        let Some(modes) = self.key_modes() else { return false };
+        match crate::keys::unhandled_cmd_key(&key_input(&event), modes) {
+            Some(bytes) => {
+                self.send_input(bytes);
+                true
+            }
+            None => false,
         }
     }
 

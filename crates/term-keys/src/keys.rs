@@ -179,6 +179,24 @@ pub fn translate(input: &KeyInput, modes: KeyModes) -> KeyAction {
     key_action(input, modes)
 }
 
+/// A Cmd shortcut the app had nothing to do for (Cmd+V with no text on
+/// the clipboard, only an image), for a program that asked for the kitty
+/// keyboard protocol: the key with its super bit, as Ghostty passes on a
+/// paste it can't perform, so a program can paste the image itself
+/// (`CSI 118;9u` for Cmd+V). None without the protocol, which is the
+/// only way to say Cmd to a program.
+pub fn unhandled_cmd_key(input: &KeyInput, modes: KeyModes) -> Option<Vec<u8>> {
+    if modes.kitty_flags == 0 || input.flags & flags::COMMAND == 0 || input.event == KeyEventType::Release {
+        return None;
+    }
+    if let KeyAction::Send(bytes) = key_action(input, modes) {
+        return Some(bytes);
+    }
+    // A text key, which would otherwise go to the input method.
+    let e = Enc::new(input, modes);
+    text_key_csi(input, e, e.mods, "")
+}
+
 /// The settings that shape one key event's encoding.
 #[derive(Clone, Copy)]
 struct Enc {
@@ -942,6 +960,35 @@ mod tests {
             flags,
             ..KeyInput::default()
         }
+    }
+
+    /// Cmd+V the app couldn't paste (only an image on the clipboard) goes
+    /// to a program using the kitty protocol as super+v, so it can paste
+    /// the image itself; without the protocol nothing can say Cmd.
+    #[test]
+    fn an_unhandled_cmd_v_goes_to_kitty_programs_as_super_v() {
+        let cmd_v = KeyInput {
+            keycode: 9,
+            chars: "v".into(),
+            chars_ignoring_mods: "v".into(),
+            chars_shift_only: "v".into(),
+            chars_unshifted: "v".into(),
+            flags: flags::COMMAND,
+            ..KeyInput::default()
+        };
+        let kitty = KeyModes {
+            kitty_flags: kitty::DISAMBIGUATE,
+            ..KeyModes::default()
+        };
+        assert_eq!(unhandled_cmd_key(&cmd_v, kitty).as_deref(), Some(&b"\x1b[118;9u"[..]));
+        assert_eq!(unhandled_cmd_key(&cmd_v, KeyModes::default()), None);
+        let release = KeyInput {
+            event: KeyEventType::Release,
+            ..cmd_v.clone()
+        };
+        assert_eq!(unhandled_cmd_key(&release, kitty), None);
+        // A key typed normally still never sends Cmd shortcuts.
+        assert_eq!(translate(&cmd_v, kitty), KeyAction::ToMenu);
     }
 
     fn modes(app_cursor: bool) -> KeyModes {

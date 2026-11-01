@@ -1147,12 +1147,23 @@ impl PxRect {
 }
 
 /// One pane in a frame: its instances drawn at `origin` (pixels) and kept
-/// inside `scissor`.
+/// inside `scissor`, moved up by `scroll` if given.
 #[derive(Clone, Copy)]
 pub struct PaneDraw<'a> {
     pub pane: &'a PaneRender,
     pub origin: (i32, i32),
     pub scissor: PxRect,
+    pub scroll: Option<Scroll>,
+}
+
+/// A pane's content drawn `up` pixels higher than its frame places it
+/// (smooth scrolling, between whole lines), and kept inside `clip` (window
+/// pixels, within the scissor: its rows, not the padding above and below
+/// them). Its background fill stays put.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Scroll {
+    pub up: i32,
+    pub clip: PxRect,
 }
 
 #[derive(Default)]
@@ -1204,6 +1215,10 @@ struct Span {
     fill: Option<RectInstance>,
     scissor: MTLScissorRect,
     origin: [f32; 2],
+    /// Where its content is drawn and kept: `scissor` and `origin`, unless
+    /// it scrolls between whole lines ([`Scroll`]).
+    content_scissor: MTLScissorRect,
+    content_origin: [f32; 2],
     /// The fill's place in the window's rect buffer.
     fill_at: usize,
     /// The pane's own buffers, and how many of their instances to draw.
@@ -1303,16 +1318,35 @@ impl Window {
             let (rect_buf, glyph_buf) = bufs.upload(&gpu.device, frame, with_glyphs);
             pane_flights.push(bufs.in_flight.clone());
             let n_images = frame.images.instances.len();
+            let mtl = |s: PxRect| MTLScissorRect {
+                x: s.x as usize,
+                y: s.y as usize,
+                width: s.w as usize,
+                height: s.h as usize,
+            };
+            let origin = [p.origin.0 as f32, p.origin.1 as f32];
+            let (content_scissor, content_origin) = match p.scroll {
+                Some(sc) => {
+                    // Inside the scissor; nothing at all if the clip misses
+                    // it. Clipped on a whole line too (`up` 0): the frame
+                    // has the row below the view, which isn't shown then.
+                    let c = intersect(sc.clip, s).unwrap_or(PxRect {
+                        x: s.x,
+                        y: s.y,
+                        w: 0,
+                        h: 0,
+                    });
+                    (mtl(c), [origin[0], origin[1] - sc.up as f32])
+                }
+                _ => (mtl(s), origin),
+            };
             self.spans.push(Span {
                 pane,
                 fill,
-                scissor: MTLScissorRect {
-                    x: s.x as usize,
-                    y: s.y as usize,
-                    width: s.w as usize,
-                    height: s.h as usize,
-                },
-                origin: [p.origin.0 as f32, p.origin.1 as f32],
+                scissor: mtl(s),
+                origin,
+                content_scissor,
+                content_origin,
                 fill_at: rects,
                 rects: if rect_buf.is_some() { frame.rects.len() } else { 0 },
                 glyphs: if glyph_buf.is_some() { frame.glyphs.len() } else { 0 },
@@ -1438,8 +1472,21 @@ impl Window {
         };
         let mut textures_at = 0;
         for span in &self.spans {
-            enc.setScissorRect(span.scissor);
-            let uniforms = [viewport[0], viewport[1], span.origin[0], span.origin[1]];
+            if span.content_scissor.width == 0 || span.content_scissor.height == 0 {
+                // Its content is clipped away: only the fill is drawn.
+                if let Some(buf) = &rect_buf
+                    && span.fill.is_some()
+                {
+                    enc.setScissorRect(span.scissor);
+                    let uniforms = [viewport[0], viewport[1], span.origin[0], span.origin[1]];
+                    draw(&gpu.rect_pipeline, buf, &uniforms, &(span.fill_at..span.fill_at + 1));
+                }
+                textures_at += panes[span.pane].pane.frame.images.images.len();
+                continue;
+            }
+            enc.setScissorRect(span.content_scissor);
+            let fill_uniforms = [viewport[0], viewport[1], span.origin[0], span.origin[1]];
+            let uniforms = [viewport[0], viewport[1], span.content_origin[0], span.content_origin[1]];
             let frame = &panes[span.pane].pane.frame;
             let pane_textures = &self.span_textures[textures_at..textures_at + frame.images.images.len()];
             textures_at += frame.images.images.len();
@@ -1462,11 +1509,19 @@ impl Window {
                 any
             };
             images_in(Layer::BelowBackground);
-            // The fill comes before the frame's rects.
+            // The fill comes before the frame's rects, over the whole
+            // scissor and where the frame places it.
             if let Some(buf) = &rect_buf
                 && span.fill.is_some()
             {
-                draw(&gpu.rect_pipeline, buf, &uniforms, &(span.fill_at..span.fill_at + 1));
+                let moved = span.content_scissor != span.scissor;
+                if moved {
+                    enc.setScissorRect(span.scissor);
+                }
+                draw(&gpu.rect_pipeline, buf, &fill_uniforms, &(span.fill_at..span.fill_at + 1));
+                if moved {
+                    enc.setScissorRect(span.content_scissor);
+                }
             }
             if let Some(buf) = &span.rect_buf
                 && span.rects > 0
@@ -1530,6 +1585,18 @@ impl Window {
         unsafe { cmd.addCompletedHandler(RcBlock::as_ptr(&done)) };
         cmd
     }
+}
+
+/// The part of `a` inside `b`.
+fn intersect(a: PxRect, b: PxRect) -> Option<PxRect> {
+    let (x0, y0) = (a.x.max(b.x), a.y.max(b.y));
+    let (x1, y1) = ((a.x + a.w).min(b.x + b.w), (a.y + a.h).min(b.y + b.h));
+    (x1 > x0 && y1 > y0).then_some(PxRect {
+        x: x0,
+        y: y0,
+        w: x1 - x0,
+        h: y1 - y0,
+    })
 }
 
 #[inline]
@@ -2005,6 +2072,7 @@ impl Renderer {
             pane: &self.pane,
             origin: (0, 0),
             scissor: all,
+            scroll: None,
         };
         self.window.encode(
             &self.shared,

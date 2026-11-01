@@ -16,7 +16,9 @@ pub use frame::{
 };
 pub use glyph_thread::GlyphWaker;
 pub use images::{ImageDraw, ImageInstance, Images};
-pub use metal::{CommandBuffer, FontsId, PaneDraw, PaneRender, PxRect, Renderer, Texture, configure_layer, set_glyph_texture_sizes};
+pub use metal::{
+    CommandBuffer, FontsId, PaneDraw, PaneRender, PxRect, Renderer, Scroll, Texture, configure_layer, set_glyph_texture_sizes,
+};
 pub use packer::ShelfPacker;
 pub use pixels::{MetalPixels, PixelAlloc};
 pub use transition::{Blend, Kind as TransitionKind, Transition};

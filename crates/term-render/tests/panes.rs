@@ -136,6 +136,7 @@ fn alone(renderer: &mut Renderer, pane: &PaneRender, size: (usize, usize)) -> Im
             pane,
             origin: (0, 0),
             scissor: all,
+            scroll: None,
         }],
         &[],
     )
@@ -204,11 +205,13 @@ fn two_panes_land_in_their_rects() {
             pane: &a,
             origin: (0, 0),
             scissor: rect(0),
+            scroll: None,
         },
         PaneDraw {
             pane: &b,
             origin: (bx as i32, 0),
             scissor: rect(bx),
+            scroll: None,
         },
     ];
     let split = draw(&mut r, size, 0, &panes, &[divider]);
@@ -227,6 +230,83 @@ fn two_panes_land_in_their_rects() {
 /// A pane's glyphs and backgrounds stop at its scissor: a pane drawn into
 /// half its width leaves the other half to the pass's clear colour, while
 /// drawn whole it inks there.
+/// Smooth scrolling: a view scrolled back, with the row below it in its
+/// snapshot, drawn `up` pixels higher inside its rows is the same frame
+/// drawn whole, moved up by exactly `up` pixels; the padding below its
+/// rows shows the background, not the row below.
+#[test]
+fn a_pane_scrolled_part_of_a_line_moves_by_the_pixels() {
+    if !have_gpu() {
+        return;
+    }
+    let mut r = Renderer::new(Fonts::new("Menlo", 24.0));
+    let m = r.metrics();
+    let (cw, ch) = (m.cell_width as usize, m.cell_height as usize);
+    let theme = theme();
+    let mut t = Term::new(4, 3, 100, term_core::ImagePool::process());
+    t.advance(b"\x1b[?25l\x1b[41ma1\x1b[0m\r\n\x1b[42mb2\x1b[0m\r\nc3\r\n\x1b[44md4\x1b[0m\r\n\x1b[45me5\x1b[0m\r\nf6");
+    t.state.set_view_overscan(true);
+    t.state.scroll_view(2);
+    let mut pane = PaneRender::new();
+    let input = input(&r, &theme);
+    r.build_pane(&mut pane, &mut t.state, &input);
+    assert_eq!(pane.frame.last_snapshot().rows.len(), 4, "the view's rows and the one below");
+    let w = 4 * cw;
+    // All four rows, unmoved.
+    let whole = draw(
+        &mut r,
+        (w, 4 * ch),
+        pane.frame.clear,
+        &[PaneDraw {
+            pane: &pane,
+            origin: (0, 0),
+            scissor: PxRect {
+                x: 0,
+                y: 0,
+                w: w as i32,
+                h: 4 * ch as i32,
+            },
+            scroll: None,
+        }],
+        &[],
+    );
+    let pad = 5;
+    let rows = PxRect {
+        x: 0,
+        y: 0,
+        w: w as i32,
+        h: 3 * ch as i32,
+    };
+    for up in [0, 1, ch / 3, ch / 2, ch - 1] {
+        let moved = draw(
+            &mut r,
+            (w, 3 * ch + pad),
+            pane.frame.clear,
+            &[PaneDraw {
+                pane: &pane,
+                origin: (0, 0),
+                scissor: PxRect {
+                    h: (3 * ch + pad) as i32,
+                    ..rows
+                },
+                scroll: Some(term_render::Scroll { up: up as i32, clip: rows }),
+            }],
+            &[],
+        );
+        let differ = (0..3 * ch)
+            .flat_map(|y| (0..w).map(move |x| (x, y)))
+            .filter(|&(x, y)| moved.at(x, y) != whole.at(x, y + up))
+            .count();
+        assert_eq!(differ, 0, "up {up}");
+        let bg = moved.at(0, 3 * ch + pad - 1);
+        assert!(
+            (3 * ch..3 * ch + pad).all(|y| (0..w).all(|x| moved.at(x, y) == bg)),
+            "up {up}: the padding is background only"
+        );
+        assert_ne!(whole.at(0, 3 * ch), bg, "the row below has its own colour");
+    }
+}
+
 #[test]
 fn a_pane_draws_nothing_outside_its_scissor() {
     if !have_gpu() {
@@ -259,6 +339,7 @@ fn a_pane_draws_nothing_outside_its_scissor() {
             pane: &a,
             origin: (0, 0),
             scissor: half,
+            scroll: None,
         }],
         &[],
     );
@@ -284,6 +365,7 @@ fn a_pane_draws_nothing_outside_its_scissor() {
             w: 2 * cw as i32,
             h: ch as i32,
         },
+        scroll: None,
     };
     let both = draw(&mut r, (4 * cw, ch), 0, &[pane(&left, 0), pane(&right, 2 * cw)], &[]);
     assert!(overhang > 0, "the italic glyph reaches past its pane");
@@ -351,11 +433,13 @@ fn scissors_are_clamped_to_the_target() {
                 pane: &a,
                 origin: (0, 0),
                 scissor: big,
+                scroll: None,
             },
             PaneDraw {
                 pane: &a,
                 origin: (4 * cw as i32, 0),
                 scissor: outside,
+                scroll: None,
             },
         ],
         &[],
@@ -820,6 +904,7 @@ fn two_windows_share_the_glyph_textures() {
                     pane: p,
                     origin: (0, 0),
                     scissor: all,
+                    scroll: None,
                 }],
                 &[],
             )

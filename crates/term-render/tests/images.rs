@@ -152,6 +152,7 @@ impl Setup {
                 pane: &pane,
                 origin: (0, 0),
                 scissor: scissor.unwrap_or(all),
+                scroll: None,
             }],
             &[],
         );

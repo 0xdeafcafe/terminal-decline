@@ -226,5 +226,38 @@ impl Registry {
 
 fn face(font: CFRetained<CTFont>) -> Face {
     let color = unsafe { font.symbolic_traits() }.contains(CTFontSymbolicTraits::ColorGlyphsTrait);
+    let font = if color { without_image_cache(&font).unwrap_or(font) } else { font };
     Face { font, color }
+}
+
+/// `font` drawing its colour glyphs without Core Text keeping each one's
+/// image: by default it keeps every emoji it has drawn, decoded, in a
+/// cache of its own (about 6 KB each; 12 MB after the 2,000 emoji of the
+/// pressure set's glyphs-30k, never given back), while the glyph
+/// textures already keep what was drawn. The attribute,
+/// `kCTFontCacheGlyphImagesAttribute`, is exported by Core Text but not
+/// in its headers, so it is looked up at run time; without it the font
+/// draws as before.
+fn without_image_cache(font: &CTFont) -> Option<CFRetained<CTFont>> {
+    use objc2_core_foundation::{CFBoolean, CFDictionary, CFString};
+    use objc2_core_text::CTFontDescriptor;
+    use std::sync::OnceLock;
+
+    struct Key(&'static CFString);
+    // A constant string, never released.
+    unsafe impl Send for Key {}
+    unsafe impl Sync for Key {}
+    static KEY: OnceLock<Option<Key>> = OnceLock::new();
+    let key = KEY.get_or_init(|| {
+        let p = unsafe { libc::dlsym(libc::RTLD_DEFAULT, c"kCTFontCacheGlyphImagesAttribute".as_ptr()) } as *const *const CFString;
+        // The symbol is the address of the constant's pointer.
+        unsafe { p.as_ref().and_then(|s| s.as_ref()) }.map(Key)
+    });
+    let key = key.as_ref()?.0;
+    let no = unsafe { objc2_core_foundation::kCFBooleanFalse }?;
+    let attrs = CFDictionary::<CFString, CFBoolean>::from_slices(&[key], &[no]);
+    unsafe {
+        let desc = CTFontDescriptor::with_attributes(attrs.as_opaque());
+        Some(font.copy_with_attributes(0.0, std::ptr::null(), Some(&desc)))
+    }
 }

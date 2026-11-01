@@ -12,6 +12,10 @@
 //! cold (nothing shaped yet), rows built again with their shaping kept (a
 //! theme change, a texture that grew), nothing changed, one row, and a
 //! line scrolled in.
+//!
+//! The prompt (completion design §11): a coloured 160×48 screen with
+//! nothing changed, with the command line's colours, and with the
+//! completion list open over it.
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use std::collections::HashMap;
@@ -273,6 +277,60 @@ fn ligatures(c: &mut Criterion, input: &FrameInput) {
                 })
             });
         }
+    }
+}
+
+/// A prompt under a full screen, unchanged frames: as is, with the
+/// command line coloured (`Snapshot::ink`), and with the list open.
+fn prompt(c: &mut Criterion, input: &FrameInput) {
+    use term_core::{Ghost, Ink, Popup, PopupItem};
+    let mut t = screen(160, 48, Colours::Coloured);
+    t.advance(b"\x1b[48;1H\x1b[2K$ git commit -m \"fix it\" && ls -la ~/src | grep -v x > out");
+    let ink: Vec<Ink> = [
+        (2..5, 2),
+        (6..12, 0),
+        (13..15, 4),
+        (16..24, 3),
+        (25..27, 5),
+        (28..30, 2),
+        (31..34, 4),
+    ]
+    .into_iter()
+    .map(|(cols, color)| Ink { row: 47, cols, color })
+    .collect();
+    let popup = Popup {
+        row: 38,
+        col: 40,
+        width: 60,
+        items: (0..8)
+            .map(|i| PopupItem {
+                text: format!("--option-{i}"),
+                detail: "What the option does, from its man page".into(),
+                selected: i == 2,
+            })
+            .collect(),
+    };
+    let mut frame = Frame::default();
+    for (name, with_ink, with_popup) in [("plain", false, false), ("coloured", true, false), ("list open", true, true)] {
+        c.bench_function(&format!("frame 160x48 prompt {name} unchanged"), |b| {
+            b.iter(|| {
+                frame.snapshot(&mut t.state, black_box(input), 0);
+                let snap = frame.snapshot_mut();
+                if with_ink {
+                    snap.ink.extend_from_slice(&ink);
+                }
+                if with_popup {
+                    snap.popup = Some(popup.clone());
+                    snap.ghost = Some(Ghost {
+                        row: 47,
+                        col: 60,
+                        text: "tion-0".into(),
+                    });
+                }
+                frame.build_snapshot(black_box(input), &mut Cached);
+                black_box(frame.glyphs.len())
+            })
+        });
     }
 }
 
@@ -606,6 +664,7 @@ fn bench_ligatures(c: &mut Criterion) {
         preedit: None,
     };
     ligatures(c, &input);
+    prompt(c, &input);
 }
 
 /// Images (images.md §9): an 80×24 screen whose rows are all cached,

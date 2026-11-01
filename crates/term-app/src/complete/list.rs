@@ -135,8 +135,11 @@ pub fn offer(at: &At, listings: &Listings) -> Option<Offer> {
             let env = listings.env?;
             let commands = listings.commands?;
             let mut all: Vec<Choice> = Vec::new();
+            // Only names that can match are copied: this runs on each
+            // frame the list is open, over thousands of programs.
+            let fits = |n: &str| starts_with_folded(n, prefix);
             let mut add = |names: &mut dyn Iterator<Item = &String>, what| {
-                all.extend(names.map(|n| Choice {
+                all.extend(names.filter(|n| fits(n)).map(|n| Choice {
                     name: n.clone(),
                     what,
                     about: String::new(),
@@ -238,6 +241,18 @@ pub fn offer(at: &At, listings: &Listings) -> Option<Offer> {
             })
         }
         _ => None,
+    }
+}
+
+/// Whether `name` starts with `prefix`, either case; without an
+/// allocation for ASCII.
+fn starts_with_folded(name: &str, prefix: &str) -> bool {
+    if prefix.is_ascii() {
+        name.as_bytes()
+            .get(..prefix.len())
+            .is_some_and(|h| h.eq_ignore_ascii_case(prefix.as_bytes()))
+    } else {
+        name.to_lowercase().starts_with(&prefix.to_lowercase())
     }
 }
 

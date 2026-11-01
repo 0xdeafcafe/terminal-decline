@@ -745,8 +745,9 @@ struct Pen {
     underline_color: term_core::Color,
     /// Any of underline, overline or strike.
     decorated: bool,
-    /// The default text colour and no attributes ([`GlyphInstance::PLAIN`]).
-    plain: bool,
+    /// [`GlyphInstance::PLAIN`] for the default text colour and no
+    /// attributes, else 0: OR'd into each glyph's flags as it is.
+    plain: u32,
 }
 
 impl Pen {
@@ -779,7 +780,7 @@ impl Pen {
             underline: style.underline,
             underline_color: style.underline_color,
             decorated: style.underline != Underline::None || a.intersects(Attrs::OVERLINE | Attrs::STRIKE),
-            plain: style.fg == term_core::Color::DEFAULT && a.is_empty(),
+            plain: GlyphInstance::PLAIN * (style.fg == term_core::Color::DEFAULT && a.is_empty()) as u32,
         }
     }
 
@@ -1979,8 +1980,7 @@ fn row_cells<const OVERLAY: bool, const LIG: bool, C: CellView, S: RowSink>(
                     u: g.u,
                     v: g.v,
                     color: fg.rgba,
-                    is_color: GlyphInstance::flags(&g, col, pen.attrs.contains(Attrs::DIM), fg.tag)
-                        | if pen.plain { GlyphInstance::PLAIN } else { 0 },
+                    is_color: GlyphInstance::flags(&g, col, pen.attrs.contains(Attrs::DIM), fg.tag) | pen.plain,
                 });
             }
         } else if !spacer && !pen.attrs.contains(Attrs::HIDDEN) && !covered && !(LIG && pieces.replaced[col]) {

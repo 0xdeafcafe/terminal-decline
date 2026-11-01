@@ -1,11 +1,16 @@
 //! Completion and colouring at the prompt (docs/design/completion.md
 //! §11): reading the command line into words, which runs on the main
-//! thread on every key. Budget: reading and colouring a 200-character
-//! line in 20 µs.
+//! thread on every key (budget: reading and colouring a 200-character
+//! line in 20 µs); matching 3,000 commands against a prefix, on the main
+//! thread while the list is open; and the man page and `--help` readers,
+//! on the worker.
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::hint::black_box;
-use terminal_decline_app::complete::lex;
+use terminal_decline_app::complete::lex::{self, At};
+use terminal_decline_app::complete::list::{self, Listings};
+use terminal_decline_app::complete::sources::Commands;
+use terminal_decline_app::complete::{help, man};
 
 /// A typical line, then the same kind of line grown to `len` bytes.
 fn line(len: usize) -> String {
@@ -39,6 +44,54 @@ fn bench(c: &mut Criterion) {
         });
     }
     g.finish();
+
+    // 3,000 programs, as on a Mac with Homebrew.
+    let names: Vec<String> = (0..3000)
+        .map(|i| format!("{}{i}", ["g", "git-", "go", "brew", "x"][i % 5]))
+        .collect();
+    let commands = Commands::from_names(names);
+    let env = term_core::ShellEnv::default();
+    let listings = Listings {
+        env: Some(&env),
+        commands: Some(&commands),
+        folder: None,
+        flags: None,
+        subcommands: None,
+        history: None,
+    };
+    for prefix in ["g", "git-1"] {
+        let at = At::Command { prefix: prefix.into() };
+        c.bench_function(&format!("offer 3000 commands {prefix:?}"), |b| {
+            b.iter(|| black_box(list::offer(black_box(&at), &listings)))
+        });
+    }
+
+    // Real pages where this Mac has them.
+    for page in [
+        "/usr/share/man/man1/ls.1",
+        "/opt/homebrew/share/man/man1/git-fetch.1",
+        "/usr/share/man/man1/curl.1",
+    ] {
+        let Ok(src) = std::fs::read_to_string(page) else { continue };
+        let name = page.rsplit('/').next().unwrap_or(page);
+        c.bench_function(&format!("man read {name}"), |b| b.iter(|| black_box(man::read(black_box(&src)))));
+    }
+    let cargo_help = "Rust's package manager\n\nOptions:\n".to_string()
+        + &(0..40)
+            .map(|i| {
+                format!(
+                    "  -{}, --option-{i} <VALUE>   What option {i} does, at some length\n",
+                    (b'a' + (i % 26) as u8) as char
+                )
+            })
+            .collect::<String>()
+        + "\nCommands:\n"
+        + &(0..30)
+            .map(|i| format!("    command{i}   What command {i} does\n"))
+            .collect::<String>();
+    c.bench_function("help read 40 flags 30 commands", |b| {
+        b.iter(|| black_box(help::read(black_box(&cargo_help))))
+    });
 }
 
 criterion_group!(benches, bench);

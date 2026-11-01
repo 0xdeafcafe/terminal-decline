@@ -18,7 +18,8 @@ the event's own timestamp. Scenarios:
 - zsh, zsh-off: the login shell as zsh with the shell integration, under
   a temporary HOME with an empty .zshrc, typing and deleting a letter at
   the prompt; `zsh` has the shell report its command line (OSC 7701,
-  docs/design/completion.md), `zsh-off` not (in-app only);
+  docs/design/completion.md) with colouring and the list on, `zsh-off`
+  has both off, `zsh-list` opens the list on every key (in-app only);
 each at the display link rates given (`DECLINE_LATENCY_HZ`).
 
 External (`--external`): `probe.swift` posts the keys from outside and
@@ -227,7 +228,7 @@ def keys_for(scenario, n):
     if scenario == "htop":
         # '/' opens htop's search bar; typed letters then show up in it.
         return KEY_SLASH, [KEY_X if i % 2 == 0 else KEY_DELETE for i in range(n)]
-    if scenario in ("zsh", "zsh-off"):
+    if scenario in ("zsh", "zsh-off", "zsh-list"):
         # The line stays short: a letter, then Delete.
         return KEY_A, [KEY_X if i % 2 == 0 else KEY_DELETE for i in range(n)]
     return KEY_A, [KEY_A] * n
@@ -241,14 +242,19 @@ def zsh_setup(scenario, tmp):
     home.mkdir()
     (home / ".zshrc").write_text("PS1='%~ %# '\n")
     config = tmp / "config.toml"
-    on = "true" if scenario == "zsh" else "false"
-    config.write_text(f"shell_integration = true\nhighlight_command_line = {on}\n")
+    on = "false" if scenario == "zsh-off" else "true"
+    # zsh-list: the list opens on every key, so frames with it open are
+    # measured (the keys come 50–150 ms apart, under the usual pause).
+    delay = 0 if scenario == "zsh-list" else 300
+    config.write_text(
+        f"shell_integration = true\nhighlight_command_line = {on}\ncompletion = {on}\ncompletion_delay = {delay}\n"
+    )
     env = {"HOME": str(home), "SHELL": "/bin/zsh", "ZDOTDIR": ""}
     return env, ["--config", str(config)]
 
 
 def program_for(scenario, marker=None):
-    if scenario in ("zsh", "zsh-off"):
+    if scenario in ("zsh", "zsh-off", "zsh-list"):
         return None
     if scenario == "htop":
         return [shutil.which("htop") or "htop", "-d", "1"]
@@ -270,7 +276,7 @@ def run_inapp(bundle, scenario, hz, n_keys, out_dir):
         **EXTRA_ENV,
     }
     app_args = []
-    if scenario in ("zsh", "zsh-off"):
+    if scenario in ("zsh", "zsh-off", "zsh-list"):
         zenv, app_args = zsh_setup(scenario, tmp)
         env.update(zenv)
     app = App.decline(bundle, env, program_for(scenario), out_dir / f"inapp-{scenario}-{hz}hz.stderr", app_args)
@@ -430,7 +436,7 @@ def main():
             if "screen_recording=false" in check or "post_events=false" in check:
                 raise SystemExit(f"probe: {check.strip()}: grant Screen Recording and Accessibility to this terminal")
             for scenario in scenarios:
-                if scenario in ("zsh", "zsh-off"):
+                if scenario in ("zsh", "zsh-off", "zsh-list"):
                     continue  # in-app only: the setting is decline's
                 # Interleaved, so a change in the machine's load hits both.
                 for terminal in terminals:

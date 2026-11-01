@@ -59,13 +59,29 @@ pub struct PaneState {
     /// What zsh's completion found on Tab (§7), shown until a key that
     /// isn't the list's own.
     zsh: Option<Vec<list::Choice>>,
+    /// The last offer and what it was made from: the same again (each
+    /// frame while the list is open) isn't worked out again.
+    last_offer: Option<(OfferKey, Option<Arc<Offer>>)>,
     open: Option<Open>,
+}
+
+/// What an offer is made from: what the cursor is on, the settings that
+/// change it, and the listings read (by address: a new read is a new one).
+#[derive(PartialEq, Eq)]
+struct OfferKey {
+    at: lex::At,
+    settings: (bool, bool, bool, bool),
+    listings: [usize; 6],
+}
+
+fn address<T>(a: &Option<Arc<T>>) -> usize {
+    a.as_ref().map_or(0, |a| Arc::as_ptr(a) as *const u8 as usize)
 }
 
 /// The list while it is open.
 #[derive(Debug)]
 struct Open {
-    offer: Offer,
+    offer: Arc<Offer>,
     /// The choice moved to with Down; none until then, so Up still goes
     /// to the shell's history.
     selected: Option<usize>,
@@ -331,11 +347,11 @@ impl PaneState {
             .map_or(report.cursor, |w| w.range.start);
         let previous = self.open.take().filter(|o| o.zsh);
         let mut open = Open {
-            offer: Offer {
+            offer: Arc::new(Offer {
                 choices,
                 prefix: report.text[start..report.cursor].to_string(),
                 keep: String::new(),
-            },
+            }),
             selected: previous.as_ref().and_then(|o| o.selected),
             scroll: previous.as_ref().map_or(0, |o| o.scroll),
             start,
@@ -351,7 +367,7 @@ impl PaneState {
     }
 
     /// The choices for what the cursor is on, if any are worth a list.
-    fn offer(&self, at: &lex::At, t: &Terminal, s: &Settings, wake: &dyn Fn() -> sources::Wake) -> Option<Offer> {
+    fn offer(&mut self, at: &lex::At, t: &Terminal, s: &Settings, wake: &dyn Fn() -> sources::Wake) -> Option<Arc<Offer>> {
         use lex::At;
         let prefix = match at {
             At::Command { prefix } | At::Argument { prefix, .. } | At::Path { prefix, .. } | At::Flag { prefix, .. } => prefix,
@@ -415,6 +431,23 @@ impl PaneState {
             }
             _ => {}
         }
+        let key = OfferKey {
+            at: at.clone(),
+            settings: (s.files, s.commands, s.flags, s.history_order),
+            listings: [
+                address(&self.shell_env),
+                address(&commands),
+                address(&folder),
+                address(&manual),
+                address(&subcommands),
+                address(&history),
+            ],
+        };
+        if let Some((k, offer)) = &self.last_offer
+            && *k == key
+        {
+            return offer.clone();
+        }
         let offer = list::offer(
             at,
             &Listings {
@@ -425,14 +458,17 @@ impl PaneState {
                 subcommands: subcommands.as_deref(),
                 history: history.as_deref(),
             },
-        )?;
+        )
         // Nothing to add: no choices, or only what is typed already (a
         // folder's name without its `/` counts).
-        match offer.choices.as_slice() {
-            [] => None,
-            [only] if only.name.strip_suffix('/').unwrap_or(&only.name) == offer.prefix => None,
-            _ => Some(offer),
-        }
+        .filter(|offer| match offer.choices.as_slice() {
+            [] => false,
+            [only] => only.name.strip_suffix('/').unwrap_or(&only.name) != offer.prefix,
+            _ => true,
+        })
+        .map(Arc::new);
+        self.last_offer = Some((key, offer.clone()));
+        offer
     }
 
     /// A key, before it goes to the shell: `plain` when no modifier is

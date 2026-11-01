@@ -785,5 +785,34 @@ brew's lists nothing.
 History order landed with it: zsh's history file read on the worker at
 the first list of commands (Alex's 57 KB in 3 ms), then only what was
 added; each command in a line counted (`git push && cargo test` counts
-both), at most the last 8 MB. Not yet: the `[keybind]` actions for the list's keys,
+both), at most the last 8 MB.
+
+Measured 1 Nov 2026 (load 5–8, 17 during the latency run):
+- Frames with everything idle, before colouring (b50de69) → now, µs:
+  80×24 full 10.3 → 10.5, 300×100 unchanged 5.97 → 6.16, 300×100 one
+  row 43.6 → 45.1, 160×48 full 7.5 → 7.8: 2–3% slower, the same at
+  563aebe (colouring alone). About a third was the colour flag's branch
+  on each glyph, now an OR; the rest isn't pinned down (skipping the
+  per-row checks when nothing is coloured didn't change it). Over the
+  "unchanged within noise" budget by 0.2–1.5 µs a frame.
+- Prompt frames, 160×48 unchanged: plain 2.92 µs, coloured 3.01 µs
+  (+0.1, budget 20), list open 9.34 µs (+6.4, budget 50).
+- Parsing: unchanged (±1%). Typing with reports: 0.47 µs a key against
+  0.05 µs without (`typing` bench, 39 keys).
+- Reading the line: 0.27 µs (20 bytes), 2.3 µs (200), 38 µs (4,000).
+  Matching 3,000 commands: 24 µs for `git-1`, 97 µs for `g` (1,800
+  matches) after copying only names that can match (was 127 µs); the
+  last offer is kept while nothing it depends on changes, so frames
+  with the list open don't redo it.
+- Readers, on the worker: ls.1 0.18 ms, git-fetch.1 0.38 ms, curl.1
+  2.1 ms; a 40-flag `--help` 33 µs.
+- zsh hook: 23 µs a key (20-byte line), 36 µs (200), 161 µs (2,000);
+  env report 314 µs when it changed, 65 µs when not.
+- Latency (in-app, `--type`, 120 Hz, 200 keys), p50 / p95 ms: off 3.53 /
+  11.3, on 3.67 / 26.4, list open on every key 3.57 / 17.2. Frame build
+  p50 0.20 → 0.22 ms; the tails are the compositor's under the load
+  spike, not the app's.
+- Not run: footprint, idle wakeups at the prompt, pressure.
+
+Not yet: the `[keybind]` actions for the list's keys,
 bash and fish. The frame and latency benchmarks are still to run.

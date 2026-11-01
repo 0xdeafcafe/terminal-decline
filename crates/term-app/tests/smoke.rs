@@ -2984,8 +2984,8 @@ fn smoke_iterm2_and_sixel_images_are_listed_in_the_images_dump() {
 
 /// A memory-pressure warning (simulated with the control's
 /// `memory-pressure`, which runs the same handler) gives memory back:
-/// history shrinks (its blocks compressed), and the window draws the
-/// same screen again afterwards (roadmap R.5).
+/// the footprint and history shrink (its blocks compressed), and the
+/// window draws the same screen again afterwards (roadmap R.5).
 #[test]
 #[ignore = "opens a window; run with --run-ignored"]
 fn smoke_memory_pressure_gives_memory_back_and_redraws() {
@@ -3014,6 +3014,14 @@ fn smoke_memory_pressure_gives_memory_back_and_redraws() {
     assert!(num(&d[1], "frames") > num(&d[0], "frames"));
     assert_eq!(screen(&d[1]), screen(&d[0]));
     assert_eq!(num(&d[1], "glyphs"), num(&d[0], "glyphs"));
+    // The footprint drops (44 -> 37.5 MB on an M-series Mac).
+    let footprint = |x: &Value| num(x, "phys_footprint");
+    assert!(
+        footprint(&d[1]) < footprint(&d[0]),
+        "footprint {} -> {}",
+        footprint(&d[0]),
+        footprint(&d[1])
+    );
     eprintln!(
         "footprint {:.1} -> {:.1} MB, history {:.2} -> {:.2} MB",
         num(&d[0], "phys_footprint") / 1e6,

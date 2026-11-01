@@ -740,6 +740,52 @@ fn glyphs_from_the_glyph_thread_grow_a_full_texture() {
     assert!(alone(&mut r, &pane, size) == alone(&mut whole, &all, size), "every glyph drawn");
 }
 
+/// Once idle, textures a flood grew go back to their starting sizes: the
+/// pane is stale, and built again it gets every glyph at once, on this
+/// thread though the glyph thread is on, and draws as before. Growing
+/// back while filling in doesn't count: the next shrink does nothing.
+#[test]
+fn grown_textures_shrink_and_panes_fill_in_at_once() {
+    if !have_gpu() {
+        return;
+    }
+    term_render::set_glyph_texture_sizes((256, 4096), (64, 2048));
+    let theme = theme();
+    let text = "😀😁😂😃😄😅😆😇😈😉";
+    let mut r = Renderer::new(Fonts::new("Menlo", 24.0));
+    let m = r.metrics();
+    let size = (20 * m.cell_width as usize, m.cell_height as usize);
+    assert!(!r.shrink_glyph_textures(), "nothing grew yet");
+    let (woke, wakes) = std::sync::mpsc::channel::<()>();
+    let woke = std::sync::Mutex::new(woke);
+    r.set_glyph_waker(Some(std::sync::Arc::new(move || {
+        let _ = woke.lock().unwrap().send(());
+    })));
+    let (_, colour) = r.glyph_texture_sizes();
+    let (mut pane, mut t) = built(&mut r, &theme, 20, 1, text);
+    let input = input(&r, &theme);
+    let mut builds = 1;
+    while pane.glyphs_deferred() {
+        wakes
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .expect("the glyph thread wakes the app");
+        r.build_pane(&mut pane, &mut t.state, &input);
+        builds += 1;
+        assert!(builds < 30, "the glyphs never came");
+    }
+    assert!(r.glyph_texture_sizes().1 > colour, "the colour texture grew");
+    let before = alone(&mut r, &pane, size);
+
+    assert!(r.shrink_glyph_textures());
+    assert_eq!(r.glyph_texture_sizes().1, colour, "back to its starting size");
+    assert!(!r.is_current(&pane), "its glyphs were forgotten");
+    r.build_pane(&mut pane, &mut t.state, &input);
+    assert!(!pane.glyphs_deferred(), "every glyph at once");
+    assert!(r.is_current(&pane));
+    assert!(alone(&mut r, &pane, size) == before, "drawn as before");
+    assert!(!r.shrink_glyph_textures(), "filling in isn't growing");
+}
+
 /// Two windows with their own fonts share the glyph textures: each draws
 /// its own text while the other uploads new glyphs between their frames,
 /// and each frame matches the same frame drawn with the GPU idle.

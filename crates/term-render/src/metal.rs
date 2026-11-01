@@ -374,6 +374,14 @@ pub struct GlyphCache {
     windows: usize,
     hidden: usize,
     volatile: bool,
+    /// A texture grew (or was emptied at its cap) since the last
+    /// [`shrink`](Self::shrink), other than while panes were built again
+    /// after one.
+    grew: bool,
+    /// The generation the last [`shrink`](Self::shrink) left, 0 before
+    /// any: panes built before it get their glyphs on the main thread
+    /// when built again, so they never draw without them.
+    refill: u64,
     /// The time the frame being built may spend on new glyphs.
     budget: Budget,
 }
@@ -397,6 +405,9 @@ struct Budget {
     deferred: bool,
     /// The glyphs left for the glyph thread.
     wanted: Vec<Want>,
+    /// The pane is built again after the textures shrank: every glyph is
+    /// found and rasterised here, with no limit.
+    refill: bool,
 }
 
 impl Budget {
@@ -422,6 +433,14 @@ impl Budget {
             return true;
         }
         false
+    }
+
+    /// This build fills in a pane after the textures shrank: no glyph
+    /// waits, so it draws as it did.
+    fn refill(&mut self) {
+        self.limit = None;
+        self.waker = None;
+        self.refill = true;
     }
 
     /// Whether a glyph was left for later; the limit goes.
@@ -460,6 +479,8 @@ impl GlyphCache {
             windows: 0,
             hidden: 0,
             volatile: false,
+            grew: false,
+            refill: 0,
             budget: Budget::default(),
         }
     }
@@ -600,8 +621,45 @@ impl GlyphCache {
                 self.forget(|slot| slot.is_some_and(|s| s.color == color));
                 kept = false;
             }
+            if !self.budget.refill {
+                self.grew = true;
+            }
         }
         kept
+    }
+
+    /// Every window has been idle a while: each texture that grew since
+    /// the last call (a flood of new glyphs: CJK, emoji) starts again
+    /// empty at its starting size, its glyphs forgotten, so the old one
+    /// goes (up to 16 MB each). The panes built again after this get
+    /// their glyphs on the main thread, all of them, as before the glyph
+    /// thread: they show what they showed, and the textures grow back
+    /// only to what is on screen. A texture filled again that way doesn't
+    /// count as grown. Returns whether a texture was emptied.
+    fn shrink(&mut self, device: &Device) -> bool {
+        if self.volatile || !std::mem::take(&mut self.grew) {
+            return false;
+        }
+        let big = |a: &Atlas| a.packer.size() > a.start;
+        let (mask, color) = (big(&self.mask), big(&self.color));
+        if !mask && !color {
+            return false;
+        }
+        self.in_flight.wait_idle();
+        if mask {
+            self.mask.restart(device);
+        }
+        if color {
+            self.color.restart(device);
+        }
+        self.forget(|slot| slot.is_some_and(|s| if s.color { color } else { mask }));
+        // The maps a flood filled keep their room otherwise.
+        self.by_key.shrink_to_fit();
+        for (_, chars) in &mut self.by_char {
+            chars.other.shrink_to_fit();
+        }
+        self.refill = self.generation;
+        true
     }
 
     /// Forget every glyph and empty both textures (keeping their sizes).
@@ -1758,6 +1816,16 @@ impl Renderer {
         freed
     }
 
+    /// Every window has been idle a while: let the glyph textures go back
+    /// to their starting sizes if a flood of new glyphs grew them
+    /// ([`GlyphCache::shrink`]). True when they did: every window must
+    /// then be drawn again (its panes are no longer current), which
+    /// rasterises what is on screen on this thread. Waits for the GPU to
+    /// finish the frames that sample them.
+    pub fn shrink_glyph_textures(&mut self) -> bool {
+        self.shared.glyphs.borrow_mut().shrink(&self.shared.gpu.device)
+    }
+
     /// Whether `pane` was built against the glyph textures as they are and
     /// this window's fonts. A pane that isn't must be built again before
     /// its glyphs are drawn: until then it draws its backgrounds only.
@@ -2045,6 +2113,9 @@ fn snapshot(pane: &mut PaneRender, term: &mut Terminal, input: &FrameInput, gene
 fn finish(shared: &Shared, id: FontsId, fonts: &Fonts, rules: &GlyphRules, pane: &mut PaneRender, input: &FrameInput) -> bool {
     let mut cache = shared.glyphs.borrow_mut();
     cache.budget.begin(rules);
+    if cache.refill > 0 && pane.built_with.is_some_and(|(g, _)| g < cache.refill) {
+        cache.budget.refill();
+    }
     // What the glyph thread sent back, for this build to draw.
     cache.receive(id);
     if !pane.frame.build_snapshot(input, &mut cache.source(id, fonts)) {

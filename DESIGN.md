@@ -38,12 +38,23 @@ any command as its own Dock app.
 | `term-pty`    | spawns the shell on a pseudo-terminal, reader thread, resize          |
 | `term-font`   | Core Text: font loading, cell metrics, glyph rasterising              |
 | `term-render` | Metal: glyph textures shared by every window, panes drawn into one layer |
-| `term-app`    | AppKit window/view, keyboard + IME, mouse, clipboard, config, pins    |
+| `term-app`    | AppKit window/view, keyboard + IME, mouse, clipboard, the agent API's server and sessions, updates, pins |
+| `term-keys`   | key press → bytes (xterm, kitty protocol), the `[keybind]` config, the ASCII-capable layout (no AppKit) |
+| `term-config` | `config.toml` and its layers, themes (`themes/`), the quick terminal's settings (no AppKit; term-render and term-font for `Theme` and `FontConfig`) |
+| `term-activity` | what a pane's shell does: OSC 133 activity, status titles, when to notify, prompts, the program running (no AppKit) |
+| `term-restore` | restarting into a new build: the saved window list, the pane tree it saves, each pane's history (no AppKit) |
+| `term-ctl`    | the agent API's protocol and `ctl` command line, its idle limit, screen read-back and keys (no AppKit; the server and its sessions are term-app's) |
 | `term-prefs`  | the preferences: settings schema, safe `config.toml` edits, the TUI (no platform code) |
 | `term-icon`   | generated pin icons by the Slope rule (`slope-pins-2`): Core Text outline of the initial, CoreGraphics drawing after `pin-template.svg`, ImageIO `.icns` |
 | `term-image`  | image parsers and decoders with no terminal state: kitty keys, base64, zlib, iTerm2 arguments, Sixel, header sizes, pure-Rust PNG/JPEG/GIF/WebP, conversion to Display P3 (no platform code; docs/design/images.md) |
 
 `term-core` has no platform code and is tested and benchmarked on its own.
+
+term-keys, term-config, term-activity, term-restore and term-ctl were split
+out of term-app so they build in parallel and their tests compile on their
+own; term-app re-exports each moved module under its old name
+(`crate::config`, `crate::keys`, `crate::ctl::protocol`…), so the app's code
+reads as before. They have no objc2 or AppKit dependency of their own.
 
 `term-app` (the `terminal-decline` package) is a library plus a thin `main.rs`. The
 AppKit code (`app`, `view`) only turns events into the inputs of plain
@@ -743,7 +754,7 @@ split_divider (unset: the background mixed 25% towards the foreground),
 the config override the theme's, one by one (`""` in `palette` keeps the
 theme's entry). Colours must be `#rrggbb`; a bad one, a bad theme file or a
 missing theme is a notice. The built-in set is embedded TOML
-(`crates/term-app/themes/`, each file naming its source and licence):
+(`crates/term-config/themes/`, each file naming its source and licence):
 31 themes: slope-dark and slope-light (Terminal Decline's own, from the
 Slope brand palette), Solarized, Gruvbox, Catppuccin (4), Tokyo Night (3;
 colours from tokyonight.nvim, Apache-2.0), Rosé Pine (3), Kanagawa wave and
@@ -1113,6 +1124,40 @@ key through `session` to `echo.py` and timing until the reader has parsed
 the echo, then `Renderer::prepare` and `encode` into an offscreen texture
 (as term-render's offscreen test does), reported like the other benches.
 Not built yet.
+
+### Build times (term-app split into crates)
+
+Before (main at e6c1e00) and after splitting term-keys, term-config,
+term-activity, term-restore and term-ctl out of term-app; medians of 3
+runs, the two builds taking turns, on a busy Mac (load 25–95 throughout,
+so single runs swing ±50%). An edit is a new function appended to one
+file. "Bundle" is what `scripts/dogfood.sh` builds: `-p term-dylib
+--release`, the release-stub binaries and `scripts/bundle.sh`.
+
+| build | before | after |
+|---|---|---|
+| bundle after editing view.rs | 64.0 s | 42.0 s |
+| bundle after editing ctl's client | 76.5 s | 52.5 s |
+| bundle, clean | 90.9 s | 85.0 s |
+| term-app's own compile, release, clean (`--timings`) | 29.8 s | 21.4 s |
+| debug build, clean | 55.3 s | 58.9 s |
+| debug build after editing view.rs / a leaf / term-core | 2–6 s | 2–6 s |
+| `nextest -p terminal-decline --no-run`, after a debug build | 44.3 s | 19.4 s |
+| `nextest --workspace --no-run`, after a debug build | 41.9 s | 44.8 s |
+| `nextest --workspace --no-run` after editing view.rs | 9.1 s | 7.1 s |
+
+What the split changes is release builds: term-app is one codegen unit
+in release (`codegen-units = 1`), so each edit rebuilt all of it; now
+the moved code builds alongside it and is not rebuilt when the app's
+own code changes. The dylib's thin-LTO link (≈24 s) is the same. Debug
+builds were already incremental, and testing only term-app is cheaper
+because the moved tests are in their own crates; the workspace's tests
+cost the same. A clean debug build waits on objc2-foundation and
+objc2-app-kit (≈13 s and ≈19 s, one after the other, before term-app can
+start), not on our crates: their features (all of AppKit by default) are
+the next thing to look at. Line-tables-only debug info for dependencies
+in dev made no difference that held up at low load. Apple's linker
+(ld-prime) is the default; release `lto`/`codegen-units` are unchanged.
 
 ## Reviews
 

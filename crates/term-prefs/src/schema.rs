@@ -688,7 +688,7 @@ mod tests {
     #[test]
     fn config_keys() {
         // The fields of the app's `Config` and `Colors` today
-        // (crates/term-app/src/config.rs, `palettes` being computed). The
+        // (crates/term-config/src/config.rs, `palettes` being computed). The
         // app's own test checks them against `Config` itself.
         assert_eq!(
             top_level_keys(),

@@ -15,6 +15,10 @@ use serde::{Deserialize, Serialize};
 pub const DIR_ENV: &str = "TERMINAL_DECLINE_CTL_DIR";
 /// How long the headless server stays once nothing is running, in ms.
 pub const IDLE_ENV: &str = "TERMINAL_DECLINE_CTL_IDLE_MS";
+/// The env var that makes the app a host for `--window` sessions, started
+/// by `ctl` when no app serves: the app runs in the background, opens no
+/// window of its own, serves the socket, and leaves once idle.
+pub const HOSTED_ENV: &str = "TERMINAL_DECLINE_CTL_HOSTED";
 
 /// Exit codes of `terminal-decline ctl`.
 pub mod exit {

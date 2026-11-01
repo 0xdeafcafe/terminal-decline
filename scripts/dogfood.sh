@@ -4,7 +4,7 @@
 # it, reopening its windows in the same folders and places, but never under a
 # running program: it waits until every tab is at its prompt and nobody has
 # used it for a couple of minutes, or for Terminal Decline > Restart to Update
-# (crates/term-app/src/reload.rs). With --now it restarts at once, for when
+# (crates/term-restore/src/reload.rs). With --now it restarts at once, for when
 # nobody is using it.
 #
 # The bundle is the shipping layout (docs/design/pins.md §2): the launcher,

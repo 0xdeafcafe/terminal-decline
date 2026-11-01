@@ -1,0 +1,12 @@
+[package]
+name = "term-keys"
+description = "Keyboard input to bytes (xterm and the kitty protocol), the [keybind] config and the ASCII-capable layout, with no AppKit"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+toml = "1.1"

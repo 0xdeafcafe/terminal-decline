@@ -11,18 +11,8 @@ use term_render::Theme;
 use crate::keybind::{self, KeybindConfig, Keybinds};
 use crate::theme::{self as themes, Appearance, AppearanceMode, ThemeChoice, ThemeTransition};
 
-/// Which Option key acts as Meta (sends ESC + key). Off by default, like
-/// Terminal.app and Ghostty, so Option still types @ [ ] { } | \\ ~ on
-/// European keyboard layouts.
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum OptionAsMeta {
-    Left,
-    Right,
-    Both,
-    #[default]
-    None,
-}
+/// `option_as_meta`: defined with the key translation that reads it.
+pub use crate::keys::OptionAsMeta;
 
 /// `update`: what the app does about updates (docs/design/updater.md).
 /// `true` and `false`, from before, mean `"notify"` and `"off"`.
@@ -87,7 +77,7 @@ pub enum WelcomeMode {
 }
 
 /// `restore_scrollback`: when a pane's history is saved, to show again
-/// above the new shell ([`crate::saved_history`]). `true` and `false`
+/// above the new shell (the app's `saved_history`). `true` and `false`
 /// mean `"always"` and `"never"`.
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
@@ -398,11 +388,11 @@ pub struct Config {
     /// The window and tab title says what the focused pane does: the
     /// command running and for how long, or waiting at the prompt in which
     /// folder (needs the shell's OSC 133 marks; see
-    /// [`crate::activity::status_title`]).
+    /// `activity::status_title`).
     pub title_status: bool,
     /// Notify when a command that ran at least `notify_after` seconds
     /// finishes in a tab or pane you aren't looking at (needs the shell's
-    /// OSC 133 marks; see [`crate::activity`]).
+    /// OSC 133 marks; see `activity`).
     pub notify_on_finish: bool,
     /// How long a command must run, in seconds, for `notify_on_finish`.
     #[serde(deserialize_with = "notify_after")]

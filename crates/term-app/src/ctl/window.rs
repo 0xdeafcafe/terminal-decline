@@ -17,10 +17,7 @@ use term_pty::{Child, Command};
 use crate::config::Config;
 use crate::session::{Events, Hooks, OnOutput, Session};
 
-/// The env var that makes the app a host for `--window` sessions, started
-/// by `ctl` when no app serves: the app runs in the background, opens no
-/// window of its own, serves the socket, and leaves once idle.
-pub const HOSTED_ENV: &str = "TERMINAL_DECLINE_CTL_HOSTED";
+pub use super::protocol::HOSTED_ENV;
 
 /// Whether this process is an app started by `ctl` to host windows.
 pub fn hosted() -> bool {

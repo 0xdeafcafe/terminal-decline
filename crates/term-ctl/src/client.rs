@@ -62,8 +62,10 @@ Exit status: 0 done (wait-for: matched), 1 the request failed, 2 bad
 arguments, 3 wait-for timed out, 4 no server could be reached or started,
 5 wait-for: the program exited before the text showed.";
 
-/// Run `ctl` with `args` (after `ctl`).
-pub fn run(args: &[String]) -> i32 {
+/// Run `ctl` with `args` (after `ctl`). `ctl serve` runs `serve`, the
+/// app's headless server (its sessions are the app's), and returns its
+/// exit status.
+pub fn run(args: &[String], serve: fn() -> i32) -> i32 {
     let first = args.first().map(String::as_str);
     match first {
         None | Some("-h" | "--help" | "help") => {
@@ -77,7 +79,7 @@ pub fn run(args: &[String]) -> i32 {
             );
             return exit::OK;
         }
-        Some("serve") => return super::serve_headless(),
+        Some("serve") => return serve(),
         _ => {}
     }
     let req = match parse(args) {
@@ -182,7 +184,7 @@ fn connect(dir: &Path, windows: bool) -> Result<UnixStream, String> {
 
 /// Start `terminal-decline ctl serve` on its own: a session of its own,
 /// stdio to the log. With `windows`, the app itself instead, in the
-/// background and hosting windows ([`super::window::HOSTED_ENV`]).
+/// background and hosting windows ([`protocol::HOSTED_ENV`]).
 fn start_server(dir: &Path, windows: bool) -> Result<std::process::Child, String> {
     use std::os::unix::process::CommandExt;
     let exe = std::env::current_exe().map_err(|e| format!("can't find this program: {e}"))?;
@@ -193,7 +195,7 @@ fn start_server(dir: &Path, windows: bool) -> Result<std::process::Child, String
         .map_err(|e| e.to_string())?;
     let mut cmd = std::process::Command::new(exe);
     if windows {
-        cmd.env(super::window::HOSTED_ENV, "1");
+        cmd.env(protocol::HOSTED_ENV, "1");
     } else {
         cmd.args(["ctl", "serve"]);
     }

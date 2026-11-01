@@ -1,11 +1,10 @@
 //! Keys and text for the agent API, through the app's own key encoding:
 //! a key name becomes the [`KeyInput`] the view builds from an `NSEvent`
-//! on a US layout, and [`crate::keys::translate`] turns it into bytes,
+//! on a US layout, and [`term_keys::keys::translate`] turns it into bytes,
 //! with every mode and kitty keyboard level the program asked for. Alt
 //! is Meta.
 
-use crate::config::OptionAsMeta;
-use crate::keys::{KeyAction, KeyEventType, KeyInput, KeyModes, committed_text, ctrl_byte, flags, translate};
+use term_keys::keys::{KeyAction, KeyEventType, KeyInput, KeyModes, OptionAsMeta, committed_text, ctrl_byte, flags, translate};
 
 /// US ANSI layout: key code, character, character with Shift.
 const US: &[(u16, char, char)] = &[
@@ -254,7 +253,7 @@ pub fn text_bytes(text: &str, modes: KeyModes, out: &mut Vec<u8>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::keys::kitty;
+    use term_keys::keys::kitty;
 
     fn key(spec: &str, modes: KeyModes) -> Vec<u8> {
         let mut out = Vec::new();

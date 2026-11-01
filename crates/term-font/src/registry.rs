@@ -52,6 +52,10 @@ impl GlyphKey {
     /// (ligatures design §3). Scaled and plain bitmaps never share a key.
     pub const SCALED: u8 = 2;
 
+    /// `variant` flag: drawn thickened, as synthetic bold for a family
+    /// with no bold face (`FontConfig::synthetic_bold`).
+    pub const EMBOLDEN: u8 = 4;
+
     /// The key for a code-drawn shape across `cells` cells.
     pub fn sprite(id: SpriteId, cells: u8) -> GlyphKey {
         GlyphKey {
@@ -107,6 +111,8 @@ impl Hash for CfKey {
 struct FaceKey {
     name: String,
     size: u64,
+    /// The skew of a slanted face (synthetic italic), as bits.
+    slant: u64,
     variation: Option<CFRetained<CFType>>,
 }
 
@@ -116,6 +122,7 @@ impl FaceKey {
             FaceKey {
                 name: font.post_script_name().to_string(),
                 size: font.size().to_bits(),
+                slant: font.matrix().c.to_bits(),
                 variation: font.variation().map(|v| CFRetained::<CFType>::from(&*v)),
             }
         }
@@ -124,7 +131,7 @@ impl FaceKey {
 
 impl PartialEq for FaceKey {
     fn eq(&self, other: &FaceKey) -> bool {
-        self.name == other.name && self.size == other.size && self.variation == other.variation
+        self.name == other.name && self.size == other.size && self.slant == other.slant && self.variation == other.variation
     }
 }
 

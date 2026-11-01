@@ -293,6 +293,63 @@ pub struct Config {
     /// as CJK terminals draw them (cells design §6.3).
     #[serde(deserialize_with = "ambiguous_width")]
     pub ambiguous_width: u8,
+    /// Features for one face only, after `font_features`.
+    pub font_features_bold: Vec<String>,
+    pub font_features_italic: Vec<String>,
+    pub font_features_bold_italic: Vec<String>,
+    /// Variable font axes, `["wght=450"]`: for the regular face, and for
+    /// each other face by its own key.
+    pub font_variations: Vec<String>,
+    pub font_variations_bold: Vec<String>,
+    pub font_variations_italic: Vec<String>,
+    pub font_variations_bold_italic: Vec<String>,
+    /// Ligatures and contextual alternates where the font has them; false
+    /// turns `calt`, `liga` and `dlig` off (after `font_features`).
+    pub ligatures: bool,
+    /// Draw glyphs a little heavier (a stroke around the outline), as
+    /// macOS's font smoothing did; `font_thicken_strength` (0–255) says
+    /// how much.
+    pub font_thicken: bool,
+    pub font_thicken_strength: u8,
+    /// Thicken the regular face for bold, and slant it for italic, when
+    /// the family has no such face.
+    pub font_synthetic_bold: bool,
+    pub font_synthetic_italic: bool,
+    /// Metric adjustments, each points (`"1"`, `-0.5`) or a percentage
+    /// (`"10%"`): the cell height (after `line_height`); the baseline
+    /// (positive raises the text); the underline's and strikethrough's
+    /// position (positive moves them down) and thickness; the bar and
+    /// underline cursor's thickness.
+    #[serde(deserialize_with = "adjust", serialize_with = "cell_width_text")]
+    pub adjust_cell_height: CellWidth,
+    #[serde(deserialize_with = "adjust", serialize_with = "cell_width_text")]
+    pub adjust_baseline: CellWidth,
+    #[serde(deserialize_with = "adjust", serialize_with = "cell_width_text")]
+    pub adjust_underline_position: CellWidth,
+    #[serde(deserialize_with = "adjust", serialize_with = "cell_width_text")]
+    pub adjust_underline_thickness: CellWidth,
+    #[serde(deserialize_with = "adjust", serialize_with = "cell_width_text")]
+    pub adjust_strikethrough_position: CellWidth,
+    #[serde(deserialize_with = "adjust", serialize_with = "cell_width_text")]
+    pub adjust_strikethrough_thickness: CellWidth,
+    #[serde(deserialize_with = "adjust", serialize_with = "cell_width_text")]
+    pub adjust_cursor_thickness: CellWidth,
+    /// `{ "U+E000-U+F8FF" = "Symbols Nerd Font Mono" }`: code points drawn
+    /// from a font of their own. Bad ranges are a notice each, by [`load`].
+    pub symbol_map: BTreeMap<String, String>,
+    /// The font emoji are drawn from; unset, Apple Color Emoji.
+    pub emoji_font: Option<String>,
+    /// Bold text in the first 8 ANSI colours is drawn in their bright
+    /// versions, as older terminals did.
+    pub bold_is_bright: bool,
+    /// The least contrast ratio text keeps against its background, 1 (the
+    /// default, off) to 21 (black on white): text below it is drawn
+    /// lighter or darker until it reaches it.
+    #[serde(deserialize_with = "minimum_contrast")]
+    pub minimum_contrast: f64,
+    /// Points Cmd+= and Cmd+- change a window's font size by.
+    #[serde(deserialize_with = "font_size_step")]
+    pub font_size_step: f64,
     /// Space around the text, in points.
     pub padding: f64,
     pub scrollback: usize,
@@ -432,6 +489,30 @@ impl Default for Config {
             cell_width: CellWidth::default(),
             font_features: Vec::new(),
             ambiguous_width: 1,
+            font_features_bold: Vec::new(),
+            font_features_italic: Vec::new(),
+            font_features_bold_italic: Vec::new(),
+            font_variations: Vec::new(),
+            font_variations_bold: Vec::new(),
+            font_variations_italic: Vec::new(),
+            font_variations_bold_italic: Vec::new(),
+            ligatures: true,
+            font_thicken: false,
+            font_thicken_strength: 255,
+            font_synthetic_bold: true,
+            font_synthetic_italic: true,
+            adjust_cell_height: CellWidth::default(),
+            adjust_baseline: CellWidth::default(),
+            adjust_underline_position: CellWidth::default(),
+            adjust_underline_thickness: CellWidth::default(),
+            adjust_strikethrough_position: CellWidth::default(),
+            adjust_strikethrough_thickness: CellWidth::default(),
+            adjust_cursor_thickness: CellWidth::default(),
+            symbol_map: BTreeMap::new(),
+            emoji_font: None,
+            bold_is_bright: false,
+            minimum_contrast: 1.0,
+            font_size_step: 1.0,
             padding: 6.0,
             scrollback: 10_000,
             restore_scrollback: RestoreScrollback::Restarts,
@@ -492,6 +573,24 @@ fn ambiguous_width<'de, D: Deserializer<'de>>(d: D) -> Result<u8, D::Error> {
     match v {
         1 | 2 => Ok(v as u8),
         _ => Err(serde::de::Error::custom(format!("{v} is not 1 or 2"))),
+    }
+}
+
+fn minimum_contrast<'de, D: Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
+    let v = f64::deserialize(d)?;
+    if (1.0..=21.0).contains(&v) {
+        Ok(v)
+    } else {
+        Err(serde::de::Error::custom(format!("{v} is not from 1 to 21")))
+    }
+}
+
+fn font_size_step<'de, D: Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
+    let v = f64::deserialize(d)?;
+    if v > 0.0 && v <= 24.0 {
+        Ok(v)
+    } else {
+        Err(serde::de::Error::custom(format!("{v} is not above 0 and at most 24")))
     }
 }
 
@@ -595,6 +694,15 @@ fn cell_width_text<S: Serializer>(w: &CellWidth, s: S) -> Result<S::Ok, S::Error
 /// `cell_width` as a string (`"1.5"`, `"-1"`, `"10%"`) or a plain number
 /// of points.
 fn cell_width<'de, D: Deserializer<'de>>(d: D) -> Result<CellWidth, D::Error> {
+    points_or_percent(d, "a width")
+}
+
+/// The `adjust_*` settings: as `cell_width`.
+fn adjust<'de, D: Deserializer<'de>>(d: D) -> Result<CellWidth, D::Error> {
+    points_or_percent(d, "an adjustment")
+}
+
+fn points_or_percent<'de, D: Deserializer<'de>>(d: D, noun: &str) -> Result<CellWidth, D::Error> {
     #[derive(Deserialize)]
     #[serde(untagged)]
     enum Raw {
@@ -603,7 +711,7 @@ fn cell_width<'de, D: Deserializer<'de>>(d: D) -> Result<CellWidth, D::Error> {
         Float(f64),
     }
     let bad = |what: &dyn std::fmt::Display| {
-        serde::de::Error::custom(format!("{what} is not a width: use points (\"1.5\") or a percentage (\"10%\")"))
+        serde::de::Error::custom(format!("{what} is not {noun}: use points (\"1.5\") or a percentage (\"10%\")"))
     };
     match Raw::deserialize(d).map_err(|_| bad(&"this"))? {
         Raw::Text(s) => CellWidth::parse(&s).ok_or_else(|| bad(&format_args!("{s:?}"))),
@@ -675,14 +783,50 @@ pub fn load_replacing(layers: &[&Path], themes_dir: &Path, replace: Option<(usiz
 }
 
 /// Leaves out the `font_features` entries that aren't features, with a
-/// notice for each, so one typo costs only that entry.
+/// notice for each, so one typo costs only that entry; the same for the
+/// per-face features, `font_variations*` and `symbol_map`'s ranges.
 fn check_features(config: &mut Config, errors: &mut Vec<String>) {
-    config.font_features.retain(|entry| {
-        let ok = term_font::Tag::parse_feature(entry).is_some();
+    let lists = [
+        ("font_features", &mut config.font_features),
+        ("font_features_bold", &mut config.font_features_bold),
+        ("font_features_italic", &mut config.font_features_italic),
+        ("font_features_bold_italic", &mut config.font_features_bold_italic),
+    ];
+    for (key, list) in lists {
+        list.retain(|entry| {
+            let ok = term_font::Tag::parse_feature(entry).is_some();
+            if !ok {
+                errors.push(format!(
+                    "config: {key}: {entry:?} is not a feature (use \"tag\", \"-tag\" or \"tag=n\", \
+                     with a tag of four letters such as \"liga\"); ignored"
+                ));
+            }
+            ok
+        });
+    }
+    let lists = [
+        ("font_variations", &mut config.font_variations),
+        ("font_variations_bold", &mut config.font_variations_bold),
+        ("font_variations_italic", &mut config.font_variations_italic),
+        ("font_variations_bold_italic", &mut config.font_variations_bold_italic),
+    ];
+    for (key, list) in lists {
+        list.retain(|entry| {
+            let ok = term_font::parse_variation(entry).is_some();
+            if !ok {
+                errors.push(format!(
+                    "config: {key}: {entry:?} is not a variation (use \"axis=value\", with an axis of four \
+                     letters such as \"wght=450\"); ignored"
+                ));
+            }
+            ok
+        });
+    }
+    config.symbol_map.retain(|ranges, _| {
+        let ok = term_font::parse_ranges(ranges).is_some();
         if !ok {
             errors.push(format!(
-                "config: font_features: {entry:?} is not a feature (use \"tag\", \"-tag\" or \"tag=n\", \
-                 with a tag of four letters such as \"liga\"); ignored"
+                "config: symbol_map: {ranges:?} is not code points (use \"U+E000-U+F8FF\" or \"U+E0A0,U+E0B0\"); ignored"
             ));
         }
         ok
@@ -878,15 +1022,65 @@ impl Config {
             bold_italic: self.font_bold_italic.clone(),
             line_height: self.line_height,
             cell_width: self.cell_width,
-            features: self.font_features.iter().filter_map(|f| term_font::Tag::parse_feature(f)).collect(),
+            features: {
+                let mut f: Vec<_> = self.font_features.iter().filter_map(|f| term_font::Tag::parse_feature(f)).collect();
+                if !self.ligatures {
+                    f.extend(["calt", "liga", "dlig"].map(|t| (term_font::Tag::new(t).expect("a tag"), 0)));
+                }
+                f
+            },
+            style_features: {
+                let parse = |l: &[String]| l.iter().filter_map(|f| term_font::Tag::parse_feature(f)).collect::<Vec<_>>();
+                [
+                    Vec::new(),
+                    parse(&self.font_features_bold),
+                    parse(&self.font_features_italic),
+                    parse(&self.font_features_bold_italic),
+                ]
+            },
+            variations: [
+                &self.font_variations,
+                &self.font_variations_bold,
+                &self.font_variations_italic,
+                &self.font_variations_bold_italic,
+            ]
+            .map(|l| l.iter().filter_map(|v| term_font::parse_variation(v)).collect()),
+            // Up to half a point of stroke at full strength.
+            thicken: if self.font_thicken {
+                self.font_thicken_strength as f64 / 255.0 * 0.5
+            } else {
+                0.0
+            },
+            synthetic_bold: self.font_synthetic_bold,
+            synthetic_italic: self.font_synthetic_italic,
+            cell_height: self.adjust_cell_height,
+            baseline: self.adjust_baseline,
+            underline_position: self.adjust_underline_position,
+            underline_thickness: self.adjust_underline_thickness,
+            strike_position: self.adjust_strikethrough_position,
+            strike_thickness: self.adjust_strikethrough_thickness,
+            cursor_thickness: self.adjust_cursor_thickness,
+            symbol_map: self
+                .symbol_map
+                .iter()
+                .filter_map(|(ranges, font)| Some((term_font::parse_ranges(ranges)?, font)))
+                .flat_map(|(ranges, font)| ranges.into_iter().map(move |r| (r, font.clone())))
+                .collect(),
+            emoji_font: self.emoji_font.clone(),
             ..FontConfig::new(&self.font_family, size)
         }
     }
 
-    /// Whether the config names fonts besides the family (fallbacks or
-    /// faces), the only ones `Fonts::missing` can list.
+    /// Whether the config names fonts besides the family (fallbacks,
+    /// faces, the symbol map or the emoji font), the only ones
+    /// `Fonts::missing` can list.
     pub fn names_fonts(&self) -> bool {
-        !self.font_fallback.is_empty() || self.font_bold.is_some() || self.font_italic.is_some() || self.font_bold_italic.is_some()
+        !self.font_fallback.is_empty()
+            || self.font_bold.is_some()
+            || self.font_italic.is_some()
+            || self.font_bold_italic.is_some()
+            || !self.symbol_map.is_empty()
+            || self.emoji_font.is_some()
     }
 
     /// A notice for each font named in the config that isn't installed
@@ -899,10 +1093,13 @@ impl Config {
                     ("font_bold", &self.font_bold),
                     ("font_italic", &self.font_italic),
                     ("font_bold_italic", &self.font_bold_italic),
+                    ("emoji_font", &self.emoji_font),
                 ]
                 .into_iter()
                 .find(|(_, v)| v.as_deref() == Some(name.as_str()))
-                .map_or("font_fallback", |(k, _)| k);
+                .map(|(k, _)| k)
+                .or_else(|| self.symbol_map.values().any(|f| f == name).then_some("symbol_map"))
+                .unwrap_or("font_fallback");
                 format!("config: {key}: no font named {name:?} is installed; ignored")
             })
             .collect()
@@ -936,6 +1133,8 @@ impl Config {
         let p = self.palette(appearance);
         let mut theme = Theme::new(p.ansi, p.foreground, p.background, p.cursor, p.selection);
         theme.background_opacity = (self.opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
+        theme.bold_is_bright = self.bold_is_bright;
+        theme.minimum_contrast = self.minimum_contrast as f32;
         theme
     }
 }
@@ -1295,6 +1494,156 @@ mod tests {
         assert_eq!(c.font_features, ["-calt", "-liga"]);
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert!(errors[0].contains("\"nope!\""), "{errors:?}");
+    }
+
+    /// Every text setting with nothing set gives the font's own drawing.
+    #[test]
+    fn text_settings_default_to_off() {
+        let c = Config::default();
+        assert!(c.ligatures && !c.font_thicken && c.font_synthetic_bold && c.font_synthetic_italic && !c.bold_is_bright);
+        assert_eq!((c.font_thicken_strength, c.minimum_contrast, c.font_size_step), (255, 1.0, 1.0));
+        let fc = c.font_config(13.0);
+        assert_eq!(fc, FontConfig::new("Menlo", 13.0));
+        let theme = c.theme(Appearance::Dark);
+        assert!(!theme.bold_is_bright && theme.minimum_contrast == 1.0);
+    }
+
+    #[test]
+    fn text_settings_are_read() {
+        let t = |s| term_font::Tag::new(s).unwrap();
+        let (c, errors) = parse(
+            "ligatures = false\nfont_features = ['zero']\nfont_features_bold = ['-zero']\nfont_features_italic = ['ss01']\n\
+             font_features_bold_italic = ['ss02']\nfont_variations = ['wght=450']\nfont_variations_bold = ['wght = 700']\n\
+             font_variations_italic = ['slnt=-10']\nfont_variations_bold_italic = ['wdth=90']\n\
+             font_thicken = true\nfont_thicken_strength = 102\nfont_synthetic_bold = false\nfont_synthetic_italic = false\n\
+             adjust_cell_height = '10%'\nadjust_baseline = 1\nadjust_underline_position = -0.5\nadjust_underline_thickness = '50%'\n\
+             adjust_strikethrough_position = '1.5'\nadjust_strikethrough_thickness = '-1'\nadjust_cursor_thickness = '200%'\n\
+             emoji_font = 'Noto Color Emoji'\nbold_is_bright = true\nminimum_contrast = 4.5\nfont_size_step = 2\n\
+             [symbol_map]\n'U+E000-U+E002,U+F000' = 'Symbols Nerd Font Mono'\n",
+        );
+        assert_eq!(errors, Vec::<String>::new());
+        let fc = c.font_config(13.0);
+        let off = |s| (t(s), 0);
+        assert_eq!(
+            fc.features,
+            [(t("zero"), 1), off("calt"), off("liga"), off("dlig")],
+            "ligatures = false turns them off last"
+        );
+        assert_eq!(
+            fc.style_features,
+            [vec![], vec![off("zero")], vec![(t("ss01"), 1)], vec![(t("ss02"), 1)]]
+        );
+        assert_eq!(
+            fc.variations,
+            [
+                vec![(t("wght"), 450.0)],
+                vec![(t("wght"), 700.0)],
+                vec![(t("slnt"), -10.0)],
+                vec![(t("wdth"), 90.0)]
+            ]
+        );
+        assert!((fc.thicken - 0.2).abs() < 1e-9, "{}", fc.thicken);
+        assert!(!fc.synthetic_bold && !fc.synthetic_italic);
+        assert_eq!(fc.cell_height, CellWidth::Percent(10.0));
+        assert_eq!(fc.baseline, CellWidth::Points(1.0));
+        assert_eq!(fc.underline_position, CellWidth::Points(-0.5));
+        assert_eq!(fc.underline_thickness, CellWidth::Percent(50.0));
+        assert_eq!(fc.strike_position, CellWidth::Points(1.5));
+        assert_eq!(fc.strike_thickness, CellWidth::Points(-1.0));
+        assert_eq!(fc.cursor_thickness, CellWidth::Percent(200.0));
+        assert_eq!(
+            fc.symbol_map,
+            [
+                (0xE000..=0xE002, "Symbols Nerd Font Mono".to_string()),
+                (0xF000..=0xF000, "Symbols Nerd Font Mono".to_string())
+            ]
+        );
+        assert_eq!(fc.emoji_font.as_deref(), Some("Noto Color Emoji"));
+        assert_eq!((c.minimum_contrast, c.font_size_step), (4.5, 2.0));
+        let theme = c.theme(Appearance::Light);
+        assert!(theme.bold_is_bright && theme.minimum_contrast == 4.5);
+        assert!(c.names_fonts());
+        // Written back as the config spells them.
+        let table = c.as_table();
+        assert_eq!(table["adjust_cell_height"].as_str(), Some("10%"));
+        assert_eq!(table["adjust_baseline"].as_str(), Some("1"));
+    }
+
+    #[test]
+    fn bad_text_settings_are_noticed_and_ignored() {
+        for (text, key) in [
+            ("minimum_contrast = 0.5", "minimum_contrast"),
+            ("minimum_contrast = 22", "minimum_contrast"),
+            ("minimum_contrast = 'high'", "minimum_contrast"),
+            ("font_size_step = 0", "font_size_step"),
+            ("font_size_step = 30", "font_size_step"),
+            ("font_thicken_strength = 300", "font_thicken_strength"),
+            ("font_thicken_strength = -1", "font_thicken_strength"),
+            ("font_thicken = 'yes'", "font_thicken"),
+            ("ligatures = 0", "ligatures"),
+            ("adjust_baseline = 'up'", "adjust_baseline"),
+            ("adjust_cell_height = '10px'", "adjust_cell_height"),
+            ("adjust_cursor_thickness = true", "adjust_cursor_thickness"),
+            ("symbol_map = 'Nerd'", "symbol_map"),
+            ("emoji_font = 3", "emoji_font"),
+            ("bold_is_bright = 1", "bold_is_bright"),
+        ] {
+            let (c, errors) = parse(text);
+            assert_eq!(errors.len(), 1, "{text}: {errors:?}");
+            assert!(errors[0].starts_with(&format!("config: {key}: ")), "{text}: {errors:?}");
+            assert_eq!(c.font_config(13.0), FontConfig::new("Menlo", 13.0), "{text}");
+            assert_eq!(c.minimum_contrast, 1.0);
+        }
+        let (_, errors) = parse("adjust_baseline = 'up'");
+        assert!(errors[0].contains("is not an adjustment"), "{errors:?}");
+    }
+
+    #[test]
+    fn bad_variations_and_ranges_load_without_them() {
+        let dir = TempDir::new("cfg-text");
+        let user = dir.join("config.toml");
+        std::fs::write(
+            &user,
+            "font_variations = ['wght=450', 'heavy']\nfont_features_italic = ['ss01', 'x']\n\
+             [symbol_map]\n'U+E000-U+E0FF' = 'A'\n'U+F000-U+E000' = 'B'\n'nerd' = 'C'\n",
+        )
+        .unwrap();
+        let (c, errors) = load(&[&user], Path::new("/nonexistent"));
+        assert_eq!(c.font_variations, ["wght=450"]);
+        assert_eq!(c.font_features_italic, ["ss01"]);
+        assert_eq!(c.symbol_map.keys().collect::<Vec<_>>(), ["U+E000-U+E0FF"]);
+        assert_eq!(errors.len(), 4, "{errors:?}");
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.starts_with("config: font_variations: \"heavy\" is not a variation"))
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.starts_with("config: font_features_italic: \"x\" is not a feature"))
+        );
+        assert_eq!(
+            errors.iter().filter(|e| e.starts_with("config: symbol_map: ")).count(),
+            2,
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn missing_symbol_and_emoji_fonts_name_their_setting() {
+        let mut c = Config {
+            emoji_font: Some("Nope Emoji".into()),
+            ..Config::default()
+        };
+        c.symbol_map.insert("U+E000".into(), "Nope Symbols".into());
+        assert_eq!(
+            c.missing_font_notices(&["Nope Symbols".into(), "Nope Emoji".into()]),
+            [
+                "config: symbol_map: no font named \"Nope Symbols\" is installed; ignored",
+                "config: emoji_font: no font named \"Nope Emoji\" is installed; ignored",
+            ]
+        );
     }
 
     #[test]

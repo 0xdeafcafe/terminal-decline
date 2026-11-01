@@ -97,7 +97,14 @@ fn wrapper_matches_the_old_bitmaps() {
     let sample = "AgWjf_|@~ éßλЖ■→∑≠★漢あ한😀🦀👍─│╭█▒⣿\u{E0B0}\u{1FB00}";
     for family in ["Menlo", "Monaco"] {
         for size in [13.0, 26.0, 37.0] {
-            let f = Fonts::new(family, size);
+            // Monaco has no bold or italic face: the old code drew those
+            // styles regular, as synthetic styles turned off do.
+            let config = FontConfig {
+                synthetic_bold: false,
+                synthetic_italic: false,
+                ..FontConfig::new(family, size)
+            };
+            let f = Fonts::with_config(&config, 1.0);
             for style in [Style::Regular, Style::Bold, Style::Italic, Style::BoldItalic] {
                 for ch in sample.chars() {
                     // Twice: the second goes through the cached lookup.

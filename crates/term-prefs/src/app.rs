@@ -42,8 +42,9 @@ enum RowKind {
     Palette(usize),
     Bind(Bind),
     AddBind,
-    Env(String),
-    AddEnv,
+    /// An entry of a table of strings (`env`, `symbol_map`), by key and name.
+    Env(&'static str, String),
+    AddEnv(&'static str),
     Pin(Pin),
     Info,
 }
@@ -69,8 +70,8 @@ enum Then {
     BindText(String),
     /// A new chord for the binding at `from`, or for a new binding.
     BindChord(Option<String>),
-    EnvName,
-    EnvValue(String),
+    EnvName(&'static str),
+    EnvValue(&'static str, String),
     /// An element of a list: replace `Some(i)`, or add at the end.
     ListItem(KeyPath, Option<usize>),
 }
@@ -671,22 +672,27 @@ impl<'h> App<'h> {
                     });
                 }
                 Editor::Map => {
-                    for name in self.env_names() {
-                        let (item, origin) = self.layers.lookup(&["env".into(), name.clone()]);
+                    for name in self.env_names(s.key) {
+                        let (item, origin) = self.layers.lookup(&[s.key.into(), name.clone()]);
                         rows.push(Row {
                             label: format!("{} {name}", s.label),
                             value: item.map(format_item).unwrap_or_default(),
                             note: self.note(&origin, s.applies),
                             swatch: None,
                             description: "enter: change the value · d: remove · r: reset".into(),
-                            kind: RowKind::Env(name),
+                            kind: RowKind::Env(s.key, name),
                         });
                     }
                     rows.push(Row {
-                        kind: RowKind::AddEnv,
-                        label: "+ add a variable".into(),
+                        kind: RowKind::AddEnv(s.key),
+                        label: if s.key == "env" { "+ add a variable" } else { "+ add a range" }.into(),
                         value: String::new(),
-                        note: "new windows".into(),
+                        note: if s.applies == schema::Applies::NewWindows {
+                            "new windows"
+                        } else {
+                            ""
+                        }
+                        .into(),
                         swatch: None,
                         description: s.description.into(),
                     });
@@ -697,21 +703,21 @@ impl<'h> App<'h> {
         rows
     }
 
-    fn env_names(&self) -> Vec<String> {
+    fn env_names(&self, key: &str) -> Vec<String> {
         let mut names: Vec<String> = Vec::new();
-        if let (Some(item), _) = self.layers.lookup(&["env".into()])
+        if let (Some(item), _) = self.layers.lookup(&[key.into()])
             && let Some(t) = item.as_table_like()
         {
             names.extend(t.iter().map(|(k, _)| k.to_string()));
         }
-        if let Some(t) = self.layers.below(&["env".into()]).and_then(Item::as_table_like) {
+        if let Some(t) = self.layers.below(&[key.into()]).and_then(Item::as_table_like) {
             for (k, _) in t.iter() {
                 if !names.iter().any(|n| n == k) {
                     names.push(k.to_string());
                 }
             }
         }
-        if let Some(t) = self.layers.here(&["env".into()]).and_then(Item::as_table_like) {
+        if let Some(t) = self.layers.here(&[key.into()]).and_then(Item::as_table_like) {
             for (k, _) in t.iter() {
                 if !names.iter().any(|n| n == k) {
                     names.push(k.to_string());
@@ -910,7 +916,7 @@ impl<'h> App<'h> {
             }
             Key::Char('a') if plain => match self.current_section() {
                 Section::Keys => self.start_chord(Then::BindChord(None)),
-                Section::Advanced => self.edit_text("Variable name", String::new(), TextKind::Plain, Then::EnvName),
+                Section::Advanced => self.edit_text("Variable name", String::new(), TextKind::Plain, Then::EnvName("env")),
                 _ => {}
             },
             Key::Char('q') if plain => self.effects.push(Effect::Quit),
@@ -1110,17 +1116,24 @@ impl<'h> App<'h> {
                 self.choose(&format!("{} does", b.chord), items, &current, Then::BindAction(b.chord), false);
             }
             RowKind::AddBind => self.start_chord(Then::BindChord(None)),
-            RowKind::Env(name) => {
+            RowKind::Env(key, name) => {
                 let v = self
                     .layers
-                    .lookup(&["env".into(), name.clone()])
+                    .lookup(&[key.into(), name.clone()])
                     .0
                     .and_then(Item::as_str)
                     .unwrap_or("")
                     .to_string();
-                self.edit_text(&name, v, TextKind::Plain, Then::EnvValue(name.clone()));
+                self.edit_text(&name, v, TextKind::Plain, Then::EnvValue(key, name.clone()));
             }
-            RowKind::AddEnv => self.edit_text("Variable name", String::new(), TextKind::Plain, Then::EnvName),
+            RowKind::AddEnv(key) => {
+                let what = if key == "env" {
+                    "Variable name"
+                } else {
+                    "Code points (U+E000-U+F8FF)"
+                };
+                self.edit_text(what, String::new(), TextKind::Plain, Then::EnvName(key))
+            }
             RowKind::Pin(p) => {
                 let user = self.host.user_config();
                 let back = (self.layers.paths.clone(), self.layers.edit);
@@ -1159,11 +1172,11 @@ impl<'h> App<'h> {
                 },
                 format!("keybind {}", b.chord),
             ),
-            RowKind::Env(n) => (
+            RowKind::Env(key, n) => (
                 Edit::Remove {
-                    path: vec!["env".into(), n.clone()],
+                    path: vec![key.to_string(), n.clone()],
                 },
-                format!("env.{n}"),
+                format!("{key}.{n}"),
             ),
             _ => return,
         };
@@ -1236,10 +1249,10 @@ impl<'h> App<'h> {
                     self.say(format!("{} unbound · u undoes", b.chord));
                 }
             }
-            RowKind::Env(n) => {
+            RowKind::Env(key, n) => {
                 if self.commit(
                     Edit::Remove {
-                        path: vec!["env".into(), n.clone()],
+                        path: vec![key.into(), n.clone()],
                     },
                     now,
                 ) {
@@ -1328,15 +1341,15 @@ impl<'h> App<'h> {
             }
             Then::BindText(chord) => self.bind_edit(&chord, Bound::Text(unescape(&value))),
             Then::BindChord(from) => return self.chord_entered(Then::BindChord(from), &value, now),
-            Then::EnvName => {
+            Then::EnvName(key) => {
                 if value.is_empty() {
                     return;
                 }
-                self.edit_text(&value, String::new(), TextKind::Plain, Then::EnvValue(value.clone()));
+                self.edit_text(&value, String::new(), TextKind::Plain, Then::EnvValue(key, value.clone()));
                 return;
             }
-            Then::EnvValue(name) => Edit::Set {
-                path: vec!["env".into(), name],
+            Then::EnvValue(key, name) => Edit::Set {
+                path: vec![key.into(), name],
                 value: Value::from(value),
             },
             Then::ListItem(path, index) => {

@@ -16,6 +16,8 @@ fn metrics(w: u32, h: u32, t: u32) -> Metrics {
         underline_offset: 2,
         underline_thickness: t,
         strike_offset: h / 4,
+        strike_thickness: 0,
+        cursor_thickness: 0,
     }
 }
 

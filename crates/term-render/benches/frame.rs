@@ -285,6 +285,8 @@ fn bench(c: &mut Criterion) {
         underline_offset: 3,
         underline_thickness: 2,
         strike_offset: 8,
+        strike_thickness: 0,
+        cursor_thickness: 0,
     };
     let input = FrameInput {
         theme: &theme,
@@ -570,6 +572,8 @@ fn bench_ligatures(c: &mut Criterion) {
             underline_offset: 3,
             underline_thickness: 2,
             strike_offset: 8,
+            strike_thickness: 0,
+            cursor_thickness: 0,
         },
         padding: (12, 12),
         cursor_on: true,
@@ -597,6 +601,8 @@ fn bench_images(c: &mut Criterion) {
             underline_offset: 3,
             underline_thickness: 2,
             strike_offset: 8,
+            strike_thickness: 0,
+            cursor_thickness: 0,
         },
         padding: (12, 12),
         cursor_on: true,

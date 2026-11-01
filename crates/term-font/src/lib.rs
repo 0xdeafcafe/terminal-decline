@@ -12,7 +12,7 @@ mod registry;
 mod shape;
 pub mod sprite;
 
-pub use config::{CellWidth, FontConfig, Tag};
+pub use config::{Adjust, CellWidth, FontConfig, Tag, parse_ranges, parse_variation};
 pub use fit::is_private_use;
 pub use list::{FaceInfo, FamilyInfo, format_families, list_families};
 pub use registry::{FontId, GlyphKey, SPRITE_FONT};
@@ -26,7 +26,9 @@ use std::ptr::NonNull;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use detect::Ligating;
-use objc2_core_foundation::{CFArray, CFDictionary, CFIndex, CFRange, CFRetained, CFString, CGFloat, CGPoint, CGRect, CGSize, Type};
+use objc2_core_foundation::{
+    CFArray, CFDictionary, CFIndex, CFRange, CFRetained, CFString, CFType, CGFloat, CGPoint, CGRect, CGSize, Type,
+};
 use objc2_core_graphics::{CGBitmapContextCreate, CGColorSpace, CGContext, CGGlyph, CGImageAlphaInfo, CGImageByteOrderInfo};
 use objc2_core_text::{
     CTFont, CTFontDescriptor, CTFontOrientation, CTFontSymbolicTraits, CTFontTableOptions, kCTFontCascadeListAttribute, kCTFontTableGSUB,
@@ -65,7 +67,34 @@ pub struct Metrics {
     /// Distance below the baseline to the top of the underline.
     pub underline_offset: u32,
     pub underline_thickness: u32,
+    /// Distance above the baseline to the top of the strikethrough.
     pub strike_offset: u32,
+    /// 0: the underline's thickness.
+    pub strike_thickness: u32,
+    /// The bar and underline cursor's thickness; 0: an eighth of the cell
+    /// width, at least 2.
+    pub cursor_thickness: u32,
+}
+
+impl Metrics {
+    /// The strikethrough's thickness.
+    pub fn strike_thickness(&self) -> u32 {
+        if self.strike_thickness == 0 {
+            self.underline_thickness
+        } else {
+            self.strike_thickness
+        }
+        .max(1)
+    }
+
+    /// The bar and underline cursor's thickness.
+    pub fn cursor_thickness(&self) -> u32 {
+        if self.cursor_thickness == 0 {
+            (self.cell_width / 8).max(2)
+        } else {
+            self.cursor_thickness
+        }
+    }
 }
 
 /// A rasterised glyph. Coverage glyphs are one byte per pixel; colour glyphs
@@ -103,6 +132,17 @@ struct Core {
     /// Runs shaped by [`Fonts::shape_and_keep`] (on the glyph thread), for
     /// [`Fonts::shape_kept`] (on the main thread).
     kept_runs: Mutex<shape::RunCache>,
+    /// Stroke width in pixels every coverage glyph is drawn with
+    /// ([`FontConfig::thicken`]).
+    thicken: f64,
+    /// The stroke width a [`GlyphKey::EMBOLDEN`] glyph adds.
+    embolden: f64,
+    /// Per face: drawn as the regular font thickened (synthetic bold).
+    synthetic_bold: [bool; 4],
+    /// [`FontConfig::symbol_map`]'s ranges and the fonts found for them.
+    symbols: Vec<(std::ops::RangeInclusive<u32>, CFRetained<CTFont>)>,
+    /// [`FontConfig::emoji_font`], if found.
+    emoji: Option<CFRetained<CTFont>>,
 }
 
 // Core Text fonts and colour spaces are immutable and documented as
@@ -196,23 +236,46 @@ impl Fonts {
         let size = (config.size * scale) as CGFloat;
         let mut missing = Vec::new();
         let regular = unsafe { CTFont::with_name(&CFString::from_str(&config.family), size, std::ptr::null()) };
+        // Each face and whether it was looked up from the family (rather
+        // than named as a face), so a missing style may be synthesised.
         let mut face = |name: &Option<String>, traits: CTFontSymbolicTraits| match name {
-            None => with_traits(&regular, traits),
+            None => (with_traits(&regular, traits), true),
             Some(name) => match named(name, size) {
-                Some((font, true)) => font,
-                Some((font, false)) => with_traits(&font, traits),
+                Some((font, true)) => (font, false),
+                Some((font, false)) => (with_traits(&font, traits), true),
                 None => {
                     missing.push(name.clone());
-                    with_traits(&regular, traits)
+                    (with_traits(&regular, traits), true)
                 }
             },
         };
-        let bold = face(&config.bold, CTFontSymbolicTraits::BoldTrait);
-        let italic = face(&config.italic, CTFontSymbolicTraits::ItalicTrait);
-        let bold_italic = face(
-            &config.bold_italic,
-            CTFontSymbolicTraits::BoldTrait | CTFontSymbolicTraits::ItalicTrait,
-        );
+        let (bold_t, italic_t) = (CTFontSymbolicTraits::BoldTrait, CTFontSymbolicTraits::ItalicTrait);
+        let (bold, bold_derived) = face(&config.bold, bold_t);
+        let (mut italic, italic_derived) = face(&config.italic, italic_t);
+        let (mut bold_italic, bi_derived) = face(&config.bold_italic, bold_t | italic_t);
+        let has = |f: &CTFont, t: CTFontSymbolicTraits| unsafe { f.symbolic_traits() }.contains(t);
+        if bi_derived && !has(&bold_italic, bold_t | italic_t) {
+            // Half of it is better than none: the family's italic to
+            // thicken, else its bold to slant.
+            if !has(&bold_italic, italic_t) && has(&italic, italic_t) {
+                bold_italic = italic.clone();
+            } else if !has(&bold_italic, bold_t) && has(&bold, bold_t) {
+                bold_italic = bold.clone();
+            }
+        }
+        let mut synthetic_bold = [false; 4];
+        if config.synthetic_bold {
+            synthetic_bold[1] = bold_derived && !has(&bold, bold_t);
+            synthetic_bold[3] = bi_derived && !has(&bold_italic, bold_t);
+        }
+        if config.synthetic_italic {
+            if italic_derived && !has(&italic, italic_t) {
+                italic = slanted(&italic);
+            }
+            if bi_derived && !has(&bold_italic, italic_t) {
+                bold_italic = slanted(&bold_italic);
+            }
+        }
         let mut fallbacks = Vec::new();
         for name in &config.fallback {
             match named(name, size) {
@@ -220,12 +283,33 @@ impl Fonts {
                 None => missing.push(name.clone()),
             }
         }
-        let (metrics, x_shift) = metrics(&regular, config, scale);
-        let advance = unsafe { advance_of_m(&regular) };
+        let mut symbols = Vec::new();
+        for (range, name) in &config.symbol_map {
+            match named(name, size) {
+                Some((font, _)) => symbols.push((range.clone(), font)),
+                None if missing.contains(name) => {}
+                None => missing.push(name.clone()),
+            }
+        }
+        let emoji = config.emoji_font.as_ref().and_then(|name| match named(name, size) {
+            Some((font, _)) => Some(font),
+            None => {
+                missing.push(name.clone());
+                None
+            }
+        });
         let mut faces = [regular, bold, italic, bold_italic];
-        if !config.features.is_empty() {
-            for f in &mut faces {
-                *f = with_features(f, &config.features);
+        for (f, vars) in faces.iter_mut().zip(&config.variations) {
+            if !vars.is_empty() {
+                *f = with_variations(f, vars);
+            }
+        }
+        let (metrics, x_shift) = metrics(&faces[0], config, scale);
+        let advance = unsafe { advance_of_m(&faces[0]) };
+        let features = Style::ALL.map(|s| config.features_of(s));
+        for (f, features) in faces.iter_mut().zip(&features) {
+            if !features.is_empty() {
+                *f = with_features(f, features);
             }
         }
         if !fallbacks.is_empty() {
@@ -236,8 +320,12 @@ impl Fonts {
         let line_attrs = faces.each_ref().map(|f| shape::font_attrs(f));
         let face_fonts = faces.clone();
         let mut registry = registry::Registry::new(faces);
-        registry.line_lookup = [!config.features.is_empty(); 4];
-        let fallback_ids = fallbacks.iter().filter_map(|f| registry.id(f)).collect();
+        registry.line_lookup = features.each_ref().map(|f| !f.is_empty());
+        let fallback_ids = fallbacks
+            .iter()
+            .chain(symbols.iter().map(|(_, f)| f))
+            .filter_map(|f| registry.id(f))
+            .collect();
         let face_ids = Style::ALL.map(|s| registry.id(&face_fonts[s as usize]).unwrap_or(s as FontId));
         let mut fonts = Fonts {
             core: Arc::new(Core {
@@ -248,6 +336,15 @@ impl Fonts {
                 rgb: CGColorSpace::new_device_rgb().expect("rgb colour space"),
                 advance,
                 kept_runs: Mutex::new(shape::RunCache::default()),
+                thicken: if config.thicken.is_finite() {
+                    config.thicken.clamp(0.0, 4.0) * scale
+                } else {
+                    0.0
+                },
+                embolden: (size / 14.0).max(1.0),
+                synthetic_bold,
+                symbols,
+                emoji,
             }),
             clusters: RefCell::new(shape::ClusterCache::new(shape::ClusterCache::CAP)),
             metrics,
@@ -260,9 +357,23 @@ impl Fonts {
             scratch: RefCell::new(shape::Scratch::default()),
             scaled: RefCell::new(HashMap::new()),
         };
-        fonts.runs = fonts.detect_runs(&face_fonts, &config.features);
-        fonts.ligating = fonts.detect_ligating(&face_fonts, &config.features);
+        fonts.runs = fonts.detect_runs(&face_fonts, &features);
+        fonts.ligating = fonts.detect_ligating(&face_fonts, &features);
         fonts
+    }
+
+    /// Whether face `style` is drawn as another face thickened (synthetic
+    /// bold, [`FontConfig::synthetic_bold`]).
+    pub fn is_synthetic_bold(&self, style: Style) -> bool {
+        self.core.synthetic_bold[style as usize]
+    }
+
+    /// Whether face `style` is slanted by a transform: synthetic italic
+    /// ([`FontConfig::synthetic_italic`]).
+    pub fn is_synthetic_italic(&self, style: Style) -> bool {
+        let reg = self.core.reg();
+        let m = unsafe { reg.faces[style as usize].font.matrix() };
+        m.c != 0.0
     }
 
     /// Per face that shapes runs, which characters can take part in its
@@ -270,7 +381,7 @@ impl Fonts {
     /// cross-character features ([`detect::lookup_glyphs`]). Every
     /// character for `morx` faces, tables this can't read, and rules that
     /// take any glyph.
-    fn detect_ligating(&self, faces: &[CFRetained<CTFont>; 4], user: &[(Tag, u32)]) -> [Ligating; 4] {
+    fn detect_ligating(&self, faces: &[CFRetained<CTFont>; 4], user: &[Vec<(Tag, u32)>; 4]) -> [Ligating; 4] {
         let mut out: [Ligating; 4] = Default::default();
         for style in Style::ALL {
             let i = style as usize;
@@ -285,7 +396,7 @@ impl Fonts {
             let morx = unsafe { font.table(kCTFontTableMorx, CTFontTableOptions(0)) }.is_some();
             let gsub = unsafe { font.table(kCTFontTableGSUB, CTFontTableOptions(0)) };
             let set = match gsub {
-                Some(gsub) if !morx => detect::lookup_glyphs(unsafe { gsub.as_bytes_unchecked() }, user),
+                Some(gsub) if !morx => detect::lookup_glyphs(unsafe { gsub.as_bytes_unchecked() }, &user[i]),
                 _ => None,
             };
             out[i] = match set {
@@ -361,7 +472,7 @@ impl Fonts {
     /// a `morx` table: a line of programming sequences shapes differently
     /// from the per-character glyphs, or the user turned such a feature
     /// on. Faces that are one font are decided once.
-    fn detect_runs(&self, faces: &[CFRetained<CTFont>; 4], user: &[(Tag, u32)]) -> [bool; 4] {
+    fn detect_runs(&self, faces: &[CFRetained<CTFont>; 4], user: &[Vec<(Tag, u32)>; 4]) -> [bool; 4] {
         let mut runs = [false; 4];
         for style in Style::ALL {
             let i = style as usize;
@@ -373,11 +484,11 @@ impl Fonts {
             let morx = unsafe { font.table(kCTFontTableMorx, CTFontTableOptions(0)) }.is_some();
             let gsub = unsafe { font.table(kCTFontTableGSUB, CTFontTableOptions(0)) };
             runs[i] = if morx {
-                detect::user_turns_on_runs(user) || self.probe_differs(style)
+                detect::user_turns_on_runs(&user[i]) || self.probe_differs(style)
             } else if let Some(gsub) = gsub {
                 // The bytes live as long as `gsub`.
                 match detect::gsub_features(unsafe { gsub.as_bytes_unchecked() }) {
-                    Some(tags) => detect::gsub_shapes_runs(&tags, user),
+                    Some(tags) => detect::gsub_shapes_runs(&tags, &user[i]),
                     None => self.probe_differs(style),
                 }
             } else {
@@ -394,7 +505,7 @@ impl Fonts {
             let reg = self.core.reg();
             [0, 1, 2, 3].map(|i| reg.faces[i].font.clone())
         };
-        self.detect_runs(&faces, features)
+        self.detect_runs(&faces, &[(); 4].map(|_| features.to_vec()))
     }
 
     /// Whether `style`'s face shapes [`detect::PROBE`] into anything but
@@ -619,10 +730,25 @@ impl Core {
             }
             (reg.faces[style as usize].font.clone(), reg.line_lookup[style as usize])
         };
-        let found = if line {
-            glyph_by_line(&face, ch).or_else(|| glyph_for(&face, ch))
-        } else {
-            glyph_for(&face, ch)
+        let mapped = self
+            .symbols
+            .iter()
+            .find(|(r, _)| r.contains(&(ch as u32)))
+            .and_then(|(_, font)| glyph_in(font, ch));
+        let found = mapped.or_else(|| {
+            if line {
+                glyph_by_line(&face, ch).or_else(|| glyph_for(&face, ch))
+            } else {
+                glyph_for(&face, ch)
+            }
+        });
+        // A colour glyph from the emoji font the config names, where it
+        // has one.
+        let found = match (&self.emoji, found) {
+            (Some(emoji), Some((font, glyph))) if is_color(&font) && (&**emoji as &CFType) != (&*font as &CFType) => {
+                glyph_in(emoji, ch).or(Some((font, glyph)))
+            }
+            (_, found) => found,
         };
         let mut reg = self.reg();
         let r = found.and_then(|(font, glyph)| Some((reg.id(&font)?, glyph)));
@@ -636,14 +762,31 @@ impl Core {
         fit::is_private_use(ch) || (fit::is_symbol(ch) && self.fallback_ids.contains(&font))
     }
 
-    fn key_for(&self, ch: char, (font, glyph): (FontId, CGGlyph)) -> GlyphKey {
+    fn key_for(&self, ch: char, style: Style, (font, glyph): (FontId, CGGlyph)) -> GlyphKey {
         let color = self.reg().faces[font as usize].color;
         let fitted = !color && self.is_icon(ch, font);
+        let variant = if fitted {
+            GlyphKey::FITTED
+        } else if !color && self.synthetic_bold[style as usize] {
+            GlyphKey::EMBOLDEN
+        } else {
+            0
+        };
         GlyphKey {
             font,
             glyph,
             cells: if color { 2 } else { 1 },
-            variant: if fitted { GlyphKey::FITTED } else { 0 },
+            variant,
+        }
+    }
+
+    /// The [`GlyphKey::EMBOLDEN`] flag for a glyph CTLine picked in `face`
+    /// from font `font`.
+    fn embolden_flag(&self, face: Style, color: bool) -> u8 {
+        if !color && self.synthetic_bold[face as usize] {
+            GlyphKey::EMBOLDEN
+        } else {
+            0
         }
     }
 
@@ -652,7 +795,7 @@ impl Core {
             return Some(GlyphKey::sprite(id, 1));
         }
         let found = self.resolve(ch, style)?;
-        Some(self.key_for(ch, found))
+        Some(self.key_for(ch, style, found))
     }
 
     fn cached_glyph_key(&self, ch: char, style: Style) -> Option<Option<GlyphKey>> {
@@ -660,7 +803,7 @@ impl Core {
             return Some(Some(GlyphKey::sprite(id, 1)));
         }
         let found = self.reg().cached(ch, style)?;
-        Some(found.map(|f| self.key_for(ch, f)))
+        Some(found.map(|f| self.key_for(ch, style, f)))
     }
 
     /// Cell width / advance: how much [`GlyphKey::SCALED`] glyphs are
@@ -705,11 +848,23 @@ impl Core {
         let scaled = !color && key.variant & GlyphKey::SCALED != 0;
         let sx = if scaled { self.x_scale() } else { 1.0 } * scale;
 
-        const PAD: f64 = 1.0;
-        let min_x = (rect.origin.x * sx).floor() - PAD;
-        let min_y = (rect.origin.y * scale).floor() - PAD;
-        let max_x = ((rect.origin.x + rect.size.width) * sx).ceil() + PAD;
-        let max_y = ((rect.origin.y + rect.size.height) * scale).ceil() + PAD;
+        // Thickening and synthetic bold: a stroke around the outline as
+        // well as the fill, half of it outside.
+        let stroke = if color {
+            0.0
+        } else {
+            self.thicken
+                + if key.variant & GlyphKey::EMBOLDEN != 0 {
+                    self.embolden
+                } else {
+                    0.0
+                }
+        };
+        let pad = 1.0 + (stroke / 2.0).ceil();
+        let min_x = (rect.origin.x * sx).floor() - pad;
+        let min_y = (rect.origin.y * scale).floor() - pad;
+        let max_x = ((rect.origin.x + rect.size.width) * sx).ceil() + pad;
+        let max_y = ((rect.origin.y + rect.size.height) * scale).ceil() + pad;
         let width = (max_x - min_x) as usize;
         let height = (max_y - min_y) as usize;
         let bpp = if color { 4 } else { 1 };
@@ -740,6 +895,12 @@ impl Core {
         CGContext::set_gray_fill_color(Some(ctx), 1.0, 1.0);
         CGContext::translate_ctm(Some(ctx), -min_x, -min_y);
         CGContext::scale_ctm(Some(ctx), sx, scale);
+        if stroke > 0.0 {
+            CGContext::set_text_drawing_mode(Some(ctx), objc2_core_graphics::CGTextDrawingMode::FillStroke);
+            CGContext::set_line_width(Some(ctx), stroke);
+            CGContext::set_line_join(Some(ctx), objc2_core_graphics::CGLineJoin::Round);
+            CGContext::set_gray_stroke_color(Some(ctx), 1.0, 1.0);
+        }
         let mut pos = CGPoint::new(0.0, 0.0);
         unsafe { font.draw_glyphs(NonNull::from(&mut g), NonNull::from(&mut pos), 1, ctx) };
         drop(owned);
@@ -910,6 +1071,49 @@ fn with_features(face: &CTFont, features: &[(Tag, u32)]) -> CFRetained<CTFont> {
     }
 }
 
+/// The glyph for `ch` in `font` itself, no fallback.
+fn glyph_in(font: &CTFont, ch: char) -> Option<(CFRetained<CTFont>, CGGlyph)> {
+    let mut utf16 = [0u16; 2];
+    let units = ch.encode_utf16(&mut utf16).len();
+    let mut glyphs = [0 as CGGlyph; 2];
+    let found = unsafe { font.glyphs_for_characters(NonNull::from(&mut utf16[0]), NonNull::from(&mut glyphs[0]), units as isize) };
+    (found && glyphs[0] != 0).then(|| (font.retain(), glyphs[0]))
+}
+
+/// Whether `font` has colour glyphs (emoji).
+fn is_color(font: &CTFont) -> bool {
+    unsafe { font.symbolic_traits() }.contains(CTFontSymbolicTraits::ColorGlyphsTrait)
+}
+
+/// `font` slanted about 14 degrees: synthetic italic.
+fn slanted(font: &CTFont) -> CFRetained<CTFont> {
+    let skew = objc2_core_foundation::CGAffineTransform {
+        a: 1.0,
+        b: 0.0,
+        c: 0.25,
+        d: 1.0,
+        tx: 0.0,
+        ty: 0.0,
+    };
+    unsafe { font.copy_with_attributes(0.0, &skew, None) }
+}
+
+/// `face` at the variable font axes `vars` (`kCTFontVariationAttribute`).
+fn with_variations(face: &CTFont, vars: &[(Tag, f64)]) -> CFRetained<CTFont> {
+    use objc2_core_foundation::CFNumber;
+    use objc2_core_text::kCTFontVariationAttribute;
+    let keys: Vec<CFRetained<CFNumber>> = vars.iter().map(|(t, _)| CFNumber::new_i64(t.to_u32() as i64)).collect();
+    let values: Vec<CFRetained<CFNumber>> = vars.iter().map(|(_, v)| CFNumber::new_f64(*v)).collect();
+    let keys: Vec<&CFNumber> = keys.iter().map(|k| &**k).collect();
+    let values: Vec<&CFNumber> = values.iter().map(|v| &**v).collect();
+    let axes = CFDictionary::<CFNumber, CFNumber>::from_slices(&keys, &values);
+    unsafe {
+        let attrs = CFDictionary::<CFString, CFDictionary<CFNumber, CFNumber>>::from_slices(&[kCTFontVariationAttribute], &[&axes]);
+        let desc = CTFontDescriptor::with_attributes(attrs.as_opaque());
+        face.copy_with_attributes(0.0, std::ptr::null(), Some(&desc))
+    }
+}
+
 /// The glyph for `ch` in `font`, or in the system fallback font for it.
 pub(crate) fn glyph_for(font: &CTFont, ch: char) -> Option<(CFRetained<CTFont>, CGGlyph)> {
     let mut utf16 = [0u16; 2];
@@ -944,9 +1148,15 @@ fn metrics(font: &CTFont, config: &FontConfig, scale: f64) -> (Metrics, i32) {
     let natural = natural_metrics(font);
     let mut m = natural;
     let line_height = config.line_height;
-    if line_height.is_finite() && line_height > 0.0 && line_height != 1.0 {
+    let multiplied = line_height.is_finite() && line_height > 0.0 && line_height != 1.0;
+    let mut height = natural.cell_height as f64;
+    if multiplied {
+        height = (height * line_height).round().max(1.0);
+    }
+    let added = config.cell_height.delta(height, scale).round();
+    if multiplied || added != 0.0 {
         let (ascent, descent) = unsafe { (font.ascent(), font.descent()) };
-        m.cell_height = (natural.cell_height as f64 * line_height).round().max(1.0) as u32;
+        m.cell_height = (height + added).max(1.0) as u32;
         // The same centring as the font's own line height: half the extra
         // height above the text, half below.
         let baseline = ((m.cell_height as f64 - (ascent + descent)) / 2.0 + ascent).round();
@@ -959,10 +1169,50 @@ fn metrics(font: &CTFont, config: &FontConfig, scale: f64) -> (Metrics, i32) {
             m.strike_offset = m.strike_offset.min(m.baseline);
         }
     }
+    adjust_lines(&mut m, natural.underline_thickness, config, scale);
     let advance = unsafe { advance_of_m(font) };
     m.cell_width = config.cell_width.apply(advance, scale);
+    if !config.cursor_thickness.is_zero() {
+        let t = m.cursor_thickness() as f64;
+        let t = (t + config.cursor_thickness.delta(t, scale)).round();
+        m.cursor_thickness = (t.max(1.0) as u32).min(m.cell_width.max(1));
+    }
     let x_shift = (m.cell_width as i32 - natural.cell_width as i32).div_euclid(2);
     (m, x_shift)
+}
+
+/// The config's baseline, underline and strikethrough adjustments, each
+/// kept inside the cell. Positions move by points or a percentage of the
+/// cell height, thicknesses by points or a percentage of themselves.
+fn adjust_lines(m: &mut Metrics, natural_thickness: u32, config: &FontConfig, scale: f64) {
+    let h = m.cell_height as f64;
+    let last = m.cell_height.saturating_sub(1).max(1);
+    let px = |a: Adjust, of: f64| a.delta(of, scale).round();
+    if !config.baseline.is_zero() {
+        // Positive raises the text: the baseline nearer the top.
+        let b = m.baseline as f64 - px(config.baseline, h);
+        m.baseline = (b.max(1.0) as u32).min(last);
+        m.strike_offset = m.strike_offset.min(m.baseline);
+    }
+    if !config.underline_thickness.is_zero() || !config.underline_position.is_zero() {
+        let t = m.underline_thickness as f64 + px(config.underline_thickness, m.underline_thickness as f64);
+        let o = m.underline_offset as f64 + px(config.underline_position, h);
+        let room = m.cell_height.saturating_sub(m.baseline).max(1);
+        m.underline_thickness = (t.max(1.0) as u32).min(room);
+        m.underline_offset = (o.max(0.0) as u32).min(room - m.underline_thickness);
+    }
+    if !config.strike_thickness.is_zero() {
+        let t = natural_thickness as f64 + px(config.strike_thickness, natural_thickness as f64);
+        m.strike_thickness = (t.max(1.0) as u32).min(m.cell_height);
+    } else if !config.underline_thickness.is_zero() {
+        // The strikethrough keeps the font's thickness.
+        m.strike_thickness = natural_thickness;
+    }
+    if !config.strike_position.is_zero() {
+        // Positive moves it down: nearer the baseline.
+        let o = m.strike_offset as f64 - px(config.strike_position, h);
+        m.strike_offset = (o.max(0.0) as u32).min(m.baseline);
+    }
 }
 
 /// The advance of 'M', in pixels.
@@ -1002,6 +1252,8 @@ fn natural_metrics(font: &CTFont) -> Metrics {
             underline_offset,
             underline_thickness: thickness,
             strike_offset,
+            strike_thickness: 0,
+            cursor_thickness: 0,
         }
     }
 }

@@ -165,11 +165,15 @@ watch a run.
 
 ## Threads
 
-1. **Reader thread** (one per window): the PTY is non-blocking; the reader
-   waits with `poll`, then drains everything available (up to 1 MB) before
-   parsing, because a macOS PTY returns at most ~1 KB per `read()`. It parses
-   in 64 KB slices, taking the lock once per slice, so drawing and typing
-   never wait long. Replies to queries
+1. **Drain and reader threads** (one pair per pane): a macOS PTY holds
+   ~2 KB and returns at most ~1 KB per `read()`, so the program writing
+   waits on whoever reads. The drain thread (`app/drain.rs`) only reads,
+   waiting with `poll`, and appends to a buffer of up to 1 MB; the reader
+   takes everything waiting at once and parses it in 32 KB slices, taking
+   the lock once per slice and letting a frame waiting for the lock in
+   between, so drawing and typing never wait long. Reading and parsing
+   overlap: `cat` of 100 MB took about half the time headless on a loaded
+   Mac (1 Nov 2026, load 55–93: 2.4–2.8 s against 4.2–5.3 s). Replies to queries
    (cursor position, device attributes) are written back to the PTY from here.
    After parsing it wakes the main thread **only if** no redraw is already
    pending (an atomic flag), so a flood of output causes at most one redraw

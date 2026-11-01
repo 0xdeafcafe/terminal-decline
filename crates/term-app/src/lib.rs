@@ -12,6 +12,7 @@ pub mod crash;
 pub mod ctl;
 pub mod desktop;
 mod divider_view;
+pub mod drain;
 pub mod entry;
 mod find_bar;
 pub mod frame_policy;

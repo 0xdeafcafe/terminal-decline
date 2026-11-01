@@ -3,10 +3,13 @@
 //! window's view uses this; so do the headless pipeline tests.
 //!
 //! Threads:
-//! - reader: one `read_batch` per loop, parse it, queue any replies for the
-//!   writer, then set the dirty flag and call `wake` only if it was clear (so
-//!   a flood of output wakes the main thread at most once per frame). When
-//!   the program has exited it calls `on_exit`.
+//! - drain: reads the PTY as fast as it gives output, into a buffer the
+//!   reader takes from ([`crate::drain`]), so the program doesn't wait for
+//!   parsing.
+//! - reader: takes everything the drain has read, parses it, queues any
+//!   replies for the writer, then sets the dirty flag and calls `wake` only
+//!   if it was clear (so a flood of output wakes the main thread at most
+//!   once per frame). When the program has exited it calls `on_exit`.
 //! - writer: writes typed input and query replies to the PTY, waiting for
 //!   room there rather than on the main thread.
 //! - prompt-wait, only for a command typed for a restored tab
@@ -24,7 +27,7 @@
 
 use std::io;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
@@ -35,9 +38,6 @@ use term_pty::{Child, Command, Pty, Size};
 
 use crate::control::ControlScanner;
 use crate::images::SessionImages;
-
-/// A macOS PTY hands out ~1 KB per read, so 64 KB is plenty.
-const READ_BUF: usize = 64 * 1024;
 
 /// A program that fails within this long keeps its window open, so its
 /// error can be read.
@@ -246,21 +246,56 @@ pub fn lock(term: &Mutex<Term>) -> MutexGuard<'_, Term> {
 /// The longest a frame waits for a terminal's lock (roadmap R.1).
 pub const FRAME_LOCK_WAIT: Duration = Duration::from_micros(500);
 
+/// How much output is parsed per taking of the lock: the reader takes all
+/// the drain has read (up to [`crate::drain::CAP`]) but parses it in
+/// slices this big, tens of microseconds each, letting the lock go between.
+pub const PARSE_SLICE: usize = 32 * 1024;
+
+/// Frames waiting in [`lock_for_frame`], in any window. Between slices a
+/// reader waits while there are any, so a flood doesn't take the lock
+/// back before the frame can (the lock isn't fair).
+static FRAMES_WAITING: AtomicUsize = AtomicUsize::new(0);
+
+/// Between slices: let a frame waiting for a lock have it first, waiting
+/// at most a little longer than a frame would.
+fn let_frames_in() {
+    if FRAMES_WAITING.load(Ordering::Acquire) == 0 {
+        return;
+    }
+    let started = Instant::now();
+    while FRAMES_WAITING.load(Ordering::Acquire) > 0 && started.elapsed() < FRAME_LOCK_WAIT * 2 {
+        std::hint::spin_loop();
+    }
+}
+
 /// The terminal's lock for taking a frame's snapshot, on the main thread:
 /// tried, then tried again for up to [`FRAME_LOCK_WAIT`]. The reader
-/// holds it for one read's parse (a macOS PTY read is ~1 KB: microseconds),
-/// so this nearly always gets it at once; on a loaded Mac the reader can
+/// holds it for one slice's parse (at most [`PARSE_SLICE`]: tens of
+/// microseconds) and then waits for frames that are waiting, so this
+/// nearly always gets it at once or soon; on a loaded Mac the reader can
 /// be taken off its core while parsing, and the main thread must not wait
 /// on that. `None`: still busy; the pane draws its last frame and keeps
 /// its change for the next tick.
 pub fn lock_for_frame(term: &Mutex<Term>) -> Option<MutexGuard<'_, Term>> {
     let mut started = None;
+    // Counted as waiting from the first miss until this returns.
+    struct Waiting;
+    impl Drop for Waiting {
+        fn drop(&mut self) {
+            FRAMES_WAITING.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+    let mut waiting = None;
     loop {
         match term.try_lock() {
             Ok(t) => return Some(t),
             Err(std::sync::TryLockError::Poisoned(p)) => return Some(p.into_inner()),
             Err(std::sync::TryLockError::WouldBlock) => {}
         }
+        waiting.get_or_insert_with(|| {
+            FRAMES_WAITING.fetch_add(1, Ordering::AcqRel);
+            Waiting
+        });
         if started.get_or_insert_with(Instant::now).elapsed() >= FRAME_LOCK_WAIT {
             return None;
         }
@@ -476,7 +511,7 @@ impl Session {
             }
         })?;
 
-        let mut reader = pty.reader()?;
+        let (taker, drain) = crate::drain::start(pty.reader()?)?;
         let child = pty.child();
         let (term2, dirty2, tx2) = (term.clone(), dirty.clone(), tx.clone());
         let batches = Arc::new(AtomicU64::new(0));
@@ -498,7 +533,7 @@ impl Session {
         let reader = std::thread::Builder::new().name("pty-reader".into()).spawn(move || {
             // A panic anywhere else in the loop stops the session too.
             let read = catch_unwind(AssertUnwindSafe(|| -> Result<(), Bug> {
-                let mut buf = vec![0u8; READ_BUF];
+                let mut buf = Vec::new();
                 let mut scanner = on_control.as_ref().map(|_| ControlScanner::default());
                 let mut prefs = on_prefs.as_ref().map(|_| ControlScanner::new(crate::control::PREFS_PREFIX));
                 let mut asked = Vec::new();
@@ -509,10 +544,7 @@ impl Session {
                 // reads apart; waking for it would draw nothing new and
                 // stop the view waiting for the echo, which would then
                 // wait for the next tick (docs/design/completion.md §3.2).
-                let parse = |bytes: &[u8]| -> Result<bool, Bug> {
-                    if bytes.is_empty() {
-                        return Ok(false);
-                    }
+                let parse_slice = |bytes: &[u8]| -> Result<bool, Bug> {
                     if stopped2.load(Ordering::Acquire) {
                         return Ok(true);
                     }
@@ -529,15 +561,25 @@ impl Session {
                     }
                     Ok(wake)
                 };
+                let parse = |bytes: &[u8]| -> Result<bool, Bug> {
+                    let mut wake = false;
+                    for (i, slice) in bytes.chunks(PARSE_SLICE).enumerate() {
+                        if i > 0 {
+                            let_frames_in();
+                        }
+                        wake |= parse_slice(slice)?;
+                    }
+                    Ok(wake)
+                };
                 loop {
                     if let Some(images) = &images2 {
                         // Decoding lags: let the PTY slow the program down.
                         images.hold_back();
                     }
-                    let n = reader.read_batch(&mut buf);
-                    if n == 0 {
+                    if !taker.take(&mut buf) {
                         return Ok(());
                     }
+                    let n = buf.len();
                     batches2.fetch_add(1, Ordering::Relaxed);
                     let parse_started = on_output.as_ref().map(|_| Instant::now());
                     let mut start = 0;
@@ -578,14 +620,18 @@ impl Session {
                     // Keep reading (and dropping) output until the program
                     // is gone: on macOS a process can't finish exiting while
                     // its terminal holds output nobody reads.
-                    let mut sink = [0u8; 4096];
-                    while reader.read_batch(&mut sink) > 0 {}
+                    let mut sink = Vec::new();
+                    while taker.take(&mut sink) {}
                     Outcome::Hold
                 }
             };
             if outcome == Outcome::Hold && !dirty2.swap(true, Ordering::AcqRel) {
                 wake();
             }
+            // The output has ended, so the drain has too (or ends now that
+            // nobody takes from it).
+            drop(taker);
+            let _ = drain.join();
             on_exit(outcome);
         })?;
 

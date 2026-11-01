@@ -11,7 +11,13 @@
 //! draw in colours it picks itself.
 
 use super::*;
-use crate::ui::frame::{Color, Style, truncate};
+use crate::ui::frame::{Color, Image, Style, truncate, wrap2};
+
+/// The font list's sample: a rule, the font's name, two rows of picture.
+const SAMPLE_ROWS: usize = 4;
+
+/// The font list's header over the fonts that aren't monospaced.
+const NOT_MONOSPACED: &str = "Not monospaced (uneven in a terminal)";
 
 /// The ANSI colours tried for the accent, calmest first.
 const ACCENTS: [u8; 7] = [4, 12, 6, 14, 5, 13, 2];
@@ -27,6 +33,39 @@ pub(super) fn contrast(a: u32, b: u32) -> f64 {
     };
     let (x, y) = (lum(a), lum(b));
     (x.max(y) + 0.05) / (x.min(y) + 0.05)
+}
+
+/// The narrowest description column worth showing.
+const MIN_DESCRIPTION: usize = 24;
+
+/// Where a list's columns start: the label after the `▸ ` marker, the
+/// value, and the description if there is room for it beside the value
+/// and the note (x and width).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Columns {
+    pub label: usize,
+    pub value: usize,
+    pub desc: Option<(usize, usize)>,
+}
+
+/// The columns of a list drawn from `x`, `w` cells wide, whose longest
+/// label, value and note are that wide. Labels get what they need, up to
+/// about half the width (a long one is cut with `…`); values what they
+/// need, up to a third of the rest, before a description is shown in
+/// what is left once the note has its room. Narrow, there is no
+/// description column (the detail line under the list still has it).
+pub(super) fn columns(x: usize, w: usize, label_max: usize, value_max: usize, note_max: usize) -> Columns {
+    let label = x + 3;
+    // The marker before, one cell of margin after.
+    let inner = w.saturating_sub(4);
+    let cap = (inner * 45 / 100).max(w.min(24) / 2);
+    let label_w = (label_max + 2).min(cap);
+    let value = label + label_w;
+    let rest = (x + w).saturating_sub(value + 1);
+    let note_w = if note_max > 0 { note_max + 3 } else { 0 };
+    let value_w = (value_max + 3).min((rest / 3).max(16));
+    let desc = (rest >= value_w + note_w + MIN_DESCRIPTION).then(|| (value + value_w, rest - value_w - note_w));
+    Columns { label, value, desc }
 }
 
 /// The styles a frame is drawn with.
@@ -97,6 +136,16 @@ impl App<'_> {
     fn hints(&self) -> &'static [(&'static str, &'static str)] {
         match &self.mode {
             Mode::Browse if self.search.is_some() => &[("type", "filter"), ("↑↓", "move"), ("enter", "edit"), ("esc", "done")],
+            Mode::Browse if matches!(self.selected().map(|r| r.kind), Some(RowKind::Action(_))) => &[
+                ("↑↓", "move"),
+                ("enter", "record"),
+                ("a", "add"),
+                ("⌫", "clear"),
+                ("r", "default"),
+                ("/", "search"),
+                ("?", "help"),
+                ("q", "quit"),
+            ],
             Mode::Browse => &[
                 ("↑↓", "move"),
                 ("←→", "section"),
@@ -108,16 +157,13 @@ impl App<'_> {
                 ("q", "quit"),
             ],
             Mode::Help => &[("any key", "closes")],
-            // Theme, family and face lists preview what is under the
-            // selection in every window.
+            // Theme lists preview what is under the selection in every
+            // window; font lists show a sample, and change nothing until
+            // Enter.
             Mode::Choice {
                 then: Then::ThemeSide(_), ..
-            }
-            | Mode::Choice {
-                fonts: true,
-                then: Then::Font(_) | Then::Set(_),
-                ..
             } => &[("↑↓", "preview"), ("type", "filter"), ("enter", "keep"), ("esc", "put back")],
+            Mode::Choice { fonts: true, .. } => &[("↑↓", "sample"), ("type", "filter"), ("enter", "use it"), ("esc", "cancel")],
             Mode::Choice { .. } => &[("type", "filter"), ("↑↓", "move"), ("enter", "pick"), ("esc", "cancel")],
             Mode::Number { .. } => &[("←→", "step"), ("0-9", "type"), ("enter", "done"), ("esc", "cancel")],
             Mode::Text { .. } => &[("enter", "save"), ("esc", "cancel")],
@@ -129,7 +175,10 @@ impl App<'_> {
                 ("shift+↑↓", "reorder"),
                 ("esc", "done"),
             ],
+            Mode::Recording(Then::ActionChord(..)) => &[("press", "the shortcut"), ("⌫", "clear"), ("t", "type it"), ("esc", "cancel")],
             Mode::Recording(_) => &[("press", "the shortcut"), ("t", "type it"), ("esc", "cancel")],
+            Mode::Confirm(_, Confirmed::Clash { swap: true, .. }) => &[("s", "swap"), ("r", "replace"), ("esc", "cancel")],
+            Mode::Confirm(_, Confirmed::Clash { .. }) => &[("r", "replace"), ("esc", "cancel")],
             Mode::Confirm(..) => &[("y", "yes"), ("n", "no")],
         }
     }
@@ -228,7 +277,7 @@ impl App<'_> {
             return f;
         }
         let rows = self.rows();
-        self.row = self.row.min(rows.len().saturating_sub(1));
+        self.row = Self::selectable_near(&rows, self.row.min(rows.len().saturating_sub(1)), 1);
         self.draw_hints(&mut f, h - 1, &look);
         let (line, error) = self.message(&rows);
         let roomy = w >= 60 && h >= 12;
@@ -329,9 +378,19 @@ impl App<'_> {
                 }
             }
             let style = if error { look.error } else { look.base };
-            f.text(2, dy + 1, end, &truncate(&line, end - 2), style);
-            if detail_h == 4 {
-                self.draw_sample(&mut f, 2, dy + 2, end, &look);
+            // The colour sample where colours are set; elsewhere a long
+            // description takes its line too.
+            let colours = self.search.is_none() && self.current_section() == Section::Appearance
+                || rows.get(self.row).is_some_and(|r| r.swatch.is_some());
+            if detail_h == 4 && !colours {
+                let (one, two) = wrap2(&line, end - 2);
+                f.text(2, dy + 1, end, &one, style);
+                f.text(2, dy + 2, end, &two, style);
+            } else {
+                f.text(2, dy + 1, end, &truncate(&line, end - 2), style);
+                if detail_h == 4 {
+                    self.draw_sample(&mut f, 2, dy + 2, end, &look);
+                }
             }
         } else {
             // One column: the section, its settings, the message.
@@ -389,8 +448,10 @@ impl App<'_> {
     }
 
     /// The rows from `y`, `visible` of them, scrolled to the selection:
-    /// the marker, label, value (or the editor in it) and where it comes
-    /// from.
+    /// the marker, label, value (or the editor in it), the description
+    /// when there is room for it, and where the value comes from. The
+    /// columns are as wide as the list's longest label and value need,
+    /// within the width ([`columns`]); a group's header spans the row.
     #[allow(clippy::too_many_arguments)]
     fn draw_rows(&mut self, f: &mut Frame, x: usize, y: usize, w: usize, visible: usize, rows: &[Row], look: &Look) {
         if visible == 0 {
@@ -402,21 +463,56 @@ impl App<'_> {
         if self.row >= self.scroll + visible {
             self.scroll = self.row + 1 - visible;
         }
+        // A header just above the selection stays in view with it.
+        if visible > 1 && self.scroll > 0 && self.scroll == self.row && rows.get(self.row - 1).is_some_and(|r| !r.selectable()) {
+            self.scroll -= 1;
+        }
         self.hit.rows = (x, x + w, y, self.scroll, visible.min(rows.len().saturating_sub(self.scroll)));
-        let label_w = if self.search.is_some() { 30 } else { 18 }.min(w / 2);
+        // Rows with no value ("+ add a variable") don't widen the labels:
+        // theirs run on into the value's room.
+        let widest = |what: fn(&Row) -> &str| {
+            rows.iter()
+                .filter(|r| r.selectable() && !r.value.is_empty())
+                .map(|r| str_width(what(r)))
+                .max()
+                .unwrap_or(0)
+        };
+        let cols = columns(
+            x,
+            w,
+            widest(|r| r.label.as_str()),
+            widest(|r| r.value.as_str()),
+            widest(|r| r.note.as_str()),
+        );
         let end = x + w;
         let mut cursor = None;
         for (i, r) in rows.iter().enumerate().skip(self.scroll).take(visible) {
             let yy = y + i - self.scroll;
+            if !r.selectable() {
+                f.text(cols.label.saturating_sub(1), yy, end, &r.label, look.accent);
+                continue;
+            }
             let selected = i == self.row;
             let style = if selected { look.sel } else { look.base };
+            let faint = if selected { look.sel } else { look.dim };
             if selected {
                 f.fill(x, yy, w, 1, style);
             }
             f.text(x + 1, yy, end, if selected { "▸ " } else { "  " }, style);
-            let lx = x + 3;
-            let vx = lx + label_w;
-            f.text(lx, yy, vx.min(end), &truncate(&r.label, label_w.saturating_sub(1)), style);
+            let vx = cols.value;
+            let editing = selected && matches!(self.mode, Mode::Text { .. } | Mode::Number { .. } | Mode::Recording(_));
+            let label_end = if r.value.is_empty() && !editing {
+                end.saturating_sub(1)
+            } else {
+                vx.min(end)
+            };
+            let label_after = f.text(
+                cols.label,
+                yy,
+                label_end,
+                &truncate(&r.label, label_end.saturating_sub(cols.label + 1)),
+                style,
+            );
             let mut value = r.value.clone();
             let mut caret = None;
             if selected {
@@ -450,11 +546,34 @@ impl App<'_> {
                 f.text(vx, yy, vx + 2, "  ", Style::default().bg(Color::Rgb(rgb)));
                 vend = vx + 3;
             }
-            let value_room = end.saturating_sub(vend + 1);
-            let after = f.text(vend, yy, end, &truncate(&value, value_room), style);
+            // Editing, the value takes the description's room too.
+            let desc = cols
+                .desc
+                .filter(|_| caret.is_none() && !matches!((&self.mode, selected), (Mode::Recording(_), true)));
+            let value_end = match desc {
+                Some((dx, _)) => dx.saturating_sub(2),
+                None => end.saturating_sub(1),
+            };
+            let after = f.text(vend, yy, value_end, &truncate(&value, value_end.saturating_sub(vend)), style);
+            // A label that runs on into the value's room ("+ add a key
+            // that sends text") pushes its description along.
+            if let Some((dx, dw)) = desc
+                && !r.description.is_empty()
+            {
+                let x0 = dx.max(label_after.max(after) + 2);
+                let room = (dx + dw).saturating_sub(x0);
+                if room >= MIN_DESCRIPTION / 2 {
+                    f.text(x0, yy, dx + dw, &truncate(&r.description, room), faint);
+                }
+            }
             let note_w = str_width(&r.note);
-            if caret.is_none() && !r.note.is_empty() && after + 2 + note_w < end {
-                f.text(end - note_w - 1, yy, end, &r.note, if selected { look.sel } else { look.dim });
+            let note_x = end.saturating_sub(note_w + 1);
+            let clear = match desc {
+                Some((dx, dw)) => note_x >= dx + dw,
+                None => after + 2 <= note_x,
+            };
+            if caret.is_none() && !r.note.is_empty() && clear {
+                f.text(note_x, yy, end, &r.note, faint);
             }
             if selected {
                 cursor = Some((
@@ -478,7 +597,7 @@ impl App<'_> {
                 filter,
                 sel,
                 then,
-                ..
+                fonts,
             } => {
                 let fl = filter.to_lowercase();
                 let shown: Vec<&(String, String)> = items
@@ -487,7 +606,7 @@ impl App<'_> {
                     .collect();
                 let labels: Vec<String> = shown.iter().map(|(_, l)| l.clone()).collect();
                 let swatches: Vec<Option<ThemeInfo>> = if matches!(then, Then::ThemeSide(_)) {
-                    shown.iter().map(|(v, _)| self.theme_info_cached(v)).collect()
+                    shown.iter().map(|(v, _)| self.theme_info(v)).collect()
                 } else {
                     Vec::new()
                 };
@@ -495,13 +614,14 @@ impl App<'_> {
                 // from dark to light (or back), for the groups that have a
                 // match.
                 let mut groups: Vec<(usize, &str)> = Vec::new();
-                // Font lists: monospaced families, then the others.
+                // Font lists: monospaced families, then the others, which
+                // draw unevenly in a terminal.
                 if matches!(then, Then::Font(_) | Then::ListItem(..)) {
                     let mut last = None;
                     for (k, (v, _)) in shown.iter().enumerate() {
                         let Some(mono) = self.is_monospace(v) else { continue };
                         if last != Some(mono) {
-                            groups.push((k, if mono { "Monospaced" } else { "Other fonts" }));
+                            groups.push((k, if mono { "Monospaced" } else { NOT_MONOSPACED }));
                             last = Some(mono);
                         }
                     }
@@ -509,7 +629,7 @@ impl App<'_> {
                 if matches!(then, Then::ThemeSide(_)) {
                     let mut last = None;
                     for (k, (v, _)) in shown.iter().enumerate() {
-                        let Some(info) = self.theme_info_cached(v) else { continue };
+                        let Some(info) = self.theme_info(v) else { continue };
                         let dark = info.is_dark();
                         if last != Some(dark) {
                             groups.push((k, if dark { "Dark" } else { "Light" }));
@@ -517,8 +637,12 @@ impl App<'_> {
                         }
                     }
                 }
-                let (cx, cy) = self.popup(f, title, Some(filter), &labels, &swatches, &groups, *sel, look);
+                let footer = if *fonts { SAMPLE_ROWS } else { 0 };
+                let (cx, cy, at) = self.popup(f, title, Some(filter), &labels, &swatches, &groups, *sel, footer, look);
                 f.cursor = Some((cx + str_width(filter), cy));
+                if let Some((x, y, w)) = at {
+                    self.draw_sample_footer(f, x, y, w, look);
+                }
             }
             Mode::List { path, sel, .. } => {
                 let items = self.list_items(path);
@@ -528,7 +652,7 @@ impl App<'_> {
                 } else {
                     items
                 };
-                self.popup(f, title, None, &labels, &[], &[], *sel, look);
+                self.popup(f, title, None, &labels, &[], &[], *sel, 0, look);
             }
             Mode::Text {
                 title,
@@ -538,29 +662,104 @@ impl App<'_> {
                 ..
             } => {
                 let before: String = buf.chars().take(*c).collect();
-                let (cx, cy) = self.popup(f, title, Some(buf), &[], &[], &[], 0, look);
+                let (cx, cy, _) = self.popup(f, title, Some(buf), &[], &[], &[], 0, 0, look);
                 f.cursor = Some((cx + str_width(&before), cy));
             }
             _ => {}
         }
     }
 
-    /// Theme `name`'s colours, read once.
-    fn theme_info_cached(&mut self, name: &str) -> Option<ThemeInfo> {
-        if name.is_empty() {
-            return None;
+    /// The font list's sample, in the `w` cells from `(x, y)` at the
+    /// bottom of the list: a rule, the font's name (and whether it is
+    /// monospaced), then the picture of [`SAMPLE_TEXT`] in it once the
+    /// selection has rested ([`SAMPLE_AFTER`]). Pictures go only to
+    /// Terminal Decline, which shows them (kitty graphics).
+    fn draw_sample_footer(&mut self, f: &mut Frame, x: usize, y: usize, w: usize, look: &Look) {
+        f.rule(x, y, x + w, look.dim);
+        let end = x + w;
+        let Some(name) = self.sample.clone() else {
+            let t = if self.sample_pace.is_held() { "…" } else { "" };
+            f.text(x + 1, y + 1, end, t, look.dim);
+            return;
+        };
+        let nx = f.text(x + 1, y + 1, end, &truncate(&name, w.saturating_sub(2)), look.base.bold());
+        let (note, style) = match self.font_is_monospace(&name) {
+            Some(true) => ("  monospaced", look.dim),
+            Some(false) => ("  not monospaced: letters won't line up in a terminal", look.error),
+            None => ("  not installed", look.error),
+        };
+        f.text(nx, y + 1, end, &truncate(note, end.saturating_sub(nx + 1)), style);
+        let (cols, rows) = (w.saturating_sub(2), SAMPLE_ROWS - 2);
+        if !self.in_app || cols < 4 {
+            return;
         }
-        if !self.theme_infos.contains_key(name) {
-            let info = self.host.theme_info(name);
-            self.theme_infos.insert(name.to_string(), info);
+        let c = self.previewed.as_ref().map_or(&self.checked, |(_, c)| c);
+        let (fg, bg) = (c.foreground.unwrap_or(0xd8dee9), c.background.unwrap_or(0x16181c));
+        match self.sample_image(&name, cols, rows, fg, bg) {
+            Some((key, width, height, rgb)) => {
+                f.image = Some(Image {
+                    key,
+                    x: x + 1,
+                    y: y + 2,
+                    cols,
+                    rows,
+                    width,
+                    height,
+                    rgb,
+                });
+            }
+            None => {
+                f.text(x + 1, y + 2, end, "no sample for this font", look.dim);
+            }
         }
-        self.theme_infos[name].clone()
+    }
+
+    /// The picture of [`SAMPLE_TEXT`] in font `name`, `cols` × `rows`
+    /// cells in `fg` on `bg`, drawn by the host at the cells' size in
+    /// pixels (a guess if the terminal doesn't say), and kept for the
+    /// next frames: its key, size and pixels.
+    fn sample_image(&self, name: &str, cols: usize, rows: usize, fg: u32, bg: u32) -> Option<(u64, u32, u32, Rc<Vec<u8>>)> {
+        let (cw, ch) = match self.cell_px {
+            (w, h) if w > 0 && h > 0 => (w, h),
+            _ => (8, 16),
+        };
+        let (mut width, mut height) = (cols as u32 * cw, rows as u32 * ch);
+        // Kept small: about a megapixel at most (3 MB of RGB).
+        let scale = ((width as f64 * height as f64) / 1_000_000.0).sqrt();
+        if scale > 1.0 {
+            width = (width as f64 / scale) as u32;
+            height = (height as f64 / scale) as u32;
+        }
+        let key: SampleKey = (name.to_string(), cols, rows, width, height, fg, bg);
+        let hash = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            key.hash(&mut h);
+            h.finish()
+        };
+        let mut samples = self.samples.borrow_mut();
+        let rgb = match samples.iter().find(|(k, _)| *k == key) {
+            Some((_, rgb)) => rgb.clone(),
+            None => {
+                let rgb = self.host.font_sample(name, SAMPLE_TEXT, width, height, fg, bg).map(Rc::new);
+                // The last few, for moving back and forth.
+                if samples.len() >= 8 {
+                    samples.remove(0);
+                }
+                samples.push((key, rgb.clone()));
+                rgb
+            }
+        };
+        let rgb = rgb.filter(|p| p.len() == (width * height * 3) as usize)?;
+        Some((hash, width, height, rgb))
     }
 
     /// A box over the right of the screen: an optional input line, then
     /// the items with `sel` marked, each with its theme's colours if
     /// `swatches` has them. `groups` are headers, each with the index of
-    /// the item it comes before. Returns where the input text starts.
+    /// the item it comes before. `footer` rows at the bottom are left for
+    /// the caller when there is room for them and three items. Returns
+    /// where the input text starts, and the footer's x, y and width.
     #[allow(clippy::too_many_arguments)]
     fn popup(
         &mut self,
@@ -571,20 +770,26 @@ impl App<'_> {
         swatches: &[Option<ThemeInfo>],
         groups: &[(usize, &str)],
         sel: usize,
+        footer: usize,
         look: &Look,
-    ) -> (usize, usize) {
+    ) -> (usize, usize, Option<(usize, usize, usize)>) {
         let (w, h) = (self.width, self.height);
-        let pw = (w * 3 / 4).clamp(10.min(w), 60.min(w));
+        // Wider on a wide screen, for long names and the sample.
+        let most = if footer > 0 { 80 } else { 60 };
+        let pw = (w * 3 / 4).clamp(10.min(w), most.min(w));
         let x = w - pw;
         let extra = usize::from(head.is_some());
         // Under the header, when there is one.
         let y = usize::from(w >= 60 && h >= 12);
-        let ph = (items.len() + groups.len() + extra + 2)
-            .min(h.saturating_sub(1 + y))
-            .max(3.min(h - y));
+        // With a footer, room for three items even when fewer match, so
+        // the box doesn't jump as the filter narrows.
+        let body = (items.len() + groups.len()).max(if footer > 0 { 3 } else { 0 });
+        let ph = (body + extra + 2 + footer).min(h.saturating_sub(1 + y)).max(3.min(h - y));
+        let footer = if ph >= extra + 2 + footer + 3 { footer } else { 0 };
         f.fill(x, y, pw, ph, look.base);
         f.boxed(x, y, pw, ph, title, look.dim, look.accent.bold());
         let inner = pw - 2;
+        let footer_at = (footer > 0).then(|| (x + 1, y + ph - 1 - footer, inner));
         let mut input = (x + 1, y + 1);
         if let Some(head) = head {
             let tx = f.text(x + 2, y + 1, x + 1 + inner, "❯ ", look.accent.bold());
@@ -597,7 +802,7 @@ impl App<'_> {
             );
             input = (tx, y + 1);
         }
-        let room = ph.saturating_sub(2 + extra);
+        let room = ph.saturating_sub(2 + extra + footer);
         // The rows: items, with a header row before each group's first.
         let mut rows: Vec<(Option<usize>, &str)> = Vec::new();
         for k in 0..items.len() {
@@ -659,7 +864,7 @@ impl App<'_> {
             }
         }
         self.hit.popup = Some((x + 1, x + 1 + inner, iy, first, room.min(rows.len().saturating_sub(first))));
-        input
+        (input.0, input.1, footer_at)
     }
 
     fn draw_help(&mut self, f: &mut Frame, look: &Look) {
@@ -671,7 +876,7 @@ impl App<'_> {
             ("r", "reset: remove it from this file"),
             ("u", "undo the last change"),
             ("e", "open the file in your editor"),
-            ("c a d", "shortcuts: rebind, add, unbind"),
+            ("enter a ⌫", "on a shortcut: record, add, clear"),
             ("ctrl+l", "redraw"),
             ("q esc", "quit"),
         ];
@@ -688,7 +893,7 @@ impl App<'_> {
             .chain(std::iter::once(String::new()))
             .chain(notes.iter().map(|s| s.to_string()))
             .collect();
-        self.popup(f, "Help", None, &lines, &[], &[], usize::MAX, look);
+        self.popup(f, "Help", None, &lines, &[], &[], usize::MAX, 0, look);
         // The keys in the accent.
         if let Some((x0, x1, y0, first, count)) = self.hit.popup {
             for (k, (key, _)) in keys.iter().enumerate().skip(first).take(count) {
@@ -702,6 +907,29 @@ impl App<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Labels get what the longest needs, up to about half the width;
+    /// a description column only where there is room for it.
+    #[test]
+    fn columns_fit_the_width() {
+        // At 80 columns the settings are 62 wide from x 17: whole labels
+        // (23 + 2), no description.
+        let c = columns(17, 62, 23, 20, 11);
+        assert_eq!((c.label, c.value, c.desc), (20, 45, None));
+        // Wide: the value's column, then the description up to the note.
+        let c = columns(17, 142, 23, 17, 11);
+        assert_eq!((c.label, c.value), (20, 45));
+        assert_eq!(c.desc, Some((65, 79)));
+        // A very long label is cut near half the width.
+        let c = columns(0, 100, 80, 10, 0);
+        assert_eq!(c.value - c.label, 43);
+        // Narrow: half of it, as the one-column layout has always had.
+        let c = columns(0, 20, 20, 6, 0);
+        assert_eq!((c.label, c.value, c.desc), (3, 13, None));
+        // No values or notes: a description still needs its room.
+        assert!(columns(0, 60, 10, 0, 0).desc.is_some());
+        assert!(columns(0, 40, 10, 0, 0).desc.is_none());
+    }
 
     #[test]
     fn the_accent_is_a_readable_theme_colour() {

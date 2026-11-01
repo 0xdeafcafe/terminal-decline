@@ -1652,7 +1652,7 @@ fn smoke_settings_records_a_chord_before_the_menus() {
     // Cmd+N opened by mistake shows up as a second dumper.
     let script = format!(
         "if mkdir '{d}/first' 2>/dev/null; then echo first; {settings}{ready}\
-         {select}{recording}{key}{recorded}{yes}{wait}echo done; {dump}sleep 1; {quit}\
+         {select}{recording}{key}{recorded}{replace}{wait}echo done; {dump}sleep 1; {quit}\
          else echo extra; {dump}fi; sleep 20",
         settings = osc("settings"),
         ready = wait_dump("\"settings_ready\":true"),
@@ -1660,7 +1660,8 @@ fn smoke_settings_records_a_chord_before_the_menus() {
         recorded = wait_dump("\"settings_recording\":false"),
         select = osc("type-settings \\\\e[C\\\\e[C\\\\e[B\\\\e[Bc"),
         key = osc("key 45 cmd"),
-        yes = osc("type-settings y"),
+        // ⌘N is New Window's: replace (New Window loses it).
+        replace = osc("type-settings r"),
         wait = wait_file("cmd+n"),
         dump = osc("dump"),
         quit = osc("quit"),

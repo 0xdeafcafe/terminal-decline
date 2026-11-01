@@ -2,14 +2,19 @@
 //! Platform-free: the runner in `lib.rs` feeds it events and draws its
 //! frames; the screen tests do the same into term-core.
 
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use toml_edit::{Item, Value};
 
 use crate::file::{self, Edit, KeyPath, ListOp};
-use crate::host::{Checked, Font, Host, Pin, ThemeInfo};
+use crate::host::{Action, Checked, Font, Host, Pin, ThemeInfo};
+use crate::keymap::{self, ActionKeys, How, Recorded, Taken};
 use crate::layers::{Bind, Bound, Layers, Origin};
+use crate::pace::Pace;
 use crate::preview::Preview;
 use crate::schema::{self, Applies, Editor, SETTINGS, Section, Setting};
 use crate::ui::frame::{Frame, str_width};
@@ -20,6 +25,18 @@ mod draw;
 /// At most this often while a number steps (key repeat); the last value
 /// is always written.
 pub const WRITE_EVERY: Duration = Duration::from_millis(100);
+
+/// How long the selection in a font list rests before its sample is
+/// drawn, so moving quickly through the list draws nothing.
+pub const SAMPLE_AFTER: Duration = Duration::from_millis(200);
+
+/// At most this often while the selection moves through a theme list
+/// (key repeat); where it stops is always previewed.
+pub const PREVIEW_EVERY: Duration = Duration::from_millis(100);
+
+/// The text of a font's sample: letters, the digits and letters that
+/// look alike, and code.
+pub const SAMPLE_TEXT: &str = "AaBbGg 0O 1lI |{}[]() => != ~/src $";
 
 /// What the runner does for the app.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -37,7 +54,11 @@ pub enum Effect {
 
 #[derive(Clone, Debug)]
 enum RowKind {
+    /// A group's name (the shortcut list's menus): not selectable.
+    Header,
     Setting(&'static Setting),
+    /// A menu action and its shortcuts.
+    Action(ActionKeys),
     ThemeSide(&'static str),
     Palette(usize),
     Bind(Bind),
@@ -57,6 +78,26 @@ struct Row {
     note: String,
     swatch: Option<u32>,
     description: String,
+    /// More text search matches (an action's name and shortcuts).
+    keywords: String,
+}
+
+impl Row {
+    fn new(kind: RowKind, label: impl Into<String>) -> Row {
+        Row {
+            kind,
+            label: label.into(),
+            value: String::new(),
+            note: String::new(),
+            swatch: None,
+            description: String::new(),
+            keywords: String::new(),
+        }
+    }
+
+    fn selectable(&self) -> bool {
+        !matches!(self.kind, RowKind::Header)
+    }
 }
 
 /// What a committed value does.
@@ -66,10 +107,13 @@ enum Then {
     ThemeSide(&'static str),
     Palette(usize),
     Font(KeyPath),
-    BindAction(String),
     BindText(String),
-    /// A new chord for the binding at `from`, or for a new binding.
+    /// A new chord for the binding at `from`, or for a new key that
+    /// sends text.
     BindChord(Option<String>),
+    /// A new shortcut for an action, replacing its shortcuts or added to
+    /// them.
+    ActionChord(String, How),
     EnvName(&'static str),
     EnvValue(&'static str, String),
     /// An element of a list: replace `Some(i)`, or add at the end.
@@ -88,8 +132,18 @@ enum TextKind {
 enum Confirmed {
     Edit(Box<Edit>, String),
     RemovePin(String),
-    /// A new binding's chord is in use: pick its action anyway.
-    PickAction(String),
+    /// A new text key's chord is in use: type its text anyway.
+    TextFor(String),
+    /// An action's new shortcut is another action's (`other`) or sends
+    /// text (`None`): replace it, or swap with the other action when it
+    /// can take this one's old shortcuts (`swap`).
+    Clash {
+        action: String,
+        chord: String,
+        how: How,
+        other: Option<String>,
+        swap: bool,
+    },
 }
 
 /// One at a time, so its size doesn't matter.
@@ -177,30 +231,52 @@ pub struct App<'h> {
     fonts: Option<Vec<Font>>,
     width: usize,
     height: usize,
+    /// A cell's size in pixels, if the terminal says (for the sample).
+    cell_px: (u32, u32),
     hit: Hit,
     effects: Vec<Effect>,
     /// The theme every window shows while a theme list is open (the live
     /// preview), and the colours windows show with it (`[colors]` on
     /// top), for drawing this tab.
     previewed: Option<(String, Checked)>,
-    /// The font setting and name every window shows while a font list is
-    /// open (the live preview).
-    font_previewed: Option<(String, String)>,
-    /// Themes' colours for the swatches in theme lists, read once each.
-    theme_infos: std::collections::HashMap<String, Option<ThemeInfo>>,
+    /// The theme to preview next while the list moves faster than
+    /// [`PREVIEW_EVERY`].
+    theme_pace: Pace<String>,
+    /// The font under a font list's selection, until it has rested for
+    /// [`SAMPLE_AFTER`]; then `sample` names it.
+    sample_pace: Pace<String>,
+    /// The font the open font list shows a sample of.
+    sample: Option<String>,
+    /// Samples drawn, newest last: font, cells, pixels and colours, and
+    /// the pixels (`None`: not installed, or the host can't draw).
+    samples: RefCell<Vec<(SampleKey, Pixels)>>,
+    /// Themes' titles and colours, read once each until the files are
+    /// read again.
+    theme_infos: RefCell<HashMap<String, Option<ThemeInfo>>>,
+    /// The menus' actions.
+    actions: Vec<Action>,
+    /// The pins, read once until the files are read again.
+    pins: RefCell<Option<Vec<Pin>>>,
+    /// Bumped when what the rows show may have changed (the files were
+    /// read again).
+    generation: Cell<u64>,
+    /// The rows last worked out, and for what.
+    rows_cache: RefCell<Option<(RowsKey, Rc<Vec<Row>>)>>,
     /// For a list with group headers: the item on each row shown (`None`
     /// for a header). Empty for a list without.
     hit_rows: Vec<Option<usize>>,
 }
 
-/// The font setting a list picks for, if it is one the app previews.
-fn font_key(then: &Then) -> Option<&'static str> {
-    let path = match then {
-        Then::Font(p) | Then::Set(p) => p,
-        _ => return None,
-    };
-    crate::preview::FONT_KEYS.into_iter().find(|k| path.len() == 1 && path[0] == *k)
-}
+/// What the rows are worked out for: the files' generation, the section,
+/// the search and whether a pin's file is edited.
+type RowsKey = (u64, usize, Option<String>, bool);
+
+/// A sample's font, size in cells and pixels, and colours.
+type SampleKey = (String, usize, usize, u32, u32, u32, u32);
+
+/// A sample's RGB pixels; `None` if the font isn't installed or the host
+/// can't draw.
+type Pixels = Option<Rc<Vec<u8>>>;
 
 fn path_of(key: &str) -> KeyPath {
     key.split('.').map(str::to_string).collect()
@@ -287,11 +363,19 @@ impl<'h> App<'h> {
             fonts: None,
             width: 80,
             height: 24,
+            cell_px: (0, 0),
             hit: Hit::default(),
             effects: Vec::new(),
             previewed: None,
-            font_previewed: None,
-            theme_infos: Default::default(),
+            theme_pace: Pace::throttle(PREVIEW_EVERY),
+            sample_pace: Pace::debounce(SAMPLE_AFTER),
+            sample: None,
+            samples: RefCell::new(Vec::new()),
+            theme_infos: RefCell::new(HashMap::new()),
+            actions: host.actions(),
+            pins: RefCell::new(None),
+            generation: Cell::new(0),
+            rows_cache: RefCell::new(None),
             hit_rows: Vec::new(),
         };
         app.open(layers, edit);
@@ -307,6 +391,7 @@ impl<'h> App<'h> {
     fn open(&mut self, layers: Vec<PathBuf>, edit: usize) {
         self.pin_file = edit > 0 && self.host.is_pin_file(&layers[edit]);
         self.layers = Layers::load(layers, edit, &self.host.defaults());
+        self.touch();
         self.undo.clear();
         self.section = 0;
         self.row = 0;
@@ -324,6 +409,7 @@ impl<'h> App<'h> {
     pub fn reload(&mut self) {
         let before = self.layers.text.clone();
         self.layers = Layers::load(self.layers.paths.clone(), self.layers.edit, &self.host.defaults());
+        self.touch();
         self.recheck();
         let ours = self.last_written.as_deref() == Some(self.layers.text.as_str());
         if self.layers.text != before && !ours {
@@ -338,22 +424,75 @@ impl<'h> App<'h> {
         self.effects.push(Effect::Repaint);
     }
 
+    /// The size of a cell in pixels, as the terminal reports it (0 if it
+    /// doesn't): font samples are drawn to fit their cells.
+    pub fn set_cell_pixels(&mut self, width: u32, height: u32) {
+        self.cell_px = (width, height);
+    }
+
+    /// The files were read again: what the rows show may have changed,
+    /// and so may the pins and themes.
+    fn touch(&self) {
+        self.generation.set(self.generation.get() + 1);
+        *self.pins.borrow_mut() = None;
+        self.theme_infos.borrow_mut().clear();
+    }
+
+    /// The pins, read once until the files are read again.
+    fn pins(&self) -> Vec<Pin> {
+        self.pins.borrow_mut().get_or_insert_with(|| self.host.pins()).clone()
+    }
+
+    /// Theme `name`'s title and colours, read once until the files are
+    /// read again.
+    fn theme_info(&self, name: &str) -> Option<ThemeInfo> {
+        if name.is_empty() {
+            return None;
+        }
+        if let Some(info) = self.theme_infos.borrow().get(name) {
+            return info.clone();
+        }
+        let info = self.host.theme_info(name);
+        self.theme_infos.borrow_mut().insert(name.to_string(), info.clone());
+        info
+    }
+
+    fn action_label(&self, name: &str) -> String {
+        self.actions
+            .iter()
+            .find(|a| a.name == name)
+            .map_or_else(|| name.to_string(), |a| a.label.clone())
+    }
+
     /// What the runner should do now.
     pub fn take_effects(&mut self) -> Vec<Effect> {
         std::mem::take(&mut self.effects)
     }
 
-    /// When a held-back write is due, if one is.
+    /// When something held back is due, if anything is: a write, a theme
+    /// preview or a font sample.
     pub fn deadline(&self) -> Option<Instant> {
-        self.pending
+        let write = self
+            .pending
             .as_ref()
-            .map(|_| self.last_write.map_or_else(Instant::now, |t| t + WRITE_EVERY))
+            .map(|_| self.last_write.map_or_else(Instant::now, |t| t + WRITE_EVERY));
+        [write, self.theme_pace.deadline(), self.sample_pace.deadline()]
+            .into_iter()
+            .flatten()
+            .min()
     }
 
-    /// Writes a held-back value if it is due (`now` past [`App::deadline`]).
+    /// Does what is held back and due at `now` ([`App::deadline`]).
     pub fn tick(&mut self, now: Instant) {
-        if self.deadline().is_some_and(|d| now >= d) {
+        let write_due = self.pending.as_ref().map(|_| self.last_write.map_or(now, |t| t + WRITE_EVERY));
+        if write_due.is_some_and(|d| now >= d) {
             self.flush(now);
+        }
+        if let Some(name) = self.theme_pace.poll(now) {
+            self.preview(&name);
+        }
+        if let Some(name) = self.sample_pace.poll(now) {
+            self.sample = Some(name);
         }
     }
 
@@ -426,6 +565,7 @@ impl<'h> App<'h> {
             self.undo.push((prepared.undo.clone(), session));
         }
         self.layers = Layers::load(self.layers.paths.clone(), self.layers.edit, &self.host.defaults());
+        self.touch();
         self.checked = after;
         self.status = None;
         Some(prepared)
@@ -480,6 +620,7 @@ impl<'h> App<'h> {
             note: self.note(&origin, s.applies),
             swatch,
             description: s.description.into(),
+            keywords: String::new(),
         }
     }
 
@@ -555,7 +696,7 @@ impl<'h> App<'h> {
     fn rows_for(&self, section: Section) -> Vec<Row> {
         let mut rows = Vec::new();
         if section == Section::Pins {
-            let pins = self.host.pins();
+            let pins = self.pins();
             if pins.is_empty() {
                 rows.push(Row {
                     kind: RowKind::Info,
@@ -563,6 +704,7 @@ impl<'h> App<'h> {
                     value: "make one with terminal-decline pin".into(),
                     note: String::new(),
                     swatch: None,
+                    keywords: String::new(),
                     description: "Pins are apps in the Dock that open a terminal with their own settings".into(),
                 });
             }
@@ -572,6 +714,7 @@ impl<'h> App<'h> {
                     value: p.command.clone(),
                     note: p.icon.clone().map_or_else(String::new, |_| "icon".into()),
                     swatch: None,
+                    keywords: String::new(),
                     description: "enter: edit its settings · d: remove it".into(),
                     kind: RowKind::Pin(p),
                 });
@@ -597,7 +740,7 @@ impl<'h> App<'h> {
                         .to_string();
                     for side in ["light", "dark"] {
                         let name = sides.as_ref().map(|(l, d)| if side == "light" { l } else { d }.clone());
-                        let info = name.as_deref().and_then(|n| self.host.theme_info(n));
+                        let info = name.as_deref().and_then(|n| self.theme_info(n));
                         let mut note = if item.is_some() {
                             self.note(&origin, s.applies)
                         } else {
@@ -616,6 +759,7 @@ impl<'h> App<'h> {
                             },
                             note,
                             swatch: info.as_ref().map(|i| i.background),
+                            keywords: String::new(),
                             description: format!(
                                 "The theme while windows are {side}: moving through the list previews it, Esc puts back the old one"
                             ),
@@ -641,35 +785,51 @@ impl<'h> App<'h> {
                                 self.note(&origin, s.applies)
                             },
                             swatch: schema::parse_hex(v),
+                            keywords: String::new(),
                             description: format!("ANSI colour {i} ({name}), over the theme's"),
                         });
                     }
                 }
                 Editor::Keybinds => {
-                    let actions = self.host.actions();
-                    for b in self.layers.keybinds(self.host) {
-                        let value = match &b.bound {
-                            Bound::Action(a) => actions.iter().find(|x| &x.name == a).map_or(a.clone(), |x| x.label.clone()),
-                            Bound::Text(t) => format!("sends {t:?}"),
-                            Bound::Unbound => "none".into(),
-                        };
-                        rows.push(Row {
-                            label: b.chord.clone(),
-                            value,
-                            note: b.origin.describe(),
-                            swatch: None,
-                            description: "enter: change the action · c: change the shortcut · d: unbind · r: reset".into(),
-                            kind: RowKind::Bind(b),
-                        });
+                    // Every action with its shortcuts, under its menu's
+                    // name; then the keys that send text.
+                    let binds = self.layers.keybinds(self.host);
+                    let mut group: Option<String> = None;
+                    for k in keymap::action_keys(&self.actions, &binds) {
+                        if group.as_deref() != Some(k.menu.as_str()) {
+                            rows.push(Row::new(RowKind::Header, k.menu.clone()));
+                            group = Some(k.menu.clone());
+                        }
+                        let shown: Vec<String> = k.chords.iter().map(|c| keymap::symbols(c)).collect();
+                        let defaults: Vec<String> = k.defaults.iter().map(|c| keymap::symbols(c)).collect();
+                        let mut row = Row::new(RowKind::Action(k.clone()), k.label.clone());
+                        row.value = if shown.is_empty() { "none".into() } else { shown.join("  ") };
+                        row.note = k.origin.describe();
+                        row.description = format!(
+                            "{} · {}",
+                            k.name,
+                            if defaults.is_empty() {
+                                "no shortcut by default".to_string()
+                            } else {
+                                format!("by default {}", defaults.join(" "))
+                            }
+                        );
+                        row.keywords = format!("{} {} {}", k.name, k.chords.join(" "), shown.join(" "));
+                        rows.push(row);
                     }
-                    rows.push(Row {
-                        kind: RowKind::AddBind,
-                        label: "+ add a shortcut".into(),
-                        value: String::new(),
-                        note: String::new(),
-                        swatch: None,
-                        description: "Bind a new shortcut to a menu action or to text".into(),
-                    });
+                    rows.push(Row::new(RowKind::Header, "Keys that send text"));
+                    for b in binds.into_iter().filter(|b| matches!(b.bound, Bound::Text(_))) {
+                        let Bound::Text(t) = &b.bound else { continue };
+                        let mut row = Row::new(RowKind::Bind(b.clone()), keymap::symbols(&b.chord));
+                        row.value = format!("sends {t:?}");
+                        row.note = b.origin.describe();
+                        row.description = "enter: change the text · c: change the key · d: remove · r: reset".into();
+                        row.keywords = b.chord.clone();
+                        rows.push(row);
+                    }
+                    let mut add = Row::new(RowKind::AddBind, "+ add a key that sends text");
+                    add.description = "A key that types text into the program, such as Shift+Enter sending a new line".into();
+                    rows.push(add);
                 }
                 Editor::Map => {
                     for name in self.env_names(s.key) {
@@ -679,6 +839,7 @@ impl<'h> App<'h> {
                             value: item.map(format_item).unwrap_or_default(),
                             note: self.note(&origin, s.applies),
                             swatch: None,
+                            keywords: String::new(),
                             description: "enter: change the value · d: remove · r: reset".into(),
                             kind: RowKind::Env(s.key, name),
                         });
@@ -694,6 +855,7 @@ impl<'h> App<'h> {
                         }
                         .into(),
                         swatch: None,
+                        keywords: String::new(),
                         description: s.description.into(),
                     });
                 }
@@ -727,7 +889,27 @@ impl<'h> App<'h> {
         names
     }
 
-    fn rows(&self) -> Vec<Row> {
+    /// The rows shown: the section's, or every section's that match the
+    /// search. Worked out once until the files are read again or the
+    /// section or search changes, since every key and scroll step asks.
+    fn rows(&self) -> Rc<Vec<Row>> {
+        let key: RowsKey = (
+            self.generation.get(),
+            self.section,
+            self.search.as_ref().map(|s| s.query.clone()),
+            self.pin_file,
+        );
+        if let Some((k, rows)) = self.rows_cache.borrow().as_ref()
+            && *k == key
+        {
+            return rows.clone();
+        }
+        let rows = Rc::new(self.work_out_rows());
+        *self.rows_cache.borrow_mut() = Some((key, rows.clone()));
+        rows
+    }
+
+    fn work_out_rows(&self) -> Vec<Row> {
         match &self.search {
             Some(s) => {
                 let q = s.query.to_lowercase();
@@ -744,7 +926,12 @@ impl<'h> App<'h> {
                             RowKind::Setting(s) => s.key,
                             _ => "",
                         };
-                        q.is_empty() || r.label.to_lowercase().contains(&q) || r.description.to_lowercase().contains(&q) || key.contains(&q)
+                        r.selectable()
+                            && (q.is_empty()
+                                || r.label.to_lowercase().contains(&q)
+                                || r.description.to_lowercase().contains(&q)
+                                || key.contains(&q)
+                                || r.keywords.to_lowercase().contains(&q))
                     })
                     .collect()
             }
@@ -752,9 +939,25 @@ impl<'h> App<'h> {
         }
     }
 
+    /// The nearest row to `row` that can be selected (not a header),
+    /// looking first in direction `dir` (1 or -1).
+    fn selectable_near(rows: &[Row], row: usize, dir: isize) -> usize {
+        let n = rows.len() as isize;
+        for d in [dir, -dir] {
+            let mut r = row as isize;
+            while r >= 0 && r < n {
+                if rows[r as usize].selectable() {
+                    return r as usize;
+                }
+                r += d;
+            }
+        }
+        row
+    }
+
     fn clamp(&mut self) {
-        let n = self.rows().len();
-        self.row = self.row.min(n.saturating_sub(1));
+        let rows = self.rows();
+        self.row = Self::selectable_near(&rows, self.row.min(rows.len().saturating_sub(1)), 1);
     }
 
     /// Handles one event; `now` is for holding back fast writes.
@@ -789,7 +992,7 @@ impl<'h> App<'h> {
             Mode::List { .. } => return self.list(mode, event, now),
             Mode::Recording(then) => match event {
                 Event::Chord(c) => {
-                    self.chord_entered(then, &c, now);
+                    self.recorded(then, &c, now);
                     return;
                 }
                 Event::ChordCancelled | Event::Key(Key::Esc, _) => {
@@ -808,6 +1011,38 @@ impl<'h> App<'h> {
                 }
                 _ => Mode::Recording(then),
             },
+            Mode::Confirm(
+                q,
+                Confirmed::Clash {
+                    action,
+                    chord,
+                    how,
+                    other,
+                    swap,
+                },
+            ) => match event {
+                Event::Key(Key::Char(c @ ('y' | 'r' | 's')), _) if c != 's' || swap => {
+                    self.status = None;
+                    let how = if c == 's' { How::Swap } else { how };
+                    self.put_on_action(&action, &chord, how, other.as_deref(), now);
+                    self.clamp();
+                    Mode::Browse
+                }
+                Event::Key(Key::Char('n') | Key::Esc, _) => {
+                    self.say("cancelled");
+                    Mode::Browse
+                }
+                _ => Mode::Confirm(
+                    q,
+                    Confirmed::Clash {
+                        action,
+                        chord,
+                        how,
+                        other,
+                        swap,
+                    },
+                ),
+            },
             Mode::Confirm(q, action) => match event {
                 Event::Key(Key::Char('y'), _) => {
                     self.status = None;
@@ -817,14 +1052,18 @@ impl<'h> App<'h> {
                                 self.say(done);
                             }
                         }
-                        Confirmed::RemovePin(name) => match self.host.remove_pin(&name) {
-                            Ok(msg) => self.say(msg),
-                            Err(e) => self.fail(e),
-                        },
-                        Confirmed::PickAction(chord) => {
-                            self.pick_action(&chord);
+                        Confirmed::RemovePin(name) => {
+                            match self.host.remove_pin(&name) {
+                                Ok(msg) => self.say(msg),
+                                Err(e) => self.fail(e),
+                            }
+                            self.touch();
+                        }
+                        Confirmed::TextFor(chord) => {
+                            self.text_for(&chord);
                             return;
                         }
+                        Confirmed::Clash { .. } => unreachable!("handled above"),
                     }
                     self.clamp();
                     Mode::Browse
@@ -839,11 +1078,13 @@ impl<'h> App<'h> {
     }
 
     fn move_row(&mut self, delta: isize) {
-        let n = self.rows().len();
+        let rows = self.rows();
+        let n = rows.len();
         if n == 0 {
             return;
         }
-        self.row = (self.row as isize + delta).clamp(0, n as isize - 1) as usize;
+        let to = (self.row as isize + delta).clamp(0, n as isize - 1) as usize;
+        self.row = Self::selectable_near(&rows, to, if delta < 0 { -1 } else { 1 });
         self.status = None;
     }
 
@@ -906,17 +1147,19 @@ impl<'h> App<'h> {
             Key::Char('u') if plain => self.undo(now),
             Key::Char('e') if plain => self.effects.push(Effect::EditFile(self.layers.edited_path().to_path_buf())),
             Key::Char('d') if plain => self.remove(now),
-            Key::Char('c') if plain => {
-                if let Some(Row {
-                    kind: RowKind::Bind(b), ..
-                }) = self.selected()
-                {
-                    self.start_chord(Then::BindChord(Some(b.chord)));
-                }
+            // ⌫ clears a shortcut, as in macOS's key recorders.
+            Key::Backspace | Key::Delete if matches!(self.selected().map(|r| r.kind), Some(RowKind::Action(_) | RowKind::Bind(_))) => {
+                self.remove(now)
             }
-            Key::Char('a') if plain => match self.current_section() {
-                Section::Keys => self.start_chord(Then::BindChord(None)),
-                Section::Advanced => self.edit_text("Variable name", String::new(), TextKind::Plain, Then::EnvName("env")),
+            Key::Char('c') if plain => match self.selected().map(|r| r.kind) {
+                Some(RowKind::Bind(b)) => self.start_chord(Then::BindChord(Some(b.chord))),
+                Some(RowKind::Action(k)) => self.start_chord(Then::ActionChord(k.name, How::Replace)),
+                _ => {}
+            },
+            Key::Char('a') if plain => match (self.current_section(), self.selected().map(|r| r.kind)) {
+                (_, Some(RowKind::Action(k))) => self.start_chord(Then::ActionChord(k.name, How::Add)),
+                (Section::Keys, _) => self.start_chord(Then::BindChord(None)),
+                (Section::Advanced, _) => self.edit_text("Variable name", String::new(), TextKind::Plain, Then::EnvName("env")),
                 _ => {}
             },
             Key::Char('q') if plain => self.effects.push(Effect::Quit),
@@ -936,7 +1179,7 @@ impl<'h> App<'h> {
     }
 
     fn selected(&self) -> Option<Row> {
-        self.rows().into_iter().nth(self.row)
+        self.rows().get(self.row).cloned()
     }
 
     fn edit_text(&mut self, title: &str, value: String, kind: TextKind, then: Then) {
@@ -953,7 +1196,14 @@ impl<'h> App<'h> {
     fn start_chord(&mut self, then: Then) {
         if self.in_app {
             self.effects.push(Effect::Send("\x1b]7771;record-chord\x1b\\".into()));
-            self.say("press the shortcut · Esc cancels · t types it instead (macOS keeps Cmd+Tab, Cmd+Space)");
+            let clear = if matches!(then, Then::ActionChord(..)) {
+                " · ⌫ clears it"
+            } else {
+                ""
+            };
+            self.say(format!(
+                "press the shortcut · Esc cancels{clear} · t types it instead (macOS keeps ⌘Tab, ⌘Space)"
+            ));
             self.mode = Mode::Recording(then);
         } else {
             self.edit_text("Shortcut", String::new(), TextKind::Chord, then);
@@ -974,8 +1224,18 @@ impl<'h> App<'h> {
         };
     }
 
+    /// Reads the installed fonts again: each time a font list opens, so a
+    /// font installed while Settings is open is listed (Core Text is
+    /// asked afresh; nothing keeps the list in the app).
+    fn refresh_fonts(&mut self) {
+        self.fonts = Some(self.host.fonts());
+        self.sample = None;
+        self.sample_pace.cancel();
+        self.samples.borrow_mut().clear();
+    }
+
     /// Every installed family: the monospaced ones, then the others (the
-    /// list draws a header before each group).
+    /// list draws a header before each group), as last read.
     fn font_items(&mut self) -> Vec<(String, String)> {
         let fonts = self.fonts.get_or_insert_with(|| self.host.fonts());
         let (mono, other): (Vec<&Font>, Vec<&Font>) = fonts.iter().partition(|f| f.monospace);
@@ -989,6 +1249,39 @@ impl<'h> App<'h> {
     /// headers.
     pub(crate) fn is_monospace(&self, family: &str) -> Option<bool> {
         self.fonts.as_ref()?.iter().find(|f| f.family == family).map(|f| f.monospace)
+    }
+
+    /// Whether the family or face `name` is monospaced, if it is installed.
+    pub(crate) fn font_is_monospace(&self, name: &str) -> Option<bool> {
+        self.fonts
+            .as_ref()?
+            .iter()
+            .find(|f| f.family.eq_ignore_ascii_case(name) || f.faces.iter().any(|x| x.eq_ignore_ascii_case(name)))
+            .map(|f| f.monospace)
+    }
+
+    /// The font family in effect.
+    fn family(&self) -> String {
+        let (item, _) = self.layers.lookup(&path_of("font_family"));
+        item.and_then(Item::as_str).unwrap_or("").to_string()
+    }
+
+    /// The selection in a font list moved to `value` (a family, a face,
+    /// or "" for the family's own face): its sample is drawn once it has
+    /// rested for [`SAMPLE_AFTER`]. Nothing else changes until Enter.
+    fn offer_sample(&mut self, value: &str, now: Instant) {
+        let name = if value.is_empty() { self.family() } else { value.to_string() };
+        if self.sample.as_deref() == Some(name.as_str()) {
+            self.sample_pace.cancel();
+            return;
+        }
+        let _ = self.sample_pace.offer(name, now);
+    }
+
+    /// A font list closed: no sample.
+    fn end_sample(&mut self) {
+        self.sample = None;
+        self.sample_pace.cancel();
     }
 
     /// The faces of the family in effect, by full name, after "unset".
@@ -1027,14 +1320,19 @@ impl<'h> App<'h> {
                     }
                     Editor::Theme => {}
                     Editor::Font => {
+                        self.refresh_fonts();
                         let items = self.font_items();
-                        self.choose("Font family", items, &current, Then::Font(path), true);
-                        self.say("type to search · moving shows the font in every window · Esc puts back the old one");
+                        let title = if s.key == "font_family" { "Font family" } else { s.label };
+                        self.choose(title, items, &current, Then::Font(path), true);
+                        self.say("type to search · the sample shows the font under the selection · Enter uses it");
+                        self.offer_sample(&current, now);
                     }
                     Editor::Face => {
+                        self.refresh_fonts();
                         let items = self.face_items(s.unset);
                         self.choose(s.label, items, &current, Then::Set(path), true);
-                        self.say("type to search, or any face's full name · Esc puts back the old face");
+                        self.say("type to search, or any face's full name · Enter uses it");
+                        self.offer_sample(&current, now);
                     }
                     Editor::Number { min, max, step, integer } => {
                         self.sessions += 1;
@@ -1081,7 +1379,7 @@ impl<'h> App<'h> {
                 // they are not items.
                 let (mut own, mut other) = (Vec::new(), Vec::new());
                 for t in self.host.themes() {
-                    let info = self.host.theme_info(&t);
+                    let info = self.theme_info(&t);
                     let dark = info.as_ref().is_none_or(ThemeInfo::is_dark);
                     let title = info.map_or_else(|| t.clone(), |i| i.title);
                     if dark == (side == "dark") {
@@ -1100,21 +1398,17 @@ impl<'h> App<'h> {
                 self.edit_text(&row.label, v, TextKind::Colour, Then::Palette(i));
             }
             RowKind::Bind(b) => {
-                let mut items: Vec<(String, String)> = self
-                    .host
-                    .actions()
-                    .into_iter()
-                    .map(|a| (a.name.clone(), format!("{} ({})", a.label, a.name)))
-                    .collect();
-                items.push(("none".into(), "none: the key does what it does with no shortcut".into()));
-                items.push(("\ttext".into(), "send text…".into()));
-                let current = match &b.bound {
-                    Bound::Action(a) => a.clone(),
-                    Bound::Unbound => "none".into(),
-                    Bound::Text(_) => "\ttext".into(),
+                let text = match &b.bound {
+                    Bound::Text(t) => escape(t),
+                    _ => String::new(),
                 };
-                self.choose(&format!("{} does", b.chord), items, &current, Then::BindAction(b.chord), false);
+                let sym = keymap::symbols(&b.chord);
+                self.edit_text(&format!("{sym} sends"), text, TextKind::Plain, Then::BindText(b.chord));
+                self.say(format!(
+                    "the text {sym} sends; escapes such as \\e and \\u001b are written as typed"
+                ));
             }
+            RowKind::Action(k) => self.start_chord(Then::ActionChord(k.name, How::Replace)),
             RowKind::AddBind => self.start_chord(Then::BindChord(None)),
             RowKind::Env(key, name) => {
                 let v = self
@@ -1141,7 +1435,7 @@ impl<'h> App<'h> {
                 self.parent = Some(back);
                 self.say(format!("editing {}'s settings, over yours · Esc goes back", p.name));
             }
-            RowKind::Info => {}
+            RowKind::Info | RowKind::Header => {}
         }
     }
 
@@ -1152,6 +1446,18 @@ impl<'h> App<'h> {
 
     fn reset(&mut self, now: Instant) {
         let Some(row) = self.selected() else { return };
+        if let RowKind::Action(k) = &row.kind {
+            let plan = keymap::plan_reset(&self.layers.keybinds(self.host), &self.below_binds(), &k.name);
+            let shown = keymap::chords_of(&self.below_binds(), &k.name)
+                .iter()
+                .map(|c| keymap::symbols(c))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let to = if shown.is_empty() { "no shortcut".to_string() } else { shown };
+            self.apply_binds(plan, format!("{} reset to {to} · u undoes", k.label), now);
+            self.clamp();
+            return;
+        }
         let (edit, what) = match &row.kind {
             RowKind::Setting(s) => {
                 if s.keep_in_pin && self.pin_file {
@@ -1207,14 +1513,32 @@ impl<'h> App<'h> {
         self.clamp();
     }
 
+    /// The shortcuts the layers below the edited file give (the defaults
+    /// for the user's own file).
+    fn below_binds(&self) -> Vec<Bind> {
+        let below = Layers::load(self.layers.paths[..self.layers.edit].to_vec(), usize::MAX, "");
+        below.keybinds(self.host)
+    }
+
     /// The binding the layers below the edited file give `chord`.
     fn bound_below(&self, chord: &str) -> Bound {
-        let below = Layers::load(self.layers.paths[..self.layers.edit].to_vec(), usize::MAX, "");
-        below
-            .keybinds(self.host)
+        self.below_binds()
             .into_iter()
             .find(|b| b.chord == chord)
             .map_or(Bound::Unbound, |b| b.bound)
+    }
+
+    /// Writes the bindings `plan` asks for (each chord and what it should
+    /// do) as one edit, one undo, and says `done`.
+    fn apply_binds(&mut self, plan: Vec<(String, Bound)>, done: String, now: Instant) {
+        let edits: Vec<Edit> = plan.into_iter().map(|(c, want)| self.bind_edit(&c, want)).collect();
+        if edits.is_empty() {
+            self.say(done);
+            return;
+        }
+        if self.commit(Edit::Many(edits), now) {
+            self.say(done);
+        }
     }
 
     /// The edit that makes `chord` do `want`: removing this file's entry if
@@ -1243,10 +1567,22 @@ impl<'h> App<'h> {
     fn remove(&mut self, now: Instant) {
         let Some(row) = self.selected() else { return };
         match row.kind {
+            RowKind::Action(k) => {
+                let plan = keymap::plan_clear(&self.layers.keybinds(self.host), &k.name);
+                if plan.is_empty() {
+                    self.say(format!("{} has no shortcut", k.label));
+                } else {
+                    self.apply_binds(
+                        plan,
+                        format!("{} has no shortcut now · r gives back the default · u undoes", k.label),
+                        now,
+                    );
+                }
+            }
             RowKind::Bind(b) => {
                 let edit = self.bind_edit(&b.chord, Bound::Unbound);
                 if self.commit(edit, now) {
-                    self.say(format!("{} unbound · u undoes", b.chord));
+                    self.say(format!("{} removed · u undoes", keymap::symbols(&b.chord)));
                 }
             }
             RowKind::Env(key, n) => {
@@ -1330,17 +1666,8 @@ impl<'h> App<'h> {
                     }
                 }
             }
-            Then::BindAction(chord) => {
-                if value == "\ttext" {
-                    self.edit_text(&format!("{chord} sends"), String::new(), TextKind::Plain, Then::BindText(chord));
-                    self.say("the text to send; escapes such as \\u001b are written as typed");
-                    return;
-                }
-                let want = if value == "none" { Bound::Unbound } else { Bound::Action(value) };
-                self.bind_edit(&chord, want)
-            }
             Then::BindText(chord) => self.bind_edit(&chord, Bound::Text(unescape(&value))),
-            Then::BindChord(from) => return self.chord_entered(Then::BindChord(from), &value, now),
+            Then::BindChord(_) | Then::ActionChord(..) => return self.chord_entered(then, &value, now),
             Then::EnvName(key) => {
                 if value.is_empty() {
                     return;
@@ -1371,7 +1698,53 @@ impl<'h> App<'h> {
         self.clamp();
     }
 
-    /// A chord recorded or typed, for a binding's new shortcut.
+    /// A key the app recorded: a shortcut, or ⌫ to clear, `t` to type
+    /// one instead, or a plain key, which can't be an action's shortcut
+    /// (it types), so recording goes on.
+    fn recorded(&mut self, then: Then, chord: &str, now: Instant) {
+        let action = matches!(then, Then::ActionChord(..));
+        match keymap::recorded(chord) {
+            Recorded::Clear => {
+                if let Then::ActionChord(name, _) = &then {
+                    let plan = keymap::plan_clear(&self.layers.keybinds(self.host), name);
+                    let label = self.action_label(name);
+                    self.apply_binds(
+                        plan,
+                        format!("{label} has no shortcut now · r gives back the default · u undoes"),
+                        now,
+                    );
+                } else {
+                    self.say("cancelled");
+                }
+            }
+            Recorded::TypeIt => {
+                self.edit_text("Shortcut", String::new(), TextKind::Chord, then);
+                self.say("type the shortcut, such as cmd+shift+k");
+            }
+            Recorded::Plain(c) if action => {
+                self.start_chord(then);
+                self.fail(format!(
+                    "{} types: a shortcut needs ⌘, ⌃ or ⌥ (or is an F-key) · press another, Esc cancels",
+                    keymap::symbols(&c)
+                ));
+            }
+            Recorded::Plain(c) | Recorded::Chord(c) => self.chord_entered(then, &c, now),
+        }
+    }
+
+    /// What taking `chord` from the menu item that has it fixed says, if
+    /// one does (Quit, Hide, Cmd+1…9).
+    fn takes_fixed(&self, chord: &str) -> String {
+        self.host
+            .fixed_chords()
+            .into_iter()
+            .find(|(c, _)| self.host.parse_chord(c).ok().as_deref() == Some(chord))
+            .map(|(_, item)| format!(" (it takes {} from {item})", keymap::symbols(chord)))
+            .unwrap_or_default()
+    }
+
+    /// A chord recorded or typed, for an action's new shortcut or a text
+    /// key.
     fn chord_entered(&mut self, then: Then, text: &str, now: Instant) {
         let chord = match self.host.parse_chord(text) {
             Ok(c) => c,
@@ -1380,36 +1753,80 @@ impl<'h> App<'h> {
                 return;
             }
         };
-        let Then::BindChord(from) = then else { return };
         let binds = self.layers.keybinds(self.host);
-        let actions = self.host.actions();
+        let sym = keymap::symbols(&chord);
+        let fixed = self.takes_fixed(&chord);
+        let from = match then {
+            Then::ActionChord(name, how) => {
+                if !keymap::usable(&chord) {
+                    self.fail(format!("{sym} types: a shortcut needs ⌘, ⌃ or ⌥ (or is an F-key)"));
+                    return;
+                }
+                let label = self.action_label(&name);
+                match keymap::taken(&binds, &chord, &name) {
+                    Taken::Free | Taken::Same => self.put_on_action(&name, &chord, how, None, now),
+                    Taken::Action(other) => {
+                        let other_label = self.action_label(&other);
+                        let old = keymap::chords_of(&binds, &name);
+                        // A swap gives the other action this one's old
+                        // shortcuts: only when replacing, and it has some.
+                        let swap = how == How::Replace && !old.is_empty();
+                        let old_shown = old.iter().map(|c| keymap::symbols(c)).collect::<Vec<_>>().join(" ");
+                        let q = if swap {
+                            format!("{sym} is {other_label}'s: swap (it gets {old_shown}), or replace (it loses it)?")
+                        } else {
+                            format!("{sym} is {other_label}'s: give it to {label} instead?")
+                        };
+                        self.mode = Mode::Confirm(
+                            q,
+                            Confirmed::Clash {
+                                action: name,
+                                chord,
+                                how,
+                                other: Some(other),
+                                swap,
+                            },
+                        );
+                    }
+                    Taken::Text(t) => {
+                        self.mode = Mode::Confirm(
+                            format!("{sym} sends {t:?}: give it to {label} instead?"),
+                            Confirmed::Clash {
+                                action: name,
+                                chord,
+                                how,
+                                other: None,
+                                swap: false,
+                            },
+                        );
+                    }
+                }
+                return;
+            }
+            Then::BindChord(from) => from,
+            _ => return,
+        };
+        let actions = &self.actions;
         let label = |b: &Bound| match b {
             Bound::Action(a) => actions.iter().find(|x| &x.name == a).map_or(a.clone(), |x| x.label.clone()),
             Bound::Text(t) => format!("sending {t:?}"),
             Bound::Unbound => "nothing".into(),
         };
-        let fixed = self
-            .host
-            .fixed_chords()
-            .into_iter()
-            .find(|(c, _)| self.host.parse_chord(c).ok().as_deref() == Some(&chord))
-            .map(|(_, item)| format!(" (it takes {chord} from {item})"))
-            .unwrap_or_default();
         match from {
             None => {
-                // A new binding: pick its action next, after asking if the
-                // chord is in use.
+                // A new text key: its text next, after asking if the chord
+                // is in use.
                 if let Some(b) = binds.iter().find(|b| b.chord == chord && b.bound != Bound::Unbound) {
                     self.mode = Mode::Confirm(
-                        format!("{chord} is {}: replace?{fixed} (y/n)", label(&b.bound)),
-                        Confirmed::PickAction(chord),
+                        format!("{sym} is {}: replace?{fixed} (y/n)", label(&b.bound)),
+                        Confirmed::TextFor(chord),
                     );
                     return;
                 }
+                self.text_for(&chord);
                 if !fixed.is_empty() {
-                    self.say(format!("pick what {chord} does{fixed}"));
+                    self.say(format!("the text {sym} sends{fixed}"));
                 }
-                self.pick_action(&chord);
             }
             Some(old) => {
                 if old == chord {
@@ -1418,14 +1835,15 @@ impl<'h> App<'h> {
                 let Some(moving) = binds.iter().find(|b| b.chord == old).map(|b| b.bound.clone()) else {
                     return;
                 };
-                let edit = Edit::Many(vec![self.bind_edit(&chord, moving.clone()), self.bind_edit(&old, Bound::Unbound)]);
-                let done = format!("{} is now on {chord}{fixed} · u undoes", label(&moving));
-                match binds.iter().find(|b| b.chord == chord && b.bound != Bound::Unbound) {
-                    Some(b) => {
-                        self.mode = Mode::Confirm(
-                            format!("{chord} is {}: replace? (y/n)", label(&b.bound)),
-                            Confirmed::Edit(Box::new(edit), done),
-                        );
+                let done = format!("{} is now on {sym}{fixed} · u undoes", label(&moving));
+                let in_use = binds
+                    .iter()
+                    .find(|b| b.chord == chord && b.bound != Bound::Unbound)
+                    .map(|b| label(&b.bound));
+                let edit = Edit::Many(vec![self.bind_edit(&chord, moving), self.bind_edit(&old, Bound::Unbound)]);
+                match in_use {
+                    Some(what) => {
+                        self.mode = Mode::Confirm(format!("{sym} is {what}: replace? (y/n)"), Confirmed::Edit(Box::new(edit), done));
                     }
                     None => {
                         if self.commit(edit, now) {
@@ -1437,18 +1855,48 @@ impl<'h> App<'h> {
         }
     }
 
-    /// The action picker for a new binding on `chord`.
-    fn pick_action(&mut self, chord: &str) {
-        let status = self.status.take();
-        let mut items: Vec<(String, String)> = self
-            .host
-            .actions()
-            .into_iter()
-            .map(|a| (a.name.clone(), format!("{} ({})", a.label, a.name)))
-            .collect();
-        items.push(("\ttext".into(), "send text…".into()));
-        self.choose(&format!("{chord} does"), items, "", Then::BindAction(chord.to_string()), false);
-        self.status = status;
+    /// Puts `chord` on action `name`, `how`; `other` is the action that
+    /// had it, if any, for the message.
+    fn put_on_action(&mut self, name: &str, chord: &str, how: How, other: Option<&str>, now: Instant) {
+        let binds = self.layers.keybinds(self.host);
+        let plan = keymap::plan(&binds, name, chord, how);
+        let (label, sym) = (self.action_label(name), keymap::symbols(chord));
+        let fixed = self.takes_fixed(chord);
+        if plan.len() == 1 && keymap::taken(&binds, chord, name) == Taken::Same {
+            self.say(format!("{sym} is {label}'s shortcut already"));
+            return;
+        }
+        let shortcuts = keymap::chords_of(&binds, name);
+        let mut done = match how {
+            How::Add if !shortcuts.is_empty() => format!("{label} is on {sym} too{fixed}"),
+            _ => format!("{label} is now on {sym}{fixed}"),
+        };
+        if let Some(other) = other {
+            let other_label = self.action_label(other);
+            done.push_str(&match how {
+                How::Swap => {
+                    let old: Vec<String> = shortcuts.iter().filter(|c| *c != chord).map(|c| keymap::symbols(c)).collect();
+                    format!(", {other_label} on {}", old.join(" "))
+                }
+                _ => format!(", {other_label} lost it"),
+            });
+        }
+        done.push_str(" · u undoes");
+        self.apply_binds(plan, done, now);
+    }
+
+    /// The text editor for a new text key on `chord`.
+    fn text_for(&mut self, chord: &str) {
+        let sym = keymap::symbols(chord);
+        self.edit_text(
+            &format!("{sym} sends"),
+            String::new(),
+            TextKind::Plain,
+            Then::BindText(chord.to_string()),
+        );
+        self.say(format!(
+            "the text {sym} sends; escapes such as \\e and \\u001b are written as typed"
+        ));
     }
 
     fn choice(&mut self, mode: Mode, event: Event, now: Instant) {
@@ -1472,8 +1920,14 @@ impl<'h> App<'h> {
         let theme_list = matches!(then, Then::ThemeSide(_));
         match event {
             Event::Key(Key::Esc, _) => {
+                // Nothing was written or restyled for a font; a theme
+                // preview goes back to the config's.
                 self.end_preview(false);
+                self.end_sample();
                 self.say("cancelled");
+                if let Then::ListItem(path, _) = then {
+                    self.mode = Mode::List { path, fonts, sel: 0 };
+                }
                 return;
             }
             Event::Key(Key::Enter, _) => {
@@ -1494,6 +1948,7 @@ impl<'h> App<'h> {
                     }
                 };
                 let undo = self.undo.len();
+                self.end_sample();
                 self.committed(then, value, now);
                 // Kept only if it was written; else back to the old one.
                 self.end_preview(self.undo.len() > undo);
@@ -1519,15 +1974,13 @@ impl<'h> App<'h> {
         }
         let list = shown(&items, &filter);
         sel = sel.min(list.len().saturating_sub(1));
-        if theme_list && let Some(&i) = list.get(sel) {
-            let name = items[i].0.clone();
-            self.preview(&name);
-        }
-        if let Some(key) = font_key(&then)
-            && let Some(&i) = list.get(sel)
-        {
-            let name = items[i].0.clone();
-            self.preview_font(key, &name);
+        if let Some(&i) = list.get(sel) {
+            let value = items[i].0.clone();
+            if theme_list {
+                self.offer_preview(value, now);
+            } else if fonts {
+                self.offer_sample(&value, now);
+            }
         }
         self.mode = Mode::Choice {
             title,
@@ -1539,25 +1992,40 @@ impl<'h> App<'h> {
         };
     }
 
-    /// In a theme list: previews the theme under the selection.
-    fn preview_choice(&mut self) {
+    /// The selection in a list moved by mouse: a theme list previews the
+    /// theme under it, a font list shows its sample.
+    fn choice_moved(&mut self, now: Instant) {
         let Mode::Choice {
             items,
             filter,
             sel,
-            then: Then::ThemeSide(_),
+            then,
+            fonts,
             ..
         } = &self.mode
         else {
             return;
         };
         let f = filter.to_lowercase();
-        let name = items
+        let value = items
             .iter()
             .filter(|(v, l)| f.is_empty() || l.to_lowercase().contains(&f) || v.to_lowercase().contains(&f))
             .nth(*sel)
             .map(|(v, _)| v.clone());
-        if let Some(name) = name {
+        let (theme_list, fonts) = (matches!(then, Then::ThemeSide(_)), *fonts);
+        if let Some(value) = value {
+            if theme_list {
+                self.offer_preview(value, now);
+            } else if fonts {
+                self.offer_sample(&value, now);
+            }
+        }
+    }
+
+    /// Theme `name` is under the selection: previewed at once, or, while
+    /// the selection moves faster than [`PREVIEW_EVERY`], when it is up.
+    fn offer_preview(&mut self, name: String, now: Instant) {
+        if let Some(name) = self.theme_pace.offer(name, now) {
             self.preview(&name);
         }
     }
@@ -1577,27 +2045,11 @@ impl<'h> App<'h> {
         self.previewed = Some((name.to_string(), colours));
     }
 
-    /// Shows font setting `key` as `name` in every window (the app's live
-    /// preview), if it isn't already.
-    fn preview_font(&mut self, key: &str, name: &str) {
-        if self.font_previewed.as_ref().is_some_and(|(k, n)| k == key && n == name) {
-            return;
-        }
-        if self.in_app {
-            let ask = Preview::Font {
-                key: key.to_string(),
-                name: name.to_string(),
-            };
-            self.effects.push(Effect::Send(ask.osc()));
-        }
-        self.font_previewed = Some((key.to_string(), name.to_string()));
-    }
-
-    /// The theme or font list closed: what was written is kept (`keep`),
-    /// else the windows go back to the config's.
+    /// The theme list closed: what was written is kept (`keep`), else the
+    /// windows go back to the config's.
     fn end_preview(&mut self, keep: bool) {
-        let font = self.font_previewed.take().is_some();
-        if (self.previewed.take().is_some() || font) && self.in_app {
+        self.theme_pace.cancel();
+        if self.previewed.take().is_some() && self.in_app {
             let ask = if keep { Preview::Keep } else { Preview::Cancel };
             self.effects.push(Effect::Send(ask.osc()));
         }
@@ -1844,8 +2296,11 @@ impl<'h> App<'h> {
             }
             Key::Char('a') => {
                 if fonts {
+                    self.refresh_fonts();
                     let items = self.font_items();
+                    let first = items.first().map(|(v, _)| v.clone()).unwrap_or_default();
                     self.choose("Add a fallback font", items, "", Then::ListItem(path, None), true);
+                    self.offer_sample(&first, now);
                 } else {
                     self.edit_text("Add", String::new(), TextKind::Plain, Then::ListItem(path, None));
                 }
@@ -1886,7 +2341,7 @@ impl<'h> App<'h> {
                                 if again {
                                     self.handle(Event::Key(Key::Enter, Mods::NONE), now);
                                 } else {
-                                    self.preview_choice();
+                                    self.choice_moved(now);
                                 }
                             }
                             _ => {}
@@ -1911,7 +2366,7 @@ impl<'h> App<'h> {
                 let (x0, x1, y0, first, count) = hit.rows;
                 if (x0..x1).contains(&x) && y >= y0 && y < y0 + count {
                     let i = first + (y - y0);
-                    if i < self.rows().len() {
+                    if self.rows().get(i).is_some_and(Row::selectable) {
                         if self.row == i {
                             self.activate(now);
                         } else {
@@ -1924,6 +2379,24 @@ impl<'h> App<'h> {
             _ => {}
         }
     }
+}
+
+/// Text to send as it is typed: controls as `\e`, `\n`, `\r`, `\t` or
+/// `\u001b`, and `\` doubled ([`unescape`] reads it back).
+fn escape(s: &str) -> String {
+    let mut out = String::new();
+    for c in s.chars() {
+        match c {
+            '\x1b' => out.push_str("\\e"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\\' => out.push_str("\\\\"),
+            c if c.is_control() => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// `\u001b`, `\e`, `\n`, `\t` and `\\` in typed text.
@@ -1968,6 +2441,10 @@ mod tests {
         assert_eq!(number_value(14.0, false).to_string(), "14");
         assert_eq!(number_value(1.25, false).to_string(), "1.25");
         assert_eq!(unescape("\\u001b[1;5A\\e"), "\x1b[1;5A\x1b");
+        for text in ["\x1b[116;5u", "a\nb\\c\t", "\x07bell"] {
+            assert_eq!(unescape(&escape(text)), text, "{text:?}");
+        }
+        assert_eq!(escape("\x1b[A\n"), "\\e[A\\n");
         assert!(luminance(0xffffff) > 0.9 && luminance(0x16181c) < 0.1);
     }
 }

@@ -142,6 +142,7 @@ pub fn actions() -> Vec<Action> {
         .map(|a| Action {
             name: a.name().into(),
             label: a.label().into(),
+            menu: a.menu().into(),
         })
         .collect()
 }
@@ -186,6 +187,10 @@ impl Host for AppHost {
 
     fn fonts(&self) -> Vec<Font> {
         fonts()
+    }
+
+    fn font_sample(&self, name: &str, text: &str, width: u32, height: u32, fg: u32, bg: u32) -> Option<Vec<u8>> {
+        term_font::sample(name, text, width, height, fg, bg)
     }
 
     fn themes(&self) -> Vec<String> {
@@ -348,6 +353,17 @@ mod tests {
         assert_eq!(a.len(), MenuAction::ALL.len());
         assert!(a.iter().any(|a| a.name == "settings" && a.label == "Settings…"));
         assert!(a.iter().any(|a| a.name == "new_tab" && a.label == "New Tab"));
+        // Grouped by the menus they are in, for Settings' shortcut list.
+        assert!(a.iter().any(|a| a.name == "new_tab" && a.menu == "Shell"));
+        assert!(a.iter().any(|a| a.name == "find" && a.menu == "Edit"));
+        assert!(a.iter().any(|a| a.name == "split_right" && a.menu == "Shell"));
+        assert!(a.iter().any(|a| a.name == "next_tab" && a.menu == "Window"));
+        assert!(a.iter().any(|a| a.name == "settings" && a.menu == "App"));
+        let menus: Vec<&str> = term_prefs::keymap::MENUS.iter().map(|(m, _)| *m).collect();
+        assert!(
+            a.iter().all(|a| menus.contains(&a.menu.as_str())),
+            "every menu is one Settings knows"
+        );
         // The update actions can be bound (Settings lists them), with no
         // chord by default.
         for (name, label) in [

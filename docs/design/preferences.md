@@ -135,6 +135,26 @@ its text colour on its background, then its first six ANSI colours.
 - Ctrl+L repaints everything (Cmd+K clears the screen and sends ^L), as
   does a resize (a font change resizes the tab).
 
+### Using the space (landed 1 Nov 2026)
+
+Setting names are shown whole: the label column is as wide as the
+longest label in the list, up to about half the width, and only then cut
+with `…`. Where there is room (about 100 columns and up) each setting's
+description from the schema sits beside it in a dim column; narrower,
+the line under the list has the selected one's, over two lines when it
+is long, except in Appearance, where the second line is the colour
+sample (`draw::columns`, `frame::wrap2`).
+
+### Keeping it quick (landed 1 Nov 2026)
+
+- A held key in a theme list previews at most every 100 ms
+  (`PREVIEW_EVERY`, a throttle): each preview restyles every window. It
+  always ends on the theme where the key stopped.
+- The font sample waits for the selection to rest (above).
+- The rows are worked out once per change (cached against the section,
+  search, file and mode), not on every key and scroll step, and the pins
+  are read when the files change, not on every key.
+
 ## Keeping the prefs tab usable
 
 When the tab is in front it is the preview, so settings that break text
@@ -323,7 +343,27 @@ window's theme changing (`apply_config`, `appearance_changed`).
   Minimize, Cmd+1…9) takes it from that item (`keeps_fixed`), and the TUI
   says so.
 
-### Recording a chord
+### The shortcut list (landed 1 Nov 2026)
+
+The Keys page lists every menu action (`MenuAction::ALL`) under the menu
+it is in (App, Shell, Edit, View, Window, from `MenuAction::menu`), with
+all its shortcuts as the menus show them (⌃⌥⇧⌘, in that order), then
+the keys that send text. `/` filters it, as it does every setting, by
+the action's name, its config name and its shortcut (`⌘T` or `cmd+t`). On an action:
+
+- Enter or `c` records the next shortcut pressed (see below), replacing
+  the action's own; `a` adds one beside them. Esc cancels while
+  recording, ⌫ clears, `t` types it instead.
+- A shortcut another action has asks first: "⌘N is New Window's: swap
+  (it gets ⌘T), or replace (it loses it)?". Swap gives the other action
+  this one's old shortcut; replace leaves it without one.
+- ⌫ clears the action's shortcuts (a default becomes `"chord" =
+  "none"`), and `r` puts back its defaults (the entries are deleted).
+- Each change is one undo step, written as `[keybind]` entries like any
+  other setting (`keymap::plan`, `plan_clear`, `plan_reset`: pure, and
+  unit tested).
+- With room, each row shows its config name and its default beside it.
+
 
 A program can't receive Cmd chords in Terminal Decline: Cmd stays with the
 menus whatever the kitty flags, bound Cmd chords are matched by the menus
@@ -396,12 +436,34 @@ The bold, italic and bold italic face rows pick from the configured
 family's own faces by full name ("Menlo Bold"), or unset (the family's
 own); any other face's name can be typed.
 
-Like the theme lists, the family and face lists preview live: moving
-sends `OSC 7771 ; theme-preview ; font ; <key> ; <name> ST` (key one of
-`font_family`, `font_bold`, `font_italic`, `font_bold_italic`; an empty
-name is unset), and every window takes that font on over the config. Esc
-sends `cancel`, Enter writes the setting and sends `keep`, as for themes.
-A TUI can't draw each row in its own font, so the preview is the sample.
+The family and face lists first previewed live, like the theme lists:
+moving sent `OSC 7771 ; theme-preview ; font ; <key> ; <name> ST` and
+every window took that font on. That restyled the whole app (and the
+Settings tab with it) on every key and every letter typed into the
+filter, so it was replaced; the app still understands the message.
+
+### Font sample, and fonts installed meanwhile (landed 1 Nov 2026)
+
+- Moving through a font list, or typing to filter it, changes nothing:
+  nothing is sent to the app and nothing is written. Once the selection
+  has rested for 200 ms (`SAMPLE_AFTER`, a debounce in `pace.rs`), the
+  list shows the font under it: its name, "monospaced" or "not
+  monospaced: letters won't line up", and in the app a picture of
+  `AaBbGg 0O 1lI |{}[]() => != ~/src $` in that font. term-font's `sample` draws
+  it with Core Text (a few ms) in the tab's colours, at the cells' pixel
+  size (`TIOCGWINSZ`), and the frame sends it with the kitty graphics
+  protocol once per font, and takes it off when the list closes. Run by
+  hand outside the app there is no picture (other terminals may not show
+  one). Enter writes the setting, and the app's reload applies it; Esc
+  leaves everything as it was, since nothing was changed.
+- Fonts that aren't monospaced stay under "Not monospaced (uneven in a
+  terminal)" at the bottom, and the sample line says so.
+- The font list was read once per Settings tab: `App` kept the first
+  answer of `Host::fonts` for as long as the tab was open (the host
+  itself never cached it; each call asks Core Text afresh). A font
+  installed while the tab was open showed up only in a new Settings tab.
+  Now the list is read each time a font list opens (100–300 ms, only on
+  opening), so a newly installed font is there the next time.
 
 ## Accessibility
 
@@ -652,7 +714,8 @@ defaults copy as a plain function.
    per session; hangs aren't). A separate binary without AppKit would save
    only 0.8 MB.
 3. Font picker: monospace fonts first, then the others under a header,
-   previewed live in every window (see "Fonts").
+   previewed live in every window (see "Fonts"). Since 1 Nov 2026,
+   previewed in a sample inside the list instead.
 
 ## Later
 

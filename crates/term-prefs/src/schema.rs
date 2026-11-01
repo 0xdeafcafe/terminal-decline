@@ -60,11 +60,12 @@ pub enum Editor {
     /// A theme name, or a light/dark pair of them.
     Theme,
     /// A font family: every installed family, monospaced ones first, then
-    /// the others under a header; moving previews it in every window.
+    /// the others under a header; the one under the selection is shown
+    /// in a sample in the list, and nothing changes until Enter.
     Font,
     /// A face of the configured family (`font_bold`): its own faces by
-    /// full name, or unset; any other face's name can be typed. Moving
-    /// previews it.
+    /// full name, or unset; any other face's name can be typed. Sampled
+    /// like a family.
     Face,
     /// A number: ←→ steps by `step` within `min..=max`, or type it.
     Number { min: f64, max: f64, step: f64, integer: bool },
@@ -296,7 +297,7 @@ pub const SETTINGS: &[Setting] = &[
         "Family",
         Font,
         Editor::Font,
-        "The font the text is drawn with: monospaced fonts first; moving through the list previews it, Esc puts back the old one",
+        "The font the text is drawn with: monospaced fonts first; the list shows a sample of each, and Enter uses it",
     ),
     setting(
         "font_size",

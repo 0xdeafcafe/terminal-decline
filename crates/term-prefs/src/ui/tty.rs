@@ -159,6 +159,20 @@ impl Tty {
         }
     }
 
+    /// A cell's size in pixels, as the terminal reports it; (0, 0) if it
+    /// doesn't.
+    pub fn cell_pixels(&self) -> (u32, u32) {
+        // SAFETY: TIOCGWINSZ fills a winsize.
+        unsafe {
+            let mut ws: libc::winsize = std::mem::zeroed();
+            if libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut ws) == 0 && ws.ws_col > 0 && ws.ws_row > 0 {
+                ((ws.ws_xpixel / ws.ws_col) as u32, (ws.ws_ypixel / ws.ws_row) as u32)
+            } else {
+                (0, 0)
+            }
+        }
+    }
+
     pub fn write(&self, s: &str) -> io::Result<()> {
         let mut out = io::stdout().lock();
         out.write_all(s.as_bytes())?;

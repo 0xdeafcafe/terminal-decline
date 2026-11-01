@@ -71,6 +71,9 @@ pub struct Action {
     pub name: String,
     /// The menu item: `New Tab`.
     pub label: String,
+    /// The menu it is in, for grouping: `App` (the app's own menu),
+    /// `Shell`, `Edit`, `View` or `Window`.
+    pub menu: String,
 }
 
 /// Called by the host when a watched file changes; safe to call from any
@@ -91,9 +94,19 @@ pub trait Host {
     /// no default value are left out.
     fn defaults(&self) -> String;
 
-    /// The installed font families. Slow (90–280 ms): asked for when the
-    /// picker first opens.
+    /// The installed font families. Slow (90–280 ms): asked for each
+    /// time a font list opens, so a font installed meanwhile is listed.
     fn fonts(&self) -> Vec<Font>;
+
+    /// `text` drawn in font `name` (a family, or a face's full name) in
+    /// `fg` on `bg`, as `width` × `height` RGB pixels (3 bytes each, rows
+    /// top first): the sample a font list shows for the font under the
+    /// selection. `None` if no such font is installed, or the host can't
+    /// draw (the default).
+    fn font_sample(&self, name: &str, text: &str, width: u32, height: u32, fg: u32, bg: u32) -> Option<Vec<u8>> {
+        let _ = (name, text, width, height, fg, bg);
+        None
+    }
 
     /// The theme names: built-in and in the themes folder.
     fn themes(&self) -> Vec<String>;
@@ -157,13 +170,18 @@ pub trait Host {
 #[derive(Default)]
 pub struct Fake {
     pub user_config: PathBuf,
-    pub fonts: Vec<Font>,
+    /// The installed fonts; tests add one to "install" it.
+    pub fonts: RefCell<Vec<Font>>,
     pub themes: Vec<String>,
     pub pins: RefCell<Vec<Pin>>,
     /// Pins that are running and can't be removed.
     pub running: Vec<String>,
     /// How many times [`Host::fonts`] was asked.
     pub font_scans: RefCell<usize>,
+    /// The fonts [`Host::font_sample`] drew, in order.
+    pub samples: RefCell<Vec<String>>,
+    /// How many times [`Host::pins`] was asked.
+    pub pin_reads: RefCell<usize>,
     /// The last watch set up.
     pub watched: Mutex<Option<(Vec<PathBuf>, Wake)>>,
 }
@@ -172,17 +190,19 @@ impl Fake {
     pub fn new(user_config: PathBuf) -> Fake {
         Fake {
             user_config,
-            fonts: ["Menlo", "Monaco", "SF Mono", "Helvetica", "Apple Color Emoji"]
-                .into_iter()
-                .map(|f| Font {
-                    family: f.into(),
-                    monospace: matches!(f, "Menlo" | "Monaco" | "SF Mono"),
-                    faces: match f {
-                        "Menlo" | "SF Mono" => ["Regular", "Bold", "Italic", "Bold Italic"].map(|s| format!("{f} {s}")).to_vec(),
-                        _ => vec![format!("{f} Regular")],
-                    },
-                })
-                .collect(),
+            fonts: RefCell::new(
+                ["Menlo", "Monaco", "SF Mono", "Helvetica", "Apple Color Emoji"]
+                    .into_iter()
+                    .map(|f| Font {
+                        family: f.into(),
+                        monospace: matches!(f, "Menlo" | "Monaco" | "SF Mono"),
+                        faces: match f {
+                            "Menlo" | "SF Mono" => ["Regular", "Bold", "Italic", "Bold Italic"].map(|s| format!("{f} {s}")).to_vec(),
+                            _ => vec![format!("{f} Regular")],
+                        },
+                    })
+                    .collect(),
+            ),
             themes: ["slope-dark", "slope-light", "solarized-dark", "tokyo-night"]
                 .map(String::from)
                 .to_vec(),
@@ -335,7 +355,29 @@ impl Host for Fake {
 
     fn fonts(&self) -> Vec<Font> {
         *self.font_scans.borrow_mut() += 1;
-        self.fonts.clone()
+        self.fonts.borrow().clone()
+    }
+
+    /// The sample's pixels: `bg`, with a band of `fg` across the middle,
+    /// for the fonts installed (families and faces).
+    fn font_sample(&self, name: &str, _text: &str, width: u32, height: u32, fg: u32, bg: u32) -> Option<Vec<u8>> {
+        let known = self
+            .fonts
+            .borrow()
+            .iter()
+            .any(|f| f.family.eq_ignore_ascii_case(name) || f.faces.iter().any(|x| x.eq_ignore_ascii_case(name)));
+        if !known {
+            return None;
+        }
+        self.samples.borrow_mut().push(name.to_string());
+        let mut out = Vec::with_capacity((width * height * 3) as usize);
+        for y in 0..height {
+            let c = if y >= height / 3 && y < height * 2 / 3 { fg } else { bg };
+            for _ in 0..width {
+                out.extend([(c >> 16) as u8, (c >> 8) as u8, c as u8]);
+            }
+        }
+        Some(out)
     }
 
     fn themes(&self) -> Vec<String> {
@@ -374,10 +416,18 @@ impl Host for Fake {
             .map(|(_, a)| Action {
                 name: a.to_string(),
                 label: title_case(a),
+                menu: match *a {
+                    "new_window" | "new_tab" | "close" => "Shell",
+                    "copy" | "paste" | "select_all" | "clear_scrollback" => "Edit",
+                    "next_tab" | "previous_tab" => "Window",
+                    _ => "View",
+                }
+                .into(),
             })
             .chain([Action {
                 name: "find".into(),
                 label: "Find".into(),
+                menu: "Edit".into(),
             }])
             .collect()
     }
@@ -391,6 +441,7 @@ impl Host for Fake {
     }
 
     fn pins(&self) -> Vec<Pin> {
+        *self.pin_reads.borrow_mut() += 1;
         self.pins.borrow().clone()
     }
 

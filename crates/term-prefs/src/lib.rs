@@ -14,7 +14,9 @@ pub mod app;
 pub mod editor;
 pub mod file;
 pub mod host;
+pub mod keymap;
 pub mod layers;
+pub mod pace;
 pub mod preview;
 pub mod schema;
 pub mod ui;
@@ -117,6 +119,8 @@ pub fn run(args: &[String], host: &dyn Host) -> i32 {
     let mut app = App::new(host, args.layers, args.edit, args.in_app);
     let (w, h) = tty.size();
     app.resize(w, h);
+    let (cw, ch) = tty.cell_pixels();
+    app.set_cell_pixels(cw, ch);
     let mut renderer = Renderer::default();
     let mut decoder = Decoder::default();
     loop {
@@ -160,6 +164,9 @@ pub fn run(args: &[String], host: &dyn Host) -> i32 {
             Ok(Wake::Resize) => {
                 let (w, h) = tty.size();
                 app.resize(w, h);
+                // A font change resizes the tab and its cells.
+                let (cw, ch) = tty.cell_pixels();
+                app.set_cell_pixels(cw, ch);
             }
             Ok(Wake::Changed) => app.reload(),
             Ok(Wake::Timeout) => app.tick(Instant::now()),

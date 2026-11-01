@@ -2,6 +2,7 @@
 //! what changed is sent to the terminal.
 
 use std::fmt::Write as _;
+use std::rc::Rc;
 
 use unicode_width::UnicodeWidthChar;
 
@@ -117,6 +118,99 @@ pub fn truncate(s: &str, max: usize) -> String {
     out
 }
 
+/// `s` on two lines of `max` cells: broken at the last space that fits,
+/// the second cut with `…` if it is still too long. One line (and an
+/// empty second) when it fits.
+pub fn wrap2(s: &str, max: usize) -> (String, String) {
+    if str_width(s) <= max {
+        return (s.to_string(), String::new());
+    }
+    let (mut w, mut cut, mut last_space) = (0, 0, None);
+    for (i, c) in s.char_indices() {
+        let cw = char_width(c).unwrap_or(0);
+        if w + cw > max {
+            break;
+        }
+        if c == ' ' {
+            last_space = Some(i);
+        }
+        w += cw;
+        cut = i + c.len_utf8();
+    }
+    // A space just after what fits is the best break.
+    if s[cut..].starts_with(' ') {
+        last_space = Some(cut);
+    }
+    let (first, rest) = match last_space {
+        Some(i) if i > 0 => (&s[..i], s[i + 1..].trim_start()),
+        _ => (&s[..cut], &s[cut..]),
+    };
+    (first.to_string(), truncate(rest, max))
+}
+
+/// A picture over some cells (the font list's sample), sent with the
+/// kitty graphics protocol.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Image {
+    /// What it shows: a picture with the same key isn't sent again.
+    pub key: u64,
+    /// The cells it covers.
+    pub x: usize,
+    pub y: usize,
+    pub cols: usize,
+    pub rows: usize,
+    /// Its pixels: `width` × `height`, 3 bytes (RGB) each.
+    pub width: u32,
+    pub height: u32,
+    pub rgb: Rc<Vec<u8>>,
+}
+
+/// The image id the TUI's picture is sent under (one at a time).
+const IMAGE_ID: u32 = 7771;
+
+/// Base64 (standard alphabet, padded), for the kitty graphics payload.
+fn base64(data: &[u8], out: &mut String) {
+    const ABC: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    for chunk in data.chunks(3) {
+        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let n = (b[0] as u32) << 16 | (b[1] as u32) << 8 | b[2] as u32;
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(ABC[(n >> (18 - 6 * i) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+}
+
+impl Image {
+    /// The kitty graphics commands that send it and place it at the
+    /// cursor, scaled to its cells: raw RGB in 4096-byte chunks, the
+    /// cursor left where it is, and no replies (`q=2`).
+    fn send(&self, out: &mut String) {
+        let mut payload = String::with_capacity(self.rgb.len() * 4 / 3 + 4);
+        base64(&self.rgb, &mut payload);
+        let chunks: Vec<&str> = payload
+            .as_bytes()
+            .chunks(4096)
+            .map(|c| std::str::from_utf8(c).expect("base64 is ASCII"))
+            .collect();
+        for (i, chunk) in chunks.iter().enumerate() {
+            let more = u8::from(i + 1 < chunks.len());
+            if i == 0 {
+                let _ = write!(
+                    out,
+                    "\x1b_Ga=T,f=24,s={},v={},c={},r={},i={IMAGE_ID},C=1,q=2,m={more};{chunk}\x1b\\",
+                    self.width, self.height, self.cols, self.rows
+                );
+            } else {
+                let _ = write!(out, "\x1b_Gm={more},q=2;{chunk}\x1b\\");
+            }
+        }
+    }
+}
+
 /// One frame: what the screen should show.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Frame {
@@ -125,6 +219,8 @@ pub struct Frame {
     cells: Vec<Cell>,
     /// Where the terminal's real cursor goes, if shown.
     pub cursor: Option<(usize, usize)>,
+    /// A picture over some of the cells.
+    pub image: Option<Image>,
 }
 
 impl Frame {
@@ -134,6 +230,7 @@ impl Frame {
             height,
             cells: vec![Cell::blank(base); width * height],
             cursor: None,
+            image: None,
         }
     }
 
@@ -249,6 +346,8 @@ impl Frame {
 #[derive(Default)]
 pub struct Renderer {
     last: Option<Frame>,
+    /// The picture on screen: its key and cells.
+    shown: Option<(u64, usize, usize, usize, usize)>,
 }
 
 impl Renderer {
@@ -266,7 +365,9 @@ impl Renderer {
             .as_ref()
             .is_none_or(|l| l.width != frame.width || l.height != frame.height);
         if whole {
+            // Clearing the screen also takes pictures off it.
             out.push_str("\x1b[0m\x1b[H\x1b[2J");
+            self.shown = None;
         }
         let mut pen: Option<Style> = None;
         for y in 0..frame.height {
@@ -301,6 +402,17 @@ impl Renderer {
             }
         }
         out.push_str("\x1b[0m");
+        let want = frame.image.as_ref().map(|i| (i.key, i.x, i.y, i.cols, i.rows));
+        if want != self.shown {
+            if self.shown.is_some() {
+                let _ = write!(out, "\x1b_Ga=d,d=I,i={IMAGE_ID},q=2\x1b\\");
+            }
+            if let Some(image) = &frame.image {
+                let _ = write!(out, "\x1b[{};{}H", image.y + 1, image.x + 1);
+                image.send(&mut out);
+            }
+            self.shown = want;
+        }
         match frame.cursor {
             Some((x, y)) => {
                 let _ = write!(out, "\x1b[{};{}H\x1b[?25h", y + 1, x + 1);
@@ -338,6 +450,20 @@ mod tests {
     }
 
     #[test]
+    fn long_lines_wrap_onto_a_second() {
+        assert_eq!(wrap2("short", 10), ("short".into(), String::new()));
+        assert_eq!(
+            wrap2("the font the text is drawn with", 12),
+            ("the font the".into(), "text is dra…".into())
+        );
+        assert_eq!(wrap2("one two", 5), ("one".into(), "two".into()));
+        // No space to break at: cut where it stops fitting.
+        assert_eq!(wrap2("abcdefgh", 5), ("abcde".into(), "fgh".into()));
+        // Wide characters count as two.
+        assert_eq!(wrap2("字字字 x", 4), ("字字".into(), "字 x".into()));
+    }
+
+    #[test]
     fn wide_characters_are_never_split() {
         let mut f = Frame::new(4, 1, Style::default());
         assert_eq!(f.text(0, 0, 4, "日本語", Style::default()), 4);
@@ -346,5 +472,73 @@ mod tests {
         assert_eq!(f.row_text(0), " x本");
         assert_eq!(truncate("abcdef", 4), "abc…");
         assert_eq!(truncate("abc", 4), "abc");
+    }
+
+    #[test]
+    fn base64_pads_like_the_standard() {
+        for (data, want) in [
+            (&b""[..], ""),
+            (b"f", "Zg=="),
+            (b"fo", "Zm8="),
+            (b"foo", "Zm9v"),
+            (b"foob", "Zm9vYg=="),
+        ] {
+            let mut out = String::new();
+            base64(data, &mut out);
+            assert_eq!(out, want);
+        }
+    }
+
+    /// A picture is sent once, placed at its cells with the cursor left
+    /// alone and no replies; it is deleted when it goes or changes, and
+    /// sent again after the screen is cleared.
+    #[test]
+    fn pictures_are_sent_once_and_taken_off() {
+        let mut r = Renderer::default();
+        let mut f = Frame::new(10, 4, Style::default());
+        f.image = Some(Image {
+            key: 1,
+            x: 2,
+            y: 1,
+            cols: 4,
+            rows: 2,
+            width: 2,
+            height: 1,
+            rgb: Rc::new(vec![0xff, 0, 0, 0, 0xff, 0]),
+        });
+        let first = r.render(&f);
+        assert!(
+            first.contains("\x1b[2;3H\x1b_Ga=T,f=24,s=2,v=1,c=4,r=2,i=7771,C=1,q=2,m=0;/wAAAP8A\x1b\\"),
+            "{first:?}"
+        );
+        assert!(!first.contains("a=d"), "nothing to delete yet");
+        let again = r.render(&f);
+        assert!(!again.contains("\x1b_G"), "{again:?}");
+        f.image.as_mut().unwrap().key = 2;
+        let changed = r.render(&f);
+        let del = changed.find("\x1b_Ga=d,d=I,i=7771,q=2\x1b\\").expect("the old one deleted");
+        assert!(changed.find("a=T").is_some_and(|t| t > del), "{changed:?}");
+        r.invalidate();
+        let whole = r.render(&f);
+        assert!(
+            whole.contains("\x1b[2J") && whole.contains("a=T") && !whole.contains("a=d"),
+            "{whole:?}"
+        );
+        f.image = None;
+        assert!(r.render(&f).contains("a=d,d=I"));
+        // A big one goes in 4096-byte chunks, the last with m=0.
+        f.image = Some(Image {
+            key: 3,
+            x: 0,
+            y: 0,
+            cols: 10,
+            rows: 1,
+            width: 2000,
+            height: 2,
+            rgb: Rc::new(vec![7; 12000]),
+        });
+        let big = r.render(&f);
+        assert_eq!(big.matches("\x1b_G").count(), 4, "16000 bytes of base64");
+        assert!(big.contains("m=1;") && big.contains("\x1b_Gm=0,q=2;"), "{}", &big[..80]);
     }
 }

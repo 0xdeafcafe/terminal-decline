@@ -1527,7 +1527,9 @@ fn prefs_edits_records_chords_and_quits() {
     wait_file(&config, "copy_on_select", |t| t.contains("copy_on_select = true"));
     // Keys > New Tab's shortcut, recorded by the app.
     h.session().send(b"\x1b[27u\x1b[C\x1b[C\x1b[B\x1b[B".to_vec());
-    h.wait_for("New Tab selected", |d| d.lines().any(|l| l.contains('▸') && l.contains("cmd+t")));
+    h.wait_for("New Tab selected", |d| {
+        d.lines().any(|l| l.contains('▸') && l.contains("New Tab") && l.contains("⌘T"))
+    });
     h.session().send(b"c".to_vec());
     h.wait_for("the prompt to press a shortcut", |d| d.contains("press the shortcut"));
     assert_eq!(recorded.load(Ordering::SeqCst), 1);

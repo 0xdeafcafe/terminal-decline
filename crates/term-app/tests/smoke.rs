@@ -1624,6 +1624,104 @@ fn smoke_settings_records_a_chord_before_the_menus() {
     assert_eq!(num(last, "tabs"), 2.0, "{last}");
 }
 
+/// Cmd+V and Edit > Paste type the clipboard into the program, in a new
+/// window and in one restored after a restart; Cmd+A, Cmd+C, Cmd+X and
+/// Cmd+Z type nothing and leave the next paste alone. The clipboard is
+/// the app's own test pasteboard (the `clipboard` command), never the
+/// user's.
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_cmd_v_and_edit_paste_type_the_clipboard() {
+    if !have_metal() {
+        return;
+    }
+    // A new window, a restored one, and one of a dogfood build, which
+    // watches for new builds and the last input.
+    for (restored, dogfood) in [(false, false), (true, false), (false, true)] {
+        let dir = TempDir::new(&format!("paste-{restored}-{dogfood}"));
+        let d = dir.path().display();
+        let script = format!(
+            "stty -icanon -echo min 1 time 0; \
+             {set1}{cmd_v}dd bs=1 count=7 of='{d}/got1' 2>/dev/null; \
+             {set2}{menu}dd bs=1 count=7 of='{d}/got2' 2>/dev/null; \
+             {cmd_a}{cmd_c}{set3}{cmd_x}{cmd_z}{cmd_v}dd bs=1 count=7 of='{d}/got3' 2>/dev/null; \
+             {quit}sleep 20",
+            set1 = osc("clipboard first-1"),
+            set2 = osc("clipboard menu--2"),
+            set3 = osc("clipboard after-3"),
+            cmd_v = osc("key 9 cmd"),
+            menu = osc("menu paste"),
+            cmd_a = osc("key 0 cmd"),
+            cmd_c = osc("key 8 cmd"),
+            cmd_x = osc("key 7 cmd"),
+            cmd_z = osc("key 6 cmd"),
+            quit = osc("quit"),
+        );
+        let mut cmd = match dogfood {
+            true => Command::new(support::launcher(&support::bundle(&dir.path().join("out"), &[("DOGFOOD", "1")]))),
+            false => Command::new(APP),
+        };
+        if restored {
+            let restore = dir.path().join("restore.json");
+            let saved = serde_json::json!([{"cwd": dir.path(), "frame": [100.0, 100.0, 700.0, 500.0]}]);
+            std::fs::write(&restore, saved.to_string()).unwrap();
+            cmd.arg("--restore").arg(&restore);
+        }
+        cmd.args(["-e", "/bin/sh", "-c", &script])
+            .env("XDG_CONFIG_HOME", dir.config_home())
+            .env("DECLINE_TEST_DUMP", dir.dump_file())
+            .current_dir(dir.path());
+        let (status, _) = run(&mut cmd);
+        assert!(status.success(), "restored {restored}, dogfood {dogfood}: {status}");
+        let got = |name: &str| std::fs::read_to_string(dir.path().join(name)).unwrap_or_default();
+        let all = [got("got1"), got("got2"), got("got3")];
+        assert_eq!(all, ["first-1", "menu--2", "after-3"], "restored {restored}, dogfood {dogfood}");
+    }
+}
+
+/// Cmd+V at a login zsh's prompt, with the shell integration loaded,
+/// puts the clipboard on the command line (bracketed, as zsh asks).
+/// Needs zsh as the login shell.
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_cmd_v_pastes_at_the_zsh_prompt() {
+    if !have_metal() {
+        return;
+    }
+    if !term_pty::login_shell().ends_with("/zsh") {
+        eprintln!("skipped: the login shell isn't zsh");
+        return;
+    }
+    let dir = TempDir::new("paste-zsh");
+    let zshrc = format!(
+        r#"PS1='READY> '
+td_seen=
+td-line-init() {{
+  [[ -z $td_seen ]] || return 0
+  td_seen=1
+  {{ sleep 0.5; {set}{cmd_v}sleep 0.5; {dump}i=0; while [ ! -s "$DECLINE_TEST_DUMP" ] && [ $i -lt 200 ]; do sleep 0.05; i=$((i+1)); done; {quit}}} > /dev/tty 2>&1 &!
+}}
+autoload -Uz add-zle-hook-widget
+add-zle-hook-widget line-init td-line-init
+"#,
+        set = osc("clipboard echo pasted-at-zsh"),
+        cmd_v = osc("key 9 cmd"),
+        dump = osc("dump"),
+        quit = osc("quit"),
+    );
+    std::fs::write(dir.path().join(".zshrc"), zshrc).unwrap();
+    let mut cmd = Command::new(APP);
+    cmd.env("XDG_CONFIG_HOME", dir.config_home())
+        .env("ZDOTDIR", dir.path())
+        .env("DECLINE_TEST_DUMP", dir.dump_file())
+        .current_dir(dir.path());
+    let (status, _) = run(&mut cmd);
+    assert!(status.success(), "{status}");
+    let all = dumps(&dir);
+    assert_eq!(all.len(), 1, "{all:?}");
+    assert!(screen(&all[0]).contains("READY> echo pasted-at-zsh"), "{}", screen(&all[0]));
+}
+
 /// Files dropped on the window are typed in as a paste: each path quoted
 /// for the shell, separated by spaces, bracketed while the program asks
 /// for bracketed paste. (The test-only `drop` command goes the same way as

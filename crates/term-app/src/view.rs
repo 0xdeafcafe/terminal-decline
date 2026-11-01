@@ -22,7 +22,7 @@ use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSApplication, NSBeep, NSCursor, NSEvent, NSEventMask, NSEventModifierFlags, NSMenuItem,
-    NSModalResponse, NSPasteboard, NSPasteboardTypeString, NSResponder, NSView, NSWindow, NSWindowDelegate, NSWindowOrderingMode,
+    NSModalResponse, NSPasteboardTypeString, NSResponder, NSView, NSWindow, NSWindowDelegate, NSWindowOrderingMode,
 };
 use objc2_foundation::{
     NSArray, NSKeyValueObservingOptions, NSNotification, NSObjectNSKeyValueObserverRegistration, NSObjectProtocol, NSPoint, NSRect,
@@ -1833,7 +1833,7 @@ impl WindowView {
             });
         }
         if let Some(text) = clipboard {
-            let pb = NSPasteboard::generalPasteboard();
+            let pb = crate::pane_view::clipboard();
             pb.clearContents();
             pb.setString_forType(&NSString::from_str(&text), unsafe { NSPasteboardTypeString });
         }
@@ -3601,6 +3601,11 @@ impl WindowView {
                         None => NSBeep(),
                     },
                 },
+                Some(Control::Clipboard(text)) => {
+                    let pb = crate::pane_view::clipboard();
+                    pb.clearContents();
+                    pb.setString_forType(&NSString::from_str(&text), unsafe { NSPasteboardTypeString });
+                }
                 Some(Control::Find(text)) => match self.focused_view() {
                     Some(view) => view.find_text(&text),
                     None => NSBeep(),

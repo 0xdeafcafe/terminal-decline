@@ -43,6 +43,7 @@ any command as its own Dock app.
 | `term-config` | `config.toml` and its layers, themes (`themes/`), the quick terminal's settings (no AppKit; term-render and term-font for `Theme` and `FontConfig`) |
 | `term-activity` | what a pane's shell does: OSC 133 activity, status titles, when to notify, prompts, the program running (no AppKit) |
 | `term-restore` | restarting into a new build: the saved window list, the pane tree it saves, each pane's history (no AppKit) |
+| `term-complete` | completion and colouring at the shell's prompt: the command line read into words and coloured, the list's choices, commands, folders, history, man pages and `--help` (no AppKit; docs/design/completion.md) |
 | `term-ctl`    | the agent API's protocol and `ctl` command line, its idle limit, screen read-back and keys (no AppKit; the server and its sessions are term-app's) |
 | `term-prefs`  | the preferences: settings schema, safe `config.toml` edits, the TUI (no platform code) |
 | `term-icon`   | generated pin icons by the Slope rule (`slope-pins-2`): Core Text outline of the initial, CoreGraphics drawing after `pin-template.svg`, ImageIO `.icns` |
@@ -50,10 +51,11 @@ any command as its own Dock app.
 
 `term-core` has no platform code and is tested and benchmarked on its own.
 
-term-keys, term-config, term-activity, term-restore and term-ctl were split
-out of term-app so they build in parallel and their tests compile on their
-own; term-app re-exports each moved module under its old name
-(`crate::config`, `crate::keys`, `crate::ctl::protocol`…), so the app's code
+term-keys, term-config, term-activity, term-restore, term-ctl and
+term-complete were split out of term-app so they build in parallel and
+their tests compile on their own; term-app re-exports each moved module
+under its old name (`crate::config`, `crate::keys`, `crate::ctl::protocol`,
+`crate::complete`…), so the app's code
 reads as before. They have no objc2 or AppKit dependency of their own.
 
 `term-app` (the `terminal-decline` package) is a library plus a thin `main.rs`. The

@@ -20,16 +20,15 @@ path = "src/main.rs"
 [dependencies]
 term-core.workspace = true
 term-pty.workspace = true
-unicode-width.workspace = true
 term-font.workspace = true
 term-render.workspace = true
 term-image.workspace = true
-miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
 term-prefs.workspace = true
 term-keys.workspace = true
 term-config.workspace = true
 term-activity.workspace = true
 term-restore.workspace = true
+term-complete.workspace = true
 term-ctl.workspace = true
 term-pin = { path = "../term-pin" }
 term-icon = { path = "../term-icon" }
@@ -59,10 +58,4 @@ test-hooks = []
 
 [dev-dependencies]
 terminal-decline = { path = ".", features = ["test-hooks"] }
-criterion = { version = "0.7", default-features = false }
-proptest = { version = "1.12", default-features = false, features = ["std"] }
 png = "0.18"
-
-[[bench]]
-name = "complete"
-harness = false

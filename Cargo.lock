@@ -972,6 +972,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "term-complete"
+version = "0.0.1"
+dependencies = [
+ "criterion",
+ "libc",
+ "miniz_oxide 0.8.9",
+ "proptest",
+ "term-core",
+ "unicode-width",
+]
+
+[[package]]
 name = "term-config"
 version = "0.0.1"
 dependencies = [
@@ -1126,10 +1138,8 @@ name = "terminal-decline"
 version = "0.0.1"
 dependencies = [
  "block2",
- "criterion",
  "dispatch2",
  "libc",
- "miniz_oxide 0.8.9",
  "objc2",
  "objc2-app-kit",
  "objc2-core-foundation",
@@ -1139,11 +1149,11 @@ dependencies = [
  "objc2-quartz-core",
  "objc2-user-notifications",
  "png",
- "proptest",
  "regex-lite",
  "serde",
  "serde_json",
  "term-activity",
+ "term-complete",
  "term-config",
  "term-core",
  "term-ctl",
@@ -1158,7 +1168,6 @@ dependencies = [
  "term-restore",
  "terminal-decline",
  "toml",
- "unicode-width",
 ]
 
 [[package]]

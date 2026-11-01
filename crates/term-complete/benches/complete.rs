@@ -7,10 +7,10 @@
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::hint::black_box;
-use terminal_decline_app::complete::lex::{self, At};
-use terminal_decline_app::complete::list::{self, Listings};
-use terminal_decline_app::complete::sources::Commands;
-use terminal_decline_app::complete::{help, man};
+use term_complete::lex::{self, At};
+use term_complete::list::{self, Listings};
+use term_complete::sources::Commands;
+use term_complete::{help, man};
 
 /// A typical line, then the same kind of line grown to `len` bytes.
 fn line(len: usize) -> String {

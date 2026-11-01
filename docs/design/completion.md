@@ -691,8 +691,8 @@ is on, as §4 has it; process substitution (`<(…)`) is one word; a
 here-document or `case` gives nothing. Tests: tables for the cursor,
 quotes and escapes, roles, spans and redirects, every prefix of broken
 input, and a property test that any line reads without a panic with its
-spans in order. The benchmark is `cargo bench -p terminal-decline
---bench complete` (lines of 20, 200 and 4,000 bytes); not run yet: it
+spans in order. The benchmark is `cargo bench -p term-complete
+--bench complete` (term-app's until completion moved to term-complete) (lines of 20, 200 and 4,000 bytes); not run yet: it
 needs a release build, held while another agent's frame-timing
 benchmarks ran.
 

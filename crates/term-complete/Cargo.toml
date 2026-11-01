@@ -1,0 +1,23 @@
+[package]
+name = "term-complete"
+description = "Completion and colouring at the shell's prompt: the command line read into words and coloured, the choices offered and where they come from, with no AppKit"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+term-core.workspace = true
+unicode-width.workspace = true
+libc.workspace = true
+# Gzipped man pages.
+miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
+
+[dev-dependencies]
+criterion = { version = "0.7", default-features = false }
+proptest = { version = "1.12", default-features = false, features = ["std"] }
+
+[[bench]]
+name = "complete"
+harness = false

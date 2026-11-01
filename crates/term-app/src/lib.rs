@@ -7,7 +7,6 @@
 
 pub mod app;
 mod background;
-pub mod complete;
 pub mod control;
 pub mod crash;
 pub mod ctl;
@@ -44,6 +43,7 @@ pub mod welcome;
 
 // Moved to crates of their own, under their old names here.
 pub use term_activity::{activity, prompts, running};
+pub use term_complete as complete;
 pub use term_config::{config, quick, theme};
 use term_keys::ascii_layout;
 pub use term_keys::{keybind, keys};

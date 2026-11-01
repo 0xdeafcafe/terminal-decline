@@ -1276,7 +1276,8 @@ pin identity collisions, pin signing and quarantine.
 
 ## Next milestone
 
-1. ~~Scrollback as text + style runs~~ (done). Next: compress sealed blocks.
+1. ~~Scrollback as text + style runs~~ (done), ~~compress sealed blocks~~
+   (done, R.7: idle LZ4 compression, cells design §11.8).
 2. ~~8-byte cells with a style table per screen~~ (done, cells design
    PR 5), ~~grapheme clusters per row and mode 2027~~ (done, PR 6). Next:
    scrollback v2 (PR 7), OSC 8 links (PR 9).

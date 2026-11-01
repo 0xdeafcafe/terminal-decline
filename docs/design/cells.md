@@ -2570,8 +2570,9 @@ and where it differs from the plan above:
   goes through it; `wrapped`, `fill` and `has_marks` don't decompress.
   `memory_bytes` counts it.
 - **Search** takes `Body`s; each segment decompresses its block the
-  first time it is read, off the lock, and keeps it until the search
-  ends. Filter jobs decompress compressed blocks off the lock too, and
+  first time it is read, off the lock (since R.7's search note below:
+  only when its text is scanned, and dropped once the search has moved
+  past it). Filter jobs decompress compressed blocks off the lock too, and
   a filter is stored by the identity of the `Body` it was built from.
 - **Measured** (`scrollback_mem compressed` / `file <path>`, 160
   columns, 100k lines, after `shrink_history`): synthetic `ls --color`
@@ -2580,9 +2581,46 @@ and where it differs from the plan above:
   `/usr` 6.31 → 1.21 MB and `/var/log/install.log` 11.19 → 1.58 MB.
   Decoding a block takes 13–30 µs. Filters, when built, add 4 KB a
   block on top (0.2–0.6 MB per 100k lines).
-- **Not done:** a block its filter rules out is still decompressed for
-  its boundary with the next block, and a search holds every block it
-  decompressed until it ends.
+- **Not done:** nothing left of R.7 (search's two gaps landed below).
+
+**Landed (R.7, search).** What search reads of compressed history
+(`search.rs`, `scrollback/packed.rs`):
+- **Each compressed block keeps its text's first and last 32 scalars**
+  uncompressed (`Packed::head`/`tail`, `EDGE`), with the text's length;
+  a saved block read back gets them when it is checked
+  (`scrollback/saved.rs`), so the saved format is unchanged. A block's
+  boundary with the next (§13.5) is searched from this window's last
+  `q − 1` scalars and the next windows' first `q − 1`, plus the scalar
+  either side for the word checks, counted in scalars rather than the
+  `4q + 4` bytes before, so a query of up to 32 scalars reads both sides
+  from the edges. A block its filter rules out is then never
+  decompressed; one is decompressed only to place a hit crossing its
+  boundary, or for a longer query, or when only part of its text is
+  searched (lines hidden by the limit, or popped). About 80 bytes a
+  block: `scrollback_mem compressed` 0.544 → 0.550 MB (`ls --color`),
+  2.672 → 2.680 (`ls -l`), 3.004 → 3.014 (the service log with random
+  ids), 0.535 → 0.540 (plain).
+- **A search holds no decompressed block between blocks:** `scan_seg`
+  returns the segments it read, and the job drops their decompressed
+  data (and line starts) after each block (`Seg::release`). What it
+  reads of them again is mostly their edges, so each block that passes
+  its filter is decompressed once (`SearchJob::unpacked`, a test aid).
+- **Measured** (`search_mem`, new: 100k log lines at 160 columns,
+  compressed, filters built; the most heap the job held above what was
+  held before it, and its thread CPU time, median of 21, three
+  interleaved rounds, load average 31–38): a rare word 10.16 → 0.07 MB
+  and 2.4 ms → 45 µs; a query in no block 10.16 → 0 MB and 2.4 ms →
+  26 µs; a word on every line 10.62 → 0.13 MB, 10.3 → 10.6 ms (within
+  the noise), ignoring case 10.72 → 0.24 MB, 10.8 → 10.9 ms. History as
+  written (`search_mem 31 plain`, four rounds, load average 21–29): a
+  rare word 32 → 30 µs, a query in no block 24 → 26 µs (the boundary
+  search counts scalars), words on every line within 2%.
+- **Tests:** a compressed history whose filters rule every block out
+  decompresses none; a match across a compressed boundary is found from
+  the edges and decompresses only its two blocks; a 46-scalar query
+  across one is found by decompressing; after every batch no
+  decompressed block is held; the naive-search and filtered property
+  tests run on compressed history too.
 
 **Landed (PR 7).** What was built (`scrollback.rs` and its tests in
 `scrollback/tests.rs`, with hooks in `term.rs`, `snapshot.rs` and
@@ -3391,7 +3429,7 @@ standard benchmarks. Rows marked "estimate" are not measured yet.
 | building a filter (background only) | ~100 µs per block, 20–50× its scan |
 | turning hits into Points | estimate: ~0.1–0.3 µs per hit, so 20k hits take 2–6 ms; hits near the view arrive first |
 | non-ASCII query ignoring case, no ASCII stretch | estimate: ~10–50 ms, off the lock |
-| R.7-compressed blocks | estimate: +20–30 µs per block scanned |
+| R.7-compressed blocks | measured (`search_mem`): +~20 µs per block scanned (a word on every line, 100k lines: 10.4 ms against 7.4 as written); a block the filter rules out costs nothing more |
 
 ### 13.8 Hits: Points, columns, words, find next
 
@@ -3530,7 +3568,8 @@ block's side in `scrollback.rs`:
   `SearchJob::skipped()` counts them.
 - **Memory:** a filter counts 4 KB against the 32 MB backstop in the
   block's bytes, and goes when its block is freed (output, the limit, a
-  pop, ED 3). Dropping filters under memory pressure (R.5) isn't built.
+  pop, ED 3). Under memory pressure (R.5) `shrink_history` drops every
+  filter, and the idle job builds them again (§11.8).
 - **Non-ASCII queries ignoring case** are found by their longest ASCII
   stretch: memmem in the text lower-cased (ASCII only), then back over
   the scalars before the stretch and the whole query checked from

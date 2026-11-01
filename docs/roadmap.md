@@ -119,9 +119,9 @@ Design: docs/design/pins.md.
 | R.4 | ~~CSI/SGR parse fast path~~ (landed: coloured 1.48–1.54×, `tui` 1.47–1.55× in thread CPU time on a loaded Mac; cells.md §11) | coloured ≥ 1.5× vs the commit before R.4 |
 | R.10 | Re-measure frame building (plain cases and `--bench renderer`) after images I.4 split the frame's rectangles — its bench ran at load ~31 and gave no usable before/after. Re-measured with R.2 in thread CPU time (cells.md §9.3): within 3% except 300×100 plain, every row changed (+4%); encode within noise | within 3% of before I.4 |
 | R.9 | Win back scrollback v2's costs (merged over the gate on purpose, 29 Oct): parse plain +6–16% and seq +6% (per-line store bookkeeping), unicode +9% (encoder per non-ASCII cell), CJK/ls history decode +12–20%; re-measure on a quiet Mac first. Parse now within 3% (plain 1.02, `seq` 0.94, unicode 0.97); decode `ls` 1.07, CJK 1.11 (cells.md §11) | parse within 3% of before PR 7 |
-| R.5 | Memory-pressure handler (spare drawables, purge textures, compress scrollback) | simulated warning: footprint drop then correct redraw |
+| R.5 | ~~Memory-pressure handler (spare drawables, purge textures, compress scrollback)~~ (landed: the smoke test's simulated warning takes the footprint from 44 to 37.5 MB and the window draws the same screen; filters dropped and built again when idle; `term-app/src/memory.rs`, cells.md §11.8) | simulated warning: footprint drop then correct redraw |
 | R.6 | `CAMetalDisplayLink` | kept only if N.5 numbers improve |
-| R.7 | Idle scrollback compression (LZ4, two-block cache) | 100k lines of `ls`/log output ≤ 3 MB; decode ≤ 100 µs per block |
+| R.7 | ~~Idle scrollback compression (LZ4, two-block cache)~~ (landed: 100k lines of real `ls -lR` 1.21 MB and `install.log` 1.53 MB, synthetic `ls --color` 0.55 and `ls -l` 2.68 MB; the synthetic log of random ids is 3.01 MB; decode 15–32 µs a block; search decompresses only blocks its filters let through, one at a time; cells.md §11.8) | 100k lines of `ls`/log output ≤ 3 MB; decode ≤ 100 µs per block |
 | R.8 | Small items (lazy colour texture, smaller first mask texture, lazy alt screen, block reuse, skip identical frames) | each kept only if footprint or CPU improves by ≥ 2% on the standard set |
 
 ## Z — 1.0

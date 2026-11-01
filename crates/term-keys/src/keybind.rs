@@ -322,6 +322,23 @@ impl MenuAction {
         }
     }
 
+    /// The menu its item is in, for grouping the actions in Settings'
+    /// shortcut list: `"App"` for the app's own menu (named after the
+    /// app, or a pin), then "Shell", "Edit", "View" and "Window" as in
+    /// the menu bar.
+    pub fn menu(self) -> &'static str {
+        use MenuAction::*;
+        match self {
+            Settings | CheckForUpdates | UpdateToLatest | RestartToUpdate | UpdateNow => "App",
+            NewWindow | NewTab | SplitRight | SplitDown | Close | CloseTab | CloseWindow => "Shell",
+            Copy | Paste | SelectAll | SelectOutput | CopyCommand | CopyOutput | ReadFlagsFromHelp | ClearScrollback | Find | FindNext
+            | FindPrevious | UseSelectionForFind => "Edit",
+            FontBigger | FontSmaller | FontReset | PreviousPrompt | NextPrompt | PreviousFailed | NextFailed | ToggleFullScreen => "View",
+            FocusPaneLeft | FocusPaneRight | FocusPaneUp | FocusPaneDown | FocusPaneNext | FocusPanePrevious | ResizePaneLeft
+            | ResizePaneRight | ResizePaneUp | ResizePaneDown | EqualizePanes | TogglePaneZoom | NextTab | PreviousTab => "Window",
+        }
+    }
+
     /// The action called `name` in the config.
     pub fn from_name(name: &str) -> Option<MenuAction> {
         MenuAction::ALL.into_iter().find(|a| a.name() == name)

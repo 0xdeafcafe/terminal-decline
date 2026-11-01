@@ -30,6 +30,9 @@ struct State {
     /// Bumped each time the schedule is armed: an older timer does
     /// nothing when it fires.
     armed: u64,
+    /// The last check found commits that can be installed: how many, and
+    /// `origin/main`'s commit (for the welcome line).
+    available: Option<(u32, String)>,
 }
 
 thread_local! {
@@ -79,6 +82,7 @@ pub fn start(role: &Role, mode: UpdateMode) -> bool {
             checking: false,
             updating: false,
             armed: 0,
+            available: None,
         })
     });
     if mode.on() {
@@ -91,6 +95,13 @@ pub fn start(role: &Role, mode: UpdateMode) -> bool {
 /// source run.
 pub fn source() -> Option<Source> {
     STATE.with(|s| s.borrow().as_ref().map(|st| st.src.clone()))
+}
+
+/// New commits the last check found, that Update to Latest would install
+/// (a clean checkout on `main`): how many, and `origin/main`'s commit.
+/// Nothing while one is being built.
+pub fn available() -> Option<(u32, String)> {
+    STATE.with(|s| s.borrow().as_ref().filter(|st| !st.updating).and_then(|st| st.available.clone()))
 }
 
 /// Whether updates from source run in this process.
@@ -217,6 +228,12 @@ fn checked(asked: Asked, remote: Result<Remote, String>, tree: Result<Tree, Stri
             return;
         }
     };
+    let installable = remote.new > 0 && tree.clean && tree.branch.as_deref() == Some(source::BRANCH);
+    STATE.with(|s| {
+        if let Some(st) = s.borrow_mut().as_mut() {
+            st.available = installable.then(|| (remote.new, remote.head.clone()));
+        }
+    });
     let told_file = source::told_file(&home());
     let told = std::fs::read_to_string(&told_file).is_ok_and(|t| t.trim() == remote.key());
     let situation = Situation {
@@ -336,7 +353,14 @@ fn built(result: Result<(), source::Failure>, log_file: PathBuf) {
     });
     match result {
         // The new build is installed: the restart follows.
-        Ok(()) => log("source: built and installed"),
+        Ok(()) => {
+            log("source: built and installed");
+            STATE.with(|s| {
+                if let Some(st) = s.borrow_mut().as_mut() {
+                    st.available = None;
+                }
+            });
+        }
         Err(source::Failure::Conflict(files)) => {
             crate::app::set_update_asked(false);
             log(&format!("source: merge conflicts, aborted: {}", files.join(", ")));

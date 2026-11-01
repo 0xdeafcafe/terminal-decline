@@ -69,6 +69,23 @@ impl<'de> Deserialize<'de> for UpdateMode {
     }
 }
 
+/// `welcome`: the faint line a new tab or window starts with
+/// ([`crate::welcome`]).
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum WelcomeMode {
+    /// The app's version, its tabs and memory, a tip, and a waiting update
+    /// with the key that installs it. The default: one faint line is
+    /// little to read past, and it is how a waiting update is noticed
+    /// without a notification.
+    #[default]
+    Full,
+    /// Only a waiting update.
+    UpdateOnly,
+    /// Nothing.
+    Off,
+}
+
 /// `restore_scrollback`: when a pane's history is saved, to show again
 /// above the new shell ([`crate::saved_history`]). `true` and `false`
 /// mean `"always"` and `"never"`.
@@ -414,6 +431,17 @@ pub struct Config {
     /// with `"auto"` update themselves when the Mac is idle. Only Terminal
     /// Decline.app's own process reads it; pins never update themselves.
     pub update: UpdateMode,
+    /// The faint line at the top of a new tab or window: `"full"` (the
+    /// default: version, tabs, memory, a tip and a waiting update),
+    /// `"update-only"` or `"off"`. Never in restored tabs, Settings,
+    /// commands (`-e`, pins with a command), agent API sessions or the
+    /// quick terminal after its first open.
+    pub welcome: WelcomeMode,
+    /// Hours the update part of that line stays away once it has been
+    /// shown in a few tabs without the update being installed; a newer
+    /// update brings it back at once. 0 never snoozes.
+    #[serde(deserialize_with = "welcome_update_snooze")]
+    pub welcome_update_snooze: u32,
     /// The program that opens config.toml (Edit config.toml, and `e` in
     /// Settings), with its arguments; unset, `$VISUAL` or `$EDITOR`, else
     /// nano, vim or vi.
@@ -486,12 +514,22 @@ impl Default for Config {
             quick_terminal_animation_ms: 150,
             quick_terminal_autohide: true,
             update: UpdateMode::Notify,
+            welcome: WelcomeMode::Full,
+            welcome_update_snooze: 24,
             editor: None,
             agent_api: true,
             agent_api_idle_timeout: 30,
             pin_app: None,
         }
     }
+}
+
+fn welcome_update_snooze<'de, D: Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
+    let v = i64::deserialize(d)?;
+    u32::try_from(v)
+        .ok()
+        .filter(|h| *h <= 24 * 30)
+        .ok_or_else(|| serde::de::Error::custom("hours, from 0 to 720"))
 }
 
 fn line_height<'de, D: Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
@@ -1481,6 +1519,21 @@ mod tests {
             let (c, errors) = parse(bad);
             assert_eq!(c.restore_scrollback, RestoreScrollback::Restarts);
             assert!(errors[0].starts_with("config: restore_scrollback"), "{errors:?}");
+        }
+    }
+
+    #[test]
+    fn welcome_is_full_unless_set() {
+        let c = Config::default();
+        assert_eq!((c.welcome, c.welcome_update_snooze), (WelcomeMode::Full, 24));
+        assert_eq!(parse("welcome = 'update-only'").0.welcome, WelcomeMode::UpdateOnly);
+        assert_eq!(parse("welcome = 'off'").0.welcome, WelcomeMode::Off);
+        assert_eq!(parse("welcome_update_snooze = 0").0.welcome_update_snooze, 0);
+        assert_eq!(parse("welcome_update_snooze = 168").0.welcome_update_snooze, 168);
+        for bad in ["welcome = 'sometimes'", "welcome_update_snooze = -1", "welcome_update_snooze = 721"] {
+            let (c, errors) = parse(bad);
+            assert_eq!((c.welcome, c.welcome_update_snooze), (WelcomeMode::Full, 24), "{bad}");
+            assert!(errors[0].starts_with("config: welcome"), "{errors:?}");
         }
     }
 

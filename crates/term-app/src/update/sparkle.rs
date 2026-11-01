@@ -595,6 +595,7 @@ define_class!(
             log(&format!("ready: {} installs when the app quits", version.as_deref().unwrap_or("?")));
             set_status("ready");
             if let Some(v) = &version {
+                crate::welcome::release_found(v, true);
                 super::announce::ready(v);
             }
             false
@@ -610,6 +611,9 @@ define_class!(
         fn found(&self, _updater: &AnyObject, item: &AnyObject) {
             let (_, version, _) = read_item(item);
             log(&format!("found {}", version.as_deref().unwrap_or("?")));
+            if let Some(v) = &version {
+                crate::welcome::release_found(v, false);
+            }
             if super::status() != "ready" {
                 set_status("found");
             }

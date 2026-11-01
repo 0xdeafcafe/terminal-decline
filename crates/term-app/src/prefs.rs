@@ -396,6 +396,8 @@ mod tests {
         }
         let d = default_keybinds();
         assert!(d.contains(&("cmd+,".into(), "settings".into())));
+        // Update Now has Cmd+U, as the welcome line says.
+        assert!(d.contains(&("cmd+u".into(), "update_now".into())));
         assert!(d.contains(&("shift+cmd+d".into(), "split_down".into())));
         // Canonical spellings, which the TUI finds entries by.
         for (c, _) in &d {

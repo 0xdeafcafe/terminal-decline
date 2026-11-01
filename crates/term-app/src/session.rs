@@ -645,9 +645,12 @@ impl Session {
                 let quiet = now > 0 && now == seen;
                 seen = now;
                 if quiet && modes.reading_keys() {
-                    let bracketed = lock(&term).state.modes().bracketed_paste;
+                    let (bracketed, ours) = {
+                        let t = lock(&term);
+                        (t.state.modes().bracketed_paste, t.state.line_report().is_some())
+                    };
                     if let Some(tx) = slot.take() {
-                        let _ = tx.send(crate::keys::paste_bytes(&text, bracketed));
+                        let _ = tx.send(restore_bytes(&text, bracketed, ours));
                     }
                     return;
                 }
@@ -865,5 +868,42 @@ impl Drop for Session {
         // Not joined: that could keep the main thread waiting for a program
         // that ignores SIGHUP.
         self.release();
+    }
+}
+
+/// What types a restored tab's command at the prompt. With our zsh
+/// integration reporting the line (`ours`), it goes to decline.zsh's
+/// widget (`ESC [ 7701 ~ = <line> BEL`), which makes it the line as if
+/// typed: as a paste zsh would draw it highlighted until it is edited,
+/// which looks like a selection a click can't clear. Else a paste
+/// (bracketed when asked for), so key bindings don't act on it. A line
+/// too long for the widget goes as a paste too.
+fn restore_bytes(text: &str, bracketed: bool, ours: bool) -> Vec<u8> {
+    let mut encoded = String::with_capacity(text.len());
+    for c in text.chars() {
+        if c == '%' || c.is_ascii_control() {
+            encoded.push_str(&format!("%{:02X}", c as u32));
+        } else {
+            encoded.push(c);
+        }
+    }
+    if ours && encoded.chars().count() < 4000 {
+        format!("\x1b[7701~={encoded}\x07").into_bytes()
+    } else {
+        crate::keys::paste_bytes(text, bracketed)
+    }
+}
+
+#[cfg(test)]
+mod restore_tests {
+    #[test]
+    fn a_restored_command_goes_to_our_widget_when_zsh_reports_lines() {
+        assert_eq!(
+            super::restore_bytes("echo 100%", true, true),
+            b"\x1b[7701~=echo 100%25\x07".to_vec()
+        );
+        assert_eq!(super::restore_bytes("ls", true, false), crate::keys::paste_bytes("ls", true));
+        let long = "x".repeat(5000);
+        assert_eq!(super::restore_bytes(&long, false, true), crate::keys::paste_bytes(&long, false));
     }
 }

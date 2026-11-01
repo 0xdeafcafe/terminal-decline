@@ -170,7 +170,10 @@ if [[ -n ${_decline_token-} && -n ${_decline_features-} && -n $TTY ]] \
   # percent-encoded like the reports. Bound only while the app gave a
   # token, so another terminal never sends it.
   # A payload `#<n>` is zsh's own match number <n> from the last Tab
-  # (_decline_tab below), which zsh inserts itself.
+  # (_decline_tab below), which zsh inserts itself. A payload `=<line>`
+  # (percent-encoded) is a restored tab's command: it becomes the whole
+  # line, as typed, not as a paste (zsh draws a paste highlighted until
+  # the line is edited).
   _decline_take() {
     local c payload=
     while read -rk 1 c && [[ $c != $'\a' ]]; do
@@ -181,7 +184,19 @@ if [[ -n ${_decline_token-} && -n ${_decline_features-} && -n $TTY ]] \
       (( ${+functions[_decline_pick]} )) && _decline_pick ${payload#\#}
       return 0
     fi
+    if [[ $payload == '='* ]]; then
+      _decline_take_line ${payload#=}
+      return 0
+    fi
     _decline_take_word $payload
+  }
+
+  _decline_take_line() {
+    emulate -L zsh -o extendedglob +o multibyte
+    local line=${1//(#b)%([[:xdigit:]](#c2))/${(#):-0x$match[1]}}
+    setopt multibyte
+    BUFFER=$line
+    CURSOR=${#BUFFER}
   }
 
   _decline_take_word() {
@@ -361,13 +376,12 @@ if [[ -n ${_decline_token-} && -n ${_decline_features-} && -n $TTY ]] \
   fi
 
   zle -N _decline_line
-  if [[ ,$_decline_features, == *,list,* ]]; then
-    zle -N _decline_take
-    for _decline_km in main emacs viins; do
-      bindkey -M $_decline_km $'\e[7701~' _decline_take
-    done
-    unset _decline_km
-  fi
+  # Always: a restored tab's command comes this way too.
+  zle -N _decline_take
+  for _decline_km in main emacs viins; do
+    bindkey -M $_decline_km $'\e[7701~' _decline_take
+  done
+  unset _decline_km
   autoload -Uz add-zle-hook-widget
   # line-init too: a new line (the prompt's, or a continuation's) is
   # drawn before any redraw hook runs.

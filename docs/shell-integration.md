@@ -16,7 +16,11 @@ The zsh and fish snippets send C as `ESC ] 133 ; C ; cmdline_url=… BEL`
 (kitty's form): the command line as typed, percent-encoded. The app
 shows its first line in titles, and after a restart into a new build
 types it again at the new shell's prompt (an alias stays an alias,
-`FOO=1 cmd` keeps its `FOO=1`). bash has no hook that sees the line, so
+`FOO=1 cmd` keeps its `FOO=1`). In zsh it is set as the line, as if
+typed (`ESC [ 7701 ~ = <line> BEL` to decline.zsh's widget), not
+pasted: zsh draws a paste highlighted until the line is edited, which
+looked like a selection a click couldn't clear. Other shells get it
+as a paste. bash has no hook that sees the line, so
 its C has none, and the app reads the command from the process instead.
 
 The app loads the marks into the shell by itself, the way Ghostty and

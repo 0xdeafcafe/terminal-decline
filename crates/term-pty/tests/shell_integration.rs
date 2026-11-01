@@ -470,6 +470,27 @@ fn zsh_takes_a_choice_from_the_list() {
     s.wait_for("typing after it", |s| line(s).as_deref() == Some("echo 'my file;x' z"));
 }
 
+/// A restored tab's command comes to the widget whole (`=<line>`, as
+/// the app types it), with only colouring on: it becomes the line as
+/// typed, not a paste zsh would draw highlighted.
+#[test]
+fn zsh_takes_a_restored_command_as_the_line() {
+    let home = TempDir::new("zsh-restore-line");
+    zsh_files(&home.0, "");
+    let reports = Reports {
+        token: TOKEN.into(),
+        features: "highlight".into(),
+    };
+    let mut s = Session::start_with(ZSH, &home, &[], Some(reports));
+    s.wait_for("the first prompt", |s| s.count("\x1b]133;B\x07") >= 1);
+    let line = |s: &Session| parsed(s).state.line_report().map(|r| r.text.clone());
+    s.send("\x1b[7701~=echo 'a b' 100%25 ok\x07");
+    s.wait_for("the restored line", |s| line(s).as_deref() == Some("echo 'a b' 100% ok"));
+    // The cursor at its end: typing goes after it.
+    s.send("!");
+    s.wait_for("typing after it", |s| line(s).as_deref() == Some("echo 'a b' 100% ok!"));
+}
+
 /// Tab asks zsh: with several matches zsh inserts what they share, lists
 /// nothing itself, and reports them; taking one by its number has zsh
 /// insert it, quoted by zsh. With one match zsh inserts it as before.

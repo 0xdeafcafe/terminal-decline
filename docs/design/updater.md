@@ -220,6 +220,25 @@ running programs, with the question the app already asks on quit
 programs." [Quit and Install] [Later]. The app doesn't relaunch afterwards
 (open question 2 asks whether it should, with windows reopened).
 
+**Update Now (Cmd+U) and the welcome line.** A new tab or window running
+the login shell starts with one faint line (`welcome`, default `"full"`;
+`crate::welcome`): the build, the tabs open, the app's memory and a tip.
+While an update waits, a second line names it and the key:
+`Update available: 5 new commits — press ⌘U to update` (new commits on
+`main`, clean checkout), `New build installed — press ⌘U to restart to
+update`, or `Terminal Decline 0.6.0 is available — press ⌘U to update`
+(Sparkle found it). Cmd+U is Update Now (`update_now`, in the app menu
+while an updater runs, enabled only while an update waits): Restart to
+Update, else Update to Latest, else Sparkle's user check, which installs.
+The line is an OSC 8 link to `terminal-decline://update?token=…` with a
+random per-process token, so only the app's own line runs it; a program's
+`terminal-decline://` link is refused as any unknown scheme. Shown in 3
+tabs, the update part then stays away for `welcome_update_snooze` hours
+(default 24; `~/Library/Caches/terminal-decline/welcome`); a different
+update shows at once. Not in restored tabs, Settings, `-e` commands, pins
+with a command, agent API sessions, or the quick terminal after its first
+open. Landed 1 Nov 2026.
+
 ### 3.5 Installing, and what the signature proves
 
 - The update is a zip of the notarized, stapled app (`ditto -c -k

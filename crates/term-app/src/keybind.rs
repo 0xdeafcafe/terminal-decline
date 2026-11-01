@@ -103,10 +103,16 @@ pub enum MenuAction {
     /// installed while programs ran (asking first if they still do; does
     /// nothing otherwise, and unbound by default).
     RestartToUpdate,
+    /// Terminal Decline > Update Now (Cmd+U): install the update the
+    /// welcome line names ([`crate::welcome`]): Restart to Update for a
+    /// new build already installed, else Update to Latest for new commits,
+    /// else Sparkle's check, which installs a release it finds. In the
+    /// menu while an updater runs, and on only while an update waits.
+    UpdateNow,
 }
 
 impl MenuAction {
-    pub const ALL: [MenuAction; 44] = [
+    pub const ALL: [MenuAction; 45] = [
         MenuAction::NewWindow,
         MenuAction::NewTab,
         MenuAction::Close,
@@ -151,6 +157,7 @@ impl MenuAction {
         MenuAction::CheckForUpdates,
         MenuAction::UpdateToLatest,
         MenuAction::RestartToUpdate,
+        MenuAction::UpdateNow,
     ];
 
     /// The name in the config.
@@ -200,6 +207,7 @@ impl MenuAction {
             MenuAction::CheckForUpdates => "check_for_updates",
             MenuAction::UpdateToLatest => "update_to_latest",
             MenuAction::RestartToUpdate => "restart_to_update",
+            MenuAction::UpdateNow => "update_now",
         }
     }
 
@@ -250,6 +258,7 @@ impl MenuAction {
             MenuAction::CheckForUpdates => "Check for Updates…",
             MenuAction::UpdateToLatest => "Update to Latest",
             MenuAction::RestartToUpdate => "Restart to Update",
+            MenuAction::UpdateNow => "Update Now",
         }
     }
 
@@ -302,6 +311,7 @@ impl MenuAction {
             MenuAction::CheckForUpdates => c"checkForUpdates:",
             MenuAction::UpdateToLatest => c"updateToLatest:",
             MenuAction::RestartToUpdate => c"restartToUpdate:",
+            MenuAction::UpdateNow => c"updateNow:",
         }
     }
 
@@ -314,8 +324,9 @@ impl MenuAction {
 /// The menus' shortcuts with no config. The pane ones are iTerm2's and
 /// Ghostty's; the prompt ones Terminal.app's and iTerm2's; the copies
 /// Warp's (its Copy Command and Copy Output). No terminal has a chord
-/// for failed commands: Option-Shift with the prompt ones.
-pub const DEFAULTS: [(&str, MenuAction); 42] = [
+/// for failed commands: Option-Shift with the prompt ones. Cmd+U, which
+/// no terminal uses, is Update Now, as the welcome line says.
+pub const DEFAULTS: [(&str, MenuAction); 43] = [
     ("cmd+n", MenuAction::NewWindow),
     ("cmd+t", MenuAction::NewTab),
     ("cmd+w", MenuAction::Close),
@@ -359,6 +370,7 @@ pub const DEFAULTS: [(&str, MenuAction); 42] = [
     ("cmd+g", MenuAction::FindNext),
     ("shift+cmd+g", MenuAction::FindPrevious),
     ("cmd+e", MenuAction::UseSelectionForFind),
+    ("cmd+u", MenuAction::UpdateNow),
 ];
 
 /// The menus' shortcuts that `[keybind]` can't move, and their items
@@ -620,6 +632,42 @@ impl fmt::Display for Chord {
             ChordKey::Named(Named::F(n)) => write!(f, "f{n}"),
             ChordKey::Named(n) => f.write_str(NAMES.iter().find(|(_, m)| *m == n).map_or("?", |(name, _)| name)),
         }
+    }
+}
+
+impl Chord {
+    /// As macOS menus spell it: `⌃⌥⇧⌘` then the key (`⌘U`, `⌘↑`, `⇧⌘C`,
+    /// `⌃Tab` is `⌃⇥`), for text in the terminal that names a shortcut.
+    pub fn symbols(&self) -> String {
+        let mut out = String::new();
+        for (on, sym) in [(self.ctrl, '⌃'), (self.alt, '⌥'), (self.shift, '⇧'), (self.cmd, '⌘')] {
+            if on {
+                out.push(sym);
+            }
+        }
+        match self.key {
+            ChordKey::Char(' ') => out.push_str("Space"),
+            ChordKey::Char(c) => out.extend(c.to_uppercase()),
+            ChordKey::Named(Named::F(n)) => out.push_str(&format!("F{n}")),
+            ChordKey::Named(n) => out.push(match n {
+                Named::Enter => '↩',
+                Named::Tab => '⇥',
+                Named::Escape => '⎋',
+                Named::Backspace => '⌫',
+                Named::Delete => '⌦',
+                Named::Insert => '⎀',
+                Named::Up => '↑',
+                Named::Down => '↓',
+                Named::Left => '←',
+                Named::Right => '→',
+                Named::Home => '↖',
+                Named::End => '↘',
+                Named::PageUp => '⇞',
+                Named::PageDown => '⇟',
+                Named::F(_) => unreachable!("handled above"),
+            }),
+        }
+        out
     }
 }
 
@@ -960,6 +1008,24 @@ mod tests {
         assert_eq!(chord("cmd+enter").key_equivalent(), ("\r".into(), COMMAND));
         assert_eq!(chord("shift+cmd+up").key_equivalent(), ("\u{F700}".into(), COMMAND | SHIFT));
         assert_eq!(chord("alt+f12").key_equivalent(), ("\u{F70F}".into(), OPTION));
+    }
+
+    #[test]
+    fn chords_in_menu_symbols() {
+        for (c, want) in [
+            ("cmd+u", "⌘U"),
+            ("cmd+up", "⌘↑"),
+            ("shift+cmd+c", "⇧⌘C"),
+            ("alt+shift+cmd+c", "⌥⇧⌘C"),
+            ("ctrl+`", "⌃`"),
+            ("cmd+,", "⌘,"),
+            ("ctrl+tab", "⌃⇥"),
+            ("alt+f12", "⌥F12"),
+            ("cmd+space", "⌘Space"),
+        ] {
+            assert_eq!(chord(c).symbols(), want, "{c}");
+        }
+        assert_eq!(Keybinds::default().chords(MenuAction::UpdateNow), [chord("cmd+u")]);
     }
 
     #[test]

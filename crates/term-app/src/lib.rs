@@ -52,6 +52,7 @@ pub mod theme;
 pub mod update;
 mod view;
 pub mod watch;
+pub mod welcome;
 
 pub use entry::{PinInfo, Role, run};
 pub use paths::Paths;

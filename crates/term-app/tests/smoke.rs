@@ -621,6 +621,62 @@ zle -N zle-line-pre-redraw td-line-pre-redraw
     assert!(!work.join("ran here").exists(), "it ran without Enter");
 }
 
+/// A new window running the login shell starts with the faint welcome
+/// line (version, tabs, memory, a tip). With an update waiting (the test
+/// control's fake one), a new tab's second line names it and Cmd+U; Cmd+U
+/// and a click on that line both run Update Now.
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_welcome_line_and_update() {
+    if !have_metal() {
+        return;
+    }
+    let dir = TempDir::new("welcome");
+    let d = dir.path().display();
+    let zshrc = format!(
+        r#"PS1='%% '
+case "$(cat '{d}/role' 2>/dev/null)" in
+  '') echo tab > '{d}/role'; {dump}{fake}{tab}sleep 20 ;;
+  tab) {dump}{cmd_u}{until_one}{click}{until_two}{quit}sleep 20 ;;
+esac
+"#,
+        dump = dump_and_wait(&dir),
+        fake = osc("fake-update commits 5 0123abc"),
+        tab = osc("tab"),
+        cmd_u = osc("key 32 cmd"),
+        until_one = dump_until(&dir, "\"update_now\":1"),
+        click = osc("click 1 3"),
+        until_two = dump_until(&dir, "\"update_now\":2"),
+        quit = osc("quit"),
+    );
+    let mut cmd = Command::new(APP);
+    cmd.env("XDG_CONFIG_HOME", dir.config_home())
+        .env("DECLINE_TEST_DUMP", dir.dump_file())
+        .current_dir(dir.path());
+    with_zsh(&mut cmd, &dir, &zshrc);
+    let (status, _) = run(&mut cmd);
+    assert!(status.success(), "{status}");
+    let all = dumps(&dir);
+    let first = all.iter().find(|x| num(x, "window") == 1.0).expect("a dump of the window");
+    check_dump(first);
+    let lines: Vec<&str> = screen(first).lines().collect();
+    assert!(lines[0].starts_with("Terminal Decline "), "{lines:?}");
+    assert!(lines[0].contains(" · 1 tab · ") && lines[0].contains(" MB"), "{lines:?}");
+    assert!(!lines[1].contains("Update"), "no update waits: {lines:?}");
+    let tab = all.iter().find(|x| num(x, "window") == 2.0).expect("a dump of the tab");
+    let lines: Vec<&str> = screen(tab).lines().collect();
+    assert!(
+        lines[0].starts_with("Terminal Decline ") && lines[0].contains(" · 2 tabs · "),
+        "{lines:?}"
+    );
+    assert_eq!(lines[1], "Update available: 5 new commits — press ⌘U to update|", "{lines:?}");
+    // Cmd+U, then the click on the line, each ran Update Now once.
+    assert!(all.iter().any(|x| num(x, "update_now") == 1.0), "{all:?}");
+    assert!(all.iter().any(|x| num(x, "update_now") == 2.0), "{all:?}");
+    // The click wasn't opened as a link.
+    assert!(all.iter().all(|x| x["opened"].as_array().is_none_or(|o| o.is_empty())), "{all:?}");
+}
+
 /// A dogfood build doesn't restart under a running program when a new
 /// build is installed: the library is swapped while the shell runs a
 /// script, and the app carries on, saying it was updated (a notification

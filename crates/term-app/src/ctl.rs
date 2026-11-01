@@ -12,15 +12,15 @@
 //!   screen read back, screenshots on the GPU;
 //! - [`window`]: sessions shown in a window of the app (`spawn --window`).
 
-mod client;
 mod headless;
-mod idle;
-mod keys;
-pub mod protocol;
-mod screen;
 mod server;
 mod shot;
 pub mod window;
+
+// The protocol, the command line and the parts of a session that need
+// no session, in term-ctl.
+pub use term_ctl::protocol;
+use term_ctl::{client, idle, keys, screen};
 
 use std::time::Duration;
 
@@ -40,7 +40,7 @@ fn idle() -> Duration {
 
 /// `terminal-decline ctl ARGS…`: its exit status.
 pub fn run(args: &[String]) -> i32 {
-    client::run(args)
+    client::run(args, serve_headless)
 }
 
 /// The config source sessions are made from: the user's config file.

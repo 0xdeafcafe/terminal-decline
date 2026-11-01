@@ -1,0 +1,16 @@
+[package]
+name = "term-activity"
+description = "What each pane's shell is doing: OSC 133 activity, status titles, notification decisions, prompts and the program running, with no AppKit"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+term-core.workspace = true
+libc.workspace = true
+
+[dev-dependencies]
+# The tests read real shells' foreground programs.
+term-pty.workspace = true

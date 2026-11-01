@@ -107,7 +107,9 @@ fn face_overrides_are_applied() {
     let defaults = Fonts::new("Menlo", 26.0);
     let monaco = Fonts::new("Monaco", 26.0);
     let a = |f: &Fonts, s| f.rasterize('A', s).unwrap();
-    assert_eq!(bitmap(&a(&f, Style::Bold)), bitmap(&a(&monaco, Style::Regular)));
+    // Monaco has no bold: its regular face thickened, as Monaco's own bold.
+    assert_eq!(bitmap(&a(&f, Style::Bold)), bitmap(&a(&monaco, Style::Bold)));
+    assert!(f.is_synthetic_bold(Style::Bold) && !f.is_synthetic_bold(Style::Italic));
     assert_eq!(bitmap(&a(&f, Style::Italic)), bitmap(&a(&defaults, Style::Bold)));
     assert_eq!(bitmap(&a(&f, Style::BoldItalic)), bitmap(&a(&defaults, Style::Regular)));
     // Metrics are the regular face's.

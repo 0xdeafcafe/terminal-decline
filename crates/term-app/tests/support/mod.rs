@@ -46,15 +46,24 @@ pub fn parts() -> &'static Parts {
         }
         let status = cmd.env("CARGO_TARGET_DIR", &target).current_dir(repo()).status().unwrap();
         assert!(status.success(), "building the library, launcher and stub");
-        let parts = Parts {
-            lib: dir.join("libterminal_decline.dylib"),
-            launcher: dir.join("terminal-decline-launcher"),
-            stub: dir.join("terminal-decline-pin"),
+        // Cargo puts its outputs in place again on every build, even one
+        // with nothing to do, so another test process's `cargo build`
+        // would take these files away for a moment: work from copies of
+        // this process's own.
+        let own = target.join(format!("parts-{}", std::process::id()));
+        std::fs::create_dir_all(&own).unwrap();
+        let copy = |name: &str| {
+            let from = dir.join(name);
+            assert!(from.is_file(), "{} not built", from.display());
+            let to = own.join(name);
+            std::fs::copy(&from, &to).unwrap();
+            to
         };
-        for p in [&parts.lib, &parts.launcher, &parts.stub] {
-            assert!(p.is_file(), "{} not built", p.display());
+        Parts {
+            lib: copy("libterminal_decline.dylib"),
+            launcher: copy("terminal-decline-launcher"),
+            stub: copy("terminal-decline-pin"),
         }
-        parts
     })
 }
 

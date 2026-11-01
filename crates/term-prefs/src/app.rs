@@ -42,8 +42,9 @@ enum RowKind {
     Palette(usize),
     Bind(Bind),
     AddBind,
-    Env(String),
-    AddEnv,
+    /// An entry of a table of strings (`env`, `symbol_map`), by key and name.
+    Env(&'static str, String),
+    AddEnv(&'static str),
     Pin(Pin),
     Info,
 }
@@ -69,8 +70,8 @@ enum Then {
     BindText(String),
     /// A new chord for the binding at `from`, or for a new binding.
     BindChord(Option<String>),
-    EnvName,
-    EnvValue(String),
+    EnvName(&'static str),
+    EnvValue(&'static str, String),
     /// An element of a list: replace `Some(i)`, or add at the end.
     ListItem(KeyPath, Option<usize>),
 }
@@ -104,7 +105,7 @@ enum Mode {
         filter: String,
         sel: usize,
         then: Then,
-        /// A font picker: Tab shows all fonts.
+        /// A font picker: a name typed that isn't listed is taken as is.
         fonts: bool,
     },
     Number {
@@ -174,7 +175,6 @@ pub struct App<'h> {
     last_write: Option<Instant>,
     last_written: Option<String>,
     fonts: Option<Vec<Font>>,
-    show_all_fonts: bool,
     width: usize,
     height: usize,
     hit: Hit,
@@ -183,11 +183,23 @@ pub struct App<'h> {
     /// preview), and the colours windows show with it (`[colors]` on
     /// top), for drawing this tab.
     previewed: Option<(String, Checked)>,
+    /// The font setting and name every window shows while a font list is
+    /// open (the live preview).
+    font_previewed: Option<(String, String)>,
     /// Themes' colours for the swatches in theme lists, read once each.
     theme_infos: std::collections::HashMap<String, Option<ThemeInfo>>,
     /// For a list with group headers: the item on each row shown (`None`
     /// for a header). Empty for a list without.
     hit_rows: Vec<Option<usize>>,
+}
+
+/// The font setting a list picks for, if it is one the app previews.
+fn font_key(then: &Then) -> Option<&'static str> {
+    let path = match then {
+        Then::Font(p) | Then::Set(p) => p,
+        _ => return None,
+    };
+    crate::preview::FONT_KEYS.into_iter().find(|k| path.len() == 1 && path[0] == *k)
 }
 
 fn path_of(key: &str) -> KeyPath {
@@ -273,12 +285,12 @@ impl<'h> App<'h> {
             last_write: None,
             last_written: None,
             fonts: None,
-            show_all_fonts: false,
             width: 80,
             height: 24,
             hit: Hit::default(),
             effects: Vec::new(),
             previewed: None,
+            font_previewed: None,
             theme_infos: Default::default(),
             hit_rows: Vec::new(),
         };
@@ -660,22 +672,27 @@ impl<'h> App<'h> {
                     });
                 }
                 Editor::Map => {
-                    for name in self.env_names() {
-                        let (item, origin) = self.layers.lookup(&["env".into(), name.clone()]);
+                    for name in self.env_names(s.key) {
+                        let (item, origin) = self.layers.lookup(&[s.key.into(), name.clone()]);
                         rows.push(Row {
                             label: format!("{} {name}", s.label),
                             value: item.map(format_item).unwrap_or_default(),
                             note: self.note(&origin, s.applies),
                             swatch: None,
                             description: "enter: change the value · d: remove · r: reset".into(),
-                            kind: RowKind::Env(name),
+                            kind: RowKind::Env(s.key, name),
                         });
                     }
                     rows.push(Row {
-                        kind: RowKind::AddEnv,
-                        label: "+ add a variable".into(),
+                        kind: RowKind::AddEnv(s.key),
+                        label: if s.key == "env" { "+ add a variable" } else { "+ add a range" }.into(),
                         value: String::new(),
-                        note: "new windows".into(),
+                        note: if s.applies == schema::Applies::NewWindows {
+                            "new windows"
+                        } else {
+                            ""
+                        }
+                        .into(),
                         swatch: None,
                         description: s.description.into(),
                     });
@@ -686,21 +703,21 @@ impl<'h> App<'h> {
         rows
     }
 
-    fn env_names(&self) -> Vec<String> {
+    fn env_names(&self, key: &str) -> Vec<String> {
         let mut names: Vec<String> = Vec::new();
-        if let (Some(item), _) = self.layers.lookup(&["env".into()])
+        if let (Some(item), _) = self.layers.lookup(&[key.into()])
             && let Some(t) = item.as_table_like()
         {
             names.extend(t.iter().map(|(k, _)| k.to_string()));
         }
-        if let Some(t) = self.layers.below(&["env".into()]).and_then(Item::as_table_like) {
+        if let Some(t) = self.layers.below(&[key.into()]).and_then(Item::as_table_like) {
             for (k, _) in t.iter() {
                 if !names.iter().any(|n| n == k) {
                     names.push(k.to_string());
                 }
             }
         }
-        if let Some(t) = self.layers.here(&["env".into()]).and_then(Item::as_table_like) {
+        if let Some(t) = self.layers.here(&[key.into()]).and_then(Item::as_table_like) {
             for (k, _) in t.iter() {
                 if !names.iter().any(|n| n == k) {
                     names.push(k.to_string());
@@ -899,7 +916,7 @@ impl<'h> App<'h> {
             }
             Key::Char('a') if plain => match self.current_section() {
                 Section::Keys => self.start_chord(Then::BindChord(None)),
-                Section::Advanced => self.edit_text("Variable name", String::new(), TextKind::Plain, Then::EnvName),
+                Section::Advanced => self.edit_text("Variable name", String::new(), TextKind::Plain, Then::EnvName("env")),
                 _ => {}
             },
             Key::Char('q') if plain => self.effects.push(Effect::Quit),
@@ -957,20 +974,31 @@ impl<'h> App<'h> {
         };
     }
 
-    fn font_items(&mut self, all: bool) -> Vec<(String, String)> {
+    /// Every installed family: the monospaced ones, then the others (the
+    /// list draws a header before each group).
+    fn font_items(&mut self) -> Vec<(String, String)> {
         let fonts = self.fonts.get_or_insert_with(|| self.host.fonts());
-        let mut items: Vec<(String, String)> = fonts
-            .iter()
-            .filter(|f| f.monospace)
+        let (mono, other): (Vec<&Font>, Vec<&Font>) = fonts.iter().partition(|f| f.monospace);
+        mono.into_iter()
+            .chain(other)
             .map(|f| (f.family.clone(), f.family.clone()))
-            .collect();
-        if all {
-            items.extend(
-                fonts
-                    .iter()
-                    .filter(|f| !f.monospace)
-                    .map(|f| (f.family.clone(), format!("{} (not monospace: text will look uneven)", f.family))),
-            );
+            .collect()
+    }
+
+    /// Whether `family` is installed and monospaced, for the font list's
+    /// headers.
+    pub(crate) fn is_monospace(&self, family: &str) -> Option<bool> {
+        self.fonts.as_ref()?.iter().find(|f| f.family == family).map(|f| f.monospace)
+    }
+
+    /// The faces of the family in effect, by full name, after "unset".
+    fn face_items(&mut self, unset: &str) -> Vec<(String, String)> {
+        let (item, _) = self.layers.lookup(&path_of("font_family"));
+        let family = item.and_then(Item::as_str).unwrap_or("").to_string();
+        let fonts = self.fonts.get_or_insert_with(|| self.host.fonts());
+        let mut items = vec![(String::new(), unset.to_string())];
+        if let Some(f) = fonts.iter().find(|f| f.family.eq_ignore_ascii_case(&family)) {
+            items.extend(f.faces.iter().map(|face| (face.clone(), face.clone())));
         }
         items
     }
@@ -999,8 +1027,14 @@ impl<'h> App<'h> {
                     }
                     Editor::Theme => {}
                     Editor::Font => {
-                        let items = self.font_items(self.show_all_fonts);
+                        let items = self.font_items();
                         self.choose("Font family", items, &current, Then::Font(path), true);
+                        self.say("type to search · moving shows the font in every window · Esc puts back the old one");
+                    }
+                    Editor::Face => {
+                        let items = self.face_items(s.unset);
+                        self.choose(s.label, items, &current, Then::Set(path), true);
+                        self.say("type to search, or any face's full name · Esc puts back the old face");
                     }
                     Editor::Number { min, max, step, integer } => {
                         self.sessions += 1;
@@ -1082,17 +1116,24 @@ impl<'h> App<'h> {
                 self.choose(&format!("{} does", b.chord), items, &current, Then::BindAction(b.chord), false);
             }
             RowKind::AddBind => self.start_chord(Then::BindChord(None)),
-            RowKind::Env(name) => {
+            RowKind::Env(key, name) => {
                 let v = self
                     .layers
-                    .lookup(&["env".into(), name.clone()])
+                    .lookup(&[key.into(), name.clone()])
                     .0
                     .and_then(Item::as_str)
                     .unwrap_or("")
                     .to_string();
-                self.edit_text(&name, v, TextKind::Plain, Then::EnvValue(name.clone()));
+                self.edit_text(&name, v, TextKind::Plain, Then::EnvValue(key, name.clone()));
             }
-            RowKind::AddEnv => self.edit_text("Variable name", String::new(), TextKind::Plain, Then::EnvName),
+            RowKind::AddEnv(key) => {
+                let what = if key == "env" {
+                    "Variable name"
+                } else {
+                    "Code points (U+E000-U+F8FF)"
+                };
+                self.edit_text(what, String::new(), TextKind::Plain, Then::EnvName(key))
+            }
             RowKind::Pin(p) => {
                 let user = self.host.user_config();
                 let back = (self.layers.paths.clone(), self.layers.edit);
@@ -1131,11 +1172,11 @@ impl<'h> App<'h> {
                 },
                 format!("keybind {}", b.chord),
             ),
-            RowKind::Env(n) => (
+            RowKind::Env(key, n) => (
                 Edit::Remove {
-                    path: vec!["env".into(), n.clone()],
+                    path: vec![key.to_string(), n.clone()],
                 },
-                format!("env.{n}"),
+                format!("{key}.{n}"),
             ),
             _ => return,
         };
@@ -1208,10 +1249,10 @@ impl<'h> App<'h> {
                     self.say(format!("{} unbound · u undoes", b.chord));
                 }
             }
-            RowKind::Env(n) => {
+            RowKind::Env(key, n) => {
                 if self.commit(
                     Edit::Remove {
-                        path: vec!["env".into(), n.clone()],
+                        path: vec![key.into(), n.clone()],
                     },
                     now,
                 ) {
@@ -1300,15 +1341,15 @@ impl<'h> App<'h> {
             }
             Then::BindText(chord) => self.bind_edit(&chord, Bound::Text(unescape(&value))),
             Then::BindChord(from) => return self.chord_entered(Then::BindChord(from), &value, now),
-            Then::EnvName => {
+            Then::EnvName(key) => {
                 if value.is_empty() {
                     return;
                 }
-                self.edit_text(&value, String::new(), TextKind::Plain, Then::EnvValue(value.clone()));
+                self.edit_text(&value, String::new(), TextKind::Plain, Then::EnvValue(key, value.clone()));
                 return;
             }
-            Then::EnvValue(name) => Edit::Set {
-                path: vec!["env".into(), name],
+            Then::EnvValue(key, name) => Edit::Set {
+                path: vec![key.into(), name],
                 value: Value::from(value),
             },
             Then::ListItem(path, index) => {
@@ -1413,7 +1454,7 @@ impl<'h> App<'h> {
     fn choice(&mut self, mode: Mode, event: Event, now: Instant) {
         let Mode::Choice {
             title,
-            mut items,
+            items,
             mut filter,
             mut sel,
             then,
@@ -1462,11 +1503,6 @@ impl<'h> App<'h> {
             Event::Key(Key::Down, _) => sel += 1,
             Event::Key(Key::PageUp, _) => sel = sel.saturating_sub(10),
             Event::Key(Key::PageDown, _) => sel += 10,
-            Event::Key(Key::Tab, _) if fonts => {
-                self.show_all_fonts = !self.show_all_fonts;
-                items = self.font_items(self.show_all_fonts);
-                sel = 0;
-            }
             Event::Key(Key::Backspace, _) => {
                 filter.pop();
                 sel = 0;
@@ -1486,6 +1522,12 @@ impl<'h> App<'h> {
         if theme_list && let Some(&i) = list.get(sel) {
             let name = items[i].0.clone();
             self.preview(&name);
+        }
+        if let Some(key) = font_key(&then)
+            && let Some(&i) = list.get(sel)
+        {
+            let name = items[i].0.clone();
+            self.preview_font(key, &name);
         }
         self.mode = Mode::Choice {
             title,
@@ -1535,10 +1577,27 @@ impl<'h> App<'h> {
         self.previewed = Some((name.to_string(), colours));
     }
 
-    /// The theme list closed: the theme written is kept (`keep`), else
-    /// the windows go back to the config's.
+    /// Shows font setting `key` as `name` in every window (the app's live
+    /// preview), if it isn't already.
+    fn preview_font(&mut self, key: &str, name: &str) {
+        if self.font_previewed.as_ref().is_some_and(|(k, n)| k == key && n == name) {
+            return;
+        }
+        if self.in_app {
+            let ask = Preview::Font {
+                key: key.to_string(),
+                name: name.to_string(),
+            };
+            self.effects.push(Effect::Send(ask.osc()));
+        }
+        self.font_previewed = Some((key.to_string(), name.to_string()));
+    }
+
+    /// The theme or font list closed: what was written is kept (`keep`),
+    /// else the windows go back to the config's.
     fn end_preview(&mut self, keep: bool) {
-        if self.previewed.take().is_some() && self.in_app {
+        let font = self.font_previewed.take().is_some();
+        if (self.previewed.take().is_some() || font) && self.in_app {
             let ask = if keep { Preview::Keep } else { Preview::Cancel };
             self.effects.push(Effect::Send(ask.osc()));
         }
@@ -1785,7 +1844,7 @@ impl<'h> App<'h> {
             }
             Key::Char('a') => {
                 if fonts {
-                    let items = self.font_items(true);
+                    let items = self.font_items();
                     self.choose("Add a fallback font", items, "", Then::ListItem(path, None), true);
                 } else {
                     self.edit_text("Add", String::new(), TextKind::Plain, Then::ListItem(path, None));

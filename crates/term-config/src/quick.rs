@@ -9,7 +9,7 @@
 //! This module is the part with no AppKit: the hotkey as Carbon wants it
 //! ([`Hotkey::parse`]), the setting for where it shows ([`Position`]) and
 //! the window's frames ([`shown_frame`], [`hidden_frame`]). The hotkey
-//! itself is [`crate::hotkey`]; the window, [`crate::app`].
+//! itself is the app's `hotkey`; the window, its `app`.
 
 use serde::{Deserialize, Serialize};
 

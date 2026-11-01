@@ -481,13 +481,13 @@ define_class!(
 
         #[unsafe(method(increaseFontSize:))]
         fn increase_font_size(&self, _sender: Option<&AnyObject>) {
-            let size = self.with_state(|st| st.win.font_size + 1.0);
+            let size = self.with_state(|st| (st.win.font_size + st.win.config.font_size_step).min(200.0));
             self.reload_fonts(size);
         }
 
         #[unsafe(method(decreaseFontSize:))]
         fn decrease_font_size(&self, _sender: Option<&AnyObject>) {
-            let size = self.with_state(|st| (st.win.font_size - 1.0).max(6.0));
+            let size = self.with_state(|st| (st.win.font_size - st.win.config.font_size_step).max(6.0));
             self.reload_fonts(size);
         }
 

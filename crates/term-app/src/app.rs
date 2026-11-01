@@ -157,16 +157,49 @@ impl crate::ctl::window::WindowControl for HostedWindow {
     }
 }
 
-/// The live theme preview from Settings (see [`term_prefs::Preview`]).
+/// The live theme or font preview from Settings (see
+/// [`term_prefs::Preview`]).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 enum Previewing {
     #[default]
     Off,
     /// Shown over the config, which is untouched.
-    Showing(String),
+    Showing(Shown),
     /// Just written to the config: still shown until the reload that
     /// follows (or the timer numbered here, if the file didn't change).
-    Kept(String, u64),
+    Kept(Shown, u64),
+}
+
+/// What Settings previews.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Shown {
+    /// A theme, for light and dark alike.
+    Theme(String),
+    /// Font setting `key` (`font_family`, `font_bold`…) as a name, ""
+    /// for unset.
+    Font(String, String),
+}
+
+impl Shown {
+    /// `config` with this shown in place of its own.
+    fn over(&self, config: &Config, themes_dir: &std::path::Path) -> Config {
+        match self {
+            Shown::Theme(name) => config.previewing(name, themes_dir),
+            Shown::Font(key, name) => {
+                let mut c = config.clone();
+                let face = (!name.is_empty()).then(|| name.clone());
+                match key.as_str() {
+                    "font_family" if !name.is_empty() => c.font_family = name.clone(),
+                    "font_bold" => c.font_bold = face,
+                    "font_italic" => c.font_italic = face,
+                    "font_bold_italic" => c.font_bold_italic = face,
+                    "emoji_font" => c.emoji_font = face,
+                    _ => {}
+                }
+                c
+            }
+        }
+    }
 }
 
 define_class!(
@@ -1017,7 +1050,7 @@ impl AppDelegate {
         let config = self.ivars().config.borrow().clone();
         match &*self.ivars().preview.borrow() {
             Previewing::Off => config,
-            Previewing::Showing(name) | Previewing::Kept(name, _) => Rc::new(config.previewing(name, &self.ivars().origin.themes_dir)),
+            Previewing::Showing(shown) | Previewing::Kept(shown, _) => Rc::new(shown.over(&config, &self.ivars().origin.themes_dir)),
         }
     }
 
@@ -1025,9 +1058,10 @@ impl AppDelegate {
     /// the one it just wrote.
     fn preview_theme(&self, ask: term_prefs::Preview) {
         let next = match (ask, self.ivars().preview.borrow().clone()) {
-            (term_prefs::Preview::Show(name), _) => Previewing::Showing(name),
+            (term_prefs::Preview::Show(name), _) => Previewing::Showing(Shown::Theme(name)),
+            (term_prefs::Preview::Font { key, name }, _) => Previewing::Showing(Shown::Font(key, name)),
             (term_prefs::Preview::Cancel, _) => Previewing::Off,
-            (term_prefs::Preview::Keep, Previewing::Showing(name)) => {
+            (term_prefs::Preview::Keep, Previewing::Showing(shown)) => {
                 thread_local!(static KEPT: Cell<u64> = const { Cell::new(0) });
                 let n = KEPT.with(|k| {
                     k.set(k.get() + 1);
@@ -1044,7 +1078,7 @@ impl AppDelegate {
                         d.end_preview();
                     }
                 });
-                Previewing::Kept(name, n)
+                Previewing::Kept(shown, n)
             }
             (term_prefs::Preview::Keep, other) => other,
         };
@@ -2012,7 +2046,7 @@ pub fn run(
 
 #[cfg(test)]
 mod tests {
-    use super::tab_index;
+    use super::{Config, Shown, tab_index};
 
     #[test]
     fn cmd_number_picks_a_tab() {
@@ -2030,5 +2064,27 @@ mod tests {
         ] {
             assert_eq!(tab_index(tag, tabs), want, "tag={tag} tabs={tabs}");
         }
+    }
+
+    /// A font preview stands in for its one setting; an empty face is the
+    /// family's own, an empty family keeps the config's.
+    #[test]
+    fn font_previews_replace_their_setting() {
+        let dir = std::path::Path::new("/nonexistent");
+        let config = Config {
+            font_bold: Some("Menlo Bold".into()),
+            ..Config::default()
+        };
+        let over = |key: &str, name: &str| Shown::Font(key.into(), name.into()).over(&config, dir);
+        assert_eq!(over("font_family", "Monaco").font_family, "Monaco");
+        assert_eq!(over("font_family", "").font_family, "Menlo");
+        assert_eq!(over("font_bold", "").font_bold, None);
+        assert_eq!(over("font_italic", "Menlo Italic").font_italic.as_deref(), Some("Menlo Italic"));
+        assert_eq!(over("font_bold_italic", "X").font_bold, Some("Menlo Bold".into()));
+        assert_eq!(
+            over("emoji_font", "Noto Color Emoji").emoji_font.as_deref(),
+            Some("Noto Color Emoji")
+        );
+        assert_eq!(over("font_size", "20"), config);
     }
 }

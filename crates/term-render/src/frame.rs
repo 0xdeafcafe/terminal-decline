@@ -363,6 +363,13 @@ pub struct Theme {
     /// colour a program set (OSC 4, 10–12): the program's, not the
     /// theme's, so it stays put in a theme transition.
     pub program_set: u32,
+    /// Bold text in one of the first 8 ANSI colours is drawn in its bright
+    /// version (`bold_is_bright`).
+    pub bold_is_bright: bool,
+    /// The least WCAG contrast ratio text keeps against its background,
+    /// 1 (any, the default) to 21: text below it is moved towards black
+    /// or white until it reaches it (`minimum_contrast`).
+    pub minimum_contrast: f32,
 }
 
 impl Default for Theme {
@@ -402,6 +409,8 @@ impl Theme {
             palette,
             background_opacity: 255,
             program_set: 0,
+            bold_is_bright: false,
+            minimum_contrast: 1.0,
         };
         theme.keep_legible();
         theme
@@ -478,6 +487,33 @@ impl Theme {
             },
         }
     }
+}
+
+/// Text colour `fg` with at least contrast `min` against `bg`
+/// (`minimum_contrast`): as it is if it has that, else moved the least
+/// way towards black or white (whichever `bg` contrasts more with) that
+/// reaches it, or all the way. A moved colour is the text's own, not the
+/// theme's, so it isn't retinted in a theme transition.
+fn legible(fg: Paint, bg: Rgba, min: f32) -> Paint {
+    if contrast(fg.rgba, bg) >= min {
+        return fg;
+    }
+    let (black, white) = (rgb(0x000000), rgb(0xffffff));
+    let target = if contrast(white, bg) >= contrast(black, bg) { white } else { black };
+    let at = |t: f32| {
+        let ch = |shift: u32| {
+            let (x, y) = (((fg.rgba >> shift) & 0xFF) as f32, ((target >> shift) & 0xFF) as f32);
+            ((x + (y - x) * t).round() as u32) << shift
+        };
+        ch(0) | ch(8) | ch(16) | (fg.rgba & 0xFF00_0000)
+    };
+    // Contrast rises with t: halve towards the least t that reaches it.
+    let (mut lo, mut hi) = (0.0f32, 1.0f32);
+    for _ in 0..8 {
+        let mid = (lo + hi) / 2.0;
+        if contrast(at(mid), bg) >= min { hi = mid } else { lo = mid }
+    }
+    Paint { rgba: at(hi), tag: 0 }
 }
 
 /// `a` (0xRRGGBB) moved `t` of the way to `b`.
@@ -719,10 +755,20 @@ impl Pen {
             rgba,
             tag: theme.tag(slot),
         };
-        let mut fg = theme.resolve(style.fg, default(theme.foreground, slot::FOREGROUND));
+        let mut fg_color = style.fg;
+        if theme.bold_is_bright
+            && a.contains(Attrs::BOLD)
+            && let ColorKind::Indexed(i @ 0..8) = style.fg.kind()
+        {
+            fg_color = term_core::Color::indexed(i + 8);
+        }
+        let mut fg = theme.resolve(fg_color, default(theme.foreground, slot::FOREGROUND));
         let mut bg = theme.resolve(style.bg, default(theme.background, slot::BACKGROUND));
         if a.contains(Attrs::INVERSE) {
             std::mem::swap(&mut fg, &mut bg);
+        }
+        if theme.minimum_contrast > 1.0 {
+            fg = legible(fg, bg.rgba, theme.minimum_contrast);
         }
         Pen {
             fg,
@@ -1011,6 +1057,7 @@ impl Frame {
                 m.underline_offset,
                 m.underline_thickness,
                 m.strike_offset,
+                m.strike_thickness,
             ],
             padding_x: input.padding.0,
             glyphs: generation,
@@ -1583,7 +1630,7 @@ fn cursor_rects(out: &mut Vec<RectInstance>, c: &CursorDraw, input: &FrameInput)
     let w = cw * if c.wide { 2 } else { 1 };
     let h = ch;
     let color = input.theme.paint(slot::CURSOR);
-    let t = (m.cell_width as i32 / 8).max(2);
+    let t = m.cursor_thickness() as i32;
     let r = |x: i32, y: i32, w: i32, h: i32| RectInstance::painted(s16(x), s16(y), w as u16, h as u16, color);
     let rects: &[RectInstance] = match (input.focused, c.shape) {
         (true, CursorShape::Bar) => &[r(x, y, t, h)],
@@ -2121,7 +2168,9 @@ fn decorate(
         rect(out, x, y, cw, fg, text);
     }
     if pen.attrs.contains(Attrs::STRIKE) {
-        rect(out, x, y + m.baseline as i32 - m.strike_offset as i32, cw, fg, text);
+        let sy = y + m.baseline as i32 - m.strike_offset as i32;
+        let strike = RectInstance::painted(s16(x), s16(sy), cw as u16, m.strike_thickness() as u16, fg);
+        RowSink::decoration(out, strike, text);
     }
 }
 
@@ -2155,6 +2204,8 @@ mod tests {
         underline_offset: 2,
         underline_thickness: 2,
         strike_offset: 4,
+        strike_thickness: 0,
+        cursor_thickness: 0,
     };
     /// Where underlines start: the top of the underline in row 0.
     const UY: i16 = (M.baseline + M.underline_offset) as i16;

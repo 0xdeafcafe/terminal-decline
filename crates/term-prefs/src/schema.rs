@@ -56,8 +56,13 @@ pub enum Editor {
     Choice(&'static [&'static str]),
     /// A theme name, or a light/dark pair of them.
     Theme,
-    /// A font family: monospace fonts first, all fonts behind a toggle.
+    /// A font family: every installed family, monospaced ones first, then
+    /// the others under a header; moving previews it in every window.
     Font,
+    /// A face of the configured family (`font_bold`): its own faces by
+    /// full name, or unset; any other face's name can be typed. Moving
+    /// previews it.
+    Face,
     /// A number: ←→ steps by `step` within `min..=max`, or type it.
     Number { min: f64, max: f64, step: f64, integer: bool },
     /// A string; empty leaves it unset.
@@ -283,7 +288,13 @@ pub const SETTINGS: &[Setting] = &[
         "Space around the text, in points",
     ),
     // Font
-    setting("font_family", "Family", Font, Editor::Font, "The font the text is drawn with"),
+    setting(
+        "font_family",
+        "Family",
+        Font,
+        Editor::Font,
+        "The font the text is drawn with: monospaced fonts first; moving through the list previews it, Esc puts back the old one",
+    ),
     setting(
         "font_size",
         "Size",
@@ -303,13 +314,19 @@ pub const SETTINGS: &[Setting] = &[
             "font_bold",
             "Bold face",
             Font,
-            Editor::Text,
-            "The bold face by name, such as \"Menlo Bold\"",
+            Editor::Face,
+            "The bold face, from the family's faces or any face's full name typed, such as \"Menlo Bold\"",
         ),
         "the family's own",
     ),
     unset(
-        setting("font_italic", "Italic face", Font, Editor::Text, "The italic face by name"),
+        setting(
+            "font_italic",
+            "Italic face",
+            Font,
+            Editor::Face,
+            "The italic face, from the family's faces or any face's full name typed",
+        ),
         "the family's own",
     ),
     unset(
@@ -317,8 +334,8 @@ pub const SETTINGS: &[Setting] = &[
             "font_bold_italic",
             "Bold italic face",
             Font,
-            Editor::Text,
-            "The bold italic face by name",
+            Editor::Face,
+            "The bold italic face, from the family's faces or any face's full name typed",
         ),
         "the family's own",
     ),

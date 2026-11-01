@@ -154,53 +154,17 @@ pub fn default_keybinds() -> Vec<(String, String)> {
         .collect()
 }
 
-/// The installed font families, sorted, with Core Text's monospace flag
-/// or equal advances for `iMW0.` (Ayuthaya has those without the flag).
-/// Opening each family takes 90–280 ms for all of them.
+/// The installed font families ([`term_font::list_families`]), sorted,
+/// with each one's faces. 100–300 ms for all of them.
 pub fn fonts() -> Vec<Font> {
-    use objc2_core_foundation::{CFString, CGSize};
-    use objc2_core_text::{CTFont, CTFontOrientation, CTFontSymbolicTraits};
-    let Some(mtm) = objc2::MainThreadMarker::new() else {
-        return Vec::new();
-    };
-    let families = objc2_app_kit::NSFontManager::sharedFontManager(mtm).availableFontFamilies();
-    let mut out: Vec<Font> = families
-        .iter()
-        .map(|f| f.to_string())
-        .filter(|f| !f.starts_with('.'))
-        .map(|family| {
-            let font = unsafe { CTFont::with_name(&CFString::from_str(&family), 12.0, std::ptr::null()) };
-            let flagged = unsafe { font.symbolic_traits() }.contains(CTFontSymbolicTraits::TraitMonoSpace);
-            let monospace = flagged || {
-                let mut chars: Vec<u16> = "iMW0.".encode_utf16().collect();
-                let mut glyphs = vec![0u16; chars.len()];
-                let mut advances = vec![CGSize::new(0.0, 0.0); chars.len()];
-                let n = chars.len() as isize;
-                let found = unsafe {
-                    font.glyphs_for_characters(
-                        std::ptr::NonNull::new_unchecked(chars.as_mut_ptr()),
-                        std::ptr::NonNull::new_unchecked(glyphs.as_mut_ptr()),
-                        n,
-                    )
-                };
-                found && {
-                    unsafe {
-                        font.advances_for_glyphs(
-                            CTFontOrientation::Default,
-                            std::ptr::NonNull::new_unchecked(glyphs.as_mut_ptr()),
-                            advances.as_mut_ptr(),
-                            n,
-                        )
-                    };
-                    advances.iter().all(|a| a.width > 0.0 && (a.width - advances[0].width).abs() < 0.01)
-                }
-            };
-            Font { family, monospace }
+    term_font::list_families()
+        .into_iter()
+        .map(|f| Font {
+            family: f.family,
+            monospace: f.monospace,
+            faces: f.faces.into_iter().map(|face| face.full_name).collect(),
         })
-        .collect();
-    out.sort_by_key(|f| f.family.to_lowercase());
-    out.dedup_by(|a, b| a.family == b.family);
-    out
+        .collect()
 }
 
 impl Host for AppHost {

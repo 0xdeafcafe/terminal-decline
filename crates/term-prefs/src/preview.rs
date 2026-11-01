@@ -1,8 +1,8 @@
-//! The live theme preview: while a theme list is open in Settings, the
-//! preferences ask the app to show the theme under the selection in every
-//! window, through `OSC 7771 ; theme-preview ; … ST` (honoured only from
-//! the Settings tab, like `record-chord`). Nothing is written to the
-//! config until Enter.
+//! The live preview: while a theme or font list is open in Settings, the
+//! preferences ask the app to show the theme or font under the selection
+//! in every window, through `OSC 7771 ; theme-preview ; … ST` (honoured
+//! only from the Settings tab, like `record-chord`). Nothing is written to
+//! the config until Enter.
 //!
 //! Anything that writes to the Settings tab's terminal could send these:
 //! the editor `e` opens, or a file it shows. So the app gives the
@@ -29,12 +29,19 @@ pub fn verify<'a>(what: &'a str, token: &str) -> Option<&'a str> {
     (!token.is_empty()).then_some(rest)
 }
 
+/// The settings a font preview may stand in for.
+pub const FONT_KEYS: [&str; 4] = ["font_family", "font_bold", "font_italic", "font_bold_italic"];
+
 /// What the preferences ask of the app.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Preview {
     /// Show theme `name` in every window, light and dark alike ("" for
     /// the built-in colours), in place of the config's theme.
     Show(String),
+    /// Show font setting `key` (one of [`FONT_KEYS`]) as `name` in every
+    /// window, in place of the config's ("" for unset: the family's own
+    /// face). `theme-preview;font;<key>;<name>`.
+    Font { key: String, name: String },
     /// Put back the config's theme now (Esc in the list).
     Cancel,
     /// The previewed theme was just written to the config: keep showing it
@@ -49,6 +56,7 @@ impl Preview {
     pub fn osc(&self) -> String {
         let what = match self {
             Preview::Show(name) => format!("show;{name}"),
+            Preview::Font { key, name } => format!("font;{key};{name}"),
             Preview::Cancel => "cancel".into(),
             Preview::Keep => "keep".into(),
         };
@@ -61,6 +69,14 @@ impl Preview {
         match rest {
             "cancel" => Some(Preview::Cancel),
             "keep" => Some(Preview::Keep),
+            _ if rest.starts_with("font;") => {
+                let (key, name) = rest.strip_prefix("font;")?.split_once(';')?;
+                // A font name: no controls.
+                (FONT_KEYS.contains(&key) && !name.chars().any(char::is_control)).then(|| Preview::Font {
+                    key: key.to_string(),
+                    name: name.to_string(),
+                })
+            }
             _ => {
                 let name = rest.strip_prefix("show;")?;
                 // A theme name is a file name: no controls.
@@ -79,6 +95,14 @@ mod tests {
         for p in [
             Preview::Show("rose-pine-dawn".into()),
             Preview::Show(String::new()),
+            Preview::Font {
+                key: "font_family".into(),
+                name: "JetBrainsMono Nerd Font Mono".into(),
+            },
+            Preview::Font {
+                key: "font_bold".into(),
+                name: String::new(),
+            },
             Preview::Cancel,
             Preview::Keep,
         ] {
@@ -89,6 +113,17 @@ mod tests {
         assert_eq!(Preview::parse("record-chord"), None);
         assert_eq!(Preview::parse("theme-preview;bogus"), None);
         assert_eq!(Preview::parse("theme-preview;show;a\x07b"), None);
+        assert_eq!(
+            Preview::Font {
+                key: "font_italic".into(),
+                name: "Menlo Italic".into()
+            }
+            .osc(),
+            "\x1b]7771;theme-preview;font;font_italic;Menlo Italic\x1b\\"
+        );
+        assert_eq!(Preview::parse("theme-preview;font;font_size;20"), None, "only the font names");
+        assert_eq!(Preview::parse("theme-preview;font;font_family;Me\x1bnlo"), None);
+        assert_eq!(Preview::parse("theme-preview;font;font_family"), None);
     }
 
     /// Requests carry the app's token; one without it, or with another,

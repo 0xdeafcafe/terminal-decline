@@ -47,6 +47,9 @@ pub struct Font {
     pub family: String,
     /// Core Text's monospace flag, or equal advances for `iMW0.`.
     pub monospace: bool,
+    /// Its faces' full names ("Menlo Bold Italic"), regular first: what
+    /// `font_bold`, `font_italic` and `font_bold_italic` take.
+    pub faces: Vec<String>,
 }
 
 /// A pin, as the pin module lists it.
@@ -174,6 +177,10 @@ impl Fake {
                 .map(|f| Font {
                     family: f.into(),
                     monospace: matches!(f, "Menlo" | "Monaco" | "SF Mono"),
+                    faces: match f {
+                        "Menlo" | "SF Mono" => ["Regular", "Bold", "Italic", "Bold Italic"].map(|s| format!("{f} {s}")).to_vec(),
+                        _ => vec![format!("{f} Regular")],
+                    },
                 })
                 .collect(),
             themes: ["slope-dark", "slope-light", "solarized-dark", "tokyo-night"]
@@ -498,7 +505,7 @@ fn fake_check(table: &dyn toml_edit::TableLike, prefix: &str, host: &Fake, notic
             Editor::Toggle => value.is_some_and(|v| v.is_bool()),
             Editor::Number { integer, .. } => value.is_some_and(|v| v.is_integer() || (!integer && v.is_float())),
             Editor::Choice(choices) => value.and_then(|v| v.as_str()).is_some_and(|s| choices.contains(&s)),
-            Editor::Text | Editor::Font => value.is_some_and(|v| v.is_str()),
+            Editor::Text | Editor::Font | Editor::Face => value.is_some_and(|v| v.is_str()),
             Editor::Width => value.is_some_and(|v| v.is_integer() || v.is_float() || v.as_str().is_some_and(schema::valid_width)),
             Editor::Colour => value.and_then(|v| v.as_str()).and_then(schema::parse_hex).is_some(),
             Editor::Palette => value.and_then(|v| v.as_array()).is_some_and(|a| {

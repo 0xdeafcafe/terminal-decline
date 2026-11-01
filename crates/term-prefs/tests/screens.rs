@@ -333,9 +333,14 @@ fn fonts_and_lists() {
     assert_eq!(*fake.font_scans.borrow(), 0, "fonts are scanned when the picker opens");
     s.send(&mut app, &format!("{RIGHT}{ENTER}"));
     assert_eq!(*fake.font_scans.borrow(), 1);
-    assert!(s.has("SF Mono") && !s.has("Helvetica"), "{}", s.text());
-    s.send(&mut app, "\t");
-    assert!(s.has("Helvetica (not monospace: text will look uneven)"), "{}", s.text());
+    // Every font: the monospaced ones, then the others under a header.
+    let t = s.text();
+    let at = |name: &str| (0..24).find(|&y| s.row(y).contains(name)).unwrap_or_else(|| panic!("{name}: {t}"));
+    assert!(at("Monospaced") < at("Menlo") && at("SF Mono") < at("Other fonts"), "{t}");
+    assert!(
+        at("Other fonts") < at("Helvetica") && at("Helvetica") < at("Apple Color Emoji"),
+        "{t}"
+    );
     s.send(&mut app, &format!("sf{ENTER}"));
     assert_eq!(read(&cfg), "font_family = \"SF Mono\"\n");
     // A typed name that isn't installed.
@@ -789,4 +794,77 @@ fn theme_lists_group_by_background() {
     s.send(&mut app, &format!("/dark theme{ENTER}{DOWN}{UP}{UP}{UP}"));
     assert!(s.has("▸"), "{}", s.text());
     s.send(&mut app, &format!("{ESC}{ESC}"));
+}
+
+/// The font list at 80×24 and at 20×5: both groups' headers when there is
+/// room, the selection always shown, and searching keeps the header of
+/// what matches.
+#[test]
+fn font_picker_screens() {
+    let dir = Dir::new("font-screens");
+    let cfg = dir.file("config.toml", "font_family = \"SF Mono\"\n");
+    let fake = Fake::new(cfg.clone());
+    let mut app = App::new(&fake, vec![cfg.clone()], 0, false);
+    let mut s = Screen::new(&mut app, 80, 24);
+    s.send(&mut app, &format!("{RIGHT}{ENTER}"));
+    assert!(s.has("Font family") && s.has("Monospaced") && s.has("Other fonts"), "{}", s.text());
+    assert!(s.has("▸ SF Mono"), "the current font is selected: {}", s.text());
+    s.send(&mut app, "helv");
+    assert!(s.has("Other fonts") && !s.has("Monospaced") && s.has("▸ Helvetica"), "{}", s.text());
+    s.send(&mut app, ESC);
+    s.resize(&mut app, 20, 5);
+    s.send(&mut app, ENTER);
+    assert!(s.has("SF Mono"), "{}", s.text());
+    for _ in 0..3 {
+        s.send(&mut app, DOWN);
+    }
+    assert!(s.has("▸ Apple Co"), "scrolled to the selection: {}", s.text());
+    s.send(&mut app, ESC);
+    assert_eq!(read(&cfg), "font_family = \"SF Mono\"\n");
+}
+
+/// Moving through the font list shows each font in every window (the app
+/// hears `OSC 7771 ; theme-preview ; font`); Esc puts the old one back and
+/// writes nothing, Enter writes it and keeps it shown until the reload.
+#[test]
+fn font_lists_preview_live() {
+    let dir = Dir::new("font-preview");
+    let cfg = dir.file("config.toml", "font_family = \"Menlo\"\n");
+    let fake = Fake::new(cfg.clone());
+    let mut app = App::new(&fake, vec![cfg.clone()], 0, true);
+    let mut s = Screen::new(&mut app, 80, 24);
+    s.send(&mut app, &format!("{RIGHT}{ENTER}"));
+    assert!(s.sent.is_empty(), "opening the list previews nothing: {:?}", s.sent);
+    s.send(&mut app, DOWN);
+    assert_eq!(s.sent, ["\x1b]7771;theme-preview;font;font_family;Monaco\x1b\\"]);
+    s.send(&mut app, "helv");
+    assert_eq!(s.sent.last().unwrap(), "\x1b]7771;theme-preview;font;font_family;Helvetica\x1b\\");
+    s.send(&mut app, ESC);
+    assert_eq!(s.sent.last().unwrap(), "\x1b]7771;theme-preview;cancel\x1b\\");
+    assert_eq!(read(&cfg), "font_family = \"Menlo\"\n");
+    // Again, and Enter keeps it.
+    s.send(&mut app, &format!("{ENTER}{DOWN}{DOWN}"));
+    assert_eq!(s.sent.last().unwrap(), "\x1b]7771;theme-preview;font;font_family;SF Mono\x1b\\");
+    s.send(&mut app, ENTER);
+    assert_eq!(s.sent.last().unwrap(), "\x1b]7771;theme-preview;keep\x1b\\");
+    assert_eq!(read(&cfg), "font_family = \"SF Mono\"\n");
+
+    // The bold face: the family's own faces, previewed the same way.
+    s.send(&mut app, &format!("{DOWN}{DOWN}{DOWN}"));
+    assert!(s.cursor_row().contains("Bold face"), "{}", s.text());
+    s.send(&mut app, ENTER);
+    assert!(s.has("the family's own") && s.has("SF Mono Bold Italic"), "{}", s.text());
+    assert!(!s.has("Menlo Bold"), "only the family's faces: {}", s.text());
+    s.send(&mut app, &format!("{DOWN}{DOWN}"));
+    assert_eq!(s.sent.last().unwrap(), "\x1b]7771;theme-preview;font;font_bold;SF Mono Bold\x1b\\");
+    s.send(&mut app, ENTER);
+    assert_eq!(s.sent.last().unwrap(), "\x1b]7771;theme-preview;keep\x1b\\");
+    assert_eq!(read(&cfg), "font_family = \"SF Mono\"\nfont_bold = \"SF Mono Bold\"\n");
+    // A face of another family is typed.
+    s.send(&mut app, &format!("{ENTER}Menlo Bold{ENTER}"));
+    assert_eq!(read(&cfg), "font_family = \"SF Mono\"\nfont_bold = \"Menlo Bold\"\n");
+    // Back to the family's own: unset.
+    s.send(&mut app, &format!("{ENTER}own{ENTER}"));
+    assert_eq!(s.sent.last().unwrap(), "\x1b]7771;theme-preview;keep\x1b\\");
+    assert_eq!(read(&cfg), "font_family = \"SF Mono\"\n");
 }

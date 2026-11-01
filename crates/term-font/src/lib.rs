@@ -7,12 +7,14 @@ mod detect;
 mod fit;
 #[cfg(test)]
 mod legacy_tests;
+mod list;
 mod registry;
 mod shape;
 pub mod sprite;
 
 pub use config::{CellWidth, FontConfig, Tag};
 pub use fit::is_private_use;
+pub use list::{FaceInfo, FamilyInfo, format_families, list_families};
 pub use registry::{FontId, GlyphKey, SPRITE_FONT};
 pub use shape::{Features, RunText, ShapedGlyph};
 pub use sprite::{SpriteId, is_code_drawn};

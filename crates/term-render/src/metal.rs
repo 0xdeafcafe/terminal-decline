@@ -59,6 +59,17 @@ const COLOR_ATLAS: u32 = 256;
 const MAX_MASK_ATLAS: u32 = 4096;
 const MAX_COLOR_ATLAS: u32 = 2048;
 
+/// Time spent waiting for frames in flight before putting glyphs in their
+/// textures, in all ([`glyph_upload_wait`]).
+static UPLOAD_WAIT_NS: AtomicU64 = AtomicU64::new(0);
+
+/// How long uploads of new glyphs have waited, in all, for the GPU to
+/// finish frames that sample the glyph textures. For the latency harness.
+#[doc(hidden)]
+pub fn glyph_upload_wait() -> Duration {
+    Duration::from_nanos(UPLOAD_WAIT_NS.load(Ordering::Relaxed))
+}
+
 /// Command buffers on the GPU, counted so the CPU can wait for them.
 #[derive(Default)]
 struct InFlight {
@@ -297,7 +308,9 @@ impl Atlas {
         // replaceRegion doesn't synchronise with the GPU: wait until no frame
         // that samples this texture is in flight, in any window. New glyphs
         // are rare.
+        let waited = Instant::now();
         in_flight.wait_idle();
+        UPLOAD_WAIT_NS.fetch_add(waited.elapsed().as_nanos() as u64, Ordering::Relaxed);
         let region = MTLRegion {
             origin: MTLOrigin {
                 x: x as usize,

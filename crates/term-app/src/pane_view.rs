@@ -1566,13 +1566,50 @@ impl PaneView {
     }
 
     fn handle_scroll(&self, event: &NSEvent) {
+        let Some(at) = self.cell_at(event) else { return };
+        let input = crate::scroll::Input {
+            precise: event.hasPreciseScrollingDeltas(),
+            dy: event.scrollingDeltaY(),
+            phase: crate::scroll::Phase::of(event.phase().0),
+            momentum: crate::scroll::Phase::of(event.momentumPhase().0),
+            t0: event.timestamp(),
+        };
+        self.scroll_by(input, self.reporting(event), Self::mods_of(event), at);
+    }
+
+    /// A scroll event made up by the latency harness, over the middle of
+    /// the pane, without modifiers.
+    pub(crate) fn scroll_synthetic(&self, mut input: crate::scroll::Input) {
+        input.t0 = latency::now();
+        let Some((reporting, at)) = self.with(|_, p| {
+            let t = p.session.lock_term();
+            let m = t.state.modes();
+            let reporting = (m.mouse != term_core::MouseMode::Off).then_some((m.mouse, m.mouse_sgr));
+            (reporting, (t.state.lines() / 2, t.state.cols() / 2))
+        }) else {
+            return;
+        };
+        self.scroll_by(input, reporting, 0, at);
+    }
+
+    /// A scroll event over cell `at`: to the program when it takes the
+    /// mouse (`reporting`), as arrow keys to a full-screen program
+    /// without, otherwise the view's. The latency harness plays its
+    /// gestures through here.
+    pub(crate) fn scroll_by(
+        &self,
+        input: crate::scroll::Input,
+        reporting: Option<(term_core::MouseMode, bool)>,
+        mods: u8,
+        (line, col): (usize, usize),
+    ) {
         self.with(|win, _| win.last_input = Instant::now());
-        let precise = event.hasPreciseScrollingDeltas();
-        let reporting = self.reporting(event);
-        let Some((line, col)) = self.cell_at(event) else { return };
+        if let (Some(lat), Some(w)) = (latency::get(), self.window_view()) {
+            lat.scrolled(w.id(), input.t0);
+        }
         let lines = self.with(|win, p| {
-            let dy = event.scrollingDeltaY();
-            let delta = if precise {
+            let dy = input.dy;
+            let delta = if input.precise {
                 dy * win.scale / win.renderer.metrics().cell_height as f64
             } else {
                 dy
@@ -1584,7 +1621,7 @@ impl PaneView {
         });
         let Some(lines) = lines.filter(|&l| l != 0) else { return };
         if let Some((_, sgr)) = reporting {
-            let code = mouse::wheel_code(lines, Self::mods_of(event));
+            let code = mouse::wheel_code(lines, mods);
             for _ in 0..lines.unsigned_abs().min(mouse::MAX_WHEEL_REPORTS) {
                 self.send_mouse(code, line, col, true, sgr);
             }

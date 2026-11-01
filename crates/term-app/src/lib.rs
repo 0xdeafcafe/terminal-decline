@@ -40,6 +40,7 @@ pub mod quick;
 pub mod reload;
 pub mod running;
 pub mod saved_history;
+pub mod scroll;
 pub mod search;
 pub mod secure_input;
 pub mod select;

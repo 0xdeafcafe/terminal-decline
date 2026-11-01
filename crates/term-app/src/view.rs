@@ -1417,6 +1417,13 @@ impl WindowView {
                 }
             }
         };
+        let window_id = self.ivars().id;
+        let scroll_log = latency::get().filter(|l| l.scrolling(window_id));
+        if let Some(l) = scroll_log
+            && !matches!(decision, Decision::Draw { .. })
+        {
+            l.tick(window_id, format!("{decision:?}"));
+        }
         let rate = match decision {
             Decision::Skip => {
                 win.idle_ticks = win.idle_ticks.saturating_add(1);
@@ -1453,6 +1460,8 @@ impl WindowView {
             Decision::Draw { rate } => latency::get().and_then(|l| l.hz()).unwrap_or(rate),
         };
         keep_held(panes, &ticks);
+        // While the view scrolls, the harness's record of this frame.
+        let mut scroll_frame = scroll_log.map(|l| l.scroll_frame(window_id, rate));
         win.idle_ticks = 0;
         win.renderer.show();
         let typing = win.last_input.elapsed() < frame_policy::INPUT_BOOST;
@@ -1548,10 +1557,20 @@ impl WindowView {
             // that may be half-updated is replaced before it is released,
             // so its reader never parses into it.
             let panic_snapshot = p.panic_next.take_if(|snapshot| *snapshot).is_some();
+            let snap_start = latency::now();
             let snap = crate::crash::contain(|| {
                 test_build_panic(panic_snapshot);
                 win.renderer.snapshot_pane(&mut p.render, &mut t.state, &input)
             });
+            if let Some(f) = scroll_frame.as_mut().filter(|_| id == focused_pane && snap.is_ok()) {
+                f.snapshot_us = (latency::now() - snap_start) * 1e6;
+                f.built = true;
+                f.offset = t.state.display_offset();
+                let s = p.render.frame.last_snapshot();
+                f.copied = s.rows.iter().filter(|r| r.cells.is_some()).count() as u32;
+                (f.rows, f.cols) = (s.rows.len() as u32, s.cols);
+                f.cell_h = input.metrics.cell_height;
+            }
             if snap.is_err() {
                 crate::session::replace_term(t);
                 p.render.forget();
@@ -1595,11 +1614,18 @@ impl WindowView {
                 preedit: Some(p.marked.as_str()),
             };
             let panic_now = p.panic_next.take().is_some();
+            let build_start = latency::now();
+            let wait_start = term_render::glyph_upload_wait();
             // Unlocked, the terminal is untouched by a panic here.
             let built = crate::crash::contain(|| {
                 test_build_panic(panic_now);
                 win.renderer.build_from_snapshot(&mut p.render, &input)
             });
+            if let Some(f) = scroll_frame.as_mut().filter(|_| id == focused_pane) {
+                f.build_us = (latency::now() - build_start) * 1e6;
+                f.upload_wait_us = (term_render::glyph_upload_wait() - wait_start).as_secs_f64() * 1e6;
+                f.deferred = p.render.glyphs_deferred();
+            }
             let ok = match built {
                 Ok(true) => true,
                 Ok(false) => {
@@ -1659,6 +1685,7 @@ impl WindowView {
                     pane: &p.render,
                     origin: (r.x, r.y),
                     scissor: r.clamped(w, h)?,
+                    scroll: None,
                 })
             })
             .collect();
@@ -1675,10 +1702,23 @@ impl WindowView {
             win.transition = None;
         }
         win.renderer.set_blend(blend);
+        if let (Some(f), Some(p)) = (scroll_frame.as_mut(), panes.get(&focused_pane)) {
+            f.shift_px = draws
+                .iter()
+                .find(|d| std::ptr::eq(d.pane, &p.render))
+                .and_then(|d| d.scroll)
+                .map_or(0, |s| s.up);
+        }
         match timed {
-            Some((lat, keys)) if !keys.is_empty() => {
-                present_timed(&mut win.renderer, &self.ivars().layer, clear, &draws, dividers, lat, keys)
-            }
+            Some((lat, keys)) if !keys.is_empty() || scroll_frame.is_some() => present_timed(
+                &mut win.renderer,
+                &self.ivars().layer,
+                clear,
+                &draws,
+                dividers,
+                lat,
+                FrameKeys::with_scroll(keys, scroll_frame),
+            ),
             _ => win.renderer.present_panes(&self.ivars().layer, clear, &draws, dividers),
         }
         drop(draws);
@@ -2510,6 +2550,12 @@ impl WindowView {
         view.with(|_, p| p.key_t0 = None);
     }
 
+    /// Play scroll events in the focused pane for the latency harness, one
+    /// every `1 / hz` seconds from now, each stamped when it is handled.
+    pub fn latency_scroll(&self, events: Vec<crate::scroll::Input>, hz: f64) {
+        play_scroll(self.ivars().id, Arc::new(events), 0, Instant::now(), hz);
+    }
+
     /// The programs running in the panes' foregrounds, other than their
     /// shells (see [`crate::running`]), in pane order. Never the Settings
     /// pane's: closing it loses nothing, each edit being written at once.
@@ -2844,6 +2890,23 @@ fn pane_hooks(id: usize, pane: PaneId, test: bool, settings: bool) -> Hooks {
     hooks
 }
 
+/// Event `i` of `events` in window `id`'s focused pane at its time, then
+/// the next: each scheduled from the one before, as a timer far ahead
+/// may fire late by a share of its delay (and they would come in bunches).
+fn play_scroll(id: usize, events: Arc<Vec<crate::scroll::Input>>, i: usize, start: Instant, hz: f64) {
+    let Some(&input) = events.get(i) else { return };
+    let due = start + Duration::from_secs_f64(i as f64 / hz);
+    let wait = due.saturating_duration_since(Instant::now());
+    let _ = DispatchQueue::main().after(DispatchTime::NOW.time(wait.as_nanos() as i64), move || {
+        with_view(id, |v| {
+            if let Some(view) = v.focused_view() {
+                view.scroll_synthetic(input);
+            }
+        });
+        play_scroll(id, events, i + 1, start, hz);
+    });
+}
+
 /// Present `panes` like [`Renderer::present_panes`], with handlers that
 /// time the frame for the keys it shows (latency harness only). The
 /// renderer doesn't see this drawable, so a window hidden right after such
@@ -2855,14 +2918,15 @@ fn present_timed(
     panes: &[PaneDraw],
     dividers: &[RectInstance],
     lat: &'static Latency,
-    keys: Vec<latency::Key>,
+    frame: FrameKeys,
 ) {
     let Some(drawable) = layer.nextDrawable() else {
-        lat.write(&keys);
+        frame.presented(lat, 0.0);
+        frame.gpu_done(lat, 0.0);
         return;
     };
     let cmd = renderer.encode_panes(&drawable.texture(), clear, panes, dividers);
-    let frame = Arc::new(FrameKeys::new(keys));
+    let frame = Arc::new(frame);
     let on_gpu = frame.clone();
     let done = RcBlock::new(move |cb: NonNull<ProtocolObject<dyn MTLCommandBuffer>>| {
         on_gpu.gpu_done(lat, unsafe { cb.as_ref() }.GPUEndTime());

@@ -70,6 +70,62 @@ pub struct Key {
     pub hz: u16,
 }
 
+/// One frame drawn while the view scrolls, as written to the log (`kind`
+/// "frame"): the scroll events it shows, how long it took to build, how
+/// far the view moved, and when it reached the glass. Times are host
+/// seconds like [`Key`]'s.
+#[derive(Clone, Debug, Default, Serialize, PartialEq)]
+pub struct ScrollFrame {
+    pub kind: &'static str,
+    pub window: usize,
+    /// Scroll events handled since the last frame, and the first's and
+    /// last's own timestamps.
+    pub events: u32,
+    pub t0_first: Option<f64>,
+    pub t0_last: Option<f64>,
+    /// The tick started drawing.
+    pub frame_start: f64,
+    /// The focused pane was built (not only drawn again, moved).
+    pub built: bool,
+    /// Snapshot under the lock (history rows read and decoded), and
+    /// building from it, in µs.
+    pub snapshot_us: f64,
+    pub build_us: f64,
+    /// Rows the snapshot copied (not cached), of `rows` (the grid's
+    /// `lines`, and a row below while smooth scrolling) by `cols`.
+    pub copied: u32,
+    pub rows: u32,
+    pub cols: u16,
+    /// The cell height, device pixels.
+    pub cell_h: u32,
+    /// The view's whole-line offset after the frame, and the pixels the
+    /// content is drawn higher than that.
+    pub offset: usize,
+    pub shift_px: i32,
+    /// Drawn without some new glyphs (the glyph thread has them).
+    pub deferred: bool,
+    /// Time the build waited for the GPU before putting new glyphs in
+    /// their textures, µs.
+    pub upload_wait_us: f64,
+    /// The longest a scroll event waited for the terminal's lock since
+    /// the last frame, µs.
+    pub lock_wait_us: f64,
+    pub commit: Option<f64>,
+    pub gpu_done: Option<f64>,
+    pub t3: Option<f64>,
+    pub hz: u16,
+}
+
+/// A display-link tick that drew nothing while the view scrolls (`kind`
+/// "tick"), with the frame policy's decision.
+#[derive(Clone, Debug, Serialize)]
+pub struct Tick {
+    pub kind: &'static str,
+    pub window: usize,
+    pub t: f64,
+    pub decision: String,
+}
+
 /// The timing log. [`get`] returns it only when `DECLINE_LATENCY_LOG` is set.
 pub struct Latency {
     hz: Option<u16>,
@@ -82,6 +138,13 @@ pub struct Latency {
 struct Inner {
     seq: u64,
     pending: Vec<Key>,
+    /// Scroll events not yet in a frame: (window, timestamp).
+    scrolls: Vec<(usize, f64)>,
+    /// Each window's last scroll event: (window, when handled).
+    last_scroll: Vec<(usize, f64)>,
+    /// The longest wait for a terminal's lock in a scroll event since the
+    /// last frame, seconds.
+    lock_wait: f64,
     out: Box<dyn Write + Send>,
 }
 
@@ -114,6 +177,9 @@ impl Latency {
             inner: Mutex::new(Inner {
                 seq: 0,
                 pending: Vec::new(),
+                scrolls: Vec::new(),
+                last_scroll: Vec::new(),
+                lock_wait: 0.0,
                 out,
             }),
         }
@@ -181,16 +247,91 @@ impl Latency {
         shown
     }
 
+    /// A scroll event made at `t0` was handled in `window`.
+    pub fn scrolled(&self, window: usize, t0: f64) {
+        let mut inner = self.inner();
+        inner.scrolls.push((window, t0));
+        let t = now();
+        match inner.last_scroll.iter_mut().find(|(w, _)| *w == window) {
+            Some(l) => l.1 = t,
+            None => inner.last_scroll.push((window, t)),
+        }
+    }
+
+    /// A scroll event waited `secs` for its terminal's lock.
+    pub fn lock_waited(&self, secs: f64) {
+        let mut inner = self.inner();
+        inner.lock_wait = inner.lock_wait.max(secs);
+    }
+
+    /// `window`'s view was scrolled in the last half second: its frames
+    /// and idle ticks are logged.
+    pub fn scrolling(&self, window: usize) -> bool {
+        let t = now();
+        self.inner().last_scroll.iter().any(|&(w, at)| w == window && t - at < 0.5)
+    }
+
+    /// A frame of `window` starts drawing while its view scrolls: the
+    /// record for it, with the scroll events it takes.
+    pub fn scroll_frame(&self, window: usize, hz: u16) -> ScrollFrame {
+        let mut inner = self.inner();
+        let mut f = ScrollFrame {
+            kind: "frame",
+            window,
+            frame_start: now(),
+            hz,
+            ..ScrollFrame::default()
+        };
+        f.lock_wait_us = std::mem::take(&mut inner.lock_wait) * 1e6;
+        let since = f.frame_start - 0.25;
+        inner.scrolls.retain(|&(w, t0)| {
+            if w != window {
+                return true;
+            }
+            // Events that moved nothing (a gesture's last) stay behind
+            // until the next frame: those of an earlier gesture don't
+            // count for it.
+            if t0 < since {
+                return false;
+            }
+            f.events += 1;
+            f.t0_first.get_or_insert(t0);
+            f.t0_last = Some(t0);
+            false
+        });
+        f
+    }
+
     /// Append finished keys to the log.
     pub fn write(&self, keys: &[Key]) {
+        self.write_all(keys, None);
+    }
+
+    fn write_all(&self, keys: &[Key], frame: Option<&ScrollFrame>) {
         let mut inner = self.inner();
-        for k in keys {
-            let line = serde_json::to_string(k).expect("key serialises");
+        let lines = keys
+            .iter()
+            .map(|k| serde_json::to_string(k).expect("key serialises"))
+            .chain(frame.map(|f| serde_json::to_string(f).expect("frame serialises")));
+        for line in lines.collect::<Vec<_>>() {
             if let Err(e) = writeln!(inner.out, "{line}") {
                 eprintln!("terminal-decline: {ENV}: {e}");
             }
         }
         let _ = inner.out.flush();
+    }
+
+    /// A tick that drew nothing while the view scrolls.
+    pub fn tick(&self, window: usize, decision: String) {
+        let t = Tick {
+            kind: "tick",
+            window,
+            t: now(),
+            decision,
+        };
+        let line = serde_json::to_string(&t).expect("tick serialises");
+        let mut inner = self.inner();
+        let _ = writeln!(inner.out, "{line}");
     }
 }
 
@@ -198,49 +339,63 @@ impl Latency {
 /// presented handlers each fill in their time, and whichever runs last
 /// writes the keys out.
 pub struct FrameKeys {
-    state: Mutex<(Vec<Key>, u8)>,
+    state: Mutex<(Vec<Key>, Option<ScrollFrame>, u8)>,
 }
 
 impl FrameKeys {
     pub fn new(keys: Vec<Key>) -> FrameKeys {
+        FrameKeys::with_scroll(keys, None)
+    }
+
+    /// Keys and, while the view scrolls, the frame's own record.
+    pub fn with_scroll(keys: Vec<Key>, frame: Option<ScrollFrame>) -> FrameKeys {
         FrameKeys {
-            state: Mutex::new((keys, 0)),
+            state: Mutex::new((keys, frame, 0)),
         }
     }
 
     pub fn committed(&self) {
         let t = now();
-        for k in &mut self.lock().0 {
+        let mut st = self.lock();
+        for k in &mut st.0 {
             k.commit = Some(t);
+        }
+        if let Some(f) = &mut st.1 {
+            f.commit = Some(t);
         }
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, (Vec<Key>, u8)> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, (Vec<Key>, Option<ScrollFrame>, u8)> {
         self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    fn done(&self, log: &Latency, set: impl Fn(&mut Key)) {
+    fn done(&self, log: &Latency, set: impl Fn(&mut Key), set_frame: impl Fn(&mut ScrollFrame)) {
         let mut st = self.lock();
         st.0.iter_mut().for_each(set);
-        st.1 += 1;
-        if st.1 == 2 {
-            log.write(&st.0);
+        if let Some(f) = &mut st.1 {
+            set_frame(f);
+        }
+        st.2 += 1;
+        if st.2 == 2 {
+            log.write_all(&st.0, st.1.as_ref());
         }
     }
 
     /// The GPU finished at `t` (host seconds).
     pub fn gpu_done(&self, log: &Latency, t: f64) {
-        self.done(log, |k| k.gpu_done = (t > 0.0).then_some(t));
+        let t = (t > 0.0).then_some(t);
+        self.done(log, |k| k.gpu_done = t, |f| f.gpu_done = t);
     }
 
     /// The frame was presented at `t` (0: it never was).
     pub fn presented(&self, log: &Latency, t: f64) {
-        self.done(log, |k| k.t3 = (t > 0.0).then_some(t));
+        let t = (t > 0.0).then_some(t);
+        self.done(log, |k| k.t3 = t, |f| f.t3 = t);
     }
 }
 
 /// A command from the harness, one line of `DECLINE_LATENCY_INPUT`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Command {
     /// `key <keycode>`: post a key down and up for this virtual key code to
     /// this process through the window server (`CGEventPostToPid`).
@@ -253,6 +408,48 @@ pub enum Command {
     /// handled). Works without the focus, which macOS may refuse while
     /// someone types in another app.
     Type(Vec<u8>),
+    /// `gesture <points> <events> <decay> <hz>`: a trackpad scroll in the
+    /// first window's focused pane, played at `hz`: `events` events of
+    /// `points` each (positive: back into history) with the finger down,
+    /// then momentum from there, each event `decay` times the last, until
+    /// under half a point. Made as scroll events with precise deltas and
+    /// their phases, handled as `scrollWheel:` handles them.
+    Gesture(Gesture),
+    /// `wheel <lines> <events> <hz>`: a mouse wheel's clicks of `lines`
+    /// each (no phases, line deltas), at `hz`.
+    Wheel { lines: f64, events: u32, hz: f64 },
+}
+
+/// A trackpad scroll to play, see [`Command::Gesture`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Gesture {
+    pub points: f64,
+    pub events: u32,
+    pub decay: f64,
+    pub hz: f64,
+}
+
+impl Gesture {
+    /// The events: (delta in points, phase, momentum phase).
+    pub fn events(&self) -> Vec<(f64, crate::scroll::Phase, crate::scroll::Phase)> {
+        use crate::scroll::Phase as P;
+        let mut out = Vec::new();
+        for i in 0..self.events {
+            out.push((self.points, if i == 0 { P::Began } else { P::Changed }, P::None));
+        }
+        out.push((0.0, P::Ended, P::None));
+        let mut v = self.points * self.decay;
+        let mut first = true;
+        while v.abs() >= 0.5 && self.decay > 0.0 {
+            out.push((v, P::None, if first { P::Began } else { P::Changed }));
+            first = false;
+            v *= self.decay;
+        }
+        if !first {
+            out.push((0.0, P::None, P::Ended));
+        }
+        out
+    }
 }
 
 impl Command {
@@ -279,6 +476,29 @@ impl Command {
                     .map(|i| u8::from_str_radix(hex.get(i..i + 2)?, 16).ok())
                     .collect();
                 Command::Type(bytes?)
+            }
+            "gesture" => {
+                let g = Gesture {
+                    points: words.next()?.parse().ok()?,
+                    events: words.next()?.parse().ok()?,
+                    decay: words.next()?.parse().ok()?,
+                    hz: words.next()?.parse().ok()?,
+                };
+                if !(g.hz > 0.0 && (0.0..1.0).contains(&g.decay) && g.points.is_finite()) {
+                    return None;
+                }
+                Command::Gesture(g)
+            }
+            "wheel" => {
+                let (lines, events, hz): (f64, u32, f64) = (
+                    words.next()?.parse().ok()?,
+                    words.next()?.parse().ok()?,
+                    words.next()?.parse().ok()?,
+                );
+                if hz <= 0.0 || hz.is_nan() {
+                    return None;
+                }
+                Command::Wheel { lines, events, hz }
             }
             _ => return None,
         };
@@ -415,12 +635,57 @@ mod tests {
     }
 
     #[test]
+    fn a_gesture_is_touch_then_momentum() {
+        use crate::scroll::Phase as P;
+        let g = Gesture {
+            points: 4.0,
+            events: 3,
+            decay: 0.5,
+            hz: 120.0,
+        };
+        let phases: Vec<_> = g.events().iter().map(|&(dy, p, m)| (dy, p, m)).collect();
+        assert_eq!(
+            phases,
+            [
+                (4.0, P::Began, P::None),
+                (4.0, P::Changed, P::None),
+                (4.0, P::Changed, P::None),
+                (0.0, P::Ended, P::None),
+                (2.0, P::None, P::Began),
+                (1.0, P::None, P::Changed),
+                (0.5, P::None, P::Changed),
+                (0.0, P::None, P::Ended),
+            ]
+        );
+    }
+
+    #[test]
     fn parses_commands() {
         for (line, want) in [
             ("key 0", Some(Command::Key { keycode: 0 })),
             ("open yes", Some(Command::Open(vec!["yes".into()]))),
             ("open htop -d 1", Some(Command::Open(vec!["htop".into(), "-d".into(), "1".into()]))),
             ("type 617f", Some(Command::Type(vec![b'a', 0x7f]))),
+            (
+                "gesture 6 10 0.9 120",
+                Some(Command::Gesture(Gesture {
+                    points: 6.0,
+                    events: 10,
+                    decay: 0.9,
+                    hz: 120.0,
+                })),
+            ),
+            ("gesture 6 10 1.5 120", None),
+            ("gesture 6 10 0.9 0", None),
+            ("gesture 6 10 0.9", None),
+            (
+                "wheel -1 5 30",
+                Some(Command::Wheel {
+                    lines: -1.0,
+                    events: 5,
+                    hz: 30.0,
+                }),
+            ),
             ("type 6", None),
             ("type zz", None),
             ("type", None),

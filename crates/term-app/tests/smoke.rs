@@ -2058,6 +2058,56 @@ fn smoke_shift_drag_selects_over_a_program_taking_the_mouse() {
     );
 }
 
+/// A drag in one of two boxes a program draws side by side stays in that
+/// box (cells §13.2): dragged into the other, it stops at the border, and
+/// copies only its own box's text. The program scrolling its region moves
+/// the selection with its text, cut at the region's top.
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_drag_keeps_to_a_panel_and_follows_a_region_scroll() {
+    if !have_metal() {
+        return;
+    }
+    let dir = TempDir::new("paneldrag");
+    let wait = "i=0; while [ \"$(stty size)\" != '20 80' ] && [ $i -lt 100 ]; do sleep 0.05; i=$((i+1)); done; ";
+    let script = format!(
+        "{resize}{wait}stty raw -echo; \
+         printf '\\033[H\\033[J┌────┐┌────┐\\r\\n│abc ││def │\\r\\n│ghi ││jkl │\\r\\n│mno ││pqr │\\r\\n└────┘└────┘\\033[2;4r'; \
+         {down}{drag}{up}{pause}{dump}{pause}\
+         printf '\\033[S'; {pause}{dump}{pause}\
+         {shift_down}{shift_drag}{shift_up}{pause}{dump}{pause}\
+         {quit}sleep 20",
+        // The mouse is handled on the main thread, the dump after a frame:
+        // each step waits for them.
+        pause = "sleep 0.3; ",
+        resize = osc("resize 80 20"),
+        down = osc("mouse down 1 2"),
+        // Into the other box: stops at the first box's right border.
+        drag = osc("mouse drag 2 9"),
+        up = osc("mouse up 2 9"),
+        // A Shift-drag ignores the boxes: it extends the selection.
+        shift_down = osc("mouse down 2 2 shift"),
+        shift_drag = osc("mouse drag 3 8 shift"),
+        shift_up = osc("mouse up 3 8 shift"),
+        dump = osc("dump"),
+        quit = osc("quit"),
+    );
+    let (status, _) = decline(&dir, &script, true);
+    assert!(status.success(), "{status}");
+    let d = dumps(&dir);
+    assert_eq!(d.len(), 3, "{d:?}");
+    let selection = |x: &Value| x["selection"].as_str().map(str::to_owned);
+    assert_eq!(selection(&d[0]).as_deref(), Some("bc\nghi"), "{}", d[0]);
+    assert_eq!(
+        selection(&d[1]).as_deref(),
+        Some("ghi"),
+        "moved up, cut at the region's top: {}",
+        d[1]
+    );
+    // Shift-click extends the selection, out of its box.
+    assert_eq!(selection(&d[2]).as_deref(), Some("ghi ││jkl │\n│mno ││pqr │\n"), "{}", d[2]);
+}
+
 /// A plain click on a URL or a path that exists, not dragged, opens its
 /// menu once the double-click time has passed (listed in `menus` under
 /// this control), with the whole of it selected.

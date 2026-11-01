@@ -185,6 +185,9 @@ pub(crate) struct Pane {
     /// A plain or Option click whose selection starts once the mouse
     /// has moved far enough ([`crate::select::Pending`]).
     pub(crate) pending: Option<crate::select::Pending>,
+    /// Where the drag making the selection left the mouse, so its end
+    /// goes back under it when output scrolls the selection.
+    pub(crate) drag_at: Option<crate::select::DragAt>,
     /// Scrolling while a selection is dragged past the top or bottom edge.
     pub(crate) autoscroll: Option<AutoScroll>,
     /// An auto-scroll step is waiting to run.
@@ -1461,6 +1464,13 @@ impl WindowView {
                     // Back to following output by other means (typing, a
                     // search): nothing between lines.
                     p.scroll.reset();
+                }
+                // A drag's selection that output scrolled: its end goes
+                // back under the mouse (cells §13.2).
+                if p.selecting.is_some()
+                    && let Some(d) = p.drag_at.as_mut()
+                {
+                    d.follow(&mut t.state);
                 }
             }
             let synchronized = t.as_ref().is_some_and(|t| t.state.modes().synchronized);
@@ -3279,6 +3289,7 @@ fn spawn_pane(window: usize, config: &Config, theme: &Theme, m: term_font::Metri
         dragged: false,
         block: None,
         pending: None,
+        drag_at: None,
         autoscroll: None,
         autoscroll_scheduled: false,
         held: false,

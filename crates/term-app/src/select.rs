@@ -8,7 +8,7 @@
 //! is made, term-core holds (and the renderer draws) the run of text
 //! between its corners.
 
-use term_core::{Point, Selection, Terminal};
+use term_core::{Panel, Point, Selection, Terminal};
 
 /// What a left click does when the program isn't taking the mouse.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -84,6 +84,9 @@ pub struct Pending {
     pub at: (f64, f64),
     /// Option was held: a rectangle.
     pub block: bool,
+    /// The program's panel the click was in, which the selection keeps
+    /// to ([`panel_for`]).
+    pub panel: Option<Panel>,
 }
 
 impl Pending {
@@ -100,9 +103,45 @@ impl Pending {
         let block = self.block.then(|| Block::at(self.anchor));
         t.set_selection(Some(match block {
             Some(b) => b.stream(),
-            None => Selection::new(self.anchor, self.anchor),
+            None => Selection::new(self.anchor, self.anchor).in_panel(self.panel),
         }));
         block
+    }
+}
+
+/// The panel a selection started at `p` keeps to (cells §13.2): the box a
+/// program draws there. A Shift-drag is never kept to one, nor is a
+/// rectangle.
+pub fn panel_for(t: &Terminal, p: Point, shift: bool, block: bool) -> Option<Panel> {
+    (!shift && !block).then(|| t.panel_at(p)).flatten()
+}
+
+/// Where a drag making a selection last left the mouse, and the
+/// selection it made there. Output scrolling the selection (it moves
+/// with its text) moves its end off the mouse: [`DragAt::follow`] puts it
+/// back.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DragAt {
+    /// The view cell under the mouse.
+    pub line: usize,
+    pub col: usize,
+    /// The selection as the drag left it.
+    pub left: Option<Selection>,
+}
+
+impl DragAt {
+    /// The selection moved since the drag left it (output scrolled it,
+    /// its start staying on its text): extend its end to the cell under
+    /// the mouse again. Whether it changed. A selection cleared (its text
+    /// changed) stays cleared.
+    pub fn follow(&mut self, t: &mut Terminal) -> bool {
+        let now = t.selection();
+        if now.is_none() || now == self.left {
+            return false;
+        }
+        t.extend_selection(t.point_at(self.line, self.col));
+        self.left = t.selection();
+        self.left != now
     }
 }
 
@@ -327,6 +366,7 @@ mod tests {
             anchor,
             at: (30.0, 10.0),
             block: false,
+            panel: None,
         };
         // 16-pixel cells: half a cell is 8 pixels.
         for to in [(30.0, 10.0), (32.0, 11.0), (37.0, 10.0), (30.0, 3.0)] {

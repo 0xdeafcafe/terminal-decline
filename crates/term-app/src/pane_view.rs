@@ -1681,6 +1681,7 @@ impl PaneView {
             p.dragged = false;
             p.autoscroll = None;
             p.pending = None;
+            p.drag_at = None;
             let block = p.block.take();
             let mut t = p.session.lock_term();
             let s = &mut t.state;
@@ -1698,24 +1699,38 @@ impl PaneView {
                 // only once the mouse is dragged far enough from it.
                 Gesture::Start | Gesture::Block => {
                     s.set_selection(None);
+                    let block = gesture == Gesture::Block;
                     p.pending = Some(select::Pending {
                         anchor: point,
                         at,
-                        block: gesture == Gesture::Block,
+                        block,
+                        panel: select::panel_for(s, point, shift, block),
                     });
                     p.scroll.forget_carry();
                 }
-                Gesture::Word => s.select_word(point),
-                Gesture::Line => s.select_line(point),
+                // Inside a program's panel, the word or line keeps to it.
+                Gesture::Word | Gesture::Line => {
+                    if gesture == Gesture::Word {
+                        s.select_word(point);
+                    } else {
+                        s.select_line(point);
+                    }
+                    let panel = select::panel_for(s, point, shift, false);
+                    s.set_selection(s.selection().map(|x| x.in_panel(panel)));
+                }
                 Gesture::Extend => {
-                    // A rectangle still shown grows as a rectangle.
+                    // A rectangle still shown grows as a rectangle; a
+                    // Shift-click is never kept to a panel.
                     match block.filter(|b| s.selection() == Some(b.stream())) {
                         Some(mut b) => {
                             b.head = point;
                             s.set_selection(Some(b.stream()));
                             p.block = Some(b);
                         }
-                        None => s.extend_selection(point),
+                        None => {
+                            s.set_selection(s.selection().map(|x| x.in_panel(None)));
+                            s.extend_selection(point);
+                        }
                     }
                 }
             }
@@ -1730,6 +1745,7 @@ impl PaneView {
             let gesture = p.selecting.take();
             p.autoscroll = None;
             p.pending = None;
+            p.drag_at = None;
             win.config.copy_on_select && gesture.is_some_and(|g| select::copies_on_release(g, p.dragged))
         });
         if copy == Some(true) {
@@ -1802,7 +1818,14 @@ impl PaneView {
                 b.head = to;
                 t.state.set_selection(Some(b.stream()));
             }
-            None => t.state.extend_selection(to),
+            None => {
+                t.state.extend_selection(to);
+                p.drag_at = Some(select::DragAt {
+                    line,
+                    col,
+                    left: t.state.selection(),
+                });
+            }
         }
         let changed = t.state.selection() != before;
         drop(t);

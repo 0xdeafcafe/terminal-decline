@@ -424,6 +424,33 @@ fn events_arrive_without_drawing() {
     session.shut_down();
 }
 
+/// Events that come while the main thread hasn't taken the last ones join
+/// them: a program setting the title in every parse slice queues one block,
+/// not thousands (each `setTitle` costs AppKit a millisecond or more).
+#[test]
+fn pending_events_join_while_waiting() {
+    use terminal_decline_app::session::{Events, PendingEvents};
+    let title = |t: &str| Events {
+        title: Some(t.into()),
+        ..Events::default()
+    };
+    let pending = PendingEvents::default();
+    assert!(pending.push(title("one")), "the first queues a block");
+    assert!(
+        !pending.push(Events {
+            bell: true,
+            ..Events::default()
+        }),
+        "later ones join it"
+    );
+    assert!(!pending.push(title("three")));
+    assert!(!pending.push(Events::default()), "no title: the last one stays");
+    let got = pending.take().expect("waiting");
+    assert_eq!((got.title.as_deref(), got.bell), (Some("three"), true));
+    assert_eq!(pending.take(), None);
+    assert!(pending.push(title("four")), "taken: the next queues a block again");
+}
+
 /// A login shell `shell` with nothing of the user's: HOME, ZDOTDIR and
 /// XDG_CONFIG_HOME at `home`, whose startup files set the prompt to
 /// [`PROMPT`] for zsh, bash and fish.

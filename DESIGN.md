@@ -38,25 +38,33 @@ any command as its own Dock app.
 | `term-pty`    | spawns the shell on a pseudo-terminal, reader thread, resize          |
 | `term-font`   | Core Text: font loading, cell metrics, glyph rasterising              |
 | `term-render` | Metal: glyph textures shared by every window, panes drawn into one layer |
-| `term-app`    | AppKit window/view, keyboard + IME, mouse, clipboard, the agent API's server and sessions, updates, pins |
+| `term-app`    | AppKit window/view, keyboard + IME, mouse, clipboard, the agent API's server and sessions, Sparkle and its alerts, pins |
 | `term-keys`   | key press → bytes (xterm, kitty protocol), the `[keybind]` config, the ASCII-capable layout (no AppKit) |
 | `term-config` | `config.toml` and its layers, themes (`themes/`), the quick terminal's settings (no AppKit; term-render and term-font for `Theme` and `FontConfig`) |
+| `term-import` | `terminal-decline import`: Ghostty and iTerm2 settings as a config or theme (AppKit only to convert iTerm2 colour spaces; its own crate so term-config stays AppKit-free) |
+| `term-pins`   | Dock pins: make, list, edit, remove, repair and update pin bundles and their records, run through an injected command runner (no AppKit; the stub itself is `term-pin`; the app passes its usage text and Secure Keyboard Entry carry-over in as hooks) |
 | `term-activity` | what a pane's shell does: OSC 133 activity, status titles, when to notify, prompts, the program running (no AppKit) |
 | `term-restore` | restarting into a new build: the saved window list, the pane tree it saves, each pane's history (no AppKit) |
 | `term-complete` | completion and colouring at the shell's prompt: the command line read into words and coloured, the list's choices, commands, folders, history, man pages and `--help` (no AppKit; docs/design/completion.md) |
 | `term-ctl`    | the agent API's protocol and `ctl` command line, its idle limit, screen read-back and keys (no AppKit; the server and its sessions are term-app's) |
+| `term-update` | the updater: whether it runs, what Sparkle is answered, updates from source (the checkout, git, the build, when to install), what is told after an update, the `update` setting (no AppKit; Sparkle.framework, its alerts and posting notifications are term-app's) |
 | `term-prefs`  | the preferences: settings schema, safe `config.toml` edits, the TUI (no platform code) |
 | `term-icon`   | generated pin icons by the Slope rule (`slope-pins-2`): Core Text outline of the initial, CoreGraphics drawing after `pin-template.svg`, ImageIO `.icns` |
 | `term-image`  | image parsers and decoders with no terminal state: kitty keys, base64, zlib, iTerm2 arguments, Sixel, header sizes, pure-Rust PNG/JPEG/GIF/WebP, conversion to Display P3 (no platform code; docs/design/images.md) |
 
 `term-core` has no platform code and is tested and benchmarked on its own.
 
-term-keys, term-config, term-activity, term-restore, term-ctl and
-term-complete were split out of term-app so they build in parallel and
-their tests compile on their own; term-app re-exports each moved module
-under its old name (`crate::config`, `crate::keys`, `crate::ctl::protocol`,
-`crate::complete`…), so the app's code
-reads as before. They have no objc2 or AppKit dependency of their own.
+term-keys, term-config, term-import, term-pins, term-activity, term-restore,
+term-ctl, term-complete and term-update were split out of term-app so
+they build in parallel and their tests compile on their own; term-app
+re-exports each moved module under its old name (`crate::config`,
+`crate::keys`, `crate::ctl::protocol`, `crate::complete`,
+`crate::update::source`…), so the app's code reads as before. They have
+no objc2 or AppKit dependency of their own, except term-import, which
+uses AppKit to convert iTerm2 colour spaces (term-update uses
+libdispatch for its timers); what term-update needs of the app (posting
+a notification, whether a program runs, whether an update was asked
+for) it asks through a small `Host` trait the app sets at launch.
 
 `term-app` (the `terminal-decline` package) is a library plus a thin `main.rs`. The
 AppKit code (`app`, `view`) only turns events into the inputs of plain
@@ -1177,10 +1185,39 @@ builds were already incremental, and testing only term-app is cheaper
 because the moved tests are in their own crates; the workspace's tests
 cost the same. A clean debug build waits on objc2-foundation and
 objc2-app-kit (≈13 s and ≈19 s, one after the other, before term-app can
-start), not on our crates: their features (all of AppKit by default) are
-the next thing to look at. Line-tables-only debug info for dependencies
+start), not on our crates: their features (all of AppKit by default) were
+the next thing to look at, below. Line-tables-only debug info for dependencies
 in dev made no difference that held up at low load. Apple's linker
 (ld-prime) is the default; release `lto`/`codegen-units` are unchanged.
+
+Then the objc2 framework crates (objc2-app-kit, -foundation, -metal,
+-quartz-core, -io-surface, -core-text, -core-graphics, -core-foundation,
+-image-io, -user-notifications) lost their default features: the
+workspace asks for `std` only and each crate lists the headers it uses
+(`NSWindow`, `MTLDevice`, `CTFont`, ...). That also drops
+objc2-cloud-kit, -core-data, -core-image, -core-location and
+-core-video from the build. Medians of 3 clean builds, before (main at
+579c155) and after taking turns, load 6–27 (falling during the runs);
+"starts" is when term-app's own compile begins in `--timings`.
+
+| clean build | before | after |
+|---|---|---|
+| `cargo build --workspace` (debug) | 37.3 s | 20.1 s |
+| debug: term-app starts at | 29.9 s | 12.8 s |
+| debug: objc2-foundation / objc2-app-kit | 9.6 / 15.3 s | 5.0 / 3.8 s |
+| `cargo build -p term-dylib --release` | 75.3 s | 64.6 s |
+| release: term-app starts at | 32.8 s | 12.4 s |
+| release: objc2-foundation / objc2-app-kit | 15.2 / 21.2 s | 6.2 / 7.7 s |
+| release: term-app's own compile | 22.5 s | 29.8 s |
+
+A clean debug build now takes about half as long. In release term-app
+starts 20 s sooner, but its own compile is the critical path and ran
+longer here (it now overlaps other crates still building), so the
+whole build saves about 11 s; paired runs saved 10.7–19.3 s. Builds
+after an edit don't rebuild these crates, so they are unchanged. A new
+AppKit or Foundation class needs its header added to the crate's
+features in its Cargo.toml (the feature is named after the header file
+in the objc2 crate's `src/generated/`); until then the import fails.
 
 ## Reviews
 
@@ -1227,6 +1264,14 @@ builds:
 | blinking cursor idle, 20 s | 20 s | 0.17 s | 41 MB | 36 MB |
 | 10 windows idle (separate processes) | – | 0% | – | 286 MB total |
 | 56 resizes during 1 GB output; 60 in htop | – | – | – | survived |
+
+Heavier campaigns against the real app live beside it in `scripts/pressure/`
+(each opens real windows and runs for minutes, so they are run by hand, not
+in CI; `--help` or `--list` shows the options): `hostile.py` (streams meant
+to break a terminal, several instances at once, each repeated), `campaign.py`
+(many instances at once, many tabs in one, and a mixed soak), `storms.py`
+(resize, font and tab storms while output floods) and `latency_load.py`
+(keypress-to-present latency while other instances or a tab flood).
 
 ### Frame building after the cell interface (F3.1)
 

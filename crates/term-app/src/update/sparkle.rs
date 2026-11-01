@@ -136,7 +136,7 @@ fn gather(role: &Role, setting: bool) -> Context {
     let test = std::env::var_os(crate::control::ENV).is_some_and(|v| !v.is_empty());
     let test_feed = test && test_feed().is_some();
     let mut c = Context {
-        role: role.clone(),
+        role: role.into(),
         primary: false,
         bundle_id: None,
         team_id: None,

@@ -18,7 +18,6 @@ pub mod frame_policy;
 pub mod hotkey;
 pub mod idle_filters;
 pub mod images;
-pub mod import;
 pub mod latency;
 pub mod layout;
 pub mod links;
@@ -45,6 +44,7 @@ pub mod welcome;
 pub use term_activity::{activity, prompts, running};
 pub use term_complete as complete;
 pub use term_config::{config, quick, theme};
+pub use term_import as import;
 use term_keys::ascii_layout;
 pub use term_keys::{keybind, keys};
 pub use term_restore::{panes, reload, saved_history};
@@ -56,8 +56,9 @@ pub use paths::Paths;
 /// titles end with it).
 pub use term_activity::PRODUCT_NAME;
 
-/// The app's bundle id, also its defaults domain and os_log subsystem.
-pub const BUNDLE_ID: &str = "red.forbes.terminal-decline";
+/// The app's bundle id, also its defaults domain and os_log subsystem
+/// (spelled in term-activity, with the name).
+pub use term_activity::BUNDLE_ID;
 
 /// The bundle id before the rename to Terminal Decline.
 pub const OLD_BUNDLE_ID: &str = "red.forbes.decline";

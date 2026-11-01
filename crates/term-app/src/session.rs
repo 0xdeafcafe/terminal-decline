@@ -154,6 +154,53 @@ impl Events {
     pub fn is_empty(&self) -> bool {
         *self == Events::default()
     }
+
+    /// Fold `later` into these as if both had come in one parse slice: the
+    /// latest title, notification and progress, and the bell if either
+    /// rang.
+    pub fn merge(&mut self, later: Events) {
+        if later.title.is_some() {
+            self.title = later.title;
+        }
+        self.bell |= later.bell;
+        if later.notification.is_some() {
+            self.notification = later.notification;
+        }
+        if later.progress.is_some() {
+            self.progress = later.progress;
+        }
+    }
+}
+
+/// Events on their way from a reader thread to the main thread. Setting a
+/// window's title costs AppKit a millisecond or more, so one block per
+/// parse slice let a program that sets the title in every slice queue up
+/// more work than the main thread could do: it stopped drawing and taking
+/// keys for many seconds after the output ended. Events that come while a
+/// block is still queued join it instead.
+#[derive(Debug, Default)]
+pub struct PendingEvents(std::sync::Mutex<Option<Events>>);
+
+impl PendingEvents {
+    /// Add `events`. True when none were waiting: the caller then queues
+    /// the block that will [`take`](Self::take) them.
+    pub fn push(&self, events: Events) -> bool {
+        let mut slot = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        match &mut *slot {
+            Some(waiting) => {
+                waiting.merge(events);
+                false
+            }
+            None => {
+                *slot = Some(events);
+                true
+            }
+        }
+    }
+
+    pub fn take(&self) -> Option<Events> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).take()
+    }
 }
 
 /// Write `text` into `term` as a dim red line from Terminal Decline itself.

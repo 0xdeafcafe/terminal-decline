@@ -187,7 +187,7 @@ fn subcommand(args: &[String], paths: &Paths, moved: Option<&str>) -> Option<i32
         Some("fonts") => Some(fonts_command(&args[1..], &mut std::io::stdout())),
         // The agent API (docs/design/agent-api.md).
         Some("ctl") => Some(crate::ctl::run(&args[1..])),
-        Some("import") => Some(match crate::import::run(&args[1..], paths) {
+        Some("import") => Some(match crate::import::run(&args[1..], &paths.config_file(), &paths.themes_dir()) {
             Ok(()) => 0,
             Err(e) => {
                 eprintln!("terminal-decline import: {e}");

@@ -1,0 +1,15 @@
+[package]
+name = "term-update"
+description = "Updates, with no AppKit: whether the updater runs, what Sparkle is answered, updates from source (the checkout, git, the build) and what is told about them"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+term-activity.workspace = true
+term-restore.workspace = true
+libc.workspace = true
+dispatch2 = "0.3"
+serde = { version = "1", features = ["derive"] }

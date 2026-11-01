@@ -15,5 +15,6 @@ term-font.workspace = true
 term-render.workspace = true
 term-prefs.workspace = true
 term-keys.workspace = true
+term-update.workspace = true
 serde = { version = "1", features = ["derive"] }
 toml = "1.1"

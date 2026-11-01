@@ -26,22 +26,25 @@ term-image.workspace = true
 term-prefs.workspace = true
 term-keys.workspace = true
 term-config.workspace = true
+term-import.workspace = true
 term-activity.workspace = true
 term-restore.workspace = true
 term-complete.workspace = true
 term-ctl.workspace = true
+term-update.workspace = true
+term-pins.workspace = true
 term-pin = { path = "../term-pin" }
 term-icon = { path = "../term-icon" }
 objc2-core-text.workspace = true
 objc2.workspace = true
 block2.workspace = true
-objc2-foundation.workspace = true
-objc2-app-kit.workspace = true
-objc2-metal.workspace = true
-objc2-quartz-core.workspace = true
-objc2-core-foundation.workspace = true
+objc2-foundation = { workspace = true, features = ["NSAttributedString", "NSGeometry", "NSKeyValueObserving", "NSNotification", "NSObjCRuntime", "NSRunLoop", "NSSet", "NSString", "NSUserDefaults", "NSValue", "objc2-core-foundation"] }
+objc2-app-kit = { workspace = true, features = ["NSAccessibility", "NSAlert", "NSAnimation", "NSAnimationContext", "NSAppearance", "NSApplication", "NSApplicationScripting", "NSBox", "NSButton", "NSCell", "NSColor", "NSColorSpace", "NSControl", "NSCursor", "NSDockTile", "NSDragging", "NSEvent", "NSFont", "NSGraphics", "NSGraphicsContext", "NSImage", "NSMenu", "NSMenuItem", "NSPasteboard", "NSPasteboardItem", "NSResponder", "NSRunningApplication", "NSScreen", "NSSearchField", "NSSegmentedControl", "NSText", "NSTextField", "NSTextFinder", "NSTextInputClient", "NSTextInputContext", "NSTextView", "NSTrackingArea", "NSView", "NSVisualEffectView", "NSWindow", "NSWindowTabGroup", "NSWorkspace", "block2", "libc", "objc2-core-foundation", "objc2-quartz-core"] }
+objc2-metal = { workspace = true, features = ["MTLCommandBuffer", "MTLDrawable", "objc2-core-foundation"] }
+objc2-quartz-core = { workspace = true, features = ["CADisplayLink", "CAFrameRateRange", "CAMetalLayer", "objc2-core-foundation"] }
+objc2-core-foundation = { workspace = true, features = ["CFPreferences"] }
 dispatch2 = "0.3"
-objc2-user-notifications = "0.3"
+objc2-user-notifications = { version = "0.3", default-features = false, features = ["UNNotification", "UNNotificationAction", "UNNotificationCategory", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationTrigger", "UNUserNotificationCenter", "block2", "std"] }
 libc.workspace = true
 serde = { version = "1", features = ["derive"] }
 toml = "1.1"

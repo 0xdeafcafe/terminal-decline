@@ -272,8 +272,9 @@ define_class!(
             // nightly and ad-hoc builds; on, the app menu gains Check for
             // Updates….
             let mode = self.ivars().config.borrow().update;
+            crate::update::install_host();
             let sparkle = crate::update::sparkle::start(&self.ivars().role, mode.on());
-            let source = crate::update::dogfood::start(&self.ivars().role, mode);
+            let source = crate::update::dogfood::start((&self.ivars().role).into(), mode);
             // "Updated to …" after an update of either kind.
             if sparkle {
                 crate::update::announce::at_launch(

@@ -11,15 +11,14 @@ use std::process::{Command, Stdio};
 
 use term_pin::abi;
 
-use super::{ID_PREFIX, REGISTER, Runner, succeeds, xml_escape};
-use crate::paths::Paths;
+use super::{ID_PREFIX, Paths, REGISTER, Runner, succeeds, xml_escape};
 
 /// `packaging/entitlements-pin.plist`: what every pin is signed with.
-pub const ENTITLEMENTS: &str = include_str!("../../../../packaging/entitlements-pin.plist");
+pub const ENTITLEMENTS: &str = include_str!("../../../packaging/entitlements-pin.plist");
 
 /// The app's bundle id, which pins look the app up by when its own
 /// Info.plist doesn't say.
-pub const APP_BUNDLE_ID: &str = crate::BUNDLE_ID;
+pub const APP_BUNDLE_ID: &str = super::BUNDLE_ID;
 
 /// Where the stub is inside Terminal Decline.app.
 pub const STUB_IN_APP: &str = "Contents/Helpers/terminal-decline-pin";

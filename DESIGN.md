@@ -405,6 +405,7 @@ Oct 2026, 1.90 → 2.16 MB) and no measurable parse speed.
   system double-click interval has passed with no second click (a run
   loop timer, cancelled by any press, key or loss of focus); a double-
   or triple-click selects a word or line as ever.
+  How it works: docs/design/links.md.
 
 ## Windows and tabs
 

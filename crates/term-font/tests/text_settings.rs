@@ -81,6 +81,19 @@ fn families_without_bold_or_italic_get_synthetic_ones() {
         assert_eq!(off.glyph_key('A', s), off.glyph_key('A', Style::Regular), "{s:?}");
     }
 
+    // The slant survives the copies features, variations and a fallback
+    // list make of each face.
+    let busy = fonts("Andale Mono", |c| {
+        c.features = vec![(Tag::new("zero").unwrap(), 1)];
+        c.variations[Style::Italic as usize] = vec![(Tag::new("wght").unwrap(), 500.0)];
+        c.fallback = vec!["Apple Symbols".into()];
+    });
+    for s in [Style::Italic, Style::BoldItalic] {
+        assert!(busy.is_synthetic_italic(s), "{s:?}");
+        let w = |s| busy.rasterize('l', s).unwrap().width;
+        assert_eq!(w(s), andale.rasterize('l', s).unwrap().width, "{s:?}");
+    }
+
     // Menlo has all four: nothing synthetic.
     let menlo = fonts("Menlo", |_| {});
     for s in Style::ALL {

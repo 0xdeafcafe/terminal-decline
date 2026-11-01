@@ -30,7 +30,7 @@ pub fn verify<'a>(what: &'a str, token: &str) -> Option<&'a str> {
 }
 
 /// The settings a font preview may stand in for.
-pub const FONT_KEYS: [&str; 4] = ["font_family", "font_bold", "font_italic", "font_bold_italic"];
+pub const FONT_KEYS: [&str; 5] = ["font_family", "font_bold", "font_italic", "font_bold_italic", "emoji_font"];
 
 /// What the preferences ask of the app.
 #[derive(Clone, Debug, PartialEq, Eq)]

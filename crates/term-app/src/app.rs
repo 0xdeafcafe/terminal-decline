@@ -193,6 +193,7 @@ impl Shown {
                     "font_bold" => c.font_bold = face,
                     "font_italic" => c.font_italic = face,
                     "font_bold_italic" => c.font_bold_italic = face,
+                    "emoji_font" => c.emoji_font = face,
                     _ => {}
                 }
                 c
@@ -1994,6 +1995,10 @@ mod tests {
         assert_eq!(over("font_bold", "").font_bold, None);
         assert_eq!(over("font_italic", "Menlo Italic").font_italic.as_deref(), Some("Menlo Italic"));
         assert_eq!(over("font_bold_italic", "X").font_bold, Some("Menlo Bold".into()));
+        assert_eq!(
+            over("emoji_font", "Noto Color Emoji").emoji_font.as_deref(),
+            Some("Noto Color Emoji")
+        );
         assert_eq!(over("font_size", "20"), config);
     }
 }

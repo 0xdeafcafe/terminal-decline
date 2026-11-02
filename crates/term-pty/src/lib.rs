@@ -233,6 +233,7 @@ impl Pty {
     pub fn reader(&self) -> io::Result<BatchReader> {
         Ok(BatchReader {
             file: File::from(self.master.try_clone()?),
+            flooding: false,
         })
     }
 
@@ -344,7 +345,17 @@ fn wait_fd(fd: libc::c_int, events: libc::c_short) -> bool {
 /// Reads program output, waiting when none is available.
 pub struct BatchReader {
     file: File,
+    /// The last read came back full: a program is writing a flood.
+    flooding: bool,
 }
+
+/// What a macOS PTY hands out per read at most.
+const PTY_READ_MAX: usize = 1024;
+
+/// In a flood, how long [`BatchReader::read_batch`] keeps looking at an
+/// empty PTY before it sleeps: the writer refills it within microseconds,
+/// and a sleep and wake-up per kilobyte costs both sides a context switch.
+const FLOOD_SPIN: std::time::Duration = std::time::Duration::from_micros(30);
 
 impl BatchReader {
     /// Fills `buf` with whatever is available, waiting if nothing is. Returns
@@ -355,10 +366,24 @@ impl BatchReader {
         // A macOS PTY returns at most ~1 KB per read and buffers ~2 KB, so
         // draining until empty costs an extra failing read per batch for
         // nothing: return what one read gives and wait only when empty.
+        // Only in a flood (the last read was full) look again for a moment
+        // before sleeping; typing and idle never spin.
+        let mut spin_until = None;
         loop {
             match self.file.read(buf) {
-                Ok(n) => return n,
+                Ok(n) => {
+                    self.flooding = n >= PTY_READ_MAX;
+                    return n;
+                }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    if self.flooding {
+                        let until = *spin_until.get_or_insert_with(|| std::time::Instant::now() + FLOOD_SPIN);
+                        if std::time::Instant::now() < until {
+                            std::hint::spin_loop();
+                            continue;
+                        }
+                        self.flooding = false;
+                    }
                     if !wait_fd(fd, libc::POLLIN) {
                         return 0;
                     }

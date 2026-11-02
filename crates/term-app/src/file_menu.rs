@@ -125,9 +125,12 @@ fn icon(path: &Path, side: f64) -> Retained<NSImage> {
     image
 }
 
+/// An image's width and height in pixels.
+type Pixels = (isize, isize);
+
 /// The image in the file, and its pixels, unless it is too big to read
 /// for a menu.
-fn picture(path: &Path, size: u64) -> Option<(Retained<NSImage>, Option<(isize, isize)>)> {
+fn picture(path: &Path, size: u64) -> Option<(Retained<NSImage>, Option<Pixels>)> {
     if size > MAX_PREVIEW_BYTES {
         return None;
     }

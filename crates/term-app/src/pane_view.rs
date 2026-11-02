@@ -51,6 +51,8 @@ pub struct Ivars {
     menu_target: RefCell<Option<crate::links::Target>>,
     /// Whether paths exist, for the hover underline and clicks.
     exists: RefCell<crate::links::ExistsCache>,
+    /// The file Quick Look shows, picked from the click menu.
+    quick_look: RefCell<Option<Retained<NSURL>>>,
 }
 
 define_class!(
@@ -206,6 +208,64 @@ define_class!(
                     }
                 }
                 _ => {}
+            }
+        }
+
+        /// Open With: the app is the item's represented object.
+        #[unsafe(method(clickOpenWith:))]
+        fn click_open_with_item(&self, sender: Option<&NSMenuItem>) {
+            let app = sender.and_then(|s| s.representedObject()).and_then(|o| o.downcast::<NSString>().ok());
+            if let (Some(crate::links::Target::Path { path, .. }), Some(app)) = (self.ivars().menu_target.take(), app)
+                && !crate::file_menu::open_with(std::path::Path::new(&path), &app.to_string())
+            {
+                self.notice(&format!("couldn't open {path} in {app}"));
+            }
+        }
+
+        #[unsafe(method(clickQuickLook:))]
+        fn click_quick_look_item(&self, _sender: Option<&AnyObject>) {
+            if let Some(crate::links::Target::Path { path, .. }) = self.ivars().menu_target.take() {
+                self.ivars().quick_look.replace(Some(NSURL::fileURLWithPath(&NSString::from_str(&path))));
+                crate::file_menu::quick_look();
+            }
+        }
+
+        /// Copy (Copy Image): the file itself on the clipboard.
+        #[unsafe(method(clickCopyFile:))]
+        fn click_copy_file_item(&self, _sender: Option<&AnyObject>) {
+            if let Some(crate::links::Target::Path { path, .. }) = self.ivars().menu_target.take() {
+                crate::file_menu::copy_file(std::path::Path::new(&path));
+            }
+        }
+
+        // Quick Look's panel asks the responder chain what to show: the
+        // file picked from the click menu.
+        #[unsafe(method(acceptsPreviewPanelControl:))]
+        fn accepts_preview_panel_control(&self, _panel: Option<&AnyObject>) -> bool {
+            self.ivars().quick_look.borrow().is_some()
+        }
+
+        #[unsafe(method(beginPreviewPanelControl:))]
+        fn begin_preview_panel_control(&self, panel: &AnyObject) {
+            let _: () = unsafe { msg_send![panel, setDataSource: self] };
+        }
+
+        #[unsafe(method(endPreviewPanelControl:))]
+        fn end_preview_panel_control(&self, panel: &AnyObject) {
+            let _: () = unsafe { msg_send![panel, setDataSource: None::<&AnyObject>] };
+            self.ivars().quick_look.replace(None);
+        }
+
+        #[unsafe(method(numberOfPreviewItemsInPreviewPanel:))]
+        fn number_of_preview_items(&self, _panel: &AnyObject) -> isize {
+            self.ivars().quick_look.borrow().is_some() as isize
+        }
+
+        #[unsafe(method(previewPanel:previewItemAtIndex:))]
+        fn preview_item(&self, _panel: &AnyObject, _index: isize) -> *mut AnyObject {
+            match &*self.ivars().quick_look.borrow() {
+                Some(url) => Retained::as_ptr(url) as *mut AnyObject,
+                None => std::ptr::null_mut(),
             }
         }
 
@@ -564,6 +624,7 @@ impl PaneView {
             click: RefCell::new(None),
             menu_target: RefCell::new(None),
             exists: RefCell::new(crate::links::ExistsCache::default()),
+            quick_look: RefCell::new(None),
         });
         let view: Retained<PaneView> = unsafe { msg_send![super(this), initWithFrame: frame] };
         let types = unsafe { [NSPasteboardTypeFileURL, NSPasteboardTypeURL, NSPasteboardTypeString] };
@@ -1242,9 +1303,9 @@ impl PaneView {
         };
         match kind {
             "path" => {
-                add("Open", sel!(clickOpen:));
-                add("Reveal in Finder", sel!(clickReveal:));
-                add("Copy Path", sel!(clickCopy:));
+                if let Some(crate::links::Target::Path { path, .. }) = &*self.ivars().menu_target.borrow() {
+                    crate::file_menu::add_items(&menu, mtm, std::path::Path::new(path), self);
+                }
             }
             "missing" => {
                 // A greyed line saying why there's no Open.

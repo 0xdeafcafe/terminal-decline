@@ -17,7 +17,15 @@ by Alex.
   second by default) the whole link or path is selected, as a normal
   selection, so Cmd-C copies it, and a menu opens at the click:
   - a link: **Open**, **Copy**;
-  - a path: **Open**, **Reveal in Finder**, **Copy Path**.
+  - a path, as Finder's menu (asked for by Alex, 2 Nov 2026): at the top,
+    greyed, the file's icon (a 48-point preview for an image), its name
+    and a line with its kind, size and an image's pixels
+    (`WebP image · 412 KB · 5120×304`); then **Open in <app>** (the app
+    macOS opens it with, by name), **Open With** (every app that says it
+    can, the default first, each with its icon), **Quick Look**,
+    **Reveal in Finder**, **Copy Image** / **Copy File** /
+    **Copy Folder** (the file itself on the clipboard) and **Copy Path**
+    (`file_menu.rs`).
 - **Cmd-click** opens it straight away, links and now paths too.
 - **A path that isn't there.** A plain click on something written as a
   path (with a `/`, or starting with `~`) that doesn't exist, which isn't
@@ -31,6 +39,14 @@ by Alex.
   an underlined link or path, which opens its menu (the program doesn't
   get that click; Alex, 2 Nov 2026). There, Shift-click (which already
   keeps a click from the program) also brings up the menu.
+- **A program that handles clicks on links itself** (rush opens its own
+  dialog for an image) says so with `CSI ? 7702 h`, Decline's own mode:
+  while it takes the mouse it then gets plain clicks on underlined text
+  too, and Cmd-click opens Decline's menu there instead of opening the
+  target. `CSI ? 7702 l` ends it, as do leaving the alternate screen, a
+  reset and the shell's next prompt (OSC 133 A), so a program that dies
+  doesn't leave it set. `CSI ? 7702 $ p` asks whether it is on
+  (`Modes::program_links`; Alex, 2 Nov 2026).
 
 ## 2. What counts
 
@@ -145,9 +161,12 @@ menu doesn't copy, even with `copy_on_select` on; Copy does.
 |---|---|---|
 | Open | link | opens it as Cmd-click does: only `http`, `https`, `mailto`, and `file` links naming this Mac; any other scheme is refused with a notice in the terminal, so text a program printed can't start arbitrary apps |
 | Copy | link | the URL on the clipboard |
-| Open | path | `NSWorkspace openURL` with a file URL: the file in the app macOS opens it with, a folder in Finder |
+| Open in <app> | path | `NSWorkspace openURL` with a file URL: the file in the app macOS opens it with (`URLForApplicationToOpenURL` names it), a folder in Finder |
+| Open With | path | the app picked (`URLsForApplicationsToOpenURL` lists them) |
+| Quick Look | path | Quick Look's panel (`QLPreviewPanel`), the pane view its data source |
 | Reveal in Finder | path | a Finder window with it selected (`activateFileViewerSelectingURLs`) |
-| Copy Path | path | the path as written, with its `:line:col` |
+| Copy Image / File / Folder | path | the file URL on the clipboard, as Finder's Copy: pasted into Finder it is copied, into Mail or a chat attached; an image's picture (TIFF) too |
+| Copy Path | path | the full path, with the `:line:col` it was shown with (until 2 Nov 2026 the text as written: a name alone pasted as just the name) |
 
 ## 5. Where it lives
 

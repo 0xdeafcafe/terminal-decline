@@ -44,8 +44,8 @@ pub enum RestoreScrollback {
     /// restarts), which reopens its windows anyway.
     #[default]
     Restarts,
-    /// Also when it quits: the next launch reopens the windows, each
-    /// pane with its history.
+    /// Also when it quits, so each pane of the windows the next launch
+    /// reopens (it always does) has its history.
     Always,
     /// Never: nothing is written.
     Never,

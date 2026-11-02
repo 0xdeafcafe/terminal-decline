@@ -591,7 +591,7 @@ pub const SETTINGS: &[Setting] = &[
         "Restore scrollback",
         Window,
         Editor::Choice(&["restarts", "always", "never"]),
-        "Show each pane's history again after a restart into a new build; always: after quitting too (the next launch reopens the windows)",
+        "Show each pane's history again after a restart into a new build; always: after quitting too (windows always reopen where they were)",
     ),
     setting(
         "restore_scrollback_limit",

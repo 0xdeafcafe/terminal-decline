@@ -730,12 +730,13 @@ columns (`cargo run --release -p term-core --example restore_size`):
 `ls -l --color` 178 KB, log lines 224 KB; saving takes 1 ms a pane
 (0.1 ms once history is idle-compressed), restoring 1.5–2 ms.
 
-`restore_scrollback = "restarts"` (the default) only saves on restarts
-into a new build, which reopen the windows anyway. `"always"` (or
-`true`) also saves as the app quits, with the window list in
-`restore/session.json`, and the next launch of Terminal Decline.app
-reopens the windows from it (not pins, and not under the test control).
-`"never"` (`false`) writes nothing. Quitting doesn't save by default
+Quitting always saves the window list (places, tabs, panes, full
+screen, and the command each was running) in `restore/session.json`, and
+the next launch of Terminal Decline.app reopens the windows from it (not
+pins, and not under the test control). History is another matter:
+`restore_scrollback = "restarts"` (the default) only saves it on restarts
+into a new build, `"always"` (or `true`) as the app quits too, and
+`"never"` (`false`) never. Quitting doesn't save history by default
 because a restart's files live for the second it takes, while a quit's
 live until the next launch, days perhaps, in backups too, with whatever
 passed through the terminal (tokens, a password echoed); and a quit

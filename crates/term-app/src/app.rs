@@ -220,14 +220,9 @@ define_class!(
             let ours = self.ivars().role == crate::entry::Role::App && !crate::background::on();
             let store = crate::saved_history::Store::current();
             if ours && restore.is_empty() {
-                // What the last quit saved, with `restore_scrollback =
-                // true`; dropped if the setting changed since.
-                let session = store.session();
-                if self.ivars().config.borrow().restore_scrollback.on_quit() {
-                    restore = crate::reload::take(&session);
-                } else {
-                    let _ = std::fs::remove_file(&session);
-                }
+                // The windows the last quit saved (with their history
+                // only under `restore_scrollback = "always"`).
+                restore = crate::reload::take(&store.session());
             }
             let folders = std::mem::take(&mut *self.ivars().opened_at_launch.borrow_mut());
             self.ivars().launched.set(true);
@@ -900,18 +895,17 @@ impl AppDelegate {
         (wanted && !pin && !self.ivars().secure.borrow().wanted()).then_some((store, config.restore_scrollback_limit))
     }
 
-    /// `restore_scrollback = true`: save the windows and their history as
-    /// the app quits, for the next launch to reopen. Only Terminal
-    /// Decline.app's own process, not under the test control.
+    /// Save the windows as the app quits (places, tabs, panes, full
+    /// screen), for the next launch to reopen; their history too only
+    /// with `restore_scrollback = "always"`. Only Terminal Decline.app's
+    /// own process, not under the test control.
     fn save_session_for_next_launch(&self) {
         if self.ivars().restarting.get() || self.ivars().role != crate::entry::Role::App || crate::background::on() {
             return;
         }
         let store = crate::saved_history::Store::current();
-        let Some(history) = self.history_to_save(&store, true) else {
-            return;
-        };
-        let saved = self.saved_windows(Some(history));
+        let history = self.history_to_save(&store, true);
+        let saved = self.saved_windows(history);
         let json = serde_json::to_vec(&saved).expect("saved windows serialise");
         if let Err(e) = store.save_session(&json) {
             eprintln!("terminal-decline: saving the windows for the next launch: {e}");

@@ -8,6 +8,9 @@ by Alex.
 
 - **Hover.** Move the pointer over a link or a path: it is underlined (all
   of it, across rows if it wraps) and the pointer becomes a pointing hand.
+  An OSC 8 link with an `id=` is underlined in every piece that has it;
+  one without is only the run of cells hovered, so a TUI that lists the
+  same file twice gets one underline, not two (Alex, 2 Nov 2026).
   No key needs holding, also while a program takes the mouse (vim, htop,
   rush, less with mouse on): the underline sends it nothing, and its
   clicks still go to it. (Until 2 Nov 2026 that needed Cmd held; Alex

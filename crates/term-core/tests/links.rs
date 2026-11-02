@@ -789,3 +789,27 @@ fn a_program_can_take_clicks_on_links_until_it_ends() {
     t.advance(b"\x1b[?7702h\x1b]133;A\x07");
     assert!(!on(&t));
 }
+
+#[test]
+fn links_without_an_id_are_highlighted_one_at_a_time() {
+    let mut t = Term::new(12, 4, 0, term_core::ImagePool::process());
+    // The same file twice, as rush lists it, with no id; the second wraps.
+    t.advance(b"\x1b]8;;file:///a/brief.md\x1b\\brief.md\x1b]8;;\x1b\\\r\n");
+    t.advance(b"  \x1b]8;;file:///a/brief.md\x1b\\brief.md brief.md\x1b]8;;\x1b\\");
+    let mut snap = Snapshot::default();
+    let rows = |t: &mut Term, snap: &mut Snapshot| -> Vec<Vec<std::ops::Range<u16>>> {
+        t.state.snapshot(snap, |_| true);
+        snap.rows
+            .iter()
+            .map(|r| snap.row_highlights(r).iter().map(|h| h.cols.clone()).collect())
+            .collect()
+    };
+    t.state.set_hover(Some(t.state.point_at(0, 2)));
+    assert_eq!(rows(&mut t, &mut snap), vec![vec![0..8], vec![], vec![], vec![]], "only the first");
+    t.state.set_hover(Some(t.state.point_at(1, 4)));
+    assert_eq!(
+        rows(&mut t, &mut snap),
+        vec![vec![], vec![2..12], vec![0..7], vec![]],
+        "the second, across its wrap"
+    );
+}

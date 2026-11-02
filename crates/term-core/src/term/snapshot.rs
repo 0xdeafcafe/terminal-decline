@@ -428,15 +428,24 @@ impl Terminal {
         let selection = self.selection;
         // The hovered link's id in the screen's table: cells are compared
         // with it, which is comparing by value within one table.
-        let hovered_link = self.hover.and_then(|p| self.link_at(p));
+        // Only a link with an `id=` is one link in every piece: without one,
+        // two links to the same place (a TUI listing a file twice) are two,
+        // and only the run of cells hovered is, across soft wraps.
+        let any_link = self.hover.and_then(|p| self.link_at(p));
+        let link_run = any_link
+            .as_ref()
+            .filter(|l| l.id.is_none())
+            .and_then(|_| self.hover.and_then(|p| self.link_span(p)));
+        let hovered_link = any_link.as_ref().filter(|l| l.id.is_some()).cloned();
         let hovered = hovered_link.as_ref().and_then(|l| self.styles.links().find(l));
         // Off an OSC 8 link, a plain URL there is highlighted the same way
         // (on history rows too: it is read from the text).
-        let hovered_url = self
-            .hover
-            .filter(|_| hovered_link.is_none())
-            .and_then(|p| self.url_at(p))
-            .map(|(a, b, _)| (a, b));
+        let hovered_url = link_run.or_else(|| {
+            self.hover
+                .filter(|_| any_link.is_none())
+                .and_then(|p| self.url_at(p))
+                .map(|(a, b, _)| (a, b))
+        });
         let history_first = self.history_first();
         let below = (self.view_overscan && self.view.is_some()) as usize;
         let view_rows = self.view_rows_n(self.lines + below);

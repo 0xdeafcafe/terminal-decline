@@ -587,12 +587,13 @@ def issue_body(current, over, baseline, table, run_url):
 
 
 def handle_issue(current, previous, week, rules, run_url, dry_run=False):
-    """Open, update or close the issue; returns a note for the summary."""
+    """Open, update or close the issue. Returns a note for the summary
+    and the open issue's baseline (None when none is open)."""
     try:
         found = find_issue()
     except (OSError, subprocess.CalledProcessError) as e:
         warn(f"couldn't list issues: {getattr(e, 'stderr', e)}")
-        return ""
+        return "", None
     baseline = (hidden(found[1], "baseline") or {}) if found else None
     rows, over = compare(current, previous, week, rules, baseline)
     table = markdown(current, previous, week, rows, over, current.get("errors", []))
@@ -604,7 +605,7 @@ def handle_issue(current, previous, week, rules, run_url, dry_run=False):
             if not over and not missing:
                 if not dry_run:
                     gh("issue", "close", str(number), "--comment", f"Back under every limit as of {current['commit'][:7]} ({run_url}).")
-                return f"Closed #{number}: everything is back under its limit."
+                return f"Closed #{number}: everything is back under its limit.", None
             # Keep the baseline; add references for anything new over.
             refs = references(current, previous, week)
             for n in over:
@@ -617,9 +618,9 @@ def handle_issue(current, previous, week, rules, run_url, dry_run=False):
                 if sorted(over) != sorted(before):
                     gh("issue", "comment", str(number), "--body", f"Now over at {current['commit'][:7]}: {', '.join(over) or 'none (some not measured)'}. {run_url}")
                 os.unlink(f.name)
-            return f"Updated #{number}."
+            return f"#{number} stays open; compared with the numbers it was opened against.", baseline
         if not over:
-            return ""
+            return "", None
         baseline = references(current, previous, week)
         if not dry_run:
             gh("label", "create", LABEL, "--color", "D93F0B", "--description", "Memory or CPU going up (the perf watch)", "--force")
@@ -628,11 +629,11 @@ def handle_issue(current, previous, week, rules, run_url, dry_run=False):
             title = f"Perf watch: {len(over)} number{'s' if len(over) != 1 else ''} over the limit at {current['commit'][:7]}"
             url = gh("issue", "create", "--title", title, "--label", LABEL, "--body-file", f.name).strip()
             os.unlink(f.name)
-            return f"Opened {url}."
-        return "Would open an issue."
+            return f"Opened {url}.", None
+        return "Would open an issue.", None
     except (OSError, subprocess.CalledProcessError) as e:
         warn(f"couldn't update the issue: {getattr(e, 'stderr', e)}")
-        return ""
+        return "", baseline
 
 
 def cmd_report(args):
@@ -648,13 +649,13 @@ def cmd_report(args):
     previous = runs[-1] if runs else None
     week = week_before(runs, current["date"])
     rules = load_rules(args.thresholds)
-    note = ""
+    note, baseline = "", None
     if args.issues:
         url = ""
         if os.environ.get("GITHUB_RUN_ID"):
             url = f"{os.environ.get('GITHUB_SERVER_URL', 'https://github.com')}/{os.environ.get('GITHUB_REPOSITORY')}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
-        note = handle_issue(current, previous, week, rules, url)
-    rows, over = compare(current, previous, week, rules)
+        note, baseline = handle_issue(current, previous, week, rules, url)
+    rows, over = compare(current, previous, week, rules, baseline)
     table = markdown(current, previous, week, rows, over, current.get("errors", []), note)
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:
@@ -732,6 +733,29 @@ def self_test():
     assert change(110, 100) == "+10.0%" and change(100, 100) == "0%" and change(1, None) == "–"
     body = issue_body(cur, ["x"], {"x": 100}, "table", "")
     assert MARKER in body and hidden(body, "baseline") == {"x": 100} and hidden(body, "over") == ["x"]
+
+    # The issue: opened when over, kept open against its baseline, closed
+    # when back under (dry runs, no `gh`).
+    global find_issue
+    real = find_issue
+    try:
+        find_issue = lambda: None  # noqa: E731
+        note, base = handle_issue(cur, runs[2], runs[1], rules, "", dry_run=True)
+        assert note == "Would open an issue." and base is None, (note, base)
+        open_body = issue_body(cur, ["x"], {"x": 100}, "", "")
+        find_issue = lambda: (7, open_body)  # noqa: E731
+        # 111 is within 10% of the previous 108, but over the baseline 100.
+        still = run("f", "2026-11-03T00:00:00Z", x=111, y=5)
+        note, base = handle_issue(still, runs[2], runs[2], rules, "", dry_run=True)
+        assert note.startswith("#7 stays open") and base == {"x": 100}, (note, base)
+        back = run("g", "2026-11-04T00:00:00Z", x=101, y=5)
+        note, base = handle_issue(back, runs[2], runs[2], rules, "", dry_run=True)
+        assert note.startswith("Closed #7") and base is None, (note, base)
+        # Not measured this time: stays open.
+        note, _ = handle_issue(gone, runs[2], runs[2], rules, "", dry_run=True)
+        assert note.startswith("#7 stays open"), note
+    finally:
+        find_issue = real
 
     with tempfile.TemporaryDirectory() as d:
         path = os.path.join(d, "runs.jsonl")

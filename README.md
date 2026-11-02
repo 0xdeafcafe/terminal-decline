@@ -7,7 +7,7 @@ macOS, written in Rust. It aims to use less memory and CPU than Ghostty and
 Warp, has no UI of its own, and can turn any program into its own Dock app.
 
 - **Light.** Under half Ghostty's memory.
-- **Fast.** `cat` of 100 MB as quick as Ghostty, on a third of the CPU.
+- **Fast.** `cat` of 100 MB faster than Ghostty, on a third of the CPU.
 - **No UI of its own.** Native macOS tabs and splits, a config file and
   a Settings screen in a tab.
 - **Any program as a Dock app.** `decline pin rush` and rush gets its own
@@ -94,7 +94,7 @@ with other work running (load 3–6). Script:
 
 | | idle memory | after 10k lines | 4 tabs | `cat` 100 MB | `cat` CPU (incl. WindowServer) | idle CPU | idle wakeups/s |
 |---|---|---|---|---|---|---|---|
-| **Decline** | **26 MB** | **19 MB** | **47 MB** | **0.66 s** | **0.63 s** | 0.15% | 2.1 |
+| **Decline** | **26 MB** | **19 MB** | **47 MB** | **0.58 s** | **0.66 s** | **0.02%** | **0.5** |
 | Ghostty | 60 MB | 56 MB | 87 MB | 0.66 s | 2.04 s | 0.03% | 0.5 |
 | kitty | 99 MB | 130 MB | 104 MB | 1.05 s | 1.63 s | 0.12% | 24 |
 

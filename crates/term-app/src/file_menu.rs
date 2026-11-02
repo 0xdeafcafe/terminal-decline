@@ -97,7 +97,7 @@ fn kind_of(url: &NSURL) -> Option<String> {
 pub fn default_app(path: &Path) -> Option<PathBuf> {
     let url = file_url(path);
     let app: Option<Retained<NSURL>> = unsafe { msg_send![&*NSWorkspace::sharedWorkspace(), URLForApplicationToOpenURL: &*url] };
-    url_path(&app?)
+    app.as_deref().and_then(url_path)
 }
 
 /// Every app that says it can open `path`, the default first, then by

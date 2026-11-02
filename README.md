@@ -13,7 +13,12 @@ Rust and drawn on the GPU. Quick, light, and out of your way.
 - **Autocomplete that tells you things**: Tab lists matches with what
   each flag does, from man pages and `--help`.
 - **Pin a TUI to the Dock**: `decline pin rush --dock` and rush gets its
-  own icon.
+  own icon and opens straight into it.
+- **Built for agents too**: `decline ctl` runs real terminals without
+  windows, so an agent can type, wait for a command to finish and read
+  the screen back as JSON.
+- **Extras are opt-in**: completion as you type, coloured output, copy on
+  select - all off until you want them.
 - **No bloaty shit**: native tabs and splits, a config file, and a simple
   settings TUI bundled for your convenience. No account, no AI sidebar.
 

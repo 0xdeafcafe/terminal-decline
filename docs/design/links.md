@@ -8,8 +8,10 @@ by Alex.
 
 - **Hover.** Move the pointer over a link or a path: it is underlined (all
   of it, across rows if it wraps) and the pointer becomes a pointing hand.
-  No key needs holding. When a program takes the mouse (vim, htop, less
-  with mouse on), only with Cmd held, as before.
+  No key needs holding, also while a program takes the mouse (vim, htop,
+  rush, less with mouse on): the underline sends it nothing, and its
+  clicks still go to it. (Until 2 Nov 2026 that needed Cmd held; Alex
+  couldn't see paths in rush.)
 - **A plain click** (left button, no modifier, no drag, one click) on one:
   after the double-click time (`NSEvent.doubleClickInterval`, about half a
   second by default) the whole link or path is selected, as a normal
@@ -67,6 +69,16 @@ wrap, not a newline the program printed) is found from either row: the
 text is read as the whole line the rows make up
 (`Terminal::logical_text`), and the found characters are mapped back to
 their cells.
+
+**Lines a program broke itself.** A TUI that lays out its own text
+(rush printing a long path indented onto the next row, a panel) leaves
+newlines, not soft wraps, inside a path. When nothing is found on the
+pointer's line, it is tried joined to the line after (its last path
+character to the next line's first) and then to the line before, each
+on its own, then both; spaces and box drawing at the joins are left
+out. Only a path that exists counts, so rows that merely meet don't make
+one (`Terminal::path_at`). The underline then runs from the path's first
+cell to its last, the indent between included. URLs aren't joined yet.
 
 **Whether a path exists** is asked of the filesystem (`stat`) in the app;
 term-core only takes a function that answers, so it stays free of the

@@ -20,7 +20,7 @@ const PATH_STARTS: &str = "=([{";
 /// The longest run of text looked at, in characters.
 const MAX_LEN: usize = 4096;
 
-fn is_path_char(c: char) -> bool {
+pub(crate) fn is_path_char(c: char) -> bool {
     !c.is_whitespace() && !c.is_control() && !PATH_BREAKS.contains(c) && !crate::word::is_drawing(c)
 }
 

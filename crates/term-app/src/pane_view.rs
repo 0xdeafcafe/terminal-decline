@@ -960,7 +960,6 @@ impl PaneView {
     /// asked for every key (kitty flag 8). A release is dropped if this
     /// pane didn't see the press (it went to another pane).
     fn handle_flags_changed(&self, event: &NSEvent) {
-        self.hover_with_cmd(event.modifierFlags().contains(NSEventModifierFlags::Command));
         let Some(modes) = self.key_modes() else { return };
         // `flagsChanged` events have no characters.
         let input = KeyInput {
@@ -1222,8 +1221,7 @@ impl PaneView {
         .flatten()
     }
 
-    /// The pointer is over visible `cell` (and the program isn't taking
-    /// the mouse, or Cmd is held), or `None`: the link or path there
+    /// The pointer is over visible `cell`, or `None`: the link or path there
     /// (every piece of it) is underlined, and the pointer is a pointing
     /// hand while it is over one.
     pub(crate) fn set_hover(&self, cell: Option<(usize, usize)>) {
@@ -1261,26 +1259,6 @@ impl PaneView {
             } else {
                 NSCursor::IBeamCursor().set();
             }
-        }
-    }
-
-    /// Cmd went down or up: every pane of the window hovers what is under
-    /// the pointer, or stops where the program takes the mouse (the key
-    /// goes to the focused pane only).
-    fn hover_with_cmd(&self, cmd: bool) {
-        let views = match self.window_view() {
-            Some(w) => w.with_state(|st| st.panes.values().map(|p| p.view.clone()).collect::<Vec<_>>()),
-            None => None,
-        };
-        let Some(loc) = self.window().map(|w| w.mouseLocationOutsideOfEventStream()) else {
-            return;
-        };
-        for view in views.unwrap_or_default() {
-            let at = view.convertPoint_fromView(loc, None);
-            let b = view.bounds();
-            let inside = at.x >= b.origin.x && at.y >= b.origin.y && at.x < b.origin.x + b.size.width && at.y < b.origin.y + b.size.height;
-            let shows = inside && (cmd || !view.program_takes_mouse());
-            view.set_hover(if shows { view.cell_at_point(at) } else { None });
         }
     }
 
@@ -1962,11 +1940,10 @@ impl PaneView {
         if button.is_none() && self.with(|_, p| p.completion.hover(line, col)) == Some(true) {
             self.request_redraw();
         }
-        // Links and paths are underlined under the pointer, unless the
-        // program takes the mouse (then only with Cmd held).
-        let cmd = event.modifierFlags().contains(NSEventModifierFlags::Command);
-        let hovers = button.is_none() && (cmd || self.reporting(event).is_none());
-        self.set_hover(hovers.then_some((line, col)));
+        // Links and paths are underlined under the pointer, also while
+        // the program takes the mouse: the underline sends it nothing, and
+        // its clicks still go to it (Cmd-click opens).
+        self.set_hover(button.is_none().then_some((line, col)));
         let selecting = self.with(|_, p| p.selecting.is_some()) == Some(true);
         if !selecting && let Some((mode, sgr)) = self.reporting(event) {
             let held = self.with(|_, p| p.mouse_button).flatten();

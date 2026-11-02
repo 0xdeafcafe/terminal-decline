@@ -1483,15 +1483,72 @@ impl Terminal {
     /// [`crate::paths::path_at`]), on its logical line, so one that a soft
     /// wrap splits is found whole. Relative paths are resolved against
     /// [`Terminal::cwd`], `~` against `home`.
-    pub fn path_at(&self, p: Point, home: Option<&str>, exists: impl FnMut(&str) -> bool) -> Option<PathAt> {
+    ///
+    /// A program that breaks long lines itself (a TUI's panel, rush
+    /// printing a long path indented) leaves a path over rows with no
+    /// soft wrap between them; when nothing is found on its own line, the
+    /// line is tried joined to the one before and the one after, where
+    /// the first ends in a path character and the second starts with one
+    /// (spaces and box drawing between them left out).
+    pub fn path_at(&self, p: Point, home: Option<&str>, mut exists: impl FnMut(&str) -> bool) -> Option<PathAt> {
         let (text, cells, at) = self.logical_text(p);
-        let f = crate::paths::path_at(&text, at?, self.cwd(), home, exists)?;
-        Some(PathAt {
+        let at = at?;
+        let found = |text: &[char], cells: &[(Point, Point)], f: crate::paths::Found| PathAt {
             start: cells[f.start].0,
             end: cells[f.end].1,
             shown: text[f.start..=f.end].iter().collect(),
             path: f.path,
-        })
+        };
+        if let Some(f) = crate::paths::path_at(&text, at, self.cwd(), home, &mut exists) {
+            return Some(found(&text, &cells, f));
+        }
+        let content = |c: char| !c.is_whitespace() && !crate::word::is_drawing(c);
+        let tail = |t: &[char]| t.iter().rposition(|&c| content(c)).filter(|&k| crate::paths::is_path_char(t[k]));
+        let head = |t: &[char]| t.iter().position(|&c| content(c)).filter(|&k| crate::paths::is_path_char(t[k]));
+        let (first, last) = self.logical_line(p.line);
+        // This line up to its last path character, joined to the start
+        // of the next (unless the pointer is past that end).
+        let next = self.row_at(last + 1).and_then(|_| tail(&text).filter(|&e| at <= e)).and_then(|e| {
+            let (t, c, _) = self.logical_text(Point { line: last + 1, col: 0 });
+            head(&t).map(|s| (e, t[s..].to_vec(), c[s..].to_vec()))
+        });
+        // The end of the line before, joined to this line from its first
+        // path character (unless the pointer is on the indent).
+        let prev = (first > 0)
+            .then(|| self.row_at(first - 1))
+            .flatten()
+            .and_then(|_| head(&text).filter(|&s| s <= at))
+            .and_then(|s| {
+                let (t, c, _) = self.logical_text(Point { line: first - 1, col: 0 });
+                tail(&t).map(|e| (s, t[..=e].to_vec(), c[..=e].to_vec()))
+            });
+        let join = |with_prev: bool, with_next: bool| -> Option<(Vec<char>, Vec<(Point, Point)>, usize)> {
+            let (mut t, mut c, mut i) = (text.clone(), cells.clone(), at);
+            if with_next {
+                let (e, nt, nc) = next.as_ref()?;
+                t.truncate(e + 1);
+                c.truncate(e + 1);
+                t.extend_from_slice(nt);
+                c.extend_from_slice(nc);
+            }
+            if with_prev {
+                let (s, pt, pc) = prev.as_ref()?;
+                i = i - s + pt.len();
+                t = pt.iter().chain(&t[*s..]).copied().collect();
+                c = pc.iter().chain(&c[*s..]).copied().collect();
+            }
+            Some((t, c, i))
+        };
+        // Each neighbour alone first, so a command printed on the next
+        // row isn't glued to a path that ends this one.
+        for (with_prev, with_next) in [(false, true), (true, false), (true, true)] {
+            if let Some((t, c, i)) = join(with_prev, with_next)
+                && let Some(f) = crate::paths::path_at(&t, i, self.cwd(), home, &mut exists)
+            {
+                return Some(found(&t, &c, f));
+            }
+        }
+        None
     }
 
     /// The first and last cell of the OSC 8 link at `p`: the run of

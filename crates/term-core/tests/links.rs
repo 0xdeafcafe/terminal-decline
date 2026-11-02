@@ -192,6 +192,36 @@ fn plain_urls_are_found_across_wraps_and_hovered_like_links() {
     assert_eq!(url(&t, 0, 6).map(|x| x.2).as_deref(), Some("http://old.ex"));
 }
 
+/// A program that breaks a long path itself, onto an indented row (rush
+/// does), with no soft wrap: found from either row, without the indent.
+#[test]
+fn paths_a_program_breaks_over_rows_are_found_whole() {
+    let mut t = Term::new(20, 4, 10, term_core::ImagePool::process());
+    t.advance(
+        b"  cat ~/tmp/abc-
+    def/out.txt
+  sleep 2",
+    );
+    let exists = |p: &str| p == "/Users/me/tmp/abc-def/out.txt";
+    let found = |t: &Term, line, col| t.state.path_at(t.state.point_at(line, col), Some("/Users/me"), exists);
+    let f = found(&t, 0, 8).unwrap();
+    assert_eq!(f.path, "/Users/me/tmp/abc-def/out.txt");
+    assert_eq!(f.shown, "~/tmp/abc-def/out.txt");
+    assert_eq!((f.start, f.end), (t.state.point_at(0, 6), t.state.point_at(1, 14)));
+    assert_eq!(found(&t, 1, 6), Some(f.clone()), "from the second row");
+    assert_eq!(found(&t, 1, 1), None, "not on the indent");
+    assert_eq!(found(&t, 0, 3), None, "not on the command");
+    assert_eq!(found(&t, 2, 3), None);
+
+    // Rows that only happen to meet don't make a path that isn't there.
+    let mut t = Term::new(20, 4, 10, term_core::ImagePool::process());
+    t.advance(
+        b"abc
+def",
+    );
+    assert_eq!(t.state.path_at(t.state.point_at(0, 1), None, |_| false), None);
+}
+
 #[test]
 fn paths_are_found_across_wraps_in_the_shells_folder() {
     let mut t = Term::new(12, 4, 10, term_core::ImagePool::process());

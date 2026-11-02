@@ -19,6 +19,12 @@ by Alex.
   - a link: **Open**, **Copy**;
   - a path: **Open**, **Reveal in Finder**, **Copy Path**.
 - **Cmd-click** opens it straight away, links and now paths too.
+- **A path that isn't there.** A plain click on something written as a
+  path (with a `/`, or starting with `~`) that doesn't exist, which isn't
+  underlined, still selects it and opens a menu: a greyed **Not found**,
+  **Reveal Closest Folder ("name") in Finder** for the nearest folder
+  above it that exists, and **Copy Path** (`links::click_target_at`,
+  `Target::Missing`; asked for by Alex, 2 Nov 2026).
 - **Unchanged:** double-click selects a word, triple-click a line, a drag
   selects, Option-click on the command line moves the shell's cursor,
   and a program taking the mouse gets the clicks. There, Shift-click (which

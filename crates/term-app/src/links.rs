@@ -34,13 +34,22 @@ pub enum Target {
         start: Point,
         end: Point,
     },
+    /// Something written as a path (with a `/`, or starting with `~`)
+    /// that doesn't exist: found only for a click, whose menu offers to
+    /// copy it or reveal the closest folder that does exist.
+    Missing {
+        shown: String,
+        path: String,
+        start: Point,
+        end: Point,
+    },
 }
 
 impl Target {
     /// Its first and last cell.
     pub fn span(&self) -> (Point, Point) {
         match self {
-            Target::Url { start, end, .. } | Target::Path { start, end, .. } => (*start, *end),
+            Target::Url { start, end, .. } | Target::Path { start, end, .. } | Target::Missing { start, end, .. } => (*start, *end),
         }
     }
 
@@ -49,9 +58,45 @@ impl Target {
     pub fn copy_text(&self) -> &str {
         match self {
             Target::Url { uri, .. } => uri,
-            Target::Path { shown, .. } => shown,
+            Target::Path { shown, .. } | Target::Missing { shown, .. } => shown,
         }
     }
+}
+
+/// What a click at `p` acts on: [`target_at`], else a path that doesn't
+/// exist ([`Target::Missing`]).
+pub fn click_target_at(t: &Terminal, p: Point, cache: &mut ExistsCache) -> Option<Target> {
+    target_at(t, p, cache).or_else(|| missing_at(t, p))
+}
+
+/// Something written as a path at `p` that isn't there: the run of path
+/// characters around it, if it holds a `/` or starts with `~` (a bare
+/// word would be any prose).
+fn missing_at(t: &Terminal, p: Point) -> Option<Target> {
+    if !t.cwd_host().is_none_or(|h| is_this_mac(h, &host_name())) {
+        return None;
+    }
+    let home = std::env::var("HOME").ok();
+    let found = t.path_at(p, home.as_deref(), |_| true)?;
+    let written = found.shown.split(':').next().unwrap_or_default();
+    if !(written.contains('/') || written.starts_with('~')) || written.contains("://") {
+        return None;
+    }
+    Some(Target::Missing {
+        shown: found.shown,
+        path: found.path,
+        start: found.start,
+        end: found.end,
+    })
+}
+
+/// The closest folder above `path` that exists (asked afresh).
+pub fn nearest_existing(path: &str) -> Option<std::path::PathBuf> {
+    std::path::Path::new(path)
+        .ancestors()
+        .skip(1)
+        .find(|a| !a.as_os_str().is_empty() && a.exists())
+        .map(Into::into)
 }
 
 /// The link or path at `p`: an OSC 8 link, else a plain URL, else a path
@@ -231,6 +276,28 @@ mod tests {
         assert_eq!(at(3).as_deref(), Some("https://real"));
         assert_eq!(at(16).as_deref(), Some("http://plain.example"));
         assert_eq!(at(35), None);
+    }
+
+    /// A click on something written as a path that isn't there still
+    /// finds it, with the closest folder above it that exists; a bare
+    /// word or a URL doesn't count.
+    #[test]
+    fn clicks_find_paths_that_dont_exist() {
+        let mut t = term_core::Term::new(60, 2, 0, term_core::ImagePool::process());
+        t.advance(b"\x1b]7;file:///tmp\x1b\\cat /tmp/zq9-gone/a.txt:3 nope-zq9 ok");
+        let mut cache = ExistsCache::default();
+        let mut at = |col| click_target_at(&t.state, t.state.point_at(0, col), &mut cache);
+        match at(8) {
+            Some(Target::Missing { shown, path, .. }) => {
+                assert_eq!(shown, "/tmp/zq9-gone/a.txt:3");
+                assert_eq!(path, "/tmp/zq9-gone/a.txt");
+                assert_eq!(nearest_existing(&path), Some("/tmp".into()));
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(at(28), None, "a bare word");
+        assert_eq!(at(1), None, "the command");
+        assert_eq!(nearest_existing("/"), None);
     }
 
     #[test]

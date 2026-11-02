@@ -197,8 +197,15 @@ define_class!(
 
         #[unsafe(method(clickReveal:))]
         fn click_reveal_item(&self, _sender: Option<&AnyObject>) {
-            if let Some(crate::links::Target::Path { path, .. }) = self.ivars().menu_target.take() {
-                self.reveal_path(&path);
+            match self.ivars().menu_target.take() {
+                Some(crate::links::Target::Path { path, .. }) => self.reveal_path(&path),
+                // The closest folder that exists, selected in its parent.
+                Some(crate::links::Target::Missing { path, .. }) => {
+                    if let Some(folder) = crate::links::nearest_existing(&path) {
+                        self.reveal_path(&folder.to_string_lossy());
+                    }
+                }
+                _ => {}
             }
         }
 
@@ -1087,11 +1094,25 @@ impl PaneView {
         .flatten()
     }
 
+    /// What a plain click at visible `line`, `col` acts on: a link or
+    /// path, else something written as a path that doesn't exist
+    /// ([`crate::links::click_target_at`]).
+    fn click_target_at_cell(&self, line: usize, col: usize) -> Option<crate::links::Target> {
+        let mut cache = self.ivars().exists.borrow_mut();
+        self.with(|_, p| {
+            let t = p.session.lock_term();
+            let target = crate::links::click_target_at(&t.state, t.state.point_at(line, col), &mut cache);
+            target.filter(|x| !Self::typed_path(&t.state, x, line, col))
+        })
+        .flatten()
+    }
+
     /// A path on the command line being typed at the prompt: not a target,
     /// so a click there only places the cursor, and words typed that name
     /// files aren't underlined.
     fn typed_path(t: &term_core::Terminal, target: &crate::links::Target, line: usize, col: usize) -> bool {
-        matches!(target, crate::links::Target::Path { .. }) && crate::prompts::input_steps(t, line, col).is_some()
+        matches!(target, crate::links::Target::Path { .. } | crate::links::Target::Missing { .. })
+            && crate::prompts::input_steps(t, line, col).is_some()
     }
 
     /// Cmd-click, or Open in the click menu: open the link (as
@@ -1110,6 +1131,8 @@ impl PaneView {
                     self.notice(&format!("couldn't open {path}"));
                 }
             }
+            // Not there: nothing to open (its menu doesn't offer Open).
+            crate::links::Target::Missing { .. } => NSBeep(),
         }
     }
 
@@ -1167,7 +1190,7 @@ impl PaneView {
         let (start, end) = target.span();
         let still = {
             let mut cache = self.ivars().exists.borrow_mut();
-            self.with(|_, p| crate::links::target_at(&p.session.lock_term().state, start, &mut cache))
+            self.with(|_, p| crate::links::click_target_at(&p.session.lock_term().state, start, &mut cache))
                 .flatten()
         };
         if still.as_ref() != Some(&target) {
@@ -1182,8 +1205,16 @@ impl PaneView {
                 .set_selection(Some(term_core::Selection::new(start, end)));
         });
         self.request_redraw();
-        let is_path = matches!(target, crate::links::Target::Path { .. });
-        let described = format!("{} {}", if is_path { "path" } else { "url" }, target.copy_text());
+        let kind = match target {
+            crate::links::Target::Url { .. } => "url",
+            crate::links::Target::Path { .. } => "path",
+            crate::links::Target::Missing { .. } => "missing",
+        };
+        let nearest = match &target {
+            crate::links::Target::Missing { path, .. } => crate::links::nearest_existing(path),
+            _ => None,
+        };
+        let described = format!("{kind} {}", target.copy_text());
         self.ivars().menu_target.replace(Some(target));
         if self.window_view().is_some_and(|w| w.menu_in_test(&described)) {
             return;
@@ -1203,12 +1234,40 @@ impl PaneView {
             unsafe { item.setTarget(Some(self)) };
             menu.addItem(&item);
         };
-        add("Open", sel!(clickOpen:));
-        if is_path {
-            add("Reveal in Finder", sel!(clickReveal:));
-            add("Copy Path", sel!(clickCopy:));
-        } else {
-            add("Copy", sel!(clickCopy:));
+        match kind {
+            "path" => {
+                add("Open", sel!(clickOpen:));
+                add("Reveal in Finder", sel!(clickReveal:));
+                add("Copy Path", sel!(clickCopy:));
+            }
+            "missing" => {
+                // A greyed line saying why there's no Open.
+                let note = unsafe {
+                    NSMenuItem::initWithTitle_action_keyEquivalent(
+                        NSMenuItem::alloc(mtm),
+                        &NSString::from_str("Not found"),
+                        None,
+                        &NSString::new(),
+                    )
+                };
+                note.setEnabled(false);
+                menu.addItem(&note);
+                if let Some(folder) = &nearest {
+                    let name = folder
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "/".into());
+                    add(
+                        &format!("Reveal Closest Folder (\u{201c}{name}\u{201d}) in Finder"),
+                        sel!(clickReveal:),
+                    );
+                }
+                add("Copy Path", sel!(clickCopy:));
+            }
+            _ => {
+                add("Open", sel!(clickOpen:));
+                add("Copy", sel!(clickCopy:));
+            }
         }
         menu.popUpMenuPositioningItem_atLocation_inView(None, at, Some(self));
     }
@@ -1707,7 +1766,7 @@ impl PaneView {
         let target = if plain {
             // Asked afresh: the click acts on it.
             self.ivars().exists.borrow_mut().clear();
-            self.target_at_cell(line, col)
+            self.click_target_at_cell(line, col)
         } else {
             None
         };

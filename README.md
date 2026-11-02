@@ -3,13 +3,14 @@
 ![Decline — less overhead, more terminal](docs/brand/readme-header.png)
 
 Terminal Decline (Decline for short) is a terminal for macOS, written in
-Rust and drawn on the GPU. It's here to be quicker and lighter than
-Ghostty, and to stay out of your way while it does it.
+Rust and drawn on the GPU. It's here to be quick, light, and to stay
+out of your way while it does it.
 
-- **Fast, properly fast**: `cat` a 100 MB file in 0.58 s. Ghostty takes
-  0.66 s and burns three times the CPU doing it (2.04 s against our 0.66 s).
-- **Tiny footprint**: 26 MB of memory sat idle, less than half of
-  Ghostty's 60. When nothing's happening it really does nothing - 0.02%
+- **Fast, properly fast**: `cat` a 100 MB file in 0.58 s. Apple's
+  Terminal takes nearly 4 s for the same file, and Decline keeps pace
+  with the fastest terminals out there on a fraction of the CPU.
+- **Tiny footprint**: 26 MB of memory sat idle, about half of what
+  Terminal uses. When nothing's happening it really does nothing - 0.02%
   CPU and about one wake-up every two seconds, so it isn't quietly eating
   your battery.
 - **GPU all the way down**: every window is a single Metal layer, with

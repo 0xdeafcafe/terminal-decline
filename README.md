@@ -6,48 +6,20 @@ Terminal Decline (Decline for short) is a GPU-accelerated terminal for
 macOS, written in Rust. It aims to use less memory and CPU than Ghostty and
 Warp, has no UI of its own, and can turn any program into its own Dock app.
 
-## Status
-
-Pre-release: there is no tagged release yet (the version is `0.0.1`), and
-the repository and the Homebrew tap are private until the `0.1.0` beta.
-The terminal itself is in daily use by its author; the Developer ID
-signing, notarization and the in-app updater need the Apple and Sparkle
-secrets, which are not set up yet, so builds are ad-hoc signed for now.
-What `0.1.0` needs is in [docs/release-checklist.md](docs/release-checklist.md);
-the road to 1.0 (performance work, the measured comparison with
-Ghostty) is in [docs/roadmap.md](docs/roadmap.md). The first measured
-comparison is below; the roadmap's targets against Ghostty are not all met
-yet.
-
-## Benchmarks
-
-30 October 2026, Apple M1 Max, macOS 27.0. Decline at 6a38c0b
-(release build), Ghostty 1.4.0, kitty 0.49.2, Warp 0.2026.10.21.08.25.02,
-Terminal.app 2.15. Menlo 13, 100×30 cells, 10k lines of scrollback, one
-window; memory is macOS physical footprint summed over all the terminal's
-processes; medians of 3–4 interleaved runs on a Mac with other builds
-running (load 1.7–10). Details, spreads and caveats:
-[docs/comparison-2026-10-30.md](docs/comparison-2026-10-30.md); script:
-[scripts/compare/run.py](scripts/compare/run.py).
-
-| | idle memory | after 10k lines | 4 tabs | idle CPU | idle wakeups/s | `cat` 100 MB time | `cat` CPU (incl. WindowServer) |
-|---|---|---|---|---|---|---|---|
-| Decline | 31.5 MB | 39 MB | 63 MB | 0.02% | 0.4 | 0.61 s | 0.62 s |
-| Ghostty | 67 MB | 68 MB | 98 MB | 0.64% | 16 | **0.53 s** | 1.68 s |
-| kitty | 109 MB | 140 MB | 115 MB | 0.13% | 23 | 0.95 s | 1.31 s |
-| Warp | 333 MB | 310 MB | 332 MB | 1.11% | 62 | 3.59 s | 4.38 s |
-| Terminal.app | 48 MB | 64 MB | 139 MB | 0.03% | 0.7 | 3.97 s | 4.62 s |
-
-Ghostty finishes the `cat` a little sooner. Idle CPU and wakeups are low
-but not yet zero, and memory is 47–64% of Ghostty's, short of the 35%
-target. Input latency was not measured (the probe needs Accessibility and
-Screen Recording).
+- **Light.** Under half Ghostty's memory.
+- **Fast.** `cat` of 100 MB as quick as Ghostty, on a third of the CPU.
+- **No UI of its own.** Native macOS tabs and splits, a config file and
+  a Settings screen in a tab.
+- **Any program as a Dock app.** `decline pin rush` and rush gets its own
+  icon in the Dock.
+- **Shell-aware.** Prompt marks, a completion list with descriptions,
+  command timings, finish notifications.
+- **For agents.** `decline ctl` drives real terminals without windows.
 
 ## Install
 
-**Homebrew** (once the beta is out; the cask installs
-`Terminal Decline.app` and the command as both `terminal-decline` and
-`decline`, Apple Silicon only):
+**Homebrew** (Apple Silicon; installs `Terminal Decline.app` and the
+command as both `terminal-decline` and `decline`):
 
 ```sh
 brew install --cask 0xdeafcafe/tap/terminal-decline
@@ -86,6 +58,52 @@ cargo install --locked --git https://github.com/0xdeafcafe/terminal-decline term
 macOS 14 (Sonoma) or later. Releases are Apple Silicon only; source builds
 are tested on Apple Silicon. MIT licensed.
 
+## Pin a program to the Dock
+
+Any command can be its own Mac app, with its own Dock icon, windows and
+settings. For example [rush](https://github.com/0xdeafcafe/rush), the
+terminal app for coding agents (`brew install 0xdeafcafe/tap/rush`):
+
+```sh
+decline pin rush --dock
+```
+
+That makes `~/Applications/rush.app` and puts it in the Dock: clicking it
+opens a Decline window running rush, nothing else. The icon is rush's
+own if it ships one (an app bundle's, or `rush.png` / `rush.icns` beside
+the program), else one is drawn for it; `--icon FILE` picks another.
+
+```sh
+decline pin Rush --icon rush.png --cwd ~/code -- rush   # Rush.app: its own name, icon and folder
+decline pin --list                                      # your pins
+decline pin --edit rush                                 # its settings (a config layer of its own)
+decline pin --remove rush
+```
+
+Pins load the installed app, so they keep working after updates; their
+settings are in `~/.config/terminal-decline/pins/`.
+
+## Benchmarks
+
+2 November 2026, Apple M1 Max, macOS 27.0. Decline at 7849ad4 (release
+build), Ghostty 1.4.0, kitty 0.49.2. Menlo 13, 100×30 cells, 10k lines
+of scrollback, one window; memory is macOS physical footprint summed over
+all the terminal's processes; medians of 5 runs, taken in turns, on a Mac
+with other work running (load 3–6). Script:
+[scripts/compare/run.py](scripts/compare/run.py).
+
+| | idle memory | after 10k lines | 4 tabs | `cat` 100 MB | `cat` CPU (incl. WindowServer) | idle CPU | idle wakeups/s |
+|---|---|---|---|---|---|---|---|
+| **Decline** | **26 MB** | **19 MB** | **47 MB** | **0.66 s** | **0.63 s** | 0.15% | 2.1 |
+| Ghostty | 60 MB | 56 MB | 87 MB | 0.66 s | 2.04 s | 0.03% | 0.5 |
+| kitty | 99 MB | 130 MB | 104 MB | 1.05 s | 1.63 s | 0.12% | 24 |
+
+Warp and Terminal.app, measured the same way on 30 October, took 3.6 s
+and 4.0 s for the `cat` and 310–333 MB and 48–139 MB of memory:
+[docs/comparison-2026-10-30.md](docs/comparison-2026-10-30.md). Idle CPU
+is the one row Decline doesn't lead: some runs idle at 0.01% and some at
+0.2–0.3%, and that is being looked into.
+
 ## Using it
 
 In the app's own shells `decline` is on `PATH` even without the cask.
@@ -93,50 +111,11 @@ In the app's own shells `decline` is on `PATH` even without the cask.
 ```sh
 terminal-decline              # your login shell
 terminal-decline -e htop      # a program instead of the shell
-terminal-decline pin Rush --icon rush.png -- ./rush   # Rush.app with its own Dock icon
-decline pin rush             # rush.app; its icon found beside it, else drawn for it
 terminal-decline settings     # the Settings screen, in any terminal (also `decline settings`)
 terminal-decline fonts --mono  # the installed monospaced fonts (see docs/fonts.md)
 ```
 
-## Driving it from agents and tests
-
-`terminal-decline ctl` runs programs in real Decline terminals
-without windows (or in background windows, with `--window`), for agents
-and tests to type into, read and measure:
-
-```sh
-terminal-decline ctl spawn --name top --size 100x30 -- htop
-terminal-decline ctl wait-for top --text "Load average" --timeout 5000
-terminal-decline ctl screen top            # the screen as text; --json for cells, colours, cursor, modes
-terminal-decline ctl screenshot top top.png   # drawn on the GPU with your fonts and theme
-terminal-decline ctl kill top
-
-# Watchable: a real window of the app, opened in the background (no focus
-# taken); every command above works on it, and closing it ends the session
-terminal-decline ctl spawn --window --name vim --size 100x30 -- vim
-terminal-decline ctl kill vim
-
-# A shell session: wait for the next command to finish, and get its status
-terminal-decline ctl spawn --name sh --shell
-terminal-decline ctl send sh --text "make test\n"
-terminal-decline ctl wait-for sh --command --timeout 600000   # {"status":0,"duration_ms":41873,...}
-```
-
-Each command prints a line of JSON and exits 0 when done (3 when
-`wait-for` timed out); keys go through the app's own encoding, kitty
-keyboard protocol included (`send top --key ctrl+c --text q`). It talks
-to the running app, or starts a headless server with no Dock icon that
-leaves once idle, over a socket only your user can reach;
-`agent_api = false` turns it off. A session nothing has asked about for
-30 minutes is killed, so forgotten test sessions don't keep a server
-running (`spawn --idle-timeout`, or `agent_api_idle_timeout` in minutes
-in the config; 0 never). `terminal-decline ctl --help` lists the commands; [docs/design/agent-api.md](docs/design/agent-api.md) has
-the details.
-
 ## Features
-
-What is in the code today:
 
 - **Tabs and splits**: native macOS window tabs (Cmd+T, Cmd+1 to 9) and
   split panes with draggable dividers, each pane drawn in the window's one
@@ -177,9 +156,15 @@ What is in the code today:
 - **Importers**: `terminal-decline import ghostty` turns a Ghostty config
   into ours; `terminal-decline import iterm FILE.itermcolors` turns an
   iTerm2 colour preset into a theme.
-- **Dock pins**: `terminal-decline pin` makes a program its own Dock app
-  with a generated icon; pins load the installed app, so they survive
-  upgrades. Pin settings are in `~/.config/terminal-decline/pins/`.
+- **Dock pins**: `decline pin` makes a program its own Dock app (see
+  [above](#pin-a-program-to-the-dock)).
+- **Completion**: Tab shows zsh's matches in a list, with what each flag
+  and subcommand does from its man page or `--help`; grey text after the
+  cursor shows the rest of the first, Right takes it; Ctrl+Space opens
+  the list at once, and it can open as you type (`completion_as_you_type`).
+- **Commands**: a faint line between commands with a ✓ or ✗ and how
+  long each took, the command line coloured as you type, and plain output
+  coloured if you like (`colour_output`).
 - **macOS**: files and folders dropped on the Dock icon or sent from
   Finder and Services open a window there, notifications (OSC 9/777 and
   the bell) when unfocused, Dock progress, Secure Keyboard Entry.
@@ -187,11 +172,46 @@ What is in the code today:
 Inline images: kitty graphics, iTerm2 (`imgcat`) and Sixel, on by default
 (`images = false` turns them off). The in-app
 updater (Sparkle) is built, but only offers releases that are signed and
-notarized, so it has nothing to offer until the secrets are set. It was called Decline
-before; the first run moves `~/.config/decline` to the new config folder.
+notarized, so it has nothing to offer until the secrets are set.
+The first run moves an old `~/.config/decline` to the new config folder.
 
 See [DESIGN.md](DESIGN.md) for how it works, pressure tests and the
 roadmap.
+
+## Driving it from agents and tests
+
+`terminal-decline ctl` runs programs in real Decline terminals
+without windows (or in background windows, with `--window`), for agents
+and tests to type into, read and measure:
+
+```sh
+terminal-decline ctl spawn --name top --size 100x30 -- htop
+terminal-decline ctl wait-for top --text "Load average" --timeout 5000
+terminal-decline ctl screen top            # the screen as text; --json for cells, colours, cursor, modes
+terminal-decline ctl screenshot top top.png   # drawn on the GPU with your fonts and theme
+terminal-decline ctl kill top
+
+# Watchable: a real window of the app, opened in the background (no focus
+# taken); every command above works on it, and closing it ends the session
+terminal-decline ctl spawn --window --name vim --size 100x30 -- vim
+terminal-decline ctl kill vim
+
+# A shell session: wait for the next command to finish, and get its status
+terminal-decline ctl spawn --name sh --shell
+terminal-decline ctl send sh --text "make test\n"
+terminal-decline ctl wait-for sh --command --timeout 600000   # {"status":0,"duration_ms":41873,...}
+```
+
+Each command prints a line of JSON and exits 0 when done (3 when
+`wait-for` timed out); keys go through the app's own encoding, kitty
+keyboard protocol included (`send top --key ctrl+c --text q`). It talks
+to the running app, or starts a headless server with no Dock icon that
+leaves once idle, over a socket only your user can reach;
+`agent_api = false` turns it off. A session nothing has asked about for
+30 minutes is killed, so forgotten test sessions don't keep a server
+running (`spawn --idle-timeout`, or `agent_api_idle_timeout` in minutes
+in the config; 0 never). `terminal-decline ctl --help` lists the commands; [docs/design/agent-api.md](docs/design/agent-api.md) has
+the details.
 
 ## Development
 

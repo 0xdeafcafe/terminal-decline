@@ -7,7 +7,8 @@ Rust and drawn on the GPU. Quick, light, and out of your way.
 
 - **Fast, properly fast**: `cat` a 100 MB file in 0.58 s. Apple's
   Terminal takes nearly 4.
-- **Tiny footprint**: 26 MB idle, and 0.02% CPU when nothing's happening.
+- **Tiny footprint**: 26 MB idle, and 0.02% CPU, so low epstein wants
+  them on his jet.
 - **GPU all the way down**: Metal for drawing, Core Text for fonts,
   ligatures and all.
 - **Autocomplete that tells you things**: Tab lists matches with what

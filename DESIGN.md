@@ -1,8 +1,14 @@
 # Decline: design
 
-Terminal Decline is a GPU-accelerated terminal for macOS, written in Rust.
-The aim is to use less memory and CPU than Ghostty and Warp, to have no UI
-of its own, and to let you pin any command as its own Dock app.
+Terminal Decline is a terminal for macOS, written in Rust and drawn on the
+GPU. The aim is a terminal that uses less memory and CPU than the other
+fast ones, has no UI of its own, and lets you pin any command as its own
+Dock app.
+
+This is how it works under the hood: where the screen lives in memory,
+which thread does what, how a frame gets to Metal, and what each of those
+costs, measured. It's brought up to date at the end of each roadmap phase,
+so if something here disagrees with the code, the code wins.
 
 ## Goals
 
@@ -134,6 +140,11 @@ a run.
 
 ## Screen storage
 
+Most of a terminal's memory is the screen and its history, so this is
+where most of the memory work has gone. Cells are packed into 8 bytes,
+styles are stored once per screen, and history that's gone quiet is
+compressed.
+
 - A cell is 8 bytes (`u64`): a 21-bit Unicode scalar, its width (narrow,
   wide, spacer), a "shows when empty" bit, and a 32-bit id into its
   screen's style table. Each screen (primary, alternate) has its own
@@ -219,6 +230,12 @@ a run.
 
 ## Threads
 
+Two threads do the heavy lifting: one reads the program's output and
+parses it, and the main thread draws. They meet at the terminal's lock,
+and the main thread never waits on it for more than 500 µs. Two more sit
+alongside them: a writer for keys and replies, and a glyph thread that
+shapes text.
+
 How output gets from the program to the screen, and keys get back to it:
 
 ```mermaid
@@ -279,8 +296,9 @@ flowchart LR
 
 ## Failures and crashes
 
-An app started from the Dock or as a pin has no stderr, so failures are
-written into the window as dim red text (and to stderr):
+An app started from the Dock or as a pin has no stderr, so a broken config
+or a program that won't start would otherwise just look like an empty
+window. Instead, failures are written into the window as dim red text (and to stderr):
 
 - Config errors show at the top of each window, before the program's
   output: `terminal-decline: config: font_sise: unknown field …; ignored`.
@@ -310,6 +328,10 @@ crash logs. Unwinding costs binary size (unwind tables and landing pads:
 1.90 → 2.16 MB) and no measurable parse speed.
 
 ## Rendering (Metal)
+
+Every window draws with Metal, through one layer. Most of what follows is
+about doing as little as possible per frame, and getting the frame to the
+screen as soon as the GPU is done with it.
 
 - One `CAMetalLayer`, `presentsWithTransaction = false`,
   `displaySyncEnabled = false` (frames go to the window server as soon as
@@ -396,6 +418,10 @@ crash logs. Unwinding costs binary size (unwind tables and landing pads:
   colours).
 
 ## Input
+
+Typing has to feel right on every layout and input method, so text comes
+in through macOS's own text input path, and keys go out as whatever xterm
+would send.
 
 - Text comes through `NSTextInputClient` (so IME, dead keys and the emoji
   picker work). Marked (in-progress IME) text is drawn at the cursor.
@@ -528,6 +554,9 @@ crash logs. Unwinding costs binary size (unwind tables and landing pads:
   docs/design/links.md.
 
 ## Windows and tabs
+
+Decline draws no tabs or window chrome of its own. It leans on what macOS
+already does, and works around the places where AppKit gets in the way.
 
 Tabs are macOS's own window tabs: each tab is an `NSWindow` with its own
 view, sessions and renderer, all sharing one tabbing identifier. Shell >
@@ -861,6 +890,9 @@ handled.
 
 ## Dock pins ("make ./rush its own app")
 
+Point Decline at any command and you get a proper Mac app for it, with its
+own icon, its own place in the Dock and its own config.
+
 `terminal-decline pin Rush [--icon rush.png] [--config rush.toml] [--dock] -- ./rush`
 creates `~/Applications/Rush.app`. Made from the app (Terminal
 Decline.app), a pin is a stub pin (docs/design/pins.md §3):
@@ -974,6 +1006,10 @@ the renamed app and pins as new apps, so it asks again for the
 permissions they'd been granted.
 
 ## Config
+
+Everything lives in one TOML file, reloaded when you save it. The Settings
+tab edits that same file, so there's only ever one place a setting comes
+from.
 
 `~/.config/terminal-decline/config.toml`: font family/size, colours (16
 + fg/bg/cursor/selection), padding, opacity/blur, option-as-meta,
@@ -1179,6 +1215,10 @@ DECRQCRA itself, from the screen, because esctest reads the screen back
 through it.
 
 ## Measured (M-series Mac, macOS 27, release build)
+
+Numbers from real runs, each with the command that produced it, so any of
+them can be checked again. Older rows are kept as they were measured
+rather than rewritten; the latest head-to-head is in the README.
 
 | | Decline | Ghostty 1.x |
 |---|---|---|

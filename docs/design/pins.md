@@ -13,7 +13,7 @@ is the hash of the code, so every `pin --update` after an upgrade gives
 the pin a new identity, and macOS asks again for every permission it had
 (Documents, Full Disk Access, camera, notifications…). The fix is
 Chrome's web-app approach: the pin holds a small **stub** that never
-changes after the pin is made, and loads Terminal Decline's code from the
+changes after the pin is made, and loads Decline's code from the
 installed app.
 
 Signing secrets (Developer ID, notarization) aren't in the repo yet
@@ -27,7 +27,7 @@ Modules named here:
   frozen interface between them (`abi`).
 - **term-icon** (new): generated pin icons by the Slope rule
   (`slope-pins-2`, docs/brand/README.md).
-- **term-app**: the library (all of Terminal Decline), the `pin` module
+- **term-app**: the library (all of Decline), the `pin` module
   that makes, lists, edits and repairs pins, and `Paths`.
 - **term-dylib** (new, a few lines): builds term-app as
   `libterminal_decline.dylib` and defines the exported entry points.
@@ -82,7 +82,7 @@ unchanged and `codesign --verify --strict` passing.
 | What a pin holds | the stub (copied from the app at creation), a frozen `Info.plist`, its icon; settings stay outside the bundle | nothing in the bundle changes again, so its signature and identity never change |
 | Why permissions then persist, even ad-hoc | an ad-hoc pin's identity is its code hash; the stub, Info.plist and icon never change, so the hash never changes (measured: deterministic) | the fix works before the signing secrets exist |
 | Pin's interface to the library | one C function per interface version, `td_pin_main_v1(const td_pin_info_v1 *)`; versions only ever added; **v1 frozen at the first build that makes stub pins** | a pin made by any public build runs every later library |
-| Checking the library | before loading it, the stub checks its code signature against a requirement written into the pin (Apple anchor + Terminal Decline's team ID for release-made pins) | catches a wrong, old or damaged library, and for release pins a swapped one |
+| Checking the library | before loading it, the stub checks its code signature against a requirement written into the pin (Apple anchor + Decline's team ID for release-made pins) | catches a wrong, old or damaged library, and for release pins a swapped one |
 | What that does not protect | a pin's permissions from programs running as the same user: they can edit the pin's settings (its command) or its environment. Terminal.app and every terminal have the same exposure | stated, not hidden; open question 1 |
 | Pin's own signing | ad-hoc, **hardened runtime**, `disable-library-validation` (so it may load the Developer ID library) plus the resource-access entitlements | measured to work ad-hoc; `DYLD_*` variables are ignored; our check replaces the system's library validation |
 | Pin arguments | in the pin role the library accepts no `-e`, `--command` or `--config`; only `--restore` and `-psn_` | `open -b <pin> --args -e …` can't run something else with the pin's permissions |
@@ -105,7 +105,7 @@ Terminal Decline.app/Contents/
                                    CFBundleExecutable terminal-decline, usage strings (§2.3),
                                    SUPublicEDKey etc. (B.4, docs/design/updater.md)
   MacOS/terminal-decline           launcher (term-pin), ~290 KB
-  Frameworks/libterminal_decline.dylib   all of Terminal Decline, ~2.2 MB
+  Frameworks/libterminal_decline.dylib   all of Decline, ~2.2 MB
   Frameworks/Sparkle.framework     B.4
   Helpers/terminal-decline-pin     the pin stub (term-pin), ~290 KB, copied into pins
   Resources/icon.icns
@@ -242,7 +242,7 @@ Rush.app/Contents/
   Resources/icon.icns
   _CodeSignature/CodeResources
 ~/.config/terminal-decline/pins/rush.toml       command, cwd, env, any setting (what --edit opens)
-~/.config/terminal-decline/pins/rush.pin.toml   the [pin] record (§5.4), written by Terminal Decline
+~/.config/terminal-decline/pins/rush.pin.toml   the [pin] record (§5.4), written by Decline
 ```
 
 Info.plist keys, all written once:
@@ -258,7 +258,7 @@ Info.plist keys, all written once:
 | `LSMinimumSystemVersion` | `14.0` |
 | `NSHighResolutionCapable`, `NSSupportsAutomaticGraphicsSwitching` | true |
 | `CFBundleDocumentTypes` | folders (`public.folder`, rank None), as the app: a folder dropped on a pin opens a window there (§11, question 7) |
-| usage strings | as §2.3, worded "A program running in Rush (a Terminal Decline pin) wants to …" |
+| usage strings | as §2.3, worded "A program running in Rush (a Decline pin) wants to …" |
 | `TDPinAbi` | `1` |
 | `TDPinId` | `rush` |
 | `TDAppBundleId` | `red.forbes.terminal-decline` |
@@ -360,7 +360,7 @@ with `SecCodeCopySigningInformation`):
   mistakes, not attacks. `pin --list` marks these pins "dev".
 
 **What the check protects, and what it doesn't.** It makes sure a pin
-runs Terminal Decline's library, of a version that understands the pin,
+runs Decline's library, of a version that understands the pin,
 undamaged, and (for release pins) signed by our team, so dropping another
 library into an unprotected copy of the app doesn't run inside the pin.
 It does **not** stop a program running as the same user from borrowing a
@@ -437,13 +437,13 @@ int td_pin_main_v1(const struct td_pin_info_v1 *info);
   interface. The entry catches panics (`catch_unwind`) so none crosses
   into C.
 - A pin needing a version the library doesn't have: the alert says "this
-  pin needs a newer Terminal Decline; update it from the Terminal
+  pin needs a newer Decline; update it from the Terminal
   Decline menu, or `brew upgrade --greedy terminal-decline`".
 
 Alerts: `CFUserNotificationDisplayAlert` (CoreFoundation, so the stub
 needs no AppKit), title "Rush can't start", the reason (app not found;
 library fails its check, naming the path; interface missing), and two
-buttons: "Get Terminal Decline" (opens the download page) and "Quit". The
+buttons: "Get Decline" (opens the download page) and "Quit". The
 same text goes to stderr.
 
 ### 3.6 Inside the library, as a pin
@@ -587,7 +587,7 @@ moved, and for old pins.
 
 `--update` (kept, since dogfood.sh, the cask caveat and users' habits call
 it) re-clones **clone pins only**, as today; for stub pins it prints
-"Rush is up to date (it loads the installed Terminal Decline)" and
+"Rush is up to date (it loads the installed Decline)" and
 changes nothing. A test checks `--update` never writes into a stub pin.
 dogfood.sh and the cask caveat change to `--repair` in P-4.
 
@@ -603,7 +603,7 @@ dogfood.sh and the cask caveat change to `--repair` in P-4.
   binary.
 
 The pin's record lives in its own file, `pins/<id>.pin.toml`, written only
-by Terminal Decline (so `--edit` doesn't show it, and an older library
+by Decline (so `--edit` doesn't show it, and an older library
 doesn't report its keys as unknown settings):
 
 ```toml
@@ -663,7 +663,7 @@ macOS 13 and later protect app bundles from being changed by other apps
 measured, not assumed. Known so far:
 
 - The `pin` command runs inside a terminal, so macOS attributes its file
-  changes to that terminal (Terminal Decline, Terminal.app, iTerm2…);
+  changes to that terminal (Decline, Terminal.app, iTerm2…);
   any prompt names that app.
 - Creating a new bundle in `~/Applications` is creating files, not
   changing an app; we expect no prompt.
@@ -677,10 +677,10 @@ measured, not assumed. Known so far:
 PR P-6 runs this matrix on macOS 14, 15, 26 and 27 (in VMs, plus Alex's
 Mac; GitHub runners can't answer prompts) and records the result in
 DESIGN.md: {create, rebuild, set icon, remove} × {`~/Applications`,
-`/Applications`} × {run in Terminal Decline (ad-hoc, then signed), in
+`/Applications`} × {run in Decline (ad-hoc, then signed), in
 Terminal.app, from the preferences tab, from inside a pin}. Where a prompt
 appears, the command catches `EPERM`, says what macOS wants ("allow
-Terminal Decline under System Settings › Privacy & Security › App
+Decline under System Settings › Privacy & Security › App
 Management, or remove Rush.app in Finder"), and changes nothing.
 
 ---
@@ -830,7 +830,7 @@ bundle id):
   - library with another identifier, or one byte changed after signing:
     refused, exit 1, stderr names the reason and the path;
   - a fixture exporting only `td_pin_main_v2` with a v1 stub: the "needs
-    a newer Terminal Decline" message; a v2 stub against a v1-only
+    a newer Decline" message; a v2 stub against a v1-only
     fixture: runs v1 (waits for a v2 to exist; the countdown itself is a
     unit test);
   - no app anywhere: the "isn't installed" message;
@@ -896,7 +896,7 @@ running a command.
 - P-0's spike (§10).
 - P.1: in the notarized app, a program asking for the microphone (a
   three-line Swift script using `AVCaptureDevice.requestAccess`) gets
-  macOS's prompt naming Terminal Decline.
+  macOS's prompt naming Decline.
 - App moved to another folder: pins still start (LaunchServices).
 - Pins from Finder, Spotlight, `open -b`, and as a login item after a
   restart.

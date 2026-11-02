@@ -86,7 +86,7 @@ cask to the tap). The same workflow without a tag builds the nightly.
 ## 4. Tag and release
 
 15. **[Alex] Tag.** From the merged `main`:
-    `git tag -a v0.1.0 -m "Terminal Decline 0.1.0"` and
+    `git tag -a v0.1.0 -m "Decline 0.1.0"` and
     `git push origin v0.1.0`. This starts the release; it can't be taken
     back cleanly (an appcast item with a build number can't be reused).
 16. **[Alex] Approve the `sign` job** if the `release` environment has a

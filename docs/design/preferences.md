@@ -1,9 +1,9 @@
-# Preferences (Cmd+,): a terminal program Terminal Decline runs itself
+# Preferences (Cmd+,): a terminal program Decline runs itself
 
 Status: reviewed (Opus, 29 Oct 2026) and revised; build after the rename
 (below), and the Pins section after P.2. Owner decisions (29 Oct 2026):
 preferences are a TUI shown in a new tab, opened with Cmd+,; sectioned-list
-layout; the product is renamed Terminal Decline (app, command
+layout; the product is renamed Decline (app, command
 `terminal-decline`, config dir `~/.config/terminal-decline`, bundle id
 `red.forbes.terminal-decline`). From the review: a hand-rolled TUI, run as
 its own process, and a font picker that lists monospace fonts first (see
@@ -365,7 +365,7 @@ the action's name, its config name and its shortcut (`⌘T` or `cmd+t`). On an a
 - With room, each row shows its config name and its default beside it.
 
 
-A program can't receive Cmd chords in Terminal Decline: Cmd stays with the
+A program can't receive Cmd chords in Decline: Cmd stays with the
 menus whatever the kitty flags, bound Cmd chords are matched by the menus
 before the view sees them, and unbound ones are dropped
 (`KeyAction::ToMenu`). Option chords go to the input method (Option+E is a
@@ -596,7 +596,7 @@ the system starts). The same process from a debug build: 3.8 MB.
   the prefs program's footprint and idle wakeups are printed.
 - The rename's tests are listed with its steps.
 
-## Rename to Terminal Decline
+## Rename to Decline
 
 Names: bundle `Terminal Decline.app`, id `red.forbes.terminal-decline`;
 pin ids `red.forbes.terminal-decline.pin.<id>`; command `terminal-decline`

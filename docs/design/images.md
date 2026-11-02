@@ -557,7 +557,7 @@ the pool which images this window drew (§5.2).
 
 ### 5.1 What counts
 
-Every byte Terminal Decline holds for images, once (cells §8.4):
+Every byte Decline holds for images, once (cells §8.4):
 - pixel buffers at their **allocated size** (`MTLBuffer.allocatedSize`:
   whole 16 KB pages, so 10,000 tiny images count as the 160 MB they really
   take, not 160 KB);

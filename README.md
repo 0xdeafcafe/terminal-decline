@@ -1,10 +1,10 @@
 # Terminal Decline
 
-![Terminal Decline — less overhead, more terminal](docs/brand/readme-header.png)
+![Decline — less overhead, more terminal](docs/brand/readme-header.png)
 
-A GPU-accelerated terminal for macOS, written in Rust. It aims to use less
-memory and CPU than Ghostty and Warp, has no UI of its own, and can turn any
-program into its own Dock app.
+Terminal Decline (Decline for short) is a GPU-accelerated terminal for
+macOS, written in Rust. It aims to use less memory and CPU than Ghostty and
+Warp, has no UI of its own, and can turn any program into its own Dock app.
 
 ## Status
 
@@ -21,7 +21,7 @@ yet.
 
 ## Benchmarks
 
-30 October 2026, Apple M1 Max, macOS 27.0. Terminal Decline at 6a38c0b
+30 October 2026, Apple M1 Max, macOS 27.0. Decline at 6a38c0b
 (release build), Ghostty 1.4.0, kitty 0.49.2, Warp 0.2026.10.21.08.25.02,
 Terminal.app 2.15. Menlo 13, 100×30 cells, 10k lines of scrollback, one
 window; memory is macOS physical footprint summed over all the terminal's
@@ -32,7 +32,7 @@ running (load 1.7–10). Details, spreads and caveats:
 
 | | idle memory | after 10k lines | 4 tabs | idle CPU | idle wakeups/s | `cat` 100 MB time | `cat` CPU (incl. WindowServer) |
 |---|---|---|---|---|---|---|---|
-| Terminal Decline | 31.5 MB | 39 MB | 63 MB | 0.02% | 0.4 | 0.61 s | 0.62 s |
+| Decline | 31.5 MB | 39 MB | 63 MB | 0.02% | 0.4 | 0.61 s | 0.62 s |
 | Ghostty | 67 MB | 68 MB | 98 MB | 0.64% | 16 | **0.53 s** | 1.68 s |
 | kitty | 109 MB | 140 MB | 115 MB | 0.13% | 23 | 0.95 s | 1.31 s |
 | Warp | 333 MB | 310 MB | 332 MB | 1.11% | 62 | 3.59 s | 4.38 s |
@@ -101,7 +101,7 @@ terminal-decline fonts --mono  # the installed monospaced fonts (see docs/fonts.
 
 ## Driving it from agents and tests
 
-`terminal-decline ctl` runs programs in real Terminal Decline terminals
+`terminal-decline ctl` runs programs in real Decline terminals
 without windows (or in background windows, with `--window`), for agents
 and tests to type into, read and measure:
 

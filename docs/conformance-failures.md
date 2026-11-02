@@ -19,7 +19,7 @@ All the to-fix bugs are in term-core except where noted.
 
 esctest's reset sets the foreground to black with `OSC 10 ; #000 ST`, and
 `ResetSpecialColor_Dynamic` then expects `OSC 110` to give black back:
-xterm's default foreground. Terminal Decline resets to the theme's
+xterm's default foreground. Decline resets to the theme's
 foreground, which is right; the headless terminal the harness runs has
 the default dark theme's. It would pass if the headless terminal used
 xterm's colours (black on white). esctest `ResetSpecialColor_Dynamic`.

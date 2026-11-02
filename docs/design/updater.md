@@ -67,7 +67,7 @@ installer launcher, plain installer, progress app, timer and
 | Who may be updated | only notarized builds signed with our Developer ID; the release job refuses to publish an appcast otherwise | Sparkle trusts the EdDSA key alone; an ad-hoc release would reset every user's permissions and break every release pin |
 | Signing updates | EdDSA (`sign_update`) in a separate macOS job, the key on stdin from `SPARKLE_ED_PRIVATE_KEY` in a protected environment; the public key committed (`packaging/sparkle-public-key`) and written into Info.plist as `SUPublicEDKey` | the key never touches disk or the build steps |
 | Version order | `sparkle:version` = `CFBundleVersion`, the integer build number that only goes up (N.9), read from the zip and checked to be above the current latest | Sparkle compares it; a wrong or lower number would loop or stop updates |
-| A check the user asks for | Terminal Decline › Check for Updates…; answers are standard alerts | menus and alerts are macOS's own UI, allowed by the zero-UI rule; open question 2 |
+| A check the user asks for | Decline › Check for Updates…; answers are standard alerts | menus and alerts are macOS's own UI, allowed by the zero-UI rule; open question 2 |
 
 ---
 
@@ -226,7 +226,7 @@ the login shell starts with one faint line (`welcome`, default `"full"`;
 While an update waits, a second line names it and the key:
 `Update available: 5 new commits — press ⌘U to update` (new commits on
 `main`, clean checkout), `New build installed — press ⌘U to restart to
-update`, or `Terminal Decline 0.6.0 is available — press ⌘U to update`
+update`, or `Decline 0.6.0 is available — press ⌘U to update`
 (Sparkle found it). Cmd+U is Update Now (`update_now`, in the app menu
 while an updater runs, enabled only while an update waits): Restart to
 Update, else Update to Latest, else Sparkle's user check, which installs.
@@ -390,7 +390,7 @@ must never be in its environment.
 ```xml
 <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
   <channel>
-    <title>Terminal Decline</title>
+    <title>Decline</title>
     <item>
       <title>0.4.0</title>
       <pubDate>Thu, 29 Oct 2026 03:00:00 +0000</pubDate>
@@ -662,7 +662,7 @@ module's `source` and `dogfood` parts).
   (`CGEventSourceSecondsSinceLastEventType`), on AC power, with no
   program running in any pane, looking again every 15 minutes until
   then; `"off"` → no checks.
-- **Menus.** Terminal Decline › Check for Updates… (Sparkle's check in
+- **Menus.** Decline › Check for Updates… (Sparkle's check in
   release builds, this one in builds from source) and, for builds from
   source, Update to Latest.
 - **Updating.** The tree is checked again, then the checkout's `main`
@@ -687,7 +687,7 @@ module's `source` and `dogfood` parts).
   `"notify"` alike: Sparkle installs on quit, which interrupts nothing.
 
 **Telling** (question 10, both kinds): when Sparkle has an update staged
-to install on quit (`willInstallUpdateOnQuit`), "Terminal Decline X will
+to install on quit (`willInstallUpdateOnQuit`), "Decline X will
 install when you quit", once per version; on the first launch after an
 update, "Updated to X" (a release's opens its release page; a build from
 source's lists the new commits). Kept in

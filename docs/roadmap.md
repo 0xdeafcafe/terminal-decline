@@ -1,6 +1,6 @@
 # Roadmap to 1.0
 
-**Terminal Decline 1.0** is a signed, notarized app on Homebrew that passes the
+**Decline 1.0** is a signed, notarized app on Homebrew that passes the
 daily-driver checklist below, beats Ghostty on the thresholds below, has no UI
 of its own beyond what macOS provides (native tabs, a split divider, standard
 menus/find bar/alerts), and has Dock pins that survive upgrades.
@@ -25,7 +25,7 @@ fzf; lazygit; btop; less/man; delta; yazi with image previews.
 Ghostty, footprint not RSS, WindowServer CPU included, interleaved runs):
 idle CPU 0% and 0 wakeups/s; idle footprint (1 tab) ≤ 27 MB; after 10k
 lines ≤ 40 MB; 4 tabs ≤ 37 MB; 4 splits ≤ 55 MB; `cat` 100 MB CPU
-(Terminal Decline + WindowServer) ≤ 45% of Ghostty's; input latency p99 ≤
+(Decline + WindowServer) ≤ 45% of Ghostty's; input latency p99 ≤
 Ghostty's. (Memory targets are fixed numbers since 30 Oct 2026, Alex's
 decision: Ghostty 1.4 measured 67 MB idle, far below the version the
 earlier "35% of Ghostty" targets were set against. On 31 Oct he set
@@ -52,7 +52,7 @@ set, not only perf work: shaping, images and the updater each cost something.
 | N.7 | Crash handling: panic hook → `~/Library/Logs/terminal-decline/` + os_log; dSYMs kept per release; release builds unwind (not abort) so a crash in one pane's parser shows an error in that pane and other windows keep running | me | M |
 | N.8 | CI cost while private: macOS nightlies only when `main` changed since last run | me | S |
 | N.9 | Pre-beta tags as `0.0.x`; `CFBundleVersion` an integer build number (nightlies too) | me | S |
-| N.10 | Rename to Terminal Decline everywhere (app, bundle id, command with `decline` alias, config dir with migration, pins, cask; was E.17), before signed builds go out, P.1/P.2 and Sparkle; steps in order in docs/design/preferences.md | agent | S |
+| N.10 | Rename to Decline everywhere (app, bundle id, command with `decline` alias, config dir with migration, pins, cask; was E.17), before signed builds go out, P.1/P.2 and Sparkle; steps in order in docs/design/preferences.md | agent | S |
 
 ## F — Formats (the foundation)
 
@@ -91,7 +91,7 @@ Design: docs/design/pins.md.
 | E.7 | Search: Cmd+F with our own native-style find bar (standard search field, previous/next, count, options; Edit > Find, Cmd+G/Cmd+E and the shared find text work as usual) over all of history; in-view hits first, then history outwards, using fast block search (SIMD substring search plus a per-block filter so most blocks are skipped) | M |
 | E.8 | Selection: auto-scroll past the edge, rectangular (Option-drag), copy-on-select option | S |
 | E.9 | Config: reload on change (FSEvents), list of live settings, `theme =` + a small built-in theme set + themes dir, `terminal-decline import ghostty` / `import iterm`, deprecation policy for renamed keys | M |
-| E.10 | macOS: drag files in → escaped paths; folder on Dock icon / `open -a` → window there; Services "New Terminal Decline Window/Tab at Folder"; right-click menu when mouse reporting is off; confirm before closing a running program (config off) | M |
+| E.10 | macOS: drag files in → escaped paths; folder on Dock icon / `open -a` → window there; Services "New Decline Window/Tab at Folder"; right-click menu when mouse reporting is off; confirm before closing a running program (config off) | M |
 | E.11 | Secure Keyboard Entry (menu) | S |
 | E.19 | Conformance fixes: the `to-fix` entries in docs/conformance-failures.md (OSC 4/10/11 colours, DECRQSS, DEC graphics glyphs, REP, DECALN, DECID, DECXCPR) | M |
 | E.14 | Small bugs: ~~VS16 with autowrap off~~ (fixed by cells design PR 6); ~~CSI M on the top row~~ (already right since the cells design; pinned by a conformance test) | S |
@@ -104,7 +104,7 @@ Design: docs/design/pins.md.
 | # | Work | Size | Done when |
 |---|---|---|---|
 | B.1 | Ligatures: shape at draw time per style run with Core Text, cache per row counter, skip for fonts without ligatures, `font_features` | L | Fira/JetBrains Mono ligatures; frame build and `cat` measured Menlo vs JetBrains Mono |
-| B.2 | Splits: one CAMetalLayer per window, plain NSViews per pane for input/IME/a11y, cached instances per pane, panes in sync-update reuse last frame, one display link per window, one glyph atlas per process | L | 4 panes all flooding: frame p99 and WindowServer+Terminal Decline CPU vs one pane; footprint per extra pane recorded |
+| B.2 | Splits: one CAMetalLayer per window, plain NSViews per pane for input/IME/a11y, cached instances per pane, panes in sync-update reuse last frame, one display link per window, one glyph atlas per process | L | 4 panes all flooding: frame p99 and WindowServer+Decline CPU vs one pane; footprint per extra pane recorded |
 | B.3 | Inline images: kitty graphics (APC; transmit/place/delete; virtual placements), iTerm2 OSC 1337; per-process memory budget (default 32 MB, Alex's decision), volatile while hidden; pixel caps, file/temp-file transmission limits; fuzz targets for graphics commands; design in docs/design/images.md | L | `kitty +kitten icat`, `imgcat`, yazi previews |
 | B.4 | Updater: Sparkle 2 for everyone (the cask declares `auto_updates true`), in Terminal Decline.app's main process only (never pins), silent driver, no system profiling, daily check (DESIGN's "no timers" updated), EdDSA key backed up; design in docs/design/updater.md | M | update applied without prompts; signature checked |
 | B.5 | Sixel (in 1.0), fuzzed decoder, same image budget; design in docs/design/images.md | M | `chafa --format sixel` |

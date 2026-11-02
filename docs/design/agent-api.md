@@ -6,7 +6,7 @@ may use it, through a socket, on by default in the app (off in pins;
 `agent_api = false` turns it off).
 
 What it is for: agents and tests start CLI and TUI programs in a real
-Terminal Decline terminal, type into them, read the screen, wait for
+Decline terminal, type into them, read the screen, wait for
 output, take GPU-rendered screenshots and measure them, without opening
 windows.
 

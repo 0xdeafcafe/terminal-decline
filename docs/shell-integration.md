@@ -1,6 +1,6 @@
 # Shell integration
 
-Terminal Decline can jump between your shell's prompts and select what a
+Decline can jump between your shell's prompts and select what a
 command printed, if the shell marks its prompts and commands. The marks
 are OSC 133 sequences, the ones FinalTerm introduced and iTerm2, kitty,
 WezTerm and Ghostty also read:

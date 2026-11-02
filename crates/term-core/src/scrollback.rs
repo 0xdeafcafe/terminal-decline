@@ -487,6 +487,15 @@ impl OpenBlock {
             dict.shrink_to(2 * used);
         }
         self.dict = dict;
+        // The next block starts as big as this one ended: grown from
+        // nothing, each of its buffers is reallocated (and the old copy
+        // handed back) a dozen times on the way to a block's size.
+        self.meta.reserve_exact(b.meta.len());
+        self.starts.reserve_exact(b.starts.len());
+        self.text.reserve_exact(b.text.len());
+        self.checkpoints.reserve_exact(b.checkpoints.len());
+        self.styles.reserve_exact(b.styles.len());
+        self.style_starts.reserve_exact(b.style_starts.len());
         BlockData {
             meta: b.meta.into_boxed_slice(),
             starts: b.starts.into_boxed_slice(),

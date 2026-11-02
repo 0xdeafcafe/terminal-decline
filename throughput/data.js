@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793594457611,
+  "lastUpdate": 1793614387196,
   "repoUrl": "https://github.com/0xdeafcafe/terminal-decline",
   "entries": {
     "Throughput": [
@@ -769,6 +769,188 @@ window.BENCHMARK_DATA = {
           {
             "name": "typing/echo+report",
             "value": 2001407,
+            "unit": "elem/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Alexander Forbes-Reed",
+            "username": "0xdeafcafe",
+            "email": "git@alex.forbes.red"
+          },
+          "committer": {
+            "name": "Alexander Forbes-Reed",
+            "username": "0xdeafcafe",
+            "email": "git@alex.forbes.red"
+          },
+          "id": "41fbb01b4db6a47145d117566552277dd563b48d",
+          "message": "perf(core): reserve half the last history block's size, not all of it\n\n50ca009 started each open block as big as the last one ended, which\nleft the open block's spare room at half a block on average: scrollback\nbytes per line rose past the nightly limit for CJK (69 to 76, limit 75)\nand plain text (44 to 49). Reserving half keeps it to one reallocation\nper buffer instead of a dozen: CJK 72, plain 46, every kind under its\nlimit. parse_1k/plain, interleaved runs at load 6-10: 7.39 and 7.07 ms\nagainst 7.06 and 7.22 ms with the whole size, within the noise.",
+          "timestamp": "2026-11-02T09:32:04Z",
+          "url": "https://github.com/0xdeafcafe/terminal-decline/commit/41fbb01b4db6a47145d117566552277dd563b48d"
+        },
+        "date": 1793614386001,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "parse/clusters",
+            "value": 89.45,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse/coloured",
+            "value": 177.29,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse/plain",
+            "value": 577.97,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse/seq",
+            "value": 148.4,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse/tui",
+            "value": 267.28,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse/unicode",
+            "value": 122.77,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse_1k/clusters",
+            "value": 86.14,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse_1k/coloured",
+            "value": 170.11,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse_1k/plain",
+            "value": 567.25,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse_1k/seq",
+            "value": 152.47,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse_1k/tui",
+            "value": 246.47,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse_1k/unicode",
+            "value": 124.4,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "history decode/background",
+            "value": 4438237,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history decode/cjk",
+            "value": 4992029,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history decode/emoji",
+            "value": 3354505,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history decode/gradient",
+            "value": 552435,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history decode/ls",
+            "value": 4264299,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history decode/plain",
+            "value": 7011100,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/background",
+            "value": 4476993,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/cjk",
+            "value": 6170419,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/emoji",
+            "value": 7398656,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/gradient",
+            "value": 274862,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/keyed/background",
+            "value": 4799146,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/keyed/cjk",
+            "value": 7089565,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/keyed/emoji",
+            "value": 8215337,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/keyed/gradient",
+            "value": 290071,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/keyed/ls",
+            "value": 8015740,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/keyed/plain",
+            "value": 23239888,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/ls",
+            "value": 8018152,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/plain",
+            "value": 21491272,
+            "unit": "elem/s"
+          },
+          {
+            "name": "typing/echo",
+            "value": 17194446,
+            "unit": "elem/s"
+          },
+          {
+            "name": "typing/echo+report",
+            "value": 1961315,
             "unit": "elem/s"
           }
         ]

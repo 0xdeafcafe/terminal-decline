@@ -1088,7 +1088,7 @@ impl PaneView {
         let mut cache = self.ivars().exists.borrow_mut();
         self.with(|_, p| {
             let t = p.session.lock_term();
-            let target = crate::links::target_at(&t.state, t.state.point_at(line, col), &mut cache);
+            let target = crate::links::target_at(&t.state, t.state.point_at(line, col), &mut cache, p.session.pid());
             target.filter(|x| !Self::typed_path(&t.state, x, line, col))
         })
         .flatten()
@@ -1101,7 +1101,7 @@ impl PaneView {
         let mut cache = self.ivars().exists.borrow_mut();
         self.with(|_, p| {
             let t = p.session.lock_term();
-            let target = crate::links::click_target_at(&t.state, t.state.point_at(line, col), &mut cache);
+            let target = crate::links::click_target_at(&t.state, t.state.point_at(line, col), &mut cache, p.session.pid());
             target.filter(|x| !Self::typed_path(&t.state, x, line, col))
         })
         .flatten()
@@ -1190,7 +1190,7 @@ impl PaneView {
         let (start, end) = target.span();
         let still = {
             let mut cache = self.ivars().exists.borrow_mut();
-            self.with(|_, p| crate::links::click_target_at(&p.session.lock_term().state, start, &mut cache))
+            self.with(|_, p| crate::links::click_target_at(&p.session.lock_term().state, start, &mut cache, p.session.pid()))
                 .flatten()
         };
         if still.as_ref() != Some(&target) {
@@ -1289,7 +1289,7 @@ impl PaneView {
             let mut t = p.session.lock_term();
             let point = cell.map(|(line, col)| t.state.point_at(line, col));
             let target = point
-                .and_then(|at| crate::links::target_at(&t.state, at, &mut cache))
+                .and_then(|at| crate::links::target_at(&t.state, at, &mut cache, p.session.pid()))
                 .filter(|x| cell.is_none_or(|(line, col)| !Self::typed_path(&t.state, x, line, col)));
             // A link is found again as the snapshot is built (an OSC 8
             // link's pieces are compared by value); a path is its cells.

@@ -199,7 +199,10 @@ fn paths_a_program_breaks_over_rows_are_found_whole() {
     let mut t = Term::new(20, 4, 10, term_core::ImagePool::process());
     t.advance(b"  cat ~/tmp/abc-\r\n    def/out.txt\r\n  sleep 2");
     let exists = |p: &str| p == "/Users/me/tmp/abc-def/out.txt";
-    let found = |t: &Term, line, col| t.state.path_at(t.state.point_at(line, col), Some("/Users/me"), exists);
+    let found = |t: &Term, line, col| {
+        t.state
+            .path_at(t.state.point_at(line, col), &term_core::Places::home(Some("/Users/me")), exists)
+    };
     let f = found(&t, 0, 8).unwrap();
     assert_eq!(f.path, "/Users/me/tmp/abc-def/out.txt");
     assert_eq!(f.shown, "~/tmp/abc-def/out.txt");
@@ -226,7 +229,7 @@ fn paths_a_program_breaks_over_rows_are_found_whole() {
     let mut t = Term::new(20, 5, 10, term_core::ImagePool::process());
     t.advance(b"  file: /Users/me/a-\r\n    bb-\r\n    cc/x.txt\r\n  next");
     let exists = |p: &str| p == "/Users/me/a-bb-cc/x.txt";
-    let found = |t: &Term, line, col| t.state.path_at(t.state.point_at(line, col), None, exists);
+    let found = |t: &Term, line, col| t.state.path_at(t.state.point_at(line, col), &term_core::Places::default(), exists);
     let f = found(&t, 0, 10).unwrap();
     assert_eq!(f.shown, "/Users/me/a-bb-cc/x.txt");
     assert_eq!(
@@ -244,7 +247,10 @@ fn paths_a_program_breaks_over_rows_are_found_whole() {
     // Rows that only happen to meet don't make a path that isn't there.
     let mut t = Term::new(20, 4, 10, term_core::ImagePool::process());
     t.advance(b"abc\r\ndef");
-    assert_eq!(t.state.path_at(t.state.point_at(0, 1), None, |_| false), None);
+    assert_eq!(
+        t.state.path_at(t.state.point_at(0, 1), &term_core::Places::default(), |_| false),
+        None
+    );
 }
 
 #[test]
@@ -254,7 +260,10 @@ fn paths_are_found_across_wraps_in_the_shells_folder() {
     // with a line and column, and a full stop that isn't part of it.
     t.advance(b"\x1b]7;file:///Users/me/src\x1b\\at src/main.rs:12:3. ok");
     let exists = |p: &str| p == "/Users/me/src/src/main.rs";
-    let found = |t: &Term, line, col| t.state.path_at(t.state.point_at(line, col), Some("/Users/me"), exists);
+    let found = |t: &Term, line, col| {
+        t.state
+            .path_at(t.state.point_at(line, col), &term_core::Places::home(Some("/Users/me")), exists)
+    };
     let f = found(&t, 1, 2).unwrap();
     assert_eq!(f.shown, "src/main.rs:12:3");
     assert_eq!(f.path, "/Users/me/src/src/main.rs");

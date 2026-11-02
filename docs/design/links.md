@@ -72,6 +72,23 @@ wins.
      space apart, longest first (`installed /Applications/Terminal
      Decline.app (0.0.1)`; asked for by Alex, 2 Nov 2026). A bare name
      with spaces isn't tried: that would be any prose.
+   - Written with a variable: `$TMPDIR/x`, `${PROJ}/src/a.rs`, `$HOME/x`.
+     Its values are read from the environments of the shell and every
+     process under it (the program running and its own child processes),
+     then Decline's own; each value is tried and the first path that
+     exists wins. A TUI that runs agents (rush, Claude Code) gives each
+     its own `$TMPDIR`, which only the agent's process has (asked for by
+     Alex, 2 Nov 2026).
+   - Relative paths are tried in the shell's folder (OSC 7) first, then
+     in the folder of each of those processes: an agent working in its
+     own worktree prints paths relative to that, not to the shell.
+   - Spaces escaped with a backslash (`my\ file.rs`, as tab completion
+     and drag and drop write them) are part of the path.
+   - `git diff`'s `a/src/x.rs` and `b/src/x.rs` are tried without the
+     `a/` or `b/` too.
+   - The processes are read from the kernel (`KERN_PROCARGS2` for the
+     environment, `proc_pidinfo` for the folder; up to 128 of them) and
+     kept for 3 s (`ExistsCache::places`, `running::whereabouts`).
    - Only while the shell is on this Mac: OSC 7's host is empty,
      `localhost` or this Mac's name. Over ssh the paths would name the
      other machine's files, which can't be checked or opened here.

@@ -11,9 +11,10 @@
 //! a program printed shouldn't start arbitrary apps.
 
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use term_core::{Point, Terminal};
+use term_core::{Places, Point, Terminal};
 
 /// The link at `p`: its OSC 8 URI, else the plain URL written there
 /// ([`Terminal::url_at`]).
@@ -77,19 +78,18 @@ impl Target {
 
 /// What a click at `p` acts on: [`target_at`], else a path that doesn't
 /// exist ([`Target::Missing`]).
-pub fn click_target_at(t: &Terminal, p: Point, cache: &mut ExistsCache) -> Option<Target> {
-    target_at(t, p, cache).or_else(|| missing_at(t, p))
+pub fn click_target_at(t: &Terminal, p: Point, cache: &mut ExistsCache, shell: Option<libc::pid_t>) -> Option<Target> {
+    target_at(t, p, cache, shell).or_else(|| missing_at(t, p, &cache.places(shell)))
 }
 
 /// Something written as a path at `p` that isn't there: the run of path
 /// characters around it, if it holds a `/` or starts with `~` (a bare
 /// word would be any prose).
-fn missing_at(t: &Terminal, p: Point) -> Option<Target> {
+fn missing_at(t: &Terminal, p: Point, places: &Places) -> Option<Target> {
     if !t.cwd_host().is_none_or(|h| is_this_mac(h, &host_name())) {
         return None;
     }
-    let home = std::env::var("HOME").ok();
-    let found = t.path_at(p, home.as_deref(), |_| true)?;
+    let found = t.path_at(p, places, |_| true)?;
     let written = found.shown.split(':').next().unwrap_or_default();
     if !(written.contains('/') || written.starts_with('~')) || written.contains("://") {
         return None;
@@ -115,8 +115,10 @@ pub fn nearest_existing(path: &str) -> Option<std::path::PathBuf> {
 /// The link or path at `p`: an OSC 8 link, else a plain URL, else a path
 /// that exists ([`Terminal::path_at`], asking `cache`). Paths are only
 /// looked for while the shell is on this Mac (its OSC 7 host is ours or
-/// none): another machine's paths can't be checked or opened here.
-pub fn target_at(t: &Terminal, p: Point, cache: &mut ExistsCache) -> Option<Target> {
+/// none): another machine's paths can't be checked or opened here. They
+/// are resolved in the folders and with the variables of `shell` and the
+/// processes under it ([`ExistsCache::places`]).
+pub fn target_at(t: &Terminal, p: Point, cache: &mut ExistsCache, shell: Option<libc::pid_t>) -> Option<Target> {
     if let Some(link) = t.link_at(p) {
         let (start, end) = t.link_span(p).unwrap_or((p, p));
         return Some(Target::Url { uri: link.uri, start, end });
@@ -127,8 +129,8 @@ pub fn target_at(t: &Terminal, p: Point, cache: &mut ExistsCache) -> Option<Targ
     if !t.cwd_host().is_none_or(|h| is_this_mac(h, &host_name())) {
         return None;
     }
-    let home = std::env::var("HOME").ok();
-    let found = t.path_at(p, home.as_deref(), |path| cache.exists(path))?;
+    let places = cache.places(shell);
+    let found = t.path_at(p, &places, |path| cache.exists(path))?;
     Some(Target::Path {
         shown: found.shown,
         path: found.path,
@@ -151,7 +153,13 @@ pub fn is_this_mac(name: &str, host: &str) -> bool {
 #[derive(Default)]
 pub struct ExistsCache {
     entries: HashMap<String, (bool, Instant)>,
+    /// The places last read, for which shell, and when.
+    places: Option<(Option<libc::pid_t>, Rc<Places>, Instant)>,
 }
+
+/// How long the places read from the processes are kept: a program
+/// started, or a folder changed to, counts within this.
+const PLACES_FOR: Duration = Duration::from_secs(3);
 
 /// How long an answer is kept: a file made or removed shows within this.
 const EXISTS_FOR: Duration = Duration::from_secs(3);
@@ -180,7 +188,51 @@ impl ExistsCache {
     /// Forget every answer, so the next ones are asked afresh.
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.places = None;
     }
+
+    /// Where paths may be: the folders and environment variables of
+    /// `shell` and the processes under it (read from the kernel, kept for
+    /// [`PLACES_FOR`]), then this app's own variables; `~` is `$HOME`.
+    pub fn places(&mut self, shell: Option<libc::pid_t>) -> Rc<Places> {
+        if let Some((pid, places, at)) = &self.places
+            && *pid == shell
+            && at.elapsed() < PLACES_FOR
+        {
+            return places.clone();
+        }
+        let found = shell.map(term_activity::running::whereabouts).unwrap_or_default();
+        let places = Rc::new(places_of(found, std::env::vars()));
+        self.places = Some((shell, places.clone(), Instant::now()));
+        places
+    }
+}
+
+/// [`Places`] from processes' whereabouts and this app's `own` variables:
+/// each folder and each name and value once, in the order found.
+fn places_of(found: Vec<term_activity::running::Whereabouts>, own: impl Iterator<Item = (String, String)>) -> Places {
+    let mut cwds: Vec<String> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut vars = Vec::new();
+    for w in found {
+        if let Some(cwd) = w.cwd
+            && !cwds.contains(&cwd)
+        {
+            cwds.push(cwd);
+        }
+        for v in w.env {
+            if seen.insert(v.clone()) {
+                vars.push(v);
+            }
+        }
+    }
+    for v in own {
+        if seen.insert(v.clone()) {
+            vars.push(v);
+        }
+    }
+    let home = vars.iter().find(|(n, _)| n == "HOME").map(|(_, v)| v.clone());
+    Places { home, cwds, vars }
 }
 
 /// Why a link isn't opened.
@@ -300,7 +352,7 @@ mod tests {
         let mut t = term_core::Term::new(60, 2, 0, term_core::ImagePool::process());
         t.advance(b"\x1b]7;file:///tmp\x1b\\cat /tmp/zq9-gone/a.txt:3 nope-zq9 ok");
         let mut cache = ExistsCache::default();
-        let mut at = |col| click_target_at(&t.state, t.state.point_at(0, col), &mut cache);
+        let mut at = |col| click_target_at(&t.state, t.state.point_at(0, col), &mut cache, None);
         match at(8) {
             Some(Target::Missing { shown, path, .. }) => {
                 assert_eq!(shown, "/tmp/zq9-gone/a.txt:3");
@@ -321,7 +373,7 @@ mod tests {
             b"\x1b]7;file:///tmp\x1b\\\x1b]8;;https://real\x1b\\shown\x1b]8;;\x1b\\ http://plain.example /etc/hosts:3 nope-zq9-missing",
         );
         let mut cache = ExistsCache::default();
-        let at = |t: &term_core::Term, cache: &mut ExistsCache, col| target_at(&t.state, t.state.point_at(0, col), cache);
+        let at = |t: &term_core::Term, cache: &mut ExistsCache, col| target_at(&t.state, t.state.point_at(0, col), cache, None);
         let p = |col| t.state.point_at(0, col);
         let url = |uri: &str, a, b| Target::Url {
             uri: uri.into(),
@@ -361,5 +413,37 @@ mod tests {
     #[test]
     fn host_name_is_known() {
         assert!(!host_name().is_empty());
+    }
+
+    #[test]
+    fn places_take_each_folder_and_value_once() {
+        use term_activity::running::Whereabouts;
+        let var = |n: &str, v: &str| (n.to_string(), v.to_string());
+        let found = vec![
+            Whereabouts {
+                cwd: Some("/shell".into()),
+                env: vec![var("TMPDIR", "/T"), var("HOME", "/Users/me")],
+            },
+            Whereabouts {
+                cwd: Some("/work/a".into()),
+                env: vec![var("TMPDIR", "/tmp/a"), var("HOME", "/Users/me")],
+            },
+            Whereabouts {
+                cwd: Some("/shell".into()),
+                env: vec![var("TMPDIR", "/tmp/a")],
+            },
+        ];
+        let places = places_of(found, [var("TMPDIR", "/T"), var("LANG", "en_GB")].into_iter());
+        assert_eq!(places.cwds, ["/shell", "/work/a"]);
+        assert_eq!(places.home.as_deref(), Some("/Users/me"));
+        assert_eq!(
+            places.vars,
+            [
+                var("TMPDIR", "/T"),
+                var("HOME", "/Users/me"),
+                var("TMPDIR", "/tmp/a"),
+                var("LANG", "en_GB")
+            ]
+        );
     }
 }

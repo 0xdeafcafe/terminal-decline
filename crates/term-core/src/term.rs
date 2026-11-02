@@ -1486,7 +1486,8 @@ impl Terminal {
     /// The file path at `p` that `exists` says is there (see
     /// [`crate::paths::path_at`]), on its logical line, so one that a soft
     /// wrap splits is found whole. Relative paths are resolved against
-    /// [`Terminal::cwd`], `~` against `home`.
+    /// [`Terminal::cwd`] and then the folders in `places`, `~` and
+    /// `$VAR` against its home and variables.
     ///
     /// A program that breaks long lines itself (a TUI's panel, rush
     /// printing a long path indented) leaves a path over rows with no
@@ -1494,7 +1495,7 @@ impl Terminal {
     /// line is tried joined to up to two lines before and two after,
     /// where each ends in a path character and the next starts with one
     /// (spaces and box drawing between them left out).
-    pub fn path_at(&self, p: Point, home: Option<&str>, mut exists: impl FnMut(&str) -> bool) -> Option<PathAt> {
+    pub fn path_at(&self, p: Point, places: &crate::paths::Places, mut exists: impl FnMut(&str) -> bool) -> Option<PathAt> {
         type Cells = Vec<(Point, Point)>;
         let (text, cells, at) = self.logical_text(p);
         let at = at?;
@@ -1514,7 +1515,7 @@ impl Terminal {
                 path: f.path,
             }
         };
-        if let Some(f) = crate::paths::path_at(&text, at, self.cwd(), home, &mut exists) {
+        if let Some(f) = crate::paths::path_at(&text, at, self.cwd(), places, &mut exists) {
             return Some(found(&text, &cells, f));
         }
         let content = |c: char| !c.is_whitespace() && !crate::word::is_drawing(c);
@@ -1585,7 +1586,7 @@ impl Terminal {
         // glued to a path that ends this one.
         for (back, ahead) in [(0, 1), (1, 0), (1, 1), (0, 2), (2, 0), (2, 1), (1, 2), (2, 2)] {
             if let Some((t, c, i)) = join(back, ahead)
-                && let Some(f) = crate::paths::path_at(&t, i, self.cwd(), home, &mut exists)
+                && let Some(f) = crate::paths::path_at(&t, i, self.cwd(), places, &mut exists)
             {
                 return Some(found(&t, &c, f));
             }

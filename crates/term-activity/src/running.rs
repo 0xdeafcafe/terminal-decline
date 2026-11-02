@@ -152,6 +152,61 @@ impl<'a> ProcArgs<'a> {
     }
 }
 
+/// A process's folder and environment, for finding the paths it prints.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Whereabouts {
+    pub cwd: Option<String>,
+    pub env: Vec<(String, String)>,
+}
+
+/// The most processes [`whereabouts`] reads.
+const MAX_PROCESSES: usize = 128;
+
+/// The folder and environment of `shell` and every process under it
+/// (the program running and its own child processes, such as each agent
+/// a TUI runs, each in its own folder with its own `$TMPDIR`), the shell
+/// first and then nearest first, up to [`MAX_PROCESSES`]. A process that
+/// can't be read (another user's) gives nothing, and neither do the
+/// processes under it. Values that aren't UTF-8 are left out.
+pub fn whereabouts(shell: libc::pid_t) -> Vec<Whereabouts> {
+    let mut out = Vec::new();
+    let mut queue = std::collections::VecDeque::from([shell]);
+    while let Some(pid) = queue.pop_front() {
+        if out.len() >= MAX_PROCESSES {
+            break;
+        }
+        let Some(buf) = procargs(pid) else { continue };
+        let env = ProcArgs::parse(&buf)
+            .map(|a| {
+                a.env
+                    .iter()
+                    .filter_map(|e| {
+                        let e = std::str::from_utf8(e).ok()?;
+                        let (name, value) = e.split_once('=')?;
+                        Some((name.to_string(), value.to_string()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let cwd = cwd_of(pid).and_then(|c| c.into_os_string().into_string().ok());
+        out.push(Whereabouts { cwd, env });
+        queue.extend(children(pid));
+    }
+    out
+}
+
+/// The processes whose parent is `pid`.
+fn children(pid: libc::pid_t) -> Vec<libc::pid_t> {
+    /// `PROC_PPID_ONLY` in `<sys/proc_info.h>`, not in libc.
+    const PROC_PPID_ONLY: u32 = 6;
+    let mut pids = vec![0 as libc::pid_t; 256];
+    let size = (pids.len() * std::mem::size_of::<libc::pid_t>()) as libc::c_int;
+    let n = unsafe { libc::proc_listpids(PROC_PPID_ONLY, pid as u32, pids.as_mut_ptr().cast(), size) };
+    pids.truncate((n.max(0) as usize) / std::mem::size_of::<libc::pid_t>());
+    pids.retain(|&p| p > 0 && p != pid);
+    pids
+}
+
 fn cwd_of(pid: libc::pid_t) -> Option<std::path::PathBuf> {
     let mut info: libc::proc_vnodepathinfo = unsafe { std::mem::zeroed() };
     let size = std::mem::size_of::<libc::proc_vnodepathinfo>() as libc::c_int;
@@ -777,5 +832,27 @@ mod tests {
             quit_question("X", &["vim".into(), "vim".into(), "top".into()]).1,
             "Programs are still running in 3 panes (vim, top). Quitting ends them."
         );
+    }
+
+    #[test]
+    fn whereabouts_cover_child_processes() {
+        let dir = std::env::temp_dir().canonicalize().unwrap();
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("5")
+            .current_dir(&dir)
+            .env("DECLINE_WHEREABOUTS_TEST", "here")
+            .spawn()
+            .unwrap();
+        // Until it has started sleep, it is a copy of this process.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let found = whereabouts(std::process::id() as libc::pid_t);
+        child.kill().ok();
+        child.wait().ok();
+        assert!(found[0].env.iter().any(|(n, _)| n == "PATH"), "this process first");
+        let theirs = found
+            .iter()
+            .find(|w| w.env.iter().any(|(n, v)| n == "DECLINE_WHEREABOUTS_TEST" && v == "here"))
+            .expect("the child");
+        assert_eq!(theirs.cwd.as_deref(), dir.to_str());
     }
 }

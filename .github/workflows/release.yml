@@ -12,6 +12,10 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # sccache keeps our own crates built in GitHub's cache, so a push
+  # rebuilds only the crates it changed (rust-cache keeps dependencies).
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: sccache
 
 jobs:
   changed:
@@ -74,9 +78,11 @@ jobs:
             echo "build=$build"
           } >> "$GITHUB_OUTPUT"
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.98.1"
           targets: aarch64-apple-darwin
+      - uses: mozilla-actions/sccache-action@v0.0.9
       - uses: Swatinem/rust-cache@v2
 
       - name: Build (Apple Silicon)

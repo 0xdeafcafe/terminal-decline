@@ -6,7 +6,8 @@ name: CI
 on:
   push:
     # `ci/**`: a branch to try a fix on the runners without opening a PR.
-    branches: [main, "ci/**"]
+    # `rush/**`: agents' branches, checked here instead of on the Mac.
+    branches: [main, "ci/**", "rush/**"]
   pull_request:
   workflow_dispatch:
 
@@ -19,6 +20,10 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # sccache keeps our own crates built in GitHub's cache, so a push
+  # rebuilds only the crates it changed (rust-cache keeps dependencies).
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: sccache
   CARGO_INCREMENTAL: "0"
 
 jobs:
@@ -28,9 +33,11 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.98.1"
           components: rustfmt
+      - uses: mozilla-actions/sccache-action@v0.0.9
       - run: cargo fmt --all -- --check
       - name: fmt (fuzz crate, outside the workspace)
         run: cargo fmt --manifest-path fuzz/Cargo.toml -- --check
@@ -48,8 +55,14 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98.1"
+      - uses: mozilla-actions/sccache-action@v0.0.9
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Branches start from main's; only main saves.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # Unit, integration, property and doctests, plus the fuzz corpus replay.
       - name: cargo test -p term-core
         run: cargo test -p term-core --locked
@@ -64,15 +77,19 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.98.1"
           components: clippy
+      - uses: mozilla-actions/sccache-action@v0.0.9
       # Also keeps target/bundle-test, where the bundle tests build the
       # library, launcher and stub (rust-cache cleans and keeps target
       # dirs nested in target/).
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: macos
+          # Branches start from main's; only main saves.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@v2
         with:
           tool: nextest
@@ -84,6 +101,9 @@ jobs:
       - run: cargo nextest run --workspace --locked --profile ci
       # nextest does not run doctests
       - run: cargo test --workspace --doc --locked
+      - name: Cache use
+        if: always()
+        run: sccache --show-stats
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -98,9 +118,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
+      - uses: mozilla-actions/sccache-action@v0.0.9
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: fuzz -> target
+          # Branches start from main's; only main saves.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-fuzz
@@ -113,7 +136,10 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98.1"
+      - uses: mozilla-actions/sccache-action@v0.0.9
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: macos

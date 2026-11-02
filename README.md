@@ -86,7 +86,7 @@ settings are in `~/.config/terminal-decline/pins/`.
 ## Benchmarks
 
 2 November 2026, Apple M1 Max, macOS 27.0. Decline at 7849ad4 (release
-build), Ghostty 1.4.0, kitty 0.49.2. Menlo 13, 100×30 cells, 10k lines
+build; `cat` and idle CPU at 82c455f), Ghostty 1.4.0, kitty 0.49.2. Menlo 13, 100×30 cells, 10k lines
 of scrollback, one window; memory is macOS physical footprint summed over
 all the terminal's processes; medians of 5 runs, taken in turns, on a Mac
 with other work running (load 3–6). Script:
@@ -100,9 +100,31 @@ with other work running (load 3–6). Script:
 
 Warp and Terminal.app, measured the same way on 30 October, took 3.6 s
 and 4.0 s for the `cat` and 310–333 MB and 48–139 MB of memory:
-[docs/comparison-2026-10-30.md](docs/comparison-2026-10-30.md). Idle CPU
-is the one row Decline doesn't lead: some runs idle at 0.01% and some at
-0.2–0.3%, and that is being looked into.
+[docs/comparison-2026-10-30.md](docs/comparison-2026-10-30.md).
+
+```mermaid
+xychart-beta
+    title "cat 100 MB: seconds (lower is better)"
+    x-axis [Decline, Ghostty, kitty]
+    y-axis "seconds" 0 --> 1.2
+    bar [0.58, 0.66, 1.05]
+```
+
+```mermaid
+xychart-beta
+    title "CPU for that cat, with WindowServer: seconds"
+    x-axis [Decline, Ghostty, kitty]
+    y-axis "seconds" 0 --> 2.2
+    bar [0.66, 2.04, 1.63]
+```
+
+```mermaid
+xychart-beta
+    title "Memory with 4 tabs open: MB"
+    x-axis [Decline, Ghostty, kitty]
+    y-axis "MB" 0 --> 120
+    bar [47, 87, 104]
+```
 
 ## Using it
 

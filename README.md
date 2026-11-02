@@ -23,7 +23,8 @@ out of your way while it does it.
   own icon, opening straight into it. Works for htop, lazygit, whatever
   you live in.
 - **No bloaty shit**: native macOS tabs and splits, a config file that
-  reloads when you save it, and a Settings screen in a tab. No account,
+  reloads when you save it, and a simple settings TUI bundled for your
+  convenience (Cmd+, or `decline settings`, even over ssh). No account,
   no AI sidebar, no custom window chrome.
 
 ## Install

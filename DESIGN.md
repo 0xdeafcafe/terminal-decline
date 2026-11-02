@@ -1,396 +1,512 @@
-# Decline — design
+# Decline: design
 
-A GPU-accelerated terminal for macOS, written in Rust. Goal: lower memory and
-CPU use than Ghostty and Warp, with zero UI of its own, and the ability to pin
-any command as its own Dock app.
+Terminal Decline is a GPU-accelerated terminal for macOS, written in Rust.
+The aim is to use less memory and CPU than Ghostty and Warp, to have no UI
+of its own, and to let you pin any command as its own Dock app.
 
 ## Goals
 
-- **Idle costs nothing.** No timers, no redraws, no wakeups while nothing
-  changes. Cursor blink (when an app asks for it) is the only timer of our
-  own, and it stops when the window is hidden or unfocused. Sparkle keeps
-  one daily wall-clock timer for the update check (docs/design/updater.md
-  §4); a build from source checks its checkout every four hours with a
-  one-shot timer (§11). The title's clock (below, Notifications) ticks
-  only while a command runs in a window that can be seen.
+- **Idle costs nothing.** No timers, no redraws and no wakeups while
+  nothing changes. Cursor blink (when an app asks for it) is our only
+  timer, and it stops when the window is hidden or unfocused. Sparkle
+  keeps one daily wall-clock timer for the update check
+  (docs/design/updater.md §4); a build from source checks its checkout
+  every four hours with a one-shot timer (§11). The title's clock (see
+  Notifications below) only ticks while a command runs in a window you
+  can see.
 - **Small memory.** Measured as macOS *physical footprint* (what Activity
-  Monitor shows; RSS misses GPU surfaces), compared at the same window pixel
-  size. The two window drawables are unavoidable (~6.6 MB each at
-  1624×1018 px) and scale with window size; the target is for everything else:
-  < 25 MB for one window with 10k lines of scrollback.
-- **Fast output.** `cat` of a large file must never block typing. A macOS PTY
-  delivers at most ~240 MB/s (1 KB per read), so parsing must stay well above
-  that: target ≥ 2× the PTY limit.
-- **Zero UI.** The window is the terminal surface only: transparent, full-size
-  content title bar with no title text, no tab bar of our own (tabs are
-  macOS's native window tabs), no settings window, no status bar. Config is
-  a file; Settings… (Cmd+,) is a program the app's own binary runs in a
-  terminal tab, editing that file (`docs/design/preferences.md`). Menus
-  exist only because macOS requires a menu bar (Quit, Copy, Paste, New
-  Window, New Tab); they are standard AppKit menus.
-- **Dock pins.** `terminal-decline pin` turns any command into its own macOS app.
+  Monitor shows; RSS misses GPU surfaces), compared at the same window
+  size in pixels. The two window drawables can't be avoided (~6.6 MB each
+  at 1624×1018 px) and grow with the window, so the target is for
+  everything else: < 25 MB for one window with 10k lines of scrollback.
+- **Fast output.** `cat` of a large file must never block typing. A macOS
+  PTY delivers at most ~240 MB/s (1 KB per read), so parsing has to stay
+  well above that: the target is ≥ 2× the PTY's limit.
+- **Zero UI.** The window is only the terminal surface: transparent, a
+  full-size content title bar with no title text, no tab bar of our own
+  (tabs are macOS's native window tabs), no settings window and no status
+  bar. Config is a file. Settings… (Cmd+,) is a program the app's own
+  binary runs in a terminal tab, editing that file
+  (`docs/design/preferences.md`). Menus only exist because macOS needs a
+  menu bar (Quit, Copy, Paste, New Window, New Tab), and they're standard
+  AppKit menus.
+- **Dock pins.** `terminal-decline pin` turns any command into its own
+  macOS app.
 
 ## Modules (Cargo workspace)
 
 | crate         | does                                                                  |
 |---------------|-----------------------------------------------------------------------|
 | `term-core`   | escape-code handling (via vendored `vte`), screen grid, scrollback, selection |
-| `term-pty`    | spawns the shell on a pseudo-terminal, reader thread, resize          |
+| `term-pty`    | spawns the shell on a pseudo-terminal, reads its output, resizes      |
 | `term-font`   | Core Text: font loading, cell metrics, glyph rasterising              |
 | `term-render` | Metal: glyph textures shared by every window, panes drawn into one layer |
 | `term-app`    | AppKit window/view, keyboard + IME, mouse, clipboard, the agent API's server and sessions, Sparkle and its alerts, pins |
 | `term-keys`   | key press → bytes (xterm, kitty protocol), the `[keybind]` config, the ASCII-capable layout (no AppKit) |
 | `term-config` | `config.toml` and its layers, themes (`themes/`), the quick terminal's settings (no AppKit; term-render and term-font for `Theme` and `FontConfig`) |
-| `term-import` | `terminal-decline import`: Ghostty and iTerm2 settings as a config or theme (AppKit only to convert iTerm2 colour spaces; its own crate so term-config stays AppKit-free) |
-| `term-pins`   | Dock pins: make, list, edit, remove, repair and update pin bundles and their records, run through an injected command runner (no AppKit; the stub itself is `term-pin`; the app passes its usage text and Secure Keyboard Entry carry-over in as hooks) |
-| `term-activity` | what a pane's shell does: OSC 133 activity, status titles, when to notify, prompts, the program running (no AppKit) |
+| `term-import` | `terminal-decline import`: Ghostty and iTerm2 settings as a config or theme (AppKit only to convert iTerm2 colour spaces; a crate of its own so term-config stays AppKit-free) |
+| `term-pins`   | Dock pins: make, list, edit, remove, repair and update pin bundles and their records, through an injected command runner (no AppKit; the stub itself is `term-pin`; the app passes in its usage text and the Secure Keyboard Entry carry-over as hooks) |
+| `term-pin`    | the Dock pin stub and the app's launcher, and the frozen interface between a pin and the Decline library (`libc` and hand-written FFI only; docs/design/pins.md) |
+| `term-dylib`  | Decline as `libterminal_decline.dylib`, with the entry points the launcher and pin stubs call |
+| `term-activity` | what a pane's shell is doing: OSC 133 activity, status titles, when to notify, prompts, the program running (no AppKit) |
 | `term-restore` | restarting into a new build: the saved window list, the pane tree it saves, each pane's history (no AppKit) |
-| `term-complete` | completion and colouring at the shell's prompt: the command line read into words and coloured, the list's choices, commands, folders, history, man pages and `--help`, past command lines, the marks between commands and plain output coloured (no AppKit; docs/design/completion.md, docs/design/command-marks.md) |
-| `term-ctl`    | the agent API's protocol and `ctl` command line, its idle limit, screen read-back and keys (no AppKit; the server and its sessions are term-app's) |
-| `term-update` | the updater: whether it runs, what Sparkle is answered, updates from source (the checkout, git, the build, when to install), what is told after an update, the `update` setting (no AppKit; Sparkle.framework, its alerts and posting notifications are term-app's) |
+| `term-complete` | completion and colouring at the shell's prompt: the command line read into words and coloured, the list's choices, commands, folders, history, man pages and `--help`, past command lines, the marks between commands, and plain output coloured (no AppKit; docs/design/completion.md, docs/design/command-marks.md) |
+| `term-ctl`    | the agent API's protocol and `ctl` command line, its idle limit, screen read-back and keys (no AppKit; the server and its sessions live in term-app) |
+| `term-update` | the updater: whether it runs, what Sparkle is answered, updates from source (the checkout, git, the build, when to install), what's said after an update, the `update` setting (no AppKit; Sparkle.framework, its alerts and posting notifications live in term-app) |
 | `term-prefs`  | the preferences: settings schema, safe `config.toml` edits, the TUI (no platform code) |
 | `term-icon`   | generated pin icons by the Slope rule (`slope-pins-2`): Core Text outline of the initial, CoreGraphics drawing after `pin-template.svg`, ImageIO `.icns` |
 | `term-image`  | image parsers and decoders with no terminal state: kitty keys, base64, zlib, iTerm2 arguments, Sixel, header sizes, pure-Rust PNG/JPEG/GIF/WebP, conversion to Display P3 (no platform code; docs/design/images.md) |
 
+How they depend on each other (Cargo dependencies, dev-dependencies left
+out). term-app depends on every module apart from term-dylib, so its
+arrows are drawn as one:
+
+```mermaid
+flowchart TD
+    launcher["launcher and pin stub<br/>(term-pin)"] -- dlopen --> dylib["libterminal_decline.dylib<br/>(term-dylib)"]
+    dylib --> app["term-app<br/>AppKit, sessions, menus"]
+    app --> rest(("every other module"))
+
+    config[term-config] --> render[term-render]
+    config --> font[term-font]
+    config --> keys[term-keys]
+    config --> prefs[term-prefs]
+    config --> update[term-update]
+    import[term-import] --> config
+    import --> font
+    import --> keys
+    pins[term-pins] --> config
+    pins --> activity[term-activity]
+    pins --> prefs
+    pins --> pty[term-pty]
+    pins --> icon[term-icon]
+    pins --> pin[term-pin]
+    update --> activity
+    update --> restore[term-restore]
+    restore --> activity
+    restore --> core[term-core]
+    activity --> core
+    ctl[term-ctl] --> core
+    ctl --> keys
+    complete[term-complete] --> core
+    render --> core
+    render --> font
+    render --> image[term-image]
+    core --> image
+```
+
 `term-core` has no platform code and is tested and benchmarked on its own.
 
-term-keys, term-config, term-import, term-pins, term-activity, term-restore,
-term-ctl, term-complete and term-update were split out of term-app so
-they build in parallel and their tests compile on their own; term-app
-re-exports each moved module under its old name (`crate::config`,
-`crate::keys`, `crate::ctl::protocol`, `crate::complete`,
-`crate::update::source`…), so the app's code reads as before. They have
-no objc2 or AppKit dependency of their own, except term-import, which
-uses AppKit to convert iTerm2 colour spaces (term-update uses
-libdispatch for its timers); what term-update needs of the app (posting
-a notification, whether a program runs, whether an update was asked
-for) it asks through a small `Host` trait the app sets at launch.
+term-keys, term-config, term-import, term-pins, term-activity,
+term-restore, term-ctl, term-complete and term-update were split out of
+term-app so they build in parallel and their tests compile on their own.
+term-app re-exports each moved module under its old name
+(`crate::config`, `crate::keys`, `crate::ctl::protocol`,
+`crate::complete`, `crate::update::source`…), so the app's code reads as
+it did. None of them has an objc2 or AppKit dependency of its own, apart
+from term-import, which uses AppKit to convert iTerm2 colour spaces
+(term-update uses libdispatch for its timers). What term-update needs
+from the app (posting a notification, whether a program is running,
+whether an update was asked for) it asks through a small `Host` trait the
+app sets at launch.
 
-`term-app` (the `terminal-decline` package) is a library plus a thin `main.rs`. The
-AppKit code (`app`, `view`) only turns events into the inputs of plain
-modules, each tested on its own: `session` (the program, its PTY, the
-reader and writer threads, the shared terminal and the dirty flag),
-`keys::translate` (a key press → bytes, input method or menu), `mouse`
-(reporting encodings), `layout` (padding, grid size, cell
+`term-app` (the `terminal-decline` package) is a library plus a thin
+`main.rs`. The AppKit code (`app`, `view`) only turns events into the
+inputs of plain modules, each tested on its own: `session` (the program,
+its PTY, the reader and writer threads, the shared terminal and the dirty
+flag), `keys::translate` (a key press → bytes, input method or menu),
+`mouse` (reporting encodings), `layout` (padding, grid size, the cell
 under a point), `frame_policy::decide` (draw, skip, pause, hold or hide on
 each display tick), `config` and `pin`. Paths (config dir, apps dir, the
-executable) are passed in from `main`, and pins run other programs through
-an injected runner, so tests use temp dirs. `tests/pipeline.rs` runs real
-programs through `session` with no window; `tests/smoke.rs` drives the real
-app through a test-only control sequence (`ESC ] 7770 ; cmd BEL`, honoured
-only with `DECLINE_TEST_DUMP=<file>` set: `dump`, `resize`, `font`, `tab`,
-`quit`) that writes JSON dumps. Under that control the app runs in the
-background (`background.rs`): an accessory app (no Dock icon, not in the
-app switcher) that never activates, with transparent windows ordered
-behind every other window that count as visible, so they still draw; it
-keeps its own key window for keys and menu actions sent with
-`sendEvent`. `DECLINE_TEST_FOREGROUND=1` brings it back to the front, to
-watch a run.
+executable) are passed in from `main`, and pins run other programs
+through an injected runner, so tests use temp dirs. `tests/pipeline.rs`
+runs real programs through `session` with no window. `tests/smoke.rs`
+drives the real app through a test-only control sequence
+(`ESC ] 7770 ; cmd BEL`, only honoured with `DECLINE_TEST_DUMP=<file>`
+set: `dump`, `resize`, `font`, `tab`, `quit`) that writes JSON dumps.
+Under that control the app runs in the background (`background.rs`): an
+accessory app (no Dock icon, not in the app switcher) that never
+activates, with transparent windows ordered behind every other window
+that still count as visible, so they keep drawing. It keeps its own key
+window for keys and menu actions sent with `sendEvent`.
+`DECLINE_TEST_FOREGROUND=1` brings it back to the front, so you can watch
+a run.
 
 ## Screen storage
 
 - A cell is 8 bytes (`u64`): a 21-bit Unicode scalar, its width (narrow,
-  wide, spacer), a "shows when empty" bit, and a 32-bit id into its screen's
-  style table. Each screen (primary, alternate) has its own table of
-  distinct `Style`s (colours, attributes, underline style and colour,
-  overline, link), each stored once. Ids are freed by a sweep over the
-  screen when the table reaches 1.5 × the screen's cells, with no reference
-  counts; clearing the whole screen renumbers them and gives the memory
-  back. History stores styles by value. Details and measurements:
-  `docs/design/cells.md` §4–§5.
-- The visible screen is a ring of rows (`VecDeque<Row>`), so scrolling the
-  whole screen moves the top row to the bottom without shifting the others;
-  scroll regions rotate just their rows. A row is `Vec<Cell>` plus a
-  soft-wrap flag, and is cleared with a memset when the fill is the default
-  blank (all zero).
+  wide, spacer), a "shows when empty" bit, and a 32-bit id into its
+  screen's style table. Each screen (primary, alternate) has its own
+  table of distinct `Style`s (colours, attributes, underline style and
+  colour, overline, link), each stored once. Ids are freed by a sweep
+  over the screen when the table reaches 1.5 × the screen's cells, with
+  no reference counts; clearing the whole screen renumbers them and gives
+  the memory back. History stores styles by value. Details and
+  measurements: `docs/design/cells.md` §4–§5.
+- The visible screen is a ring of rows (`VecDeque<Row>`), so scrolling
+  the whole screen moves the top row to the bottom without shifting the
+  others; scroll regions rotate just their own rows. A row is `Vec<Cell>`
+  plus a soft-wrap flag, and is cleared with a memset when the fill is
+  the default blank (all zero).
 - Scrollback (`term-core/src/scrollback.rs`, scrollback v2, cells design
-  §11) stores lines as written, in blocks whose text is contiguous apart
-  from each line's flags, style runs (slots in a per-block style
-  dictionary, with its own OSC 8 link table), whole grapheme clusters,
-  width exceptions and OSC 133 prompt marks. Blocks are
-  sealed before any part passes 64 KB (16-bit offsets) and are then
-  immutable and shared (`Arc`); whole blocks are freed from the oldest end
-  at the `scrollback` line limit (changeable on a running terminal) or a
-  hidden 32 MB backstop. Lines are expanded back into cells only when
-  shown, copied or pulled back. Measured per line at 160 columns,
-  everything held: plain 44 B, `ls` colours 61 B, compiler errors 67 B,
-  full-width background 30 B, CJK 69 B, emoji 81 B (v1: 52 / 93 / 81 /
-  183 / 90 B, emoji lossy): 10k lines take 0.3–0.8 MB.
-- term-render and term-app read cells only through `RowRef` and `CellRef`
-  (content: empty, a character, cluster text or an image placeholder; width;
-  and a `&Style` with colours, attributes, underline style and link), and
-  the terminal only through `Terminal`'s methods: its fields are private.
-  How cells are stored is term-core's own business
-  (`docs/design/cells.md`).
-- Points in the buffer use an ever-increasing line number so a selection stays
-  attached to its text while output scrolls. The app and the renderer do no
-  line arithmetic of their own: term-core gives them `point_at` (view row
-  and column to a Point), `cursor_in_view`, `view_top`/`set_view_top`, the
-  selection gestures (`select_word`, `select_line`, `select_all`,
-  `extend_selection`) and the word rule (`term_core::word`).
+  §11) stores lines as they were written, in blocks whose text is
+  contiguous apart from each line's flags, style runs (slots in a
+  per-block style dictionary, with its own OSC 8 link table), whole
+  grapheme clusters, width exceptions and OSC 133 prompt marks. A block
+  is sealed before any part of it passes 64 KB (16-bit offsets), and from
+  then on it's immutable and shared (`Arc`). Whole blocks are freed from
+  the oldest end at the `scrollback` line limit (which can be changed on
+  a running terminal) or at a hidden 32 MB backstop. Lines are only
+  expanded back into cells when they're shown, copied or pulled back.
+  Measured per line at 160 columns, everything held: plain 44 B, `ls`
+  colours 61 B, compiler errors 67 B, full-width background 30 B, CJK
+  69 B, emoji 81 B (v1: 52 / 93 / 81 / 183 / 90 B, emoji lossy), so 10k
+  lines take 0.3–0.8 MB.
+- term-render and term-app only read cells through `RowRef` and
+  `CellRef` (content: empty, a character, cluster text or an image
+  placeholder; width; and a `&Style` with colours, attributes, underline
+  style and link), and only read the terminal through `Terminal`'s
+  methods: its fields are private. How cells are stored is term-core's
+  own business (`docs/design/cells.md`).
+- Points in the buffer use an ever-increasing line number, so a selection
+  stays attached to its text while output scrolls. The app and the
+  renderer do no line arithmetic of their own: term-core gives them
+  `point_at` (view row and column to a Point), `cursor_in_view`,
+  `view_top`/`set_view_top`, the selection gestures (`select_word`,
+  `select_line`, `select_all`, `extend_selection`) and the word rule
+  (`term_core::word`).
 - Output that changes the text under the selection clears it (as xterm
-  and Alacritty do). It is found as cells are written (`term/watch.rs`):
-  during a parse call the selection's lines on the screen are watched by
+  and Alacritty do). It's spotted as cells are written (`term/watch.rs`):
+  during a parse call, the selection's lines on the screen are watched by
   buffer line number, and the places that change cells check whether
-  their row is one of them; most writes tell on the spot whether the
-  text changed, the rest (wide characters, clusters, scroll regions
+  their row is one of them. Most writes can tell on the spot whether the
+  text changed; the rest (wide characters, clusters, scroll regions
   moving rows) read the text once and compare it at the end of the call.
-  Text drawn again unchanged, writes beside it and scrolling into
-  history keep it; a scroll region moving other text under it clears
-  it. A flood with 10 rows selected parses as fast as one without
+  Text drawn again unchanged, writes beside it and scrolling into history
+  keep the selection; a scroll region moving other text under it clears
+  it. A flood with 10 rows selected parses as fast as one with none
   (cells §11).
 - Parsing: `vte` is vendored (`vendor/vte`, through `[patch.crates-io]`)
-  with `Perform::print_ascii`, which hands over each run of printable ASCII
-  whole; the end of a run is found 8 bytes at a time. `Terminal::write_ascii`
-  writes a run one row segment at a time (pen read once, wrap handled only at
-  segment ends). Segments over part of a wide character, insert mode, DEC line
-  drawing and autowrap off go one character at a time. A property test checks
-  the bulk path against one character at a time, fed one byte per call.
-- Widths come from term-core's own Unicode table (`src/unicode`, generated
-  from the Unicode 18.0.0 files; equal to `unicode-width` per scalar but
-  for U+17D8). The terminal segments printed text into grapheme clusters
-  (UAX #29) as it arrives, including after a bulk ASCII run.
+  with `Perform::print_ascii`, which hands over each run of printable
+  ASCII whole; the end of a run is found 8 bytes at a time.
+  `Terminal::write_ascii` writes a run one row segment at a time (the pen
+  read once, wrapping only handled at segment ends). Segments over part
+  of a wide character, insert mode, DEC line drawing and autowrap off go
+  one character at a time. A property test checks the bulk path against
+  one character at a time, fed one byte per call. CSI parameters are
+  taken in one tight loop (`advance_csi_run` in the vendored `vte`), with
+  SGR handled before other CSIs.
+- Widths come from term-core's own Unicode table (`src/unicode`,
+  generated from the Unicode 18.0.0 files; the same as `unicode-width`
+  per scalar apart from U+17D8). The terminal splits printed text into
+  grapheme clusters (UAX #29) as it arrives, including after a bulk ASCII
+  run.
 - Grapheme clusters (`e` + U+0301, emoji ZWJ sequences, flags, keycaps,
   skin tones, Indic conjuncts) are stored whole: a cluster cell holds a
-  slot in its row's own cluster store (`src/clusters.rs`), freed as soon as
-  the cell is overwritten. Mode 2027 is on by default: a cluster is 2
-  cells if it is an emoji sequence, 1 with VS15, otherwise its first
-  character's width (what `string-width`, and so Ink, computes); a
+  slot in its row's own cluster store (`src/clusters.rs`), freed as soon
+  as the cell is overwritten. Mode 2027 is on by default: a cluster is 2
+  cells if it's an emoji sequence, 1 with VS15, otherwise its first
+  character's width (what `string-width`, and so Ink, computes). A
   program can turn it off for the old per-character rule. East Asian
-  Ambiguous characters are 1 or 2 cells by `Terminal::set_ambiguous_width`
-  (the app's setting comes with cells design PR 15). Selection text and
-  `dump()` give whole clusters, and so does history (PR 7); the renderer
-  draws a cluster's first character until clusters are shaped (F3.2).
-- Known gap for the first milestone: resize does not re-wrap lines yet.
+  Ambiguous characters are 1 or 2 cells by
+  `Terminal::set_ambiguous_width` (the app's setting comes with cells
+  design PR 15). Selection text and `dump()` give whole clusters, and so
+  does history (PR 7). The renderer shapes clusters through Core Text on
+  the glyph thread (see Threads).
+- Resize reflows the primary screen and the lines pulled back from
+  history (`term/reflow.rs`, cells design §12.2). The alternate screen
+  isn't reflowed: a wrapped row made wider keeps its cells as written.
 
 ## Threads
 
-1. **Reader thread** (one per window): the PTY is non-blocking; the reader
-   waits with `poll`, then drains everything available (up to 1 MB) before
-   parsing, because a macOS PTY returns at most ~1 KB per `read()`. It parses
-   in 64 KB slices, taking the lock once per slice, so drawing and typing
-   never wait long. Replies to queries
-   (cursor position, device attributes) are written back to the PTY from here.
-   After parsing it wakes the main thread **only if** no redraw is already
-   pending (an atomic flag), so a flood of output causes at most one redraw
-   per display refresh.
-3. **Main thread** (AppKit): input, and drawing. Drawing is driven by a
-   `CADisplayLink` that is paused whenever nothing changed; it is resumed by
-   the reader thread's wake-up or by input. Each frame it locks the terminal
-   briefly, copies the visible cells into the GPU instance buffer, unlocks,
-   then encodes the draw. While the program has synchronized-update mode
-   (2026) on, drawing is held (150 ms timeout). Nothing is drawn while the
-   window is hidden or covered. When the display link was paused, a wake-up
-   draws immediately rather than waiting a refresh. Input doesn't draw by
-   itself: the first output after it (the echo) is drawn as soon as it is
-   parsed, and without one a tick draws after 8 ms (see "Input latency").
+How output gets from the program to the screen, and keys get back to it:
+
+```mermaid
+flowchart LR
+    prog["program on the PTY"] -- "~1 KB per read" --> reader["pty-reader thread<br/>read_batch"]
+    reader -- "parse under the terminal's lock" --> core["term-core Terminal"]
+    reader -- "replies to queries" --> writer["pty-writer thread"]
+    reader -- "dirty flag was clear:<br/>wake" --> main["main thread<br/>CADisplayLink tick or output_arrived"]
+    main -- "frame_policy decides,<br/>lock_for_frame, snapshot" --> core
+    main -- "build rows outside the lock<br/>(row cache, term-render)" --> gpu["instance buffers<br/>Metal encode"]
+    main -. "glyphs not drawn before" .-> glyphs["glyph thread<br/>find, rasterise, shape"]
+    glyphs -. "bitmaps, wake" .-> main
+    gpu --> layer["CAMetalLayer drawable<br/>window server"]
+    keys["keyDown / NSTextInputClient"] --> main
+    main -- "keys::translate bytes" --> writer
+    writer --> prog
+```
+
+1. **Reader thread** (one per pane's session, `pty-reader`): the PTY is
+   non-blocking. A macOS PTY returns at most ~1 KB per `read()` and
+   buffers ~2 KB, so the reader (`BatchReader::read_batch`, into a 64 KB
+   buffer) parses what one read gives and only waits with `poll` when the
+   PTY is empty; draining it until empty would cost a failing read per
+   batch for nothing. In a flood (the last read came back full) it looks
+   again for up to 30 µs (`FLOOD_SPIN`) before it sleeps, since the
+   writer refills the PTY within microseconds and a sleep and wake-up per
+   kilobyte costs both sides a context switch; typing and idle never
+   spin. The terminal's lock is held for one read's parse, so drawing and
+   typing never wait long. Replies to queries (cursor position, device
+   attributes) are handed to the writer thread. After parsing it wakes
+   the main thread **only if** no redraw is already pending (an atomic
+   flag), so a flood of output causes at most one redraw per display
+   refresh.
+2. **Writer thread** (one per session, `pty-writer`): writes what it's
+   sent over a channel to the PTY: key bytes, pastes and the reader's
+   replies.
+3. **Main thread** (AppKit): input and drawing. Drawing is driven by a
+   `CADisplayLink` that's paused whenever nothing has changed; the reader
+   thread's wake-up or input resumes it. Each frame tries the terminal's
+   lock, spinning for at most 500 µs (`session::lock_for_frame`; a pane
+   whose reader still holds it is held for a tick, like a synchronized
+   update), takes term-core's snapshot, unlocks, and builds and encodes
+   the frame outside the lock. While the program has synchronized-update
+   mode (2026) on, drawing is held (150 ms timeout, `SYNC_TIMEOUT`).
+   Nothing is drawn while the window is hidden or covered. When the
+   display link was paused, a wake-up draws straight away rather than
+   waiting a refresh. Input doesn't draw by itself: the first output
+   after it (the echo) is drawn as soon as it's parsed, and without one a
+   tick draws after 8 ms (`ECHO_WAIT`; see "Input latency").
+4. **Glyph thread** (one per font setting, `term-render/src/glyph_thread.rs`):
+   a screenful of glyphs not drawn before (CJK, emoji, symbols) costs
+   10–200 ms, mostly finding the fallback font, so a frame that meets one
+   asks this thread for it once and draws the cell without it. The
+   thread finds and rasterises the glyph, shapes clusters and stretches
+   with ligatures, sends the bitmap back and wakes the app, which builds
+   the waiting panes again. Bitmaps go into the glyph textures on the
+   main thread, by the first build that draws them.
 
 ## Failures and crashes
 
 An app started from the Dock or as a pin has no stderr, so failures are
 written into the window as dim red text (and to stderr):
 
-- Config errors appear at the top of each window, before the program's
+- Config errors show at the top of each window, before the program's
   output: `terminal-decline: config: font_sise: unknown field …; ignored`.
 - A program that can't be started leaves its error and "press any key to
   close". One that exits within 1 s with a non-zero status (a broken pin,
-  `terminal-decline -e /nonexistent`) leaves `[process exited with status N]`. In
-  both cases the window stays open until a key is pressed (Cmd shortcuts
-  still work, so the message can be copied). A program that exits with
-  status 0, or after the first second, closes its window as before. The
-  exit status comes from term-pty's `Child`, which reaps and signals under
-  one lock, so no signal can reach a process that reused the pid.
+  `terminal-decline -e /nonexistent`) leaves
+  `[process exited with status N]`. Either way the window stays open
+  until a key is pressed (Cmd shortcuts still work, so you can copy the
+  message). A program that exits with status 0, or after the first
+  second, closes its window as before. The exit status comes from
+  term-pty's `Child`, which reaps and signals under one lock, so no
+  signal can reach a process that has reused the pid.
 
 Release builds unwind (`panic = "unwind"`). A panic hook writes the
 message, a backtrace and the version to
-`~/Library/Logs/terminal-decline/crash-<time>.log` and logs a fault to os_log
-(subsystem `red.forbes.terminal-decline`, a few lines of FFI to `_os_log_impl`). A
-panic while a reader thread parses output is caught inside the terminal's
-lock, so the lock is never poisoned: that session's terminal is replaced by
-a fresh one saying "Decline hit a bug and stopped this session; details in
-…", its program is killed, and other windows keep running. A panic on the
-main thread (AppKit) aborts once it has been logged. Each release keeps
-its `terminal-decline.dSYM` (`split-debuginfo = "packed"`) as a release download,
-for symbolicating crash logs. Unwinding costs binary size (unwind tables
-and landing pads: 157 KB when it was added, 1.34 → 1.50 MB; 261 KB on 29
-Oct 2026, 1.90 → 2.16 MB) and no measurable parse speed.
+`~/Library/Logs/terminal-decline/crash-<time>.log` and logs a fault to
+os_log (subsystem `red.forbes.terminal-decline`, a few lines of FFI to
+`_os_log_impl`). A panic while a reader thread parses output is caught
+inside the terminal's lock, so the lock is never poisoned: that session's
+terminal is replaced by a fresh one saying "Decline hit a bug and stopped
+this session; details in …", its program is killed, and other windows
+keep running. A panic on the main thread (AppKit) aborts once it's been
+logged. Each release keeps its `terminal-decline.dSYM`
+(`split-debuginfo = "packed"`) as a release download, for symbolicating
+crash logs. Unwinding costs binary size (unwind tables and landing pads:
+157 KB when it was added, 1.34 → 1.50 MB; 261 KB on 29 Oct 2026,
+1.90 → 2.16 MB) and no measurable parse speed.
 
 ## Rendering (Metal)
 
 - One `CAMetalLayer`, `presentsWithTransaction = false`,
   `displaySyncEnabled = false` (frames go to the window server as soon as
-  the GPU is done; see "Input latency"), two drawables, triple-buffered
-  instance buffers in shared memory (Apple Silicon has unified memory, so no
-  copies to the GPU).
-- Per cell the GPU gets one instance: glyph rectangle in the texture (u16×4),
-  glyph offset (i16×2), fg colour (rgba8), bg colour (rgba8), flags (u32). The
-  vertex shader places a quad per cell from its index and the grid size, so no
-  vertex buffer is needed. Two passes in one encoder: backgrounds, then glyphs
-  (glyphs can overflow their cell, e.g. italics and wide icons).
-- Glyph texture: an `R8` texture for text (coverage, blended in sRGB space
-  like native Mac text) and a `BGRA8` texture for colour emoji, **one pair
-  per process**, shared by every window and keyed by (fonts, glyph key)
-  (splits design §3.3). Shelf-packed; only the texture that fills up grows
-  (caps: 4096² and 2048², 16 MB each), and growing copies the old texture
-  into the corner of the new one on the GPU, so glyphs already placed stay
-  where they are and nothing is rebuilt. The textures are managed (a CPU
-  copy and a GPU copy), so the same blit synchronises the new texture
-  before new glyphs are written into its CPU copy: without that, a GPU
-  with its own copy (GitHub's virtual GPU) drew every copied glyph blank.
-  At the cap it is emptied and
-  refilled with what's on screen, and every pane built before is built
-  again. Glyphs are rasterised once by Core Text; ASCII is pre-rasterised
-  for each new font setting. When fonts no window uses are dropped (a
-  window closed, the font size changed), both textures are emptied back to
-  their starting sizes, so they never stay bigger than the open windows
-  need. The textures go purgeable only when every window is hidden.
-- One process-wide Metal device, queue and pair of pipelines; one `Fonts`
-  per font setting and scale, shared by the windows using it. Each window
-  has its own instance buffers and waits only on its own frames; uploads
-  into the shared textures wait on every window's frames.
+  the GPU is done; see "Input latency"), two drawables
+  (`maximumDrawableCount = 2`). Instance buffers live in shared memory
+  (Apple Silicon has unified memory, so nothing is copied to the GPU) and
+  are double-buffered: each `PaneRender` owns two rectangle and two glyph
+  buffers used in turn (`FRAMES_IN_FLIGHT = 2`), and each pane counts its
+  own frames in flight, so a buffer is only written once the GPU is done
+  with it.
+- The GPU gets two kinds of instance. Rectangles (`RectInstance`:
+  position i16×2, size u16×2, colour rgba8, and a tag saying where the
+  colour comes from) for backgrounds and, after them, underlines,
+  strikethrough and the cursor; and glyphs (`GlyphInstance`: position
+  i16×2, size u16×2, place in the texture u16×2, colour rgba8, and flags
+  for the emoji texture and the colour's tag). The vertex shaders place a
+  quad per instance from the vertex and instance ids, so no vertex buffer
+  is needed. Everything goes into one render encoder, rectangles before
+  glyphs (glyphs can overflow their cell, e.g. italics and wide icons),
+  with images drawn by a pipeline of their own.
+- Glyph textures: an `R8` texture for text (coverage, blended in sRGB
+  space like native Mac text) and a `BGRA8` texture for colour emoji,
+  **one pair per process**, shared by every window and keyed by (fonts,
+  glyph key) (splits design §3.3). They're shelf-packed, and only the
+  texture that fills up grows (caps: 4096² and 2048², 16 MB each).
+  Growing copies the old texture into the corner of the new one on the
+  GPU, so glyphs already placed stay where they are and nothing is
+  rebuilt. The textures are managed (a CPU copy and a GPU copy), so the
+  same blit synchronises the new texture before new glyphs are written
+  into its CPU copy; without that, a GPU with its own copy (GitHub's
+  virtual GPU) drew every copied glyph blank. At the cap a texture is
+  emptied and refilled with what's on screen, and every pane built
+  before is built again. Glyphs are rasterised once by Core Text; ASCII
+  is rasterised up front for each new font setting. When fonts no window
+  uses are dropped (a window closed, the font size changed), both
+  textures go back to their starting sizes, so they're never bigger than
+  the open windows need. The textures only go purgeable when every
+  window is hidden.
+- One process-wide Metal device, queue and set of pipelines; one `Fonts`
+  per font setting and scale, shared by the windows that use it. Each
+  window waits only on its own frames; uploads into the shared textures
+  wait on every window's frames.
 - Panes: each terminal's instances (its `PaneRender`, with the row cache)
-  are placed relative to the pane's corner. A frame copies every pane's
-  instances back to back into the window's buffers and draws each pane
-  with `baseInstance`, its origin in the uniforms and a scissor (clamped to
-  the drawable) around its rectangle, then the dividers.
+  are placed relative to the pane's corner. A frame draws each pane from
+  its own buffers with `baseInstance`, its origin in the uniforms and a
+  scissor (clamped to the drawable) around its rectangle, then the
+  dividers; the window's own buffers hold the fills, dividers and images.
+- Rows' instances stay where they were put, on the CPU and on the GPU
+  (cells design R.2, R.3; `frame.rs`, `row_cache.rs`): a row already in
+  place isn't copied, a changed row is written over its old one, and
+  from the first row whose length changed the rest is written out. A
+  copied row is built up to its last non-blank cell; the rest shows the
+  default background. Drawing copies only the range that changed since
+  the buffer's version.
 - Box drawing (U+2500–257F), block elements (U+2580–259F), braille
   (U+2800–28FF), Powerline (U+E0A0–E0A3, U+E0B0–E0BF) and the legacy
   computing sextants, wedges and eighth blocks (U+1FB00–1FB8B) are drawn
-  in code (`term_font::sprite`), not taken from the font: bitmaps exactly
-  the cell's size, straight lines in whole pixels centred in the cell (light
-  = the underline thickness, heavy twice that, double = two light strokes a
-  light thickness apart), so neighbours join with no seam at any size.
-  Rounded corners, diagonals, Powerline triangles and wedges are
-  anti-aliased; shades (░▒▓) are even 25/50/75 % coverage, since a pixel
-  pattern can't repeat across odd-width cells. Each shape has a `SpriteId`
-  for the glyph keys of the cell design (docs/design/cells.md §10.4). Uploading a
-  new glyph waits for in-flight frames, since `replaceRegion` doesn't
-  synchronise with the GPU.
-- Shaders are compiled to a `.metallib` at build time (falls back to runtime
-  compilation if the Metal toolchain is missing).
-- Cursor, selection and underline/strikethrough are drawn in the shader from
-  flags; no extra geometry.
-- Selection and cursor colours stay legible whatever the theme or a
-  program sets (`Theme::keep_legible`): the selection gets at least 1.5:1
+  in code (`term_font::sprite`) rather than taken from the font: bitmaps
+  exactly the cell's size, straight lines in whole pixels centred in the
+  cell (light = the underline thickness, heavy twice that, double = two
+  light strokes a light thickness apart), so neighbours join with no seam
+  at any size. Rounded corners, diagonals, Powerline triangles and wedges
+  are anti-aliased; shades (░▒▓) are even 25/50/75 % coverage, since a
+  pixel pattern can't repeat across odd-width cells. Each shape has a
+  `SpriteId` for the glyph keys of the cell design
+  (docs/design/cells.md §10.4). Uploading a new glyph waits for in-flight
+  frames, since `replaceRegion` doesn't synchronise with the GPU.
+- Shaders are compiled to a `.metallib` at build time (with runtime
+  compilation as the fallback if the Metal toolchain is missing).
+- Selection and cursor colours stay readable whatever the theme or a
+  program sets (`Theme::keep_legible`). The selection gets at least 1.5:1
   contrast against the background (WCAG ratio), moved towards the
-  foreground while the text keeps 3:1 on it, so one selected character
-  shows; the text under a block cursor is the background colour where
-  that has 4.5:1 on the cursor, else the foreground, black or white,
-  whichever reads best. The cursor is drawn over the selection, and a
-  cursor with less than 1.4:1 against the selection is moved towards
-  black or white until it has it, so a cursor inside a selection shows;
-  an unfocused window's or pane's cursor is a hollow box.
+  foreground while the text keeps 3:1 on it, so a single selected
+  character shows. The text under a block cursor is the background
+  colour where that has 4.5:1 on the cursor, else the foreground, black
+  or white, whichever reads best. The cursor is drawn over the
+  selection, and a cursor with less than 1.4:1 against the selection is
+  moved towards black or white until it has it, so a cursor inside a
+  selection shows. An unfocused window's or pane's cursor is a hollow
+  box.
 - Background blur/transparency: `NSVisualEffectView` behind a non-opaque
   Metal layer, opt-in by config.
-- sRGB colours (no Display P3 tagging, which would over-saturate app colours).
-- Later: dirty-row tracking so only changed rows are re-copied (currently the
-  whole visible grid is re-copied when anything changed — ~30k cells × 24 B =
-  720 KB memcpy, which is cheap but not free).
+- sRGB colours (no Display P3 tagging, which would over-saturate app
+  colours).
 
 ## Input
 
-- Text through `NSTextInputClient` (so IME, dead keys and emoji picker work).
-  Marked (in-progress IME) text is drawn at the cursor.
-- Keys with Ctrl / Option / arrows / function keys / Home / End / PgUp / PgDn
-  mapped to xterm sequences; application cursor and keypad modes respected.
-  While an input method is composing, every key goes to it first.
+- Text comes through `NSTextInputClient` (so IME, dead keys and the emoji
+  picker work). Marked (in-progress IME) text is drawn at the cursor.
+- Keys with Ctrl / Option / arrows / function keys / Home / End / PgUp /
+  PgDn are mapped to xterm sequences, respecting application cursor and
+  keypad modes. While an input method is composing, every key goes to it
+  first.
 - Ctrl and Meta work on non-Latin layouts: when the current layout's
   character isn't ASCII, the key's character on the ASCII-capable layout
   (the Latin layout macOS keeps for Cmd shortcuts) is used, so Ctrl+С on
   a Russian layout sends ^C and Meta+С sends ESC c (`ascii_layout`:
-  `TISCopyCurrentASCIICapableKeyboardLayoutInputSource` + `UCKeyTranslate`
-  for every key, read once and again only after the selected input source
-  changes, which a distributed notification announces).
-- Option-as-Meta configurable, **off by default** (like Terminal.app and
-  Ghostty) so Option still types `@ [ ] { } | \ ~` on European layouts.
+  `TISCopyCurrentASCIICapableKeyboardLayoutInputSource` +
+  `UCKeyTranslate` for every key, read once and only again after the
+  selected input source changes, which a distributed notification
+  announces).
+- Option-as-Meta is configurable and **off by default** (like
+  Terminal.app and Ghostty), so Option still types `@ [ ] { } | \ ~` on
+  European layouts.
 - Kitty keyboard protocol, all five flags, following the spec's tables
   (`keys`; table tests from the spec's examples). Flag 1 (disambiguate):
   Shift+Enter, Ctrl+Enter, Ctrl+Tab, Esc vs Alt, keypad keys by their own
-  codes (Claude Code, Neovim, Helix rely on these). Flag 2: repeats and
-  releases, so the view translates `keyUp` too, and sends a release only
+  codes (Claude Code, Neovim and Helix rely on these). Flag 2: repeats and
+  releases, so the view translates `keyUp` too, and only sends a release
   for a key whose press went to the program. Flag 4: the shifted key and
   the base layout key (the ASCII-capable layout's, so Ctrl+С on a Russian
   layout carries `c`). Flag 8: every key as an escape code, modifier keys
   too (`flagsChanged`); text keys still go through the input method, and
   what it types is encoded as that key (`keys::committed_text`), so IMEs
-  and dead keys keep working; composed text with no key of its own is a
-  key-0 text event under flag 16 and plain UTF-8 without it. Flag 16: the
-  text inside the escape code. Cmd stays with the menus and the Cmd
+  and dead keys keep working. Composed text with no key of its own is a
+  key-0 text event under flag 16, and plain UTF-8 without it. Flag 16:
+  the text inside the escape code. Cmd stays with the menus and the Cmd
   line-editing keys whatever the flags. term-core keeps the flags stack
   (`kitty_keyboard_flags()`).
 - Cmd+← / Cmd+→ / Cmd+⌫ send start-of-line / end-of-line / delete-line.
-- Cmd shortcuts are handled by the app, never sent to the program:
-  Cmd+C copy (selection), Cmd+V paste (bracketed paste when on), Cmd+N new
-  window, Cmd+T new tab, Cmd+Shift+[ / ] previous / next tab, Cmd+1…8 that
-  tab and Cmd+9 the last, Cmd+W close, Cmd+Q quit, Cmd+K clear scrollback,
-  Cmd+= / Cmd+- font size, Ctrl+Cmd+F full screen. These are the
-  defaults of the `[keybind]` config (below), which remaps or unbinds them
-  and makes keys send text; pins may override it in their own config.
-  One exception: Cmd+V with no text on the clipboard (only an image, say)
-  goes to a program using the kitty keyboard protocol as super+v
-  (`CSI 118;9u`), as Ghostty passes on a paste it can't perform, so the
-  program (rush, Claude Code) can paste the image itself.
-- Secure Keyboard Entry (Terminal Decline menu, with a checkmark; kept in user
-  defaults as `SecureKeyboardEntry`): `EnableSecureEventInput` so no other
-  process sees the keys typed, as in Terminal.app. macOS has one switch
-  for the whole session, so Decline holds it only while it is the active
-  app (other apps' hot keys and input tools keep working while it is in
-  the background) and gives it back when it quits (`secure_input`). Pins
-  have their own bundle id, so their own setting.
-- Mouse: drag to select (word on double-click, line on triple-click; words
-  and lines are logical, so a word split by a soft wrap is selected whole,
-  and dragging after a double- or triple-click grows by words or lines), wheel
-  scrolls scrollback, or when the program asks for mouse reporting (1000/1002/
-  1003 + SGR 1006) events go to the program; Shift or Option overrides to select.
+- Cmd shortcuts are handled by the app and never sent to the program:
+  Cmd+C copy (selection), Cmd+V paste (bracketed paste when on), Cmd+N
+  new window, Cmd+T new tab, Cmd+Shift+[ / ] previous / next tab,
+  Cmd+1…8 that tab and Cmd+9 the last, Cmd+W close, Cmd+Q quit, Cmd+K
+  clear scrollback, Cmd+= / Cmd+- font size, Ctrl+Cmd+F full screen.
+  These are the defaults of the `[keybind]` config (below), which remaps
+  or unbinds them and makes keys send text; pins can override it in their
+  own config. One exception: Cmd+V with no text on the clipboard (only an
+  image, say) goes to a program using the kitty keyboard protocol as
+  super+v (`CSI 118;9u`), as Ghostty passes on a paste it can't perform,
+  so the program (rush, Claude Code) can paste the image itself.
+- Secure Keyboard Entry (Terminal Decline menu, with a checkmark; kept in
+  user defaults as `SecureKeyboardEntry`): `EnableSecureEventInput`, so
+  no other process sees the keys typed, as in Terminal.app. macOS has one
+  switch for the whole session, so Decline only holds it while it's the
+  active app (other apps' hot keys and input tools keep working while
+  it's in the background) and gives it back when it quits
+  (`secure_input`). Pins have their own bundle id, so their own setting.
+- Mouse: drag to select (word on double-click, line on triple-click;
+  words and lines are logical, so a word split by a soft wrap is selected
+  whole, and dragging after a double- or triple-click grows by words or
+  lines). The wheel scrolls the scrollback, or, when the program asks for
+  mouse reporting (1000/1002/1003 + SGR 1006), events go to the program;
+  Shift or Option overrides that to select.
+
   A trackpad (precise deltas) moves the view by its exact pixels
-  (`scroll::Smooth`): whole lines are the terminal's view offset, the
-  rest a shift of the pane's content drawn up to a line higher on the
+  (`scroll::Smooth`): whole lines are the terminal's view offset, and the
+  rest is a shift of the pane's content drawn up to a line higher on the
   GPU (`term_render::Scroll`, clipped to the rows), with the row below
   the view in the snapshot (`Terminal::set_view_overscan`). A new shift
   only draws the last frame again (`PaneFrame::Moved`); a new whole line
-  builds it, the rows that only moved reused. The display link ticks
-  through the gesture and its momentum (`WindowTick::scrolling`, not
-  idle then). Its events come at the trackpad's rate, out of step with
-  the display, so a frame took one, two or three events' pixels as their
-  times fell (a steady scroll moving 16, 48, 32 px a frame, on and off as
-  the two drift): each event's pixels are spread over the time since the
-  one before, and each tick moves the view by the movement up to its
-  refresh (the display link's timestamp) less about one event's gap,
-  4–17 ms (`scroll::Resample`). Once the gesture and its momentum end the shift eases to the nearest whole
-  line over a few ticks; a click snaps to it at once (cells are hit at
-  whole lines). A mouse wheel moves whole lines, `scroll_multiplier`
-  (default 1) times its own count; the program's mouse reports and the
-  arrow keys on the alternate screen stay in whole lines. Scroll frames
-  find new glyphs themselves for up to 1.5 ms before leaving the rest
-  to the glyph thread, so rows coming in don't show empty cells first.
+  builds it, reusing the rows that only moved. The display link ticks
+  through the gesture and its momentum (`WindowTick::scrolling`, not idle
+  then). The trackpad's events come at its own rate, out of step with
+  the display, so a frame used to take one, two or three events' pixels
+  depending on how their times fell (a steady scroll moving 16, 48, 32 px
+  a frame, on and off as the two drifted). Now each event's pixels are
+  spread over the time since the one before, and each tick moves the view
+  by the movement up to its refresh (the display link's timestamp) less
+  about one event's gap, 4–17 ms (`scroll::Resample`). Once the gesture
+  and its momentum end, the shift eases to the nearest whole line over a
+  few ticks; a click snaps to it at once (cells are hit at whole lines).
+  A mouse wheel moves whole lines, `scroll_multiplier` (default 1) times
+  its own count; the program's mouse reports and the arrow keys on the
+  alternate screen stay in whole lines. Scroll frames find new glyphs
+  themselves for up to 1.5 ms before leaving the rest to the glyph
+  thread, so rows coming in don't show empty cells first.
+
   A plain click clears the selection and selects nothing: a selection
-  starts only once the mouse has moved half a cell width (at least 4
-  pixels) from where the button went down (`select::Pending`), so a click
-  or a shaky hand doesn't leave one character selected. A click that goes
-  to the program clears the terminal's selection, as typing does
-  (`select::reported`): the program draws its own highlight, and Cmd+C
-  mustn't copy an old selection the user no longer sees as current.
-  A window has one selection: one starting in a pane (a click, Select
-  All, Select Command Output) clears the other panes'
-  (`select::clear_others`).
+  only starts once the mouse has moved half a cell width (at least 4
+  pixels) from where the button went down (`select::Pending`), so a
+  click or a shaky hand doesn't leave one character selected. A click
+  that goes to the program clears the terminal's selection, as typing
+  does (`select::reported`): the program draws its own highlight, and
+  Cmd+C mustn't copy an old selection you no longer see as current. A
+  window has one selection: one starting in a pane (a click, Select All,
+  Select Command Output) clears the other panes' (`select::clear_others`).
+
   Which click does what is `select::gesture`: Shift-click extends the
-  selection (by words or lines if it was made that way), Option-drag makes
-  a rectangle. Over a program taking the mouse, Shift only keeps the click
-  from it (`select::gesture_over_program`): a Shift-drag starts a new
-  selection (never stretching an old one), Shift+Option-drag a rectangle,
-  and a Shift-click without a drag selects nothing. Dragging past the top or bottom edge scrolls, faster the
-  further past (10 lines a second per cell height, 3 to 150), driven by a
-  16 ms dispatch timer that runs only while the mouse is held past an edge.
+  selection (by words or lines if it was made that way), and Option-drag
+  makes a rectangle. Over a program taking the mouse, Shift only keeps
+  the click from it (`select::gesture_over_program`): a Shift-drag starts
+  a new selection (never stretching an old one), Shift+Option-drag a
+  rectangle, and a Shift-click without a drag selects nothing. Dragging
+  past the top or bottom edge scrolls, faster the further past (10 lines
+  a second per cell height, 3 to 150), driven by a 16 ms dispatch timer
+  that only runs while the mouse is held past an edge.
   `copy_on_select = true` copies a selection when the button is let go
-  (a plain click without a drag copies nothing). term-core's selection has
-  no rectangular mode, so a rectangle is kept in the app: its text is read
-  a line at a time, and while it is shown term-core holds, and the
+  (a plain click without a drag copies nothing). term-core's selection
+  has no rectangular mode, so a rectangle is kept in the app: its text is
+  read a line at a time, and while it's shown term-core holds, and the
   renderer draws, the run of text between its corners rather than the
   rectangle itself.
 - Right-click, or Control-click, opens a menu (Copy, Paste, Select All,
   Clear Scrollback; Copy only with a selection, Paste only with text on
   the clipboard) while the program isn't taking the mouse
-  (`mouse::opens_menu`); with mouse reporting on, the click goes to the
+  (`mouse::opens_menu`). With mouse reporting on, the click goes to the
   program as before, and Shift still overrides.
 - Links and paths (`links::target_at`): an OSC 8 link, else a plain URL
   (`term_core::word::url_at`), else a file path that exists
@@ -398,216 +514,243 @@ Oct 2026, 1.90 → 2.16 MB) and no measurable parse speed.
   folder, only while that folder is on this Mac; a `:line:col` after it
   is shown and copied but not opened; soft wraps are followed; spaces
   only inside quotes). The one under the pointer is underlined and the
-  pointer is a pointing hand; over a program taking the mouse only with
-  Cmd held. Whether a path exists is asked of the filesystem at most
-  once every 3 s per path while hovering (`links::ExistsCache`), and
+  pointer turns into a pointing hand; over a program taking the mouse,
+  only with Cmd held. Whether a path exists is asked of the filesystem at
+  most once every 3 s per path while hovering (`links::ExistsCache`), and
   afresh on a click. Cmd-click opens it. A plain single click on one
   that isn't dragged (Shift-click over a program taking the mouse)
   selects all of it and opens a small menu at the click: Open and Copy
-  for a link; Open, Reveal in Finder and Copy Path (with its
-  `:line:col`) for a path. The menu is modal, so it opens only once the
-  system double-click interval has passed with no second click (a run
-  loop timer, cancelled by any press, key or loss of focus); a double-
-  or triple-click selects a word or line as ever.
-  How it works: docs/design/links.md.
+  for a link; Open, Reveal in Finder and Copy Path (with its `:line:col`)
+  for a path. The menu is modal, so it only opens once the system
+  double-click interval has passed with no second click (a run loop
+  timer, cancelled by any press, key or loss of focus); a double- or
+  triple-click selects a word or line as usual. How it works:
+  docs/design/links.md.
 
 ## Windows and tabs
 
 Tabs are macOS's own window tabs: each tab is an `NSWindow` with its own
-view, session and renderer, all sharing one tabbing identifier. Shell >
+view, sessions and renderer, all sharing one tabbing identifier. Shell >
 New Tab (Cmd+T, and the tab bar's "+", through `newWindowForTab:`) adds a
 tab after the current one, in the current tab's working directory, as
-Cmd+N does for windows. The Window menu has AppKit's own tab actions (Show
-Previous/Next Tab, Move Tab to New Window, Merge All Windows) and hidden
-Cmd+1…9 items. A new window is created with tabbing disallowed and allowed
-once it is on screen, so Cmd+N gives a window even when System Settings
-prefers tabs, while Merge All Windows and dragging tabs together still work.
+Cmd+N does for windows. The Window menu has AppKit's own tab actions
+(Show Previous/Next Tab, Move Tab to New Window, Merge All Windows) and
+hidden Cmd+1…9 items. A new window is created with tabbing disallowed and
+allowed once it's on screen, so Cmd+N gives you a window even when System
+Settings prefers tabs, while Merge All Windows and dragging tabs together
+still work.
 
 The content view runs under the title bar (full-size content), so the
 view's size doesn't change when the tab bar appears or goes. Each view
-observes its window's `contentLayoutRect` (KVO): when the top inset (window
-height less that rect's height: the title bar, plus the tab bar while it
-shows, 36 pt on macOS 27) changes, the top padding follows and the grid
-shrinks or grows, and the program gets a resize (`layout::top_inset`).
+observes its window's `contentLayoutRect` (KVO): when the top inset (the
+window's height less that rect's height: the title bar, plus the tab bar
+while it shows, 36 pt on macOS 27) changes, the top padding follows, the
+grid shrinks or grows, and the program gets a resize
+(`layout::top_inset`).
 
 A background tab is a hidden window: it stops drawing and gives back its
 drawables like a covered window. macOS doesn't reliably send a background
 tab the occlusion event, so a window that isn't its tab group's selected
 window counts as hidden whatever its occlusion state, and a tab switch is
-noticed through the key window changing: the tab brought to the front
+noticed through the key window changing. The tab brought to the front
 becomes key and is shown (and drawn) at once, and on the next turn of the
-main queue, once the group has selected it, every window hides or shows to
-match (as it does after a window opens or is brought to the front, which
-an inactive app gets no key notifications for). (Watching the group's `selectedWindow` by KVO would need
-re-registering each time a window moves between groups, and AppKit doesn't
-document that property as observable.) The key window counts as seen even
-before its occlusion state catches up. Nothing polls. Since it is
-never drawn, what a program asks for that must happen anyway (a new title,
-shown in the tab bar; the bell) is taken out of the terminal by the reader
-thread as it parses (`session::Events`) and handed to the main thread,
-rather than when a frame is drawn.
+main queue, once the group has selected it, every window hides or shows
+to match (as it does after a window opens or is brought to the front,
+which an inactive app gets no key notifications for). Watching the
+group's `selectedWindow` by KVO would mean registering again each time a
+window moves between groups, and AppKit doesn't document that property as
+observable. The key window counts as seen even before its occlusion state
+catches up. Nothing polls. Since a background tab is never drawn, what a
+program asks for that has to happen anyway (a new title, shown in the tab
+bar; the bell) is taken out of the terminal by the reader thread as it
+parses (`session::Events`) and handed to the main thread, rather than
+when a frame is drawn.
 
-A dogfood restart saves each window's directory and frame, plus, for tabs,
-the index of their tab group and which tab was in front
-(`reload::SavedWindow`); they reopen as tabs of one window, in order. Files
-from builds before tabs restore as plain windows. The build keeps its
-bundle path from startup: if the bundle is gone rather than replaced (the
-build from before the rename to Decline, removed by the dogfood
-script), it restarts into `Terminal Decline.app` in the same folder
-(`reload::relaunch_target`).
+A dogfood restart saves each window's directory and frame, plus, for
+tabs, the index of their tab group and which tab was in front
+(`reload::SavedWindow`); they reopen as tabs of one window, in order.
+Files from builds before tabs restore as plain windows. The build keeps
+its bundle path from startup: if the bundle is gone rather than replaced
+(the build from before the rename to Terminal Decline, removed by the
+dogfood script), it restarts into `Terminal Decline.app` in the same
+folder (`reload::relaunch_target`).
 
-The restart never ends a running program. When the watch sees a new
-build, the app reads, there and then, what each pane runs
-(`reload::busy`): busy if the shell's OSC 133 marks say a command runs,
-or if the PTY's foreground process group isn't the shell's (a program
-started without marks); a pane running the window's own program
-(`-e PROGRAM`) is busy unless its marks say it is at a prompt. With
-every pane at its prompt and no key or mouse input to the app for
+The restart never ends a running program. A dogfood build watches its
+library (`Contents/Frameworks/libterminal_decline.dylib`, or its
+executable when there's no library) with kqueue. When that file is
+replaced, the app reads, there and then, what each pane is running
+(`reload::busy`): a pane is busy if the shell's OSC 133 marks say a
+command runs, or if the PTY's foreground process group isn't the
+shell's (a program started without marks); a pane running the window's
+own program (`-e PROGRAM`) is busy unless its marks say it's at a prompt.
+With every pane at its prompt and no key or mouse input to the app for
 `reload::RESTART_IDLE` (2 minutes; a local event monitor notes the last
-input) it restarts at once. Otherwise the old build carries on (its
+input), it restarts at once. Otherwise the old build carries on (its
 library stays mapped; nothing loads it again) and says so once, in a
-notification "Decline updated — restart when you're ready" with
-a Restart button; Decline › Update Now (Cmd+U; the key action
-`restart_to_update` does only this, unbound) restarts meanwhile. It looks again when
-a command finishes in some pane, when a window closes, and on a one-shot
-timer (the rest of the idle time, or 2 minutes while busy); nothing
-polls the panes. Restart (button or menu) while programs run asks first,
-naming them, as `confirm_close` does. Quitting instead is fine too: the
-next launch is the new build. An update asked for in the app (Update to
-Latest) restarts as soon as no program runs, without the idle wait.
-Under the test control the restart doesn't start the new build (Launch
-Services would open it outside the test's environment): it writes the
-windows it would reopen to `<dump>.restart` and quits, and
-`DECLINE_TEST_RESTART_IDLE` cuts the idle time
+notification `Terminal Decline updated — restart when you're ready` with
+a Restart button. Terminal Decline › Update Now (Cmd+U; the key action
+`restart_to_update` does only this, and is unbound) restarts in the
+meantime. It looks again when a command finishes in some pane, when a
+window closes, and on a one-shot timer (the rest of the idle time, or 2
+minutes while busy); nothing polls the panes. Restart (button or menu)
+while programs are running asks first, naming them, as `confirm_close`
+does. Quitting instead is fine too: the next launch is the new build. An
+update asked for in the app (Update to Latest) restarts as soon as no
+program is running, without the idle wait, and `scripts/dogfood.sh
+--now` restarts at once. Under the test control the restart doesn't start
+the new build (Launch Services would open it outside the test's
+environment): it writes the windows it would reopen to `<dump>.restart`
+and quits, and `DECLINE_TEST_RESTART_IDLE` shortens the idle time
 (`smoke_a_new_build_waits_for_the_program_to_end`).
+
+```mermaid
+flowchart TD
+    install["scripts/dogfood.sh installs a new build"] --> watch["kqueue watch on the library fires"]
+    watch --> now{"--now?"}
+    now -- yes --> restart
+    now -- no --> busy{"every pane at its prompt<br/>(reload::busy)?"}
+    busy -- no --> tell["notify once:<br/>updated, restart when you're ready"]
+    busy -- yes --> idle{"no input for RESTART_IDLE,<br/>or the update was asked for?"}
+    idle -- no --> tell
+    idle -- yes --> restart
+    tell --> again["look again: a command finishes,<br/>a window closes, one-shot timer"]
+    again --> busy
+    tell -- "Restart or Update Now (Cmd+U),<br/>asking first if programs run" --> restart
+    restart["save windows, panes, commands<br/>and history (restore/)"] --> launch["start the new build with<br/>--restore FILE, then quit"]
+    launch --> reopen["new build reopens the windows,<br/>types each saved command"]
+```
 
 A tab whose shell was running a program (`claude`, `nvim foo.rs`,
 `ssh host`) also saves that program's command line
 (`SavedWindow::command`, and per pane in `SavedPanes`; absent in older
-files and for tabs at their prompt). After the restart it is typed at the
+files and for tabs at their prompt). After the restart it's typed at the
 new shell's prompt but not run, so Enter starts it again. Only tabs
-running the login shell save one: not a window started with `-e PROGRAM`,
-a pin's or one with `command` in the config (they run their program again
-anyway), nor the Settings tab.
+running the login shell save one: not a window started with
+`-e PROGRAM`, a pin's, or one with `command` in the config (they run
+their program again anyway), and not the Settings tab.
 
-- What is saved (`reload::command_to_type`): first the command line the
+- What's saved (`reload::command_to_type`): first, the command line the
   shell sent with its OSC 133 C mark (`cmdline_url=`, kitty's form; the
   zsh and fish snippets send it, bash's can't), as typed, so an alias or
   function stays one and `FOO=1 cmd` keeps its `FOO=1`
   (`smoke_restart_saves_the_command_as_typed`); else the foreground
   process's command line, below; else the first line the marks showed on
-  the screen, unless it may have been cut at 200 characters. Text with
-  control characters (a multi-line command) isn't typed.
-- The foreground process's command line (`running::foreground_command`): the arguments of the
-  terminal's foreground process group's programs, read with sysctl
-  `KERN_PROCARGS2`. A pipeline is its programs that the shell started, in
-  the order they started, joined with ` | `. A script run through its
-  `#!` interpreter is saved as the script (`/opt/homebrew/bin/vite dev`,
-  not `node /opt/homebrew/bin/vite dev`). Each argument is quoted for the
-  tab's shell (`running::quote`): as it is when no shell gives it a
+  the screen, unless it may have been truncated at 200 characters. Text
+  with control characters (a multi-line command) isn't typed.
+- The foreground process's command line
+  (`running::foreground_command`): the arguments of the terminal's
+  foreground process group's programs, read with sysctl `KERN_PROCARGS2`.
+  A pipeline is the programs in it that the shell started, in the order
+  they started, joined with ` | `. A script run through its `#!`
+  interpreter is saved as the script (`/opt/homebrew/bin/vite dev`, not
+  `node /opt/homebrew/bin/vite dev`). Each argument is quoted for the
+  tab's shell (`running::quote`): left as it is when no shell gives it a
   meaning, else in single quotes, with control characters as escapes
-  (`$'…'`, or for fish unquoted `\n`), so the line has none and can't
-  run before Enter. Tests read the quoted line back through sh, bash 3.2,
+  (`$'…'`, or for fish unquoted `\n`), so the line has none and can't run
+  before Enter. Tests read the quoted line back through sh, bash 3.2,
   bash 5 and zsh. Nothing is saved when the arguments can't be read
   (another user's process, such as `sudo`'s), aren't UTF-8, or come to
   over 64 KB. macOS 27 leaves the environment out of `KERN_PROCARGS2`, so
   `FOO=1 cmd` comes back as `cmd`.
-- When it is typed (`Session::type_at_prompt`): typed as soon as the shell
-  starts, the terminal echoes it before the prompt and the line editor
-  then shows it again (seen with zsh and both bashes). So a thread waits
-  until the shell has written something and has the terminal reading keys
-  unechoed (canonical mode and echo off, read from the PTY's termios:
-  `term_pty::Modes`), with the output quiet for 50 ms, looking every
-  50 ms for at most 30 s. zsh, bash and fish all set that mode at their
-  prompt; OSC 133 isn't needed. It is sent as a paste when the shell has
-  bracketed paste on (zsh, bash 5.1+, fish), so key bindings and fish
-  abbreviations don't act on it; Enter runs a paste as it does typed text.
-  Anything typed into the tab first cancels it (focus reports the
-  terminal sends by itself don't). Tested on a PTY with zsh
-  5.9, bash 3.2 and bash 5 (fish isn't installed here, so its test is
-  skipped), with oh-my-zsh's `.zshrc` (shown after about 0.8 s), and in
-  the app (`smoke_restore_types_the_command_at_the_prompt`).
+- When it's typed (`Session::type_at_prompt`): typed as soon as the
+  shell starts, the terminal echoes it before the prompt and the line
+  editor then shows it again (seen with zsh and both bashes). So a thread
+  waits until the shell has written something and has the terminal
+  reading keys unechoed (canonical mode and echo off, read from the PTY's
+  termios: `term_pty::Modes`), with the output quiet for 50 ms, looking
+  every 50 ms for at most 30 s. zsh, bash and fish all set that mode at
+  their prompt, so OSC 133 isn't needed. It's sent as a paste when the
+  shell has bracketed paste on (zsh, bash 5.1+, fish), so key bindings
+  and fish abbreviations don't act on it; Enter runs a paste as it does
+  typed text. Anything typed into the tab first cancels it (focus reports
+  the terminal sends by itself don't). Tested on a PTY with zsh 5.9, bash
+  3.2 and bash 5 (fish isn't installed here, so its test is skipped),
+  with oh-my-zsh's `.zshrc` (shown after about 0.8 s), and in the app
+  (`smoke_restore_types_the_command_at_the_prompt`).
 
 Each pane's history comes back too (`restore_scrollback`,
 `saved_history`): above the new shell it shows what it showed before,
 its screen's rows on the screen and the rest in history, then a faint
 `restored from Sat 31 Oct 14:05` line, which also names the command the
-shell was running then, if any (`restored from Sat 31 Oct 17:12 — was
-running: rush`; written alone when there is no history, as for a pane
-that was on the alternate screen). As the app restarts, each pane's
-newest `restore_scrollback_limit` lines (default 10,000; whole blocks, the
-lines over it hidden again) are written to a file of their own in
+shell was running then, if any
+(`restored from Sat 31 Oct 17:12 — was running: rush`; written on its own
+when there's no history, as for a pane that was on the alternate screen).
+As the app restarts, each pane's newest `restore_scrollback_limit` lines
+(default 10,000; whole blocks, with the lines over the limit hidden
+again) are written to a file of their own in
 `~/Library/Application Support/terminal-decline/restore/` (folder 0700,
 files 0600, created new without following links), named in the saved
 window list (`SavedWindow::history`, `SavedPane::history`; absent in
-older files), read and deleted as the pane opens; files left over (a
-launch that never came) are deleted at the next launch once older than a
-minute. The file holds the scrollback-v2 blocks as history keeps them
-(`Scrollback::save`): blocks idle compression already packed go as they
-are, the others, the open block and the screen's rows are packed with
-LZ4 as idle compression would; no line is decoded or stored again. It
-has a checksum, and every block is decompressed and its lines read
-through before history takes any (a damaged file restores nothing).
+older files), then read and deleted as the pane opens. Files left over
+(a launch that never came) are deleted at the next launch once they're
+older than a minute. The file holds the scrollback-v2 blocks as history
+keeps them (`Scrollback::save`): blocks idle compression already packed
+go as they are, and the others, the open block and the screen's rows are
+packed with LZ4 as idle compression would; no line is decoded or stored
+again. It has a checksum, and every block is decompressed and its lines
+read through before history takes any (a damaged file restores nothing).
 Nothing is written while the app runs, only as it goes. Not saved: a
 pane on the alternate screen (an editor, a pager, a password manager),
-anything while Secure Keyboard Entry is on (what is typed stays in the
-app), the Settings tab, pins. Images don't outlive the process: their
-placeholder cells come back empty. Measured for 10k lines at 160
+anything while Secure Keyboard Entry is on (what's typed stays in the
+app), the Settings tab, and pins. Images don't outlive the process:
+their placeholder cells come back empty. Measured for 10k lines at 160
 columns (`cargo run --release -p term-core --example restore_size`):
 `ls -l --color` 178 KB, log lines 224 KB; saving takes 1 ms a pane
 (0.1 ms once history is idle-compressed), restoring 1.5–2 ms.
 
-`restore_scrollback = "restarts"` (the default) saves on restarts into
-a new build only, which reopen the windows anyway. `"always"` (or
+`restore_scrollback = "restarts"` (the default) only saves on restarts
+into a new build, which reopen the windows anyway. `"always"` (or
 `true`) also saves as the app quits, with the window list in
 `restore/session.json`, and the next launch of Terminal Decline.app
-reopens the windows from it (not pins, not under the test control);
-`"never"` (`false`) writes nothing. Quitting doesn't save by default:
-a restart's files live for the second it takes, a quit's until the next
-launch, days perhaps, in backups too, with whatever passed through the
-terminal (tokens, a password echoed); and a quit today means a fresh
-start, which reopening every window would change. There is no crash
-relaunch: a crash can't save at quit time, and saving while running
-(periodically) is what this avoids.
+reopens the windows from it (not pins, and not under the test control).
+`"never"` (`false`) writes nothing. Quitting doesn't save by default
+because a restart's files live for the second it takes, while a quit's
+live until the next launch, days perhaps, in backups too, with whatever
+passed through the terminal (tokens, a password echoed); and a quit
+today means a fresh start, which reopening every window would change.
+There's no relaunch after a crash: a crash can't save at quit time, and
+saving while running (periodically) is exactly what this avoids.
 
-The quick terminal (`quick`, `app/quick.rs`), as Ghostty's quick
-terminal and iTerm2's hotkey window: a system-wide hotkey
+The quick terminal (`quick`, `app/quick.rs`) works like Ghostty's quick
+terminal and iTerm2's hotkey window. A system-wide hotkey
 (`quick_terminal_hotkey`, default ``ctrl+` ``, a chord in `[keybind]`'s
-spelling with Cmd, Ctrl or Alt unless it is an F key; `""` turns it
-off) slides a terminal window in from the top of the screen the mouse
-is on (`quick_terminal_position = top | bottom | left | right |
-center`, the centre fading in), `quick_terminal_size` (0.4) of the
-screen's usable area deep, over `quick_terminal_animation_ms` (150; 0,
-Reduce Motion and the test control: at once). The hotkey again, or with
-`quick_terminal_autohide` (on) the focus going to another window or
-app, slides it away and gives the focus back to the app that had it.
-The hotkey is Carbon's `RegisterEventHotKey` (`hotkey`): no
-Accessibility permission, and the window server sends one event per
-press, so idle stays at 0 wakeups; the slide is an `NSAnimationContext`
-group, which runs only while it lasts. The window is made on the first
-press: borderless (its own `NSWindow` subclass, which may become key
-and may be placed past the screen's edge), floating, moving to the
-active Space and allowed over full-screen apps (`MoveToActiveSpace |
-FullScreenAuxiliary`), out of Cmd+` cycling, with a tabbing identifier
-of its own. Hidden, it is ordered out: its view counts a window that
+spelling with Cmd, Ctrl or Alt unless it's an F key; `""` turns it off)
+slides a terminal window in from the top of the screen the mouse is on
+(`quick_terminal_position = top | bottom | left | right | center`, the
+centre fading in), `quick_terminal_size` (0.4) of the screen's usable
+area deep, over `quick_terminal_animation_ms` (150; 0, Reduce Motion and
+the test control show it at once). The hotkey again, or with
+`quick_terminal_autohide` (on) the focus going to another window or app,
+slides it away and gives the focus back to the app that had it. The
+hotkey is Carbon's `RegisterEventHotKey` (`hotkey`): no Accessibility
+permission, and the window server sends one event per press, so idle
+stays at 0 wakeups. The slide is an `NSAnimationContext` group, which
+only runs while it lasts. The window is made on the first press:
+borderless (its own `NSWindow` subclass, which can become key and be
+placed past the screen's edge), floating, moving to the active Space and
+allowed over full-screen apps (`MoveToActiveSpace |
+FullScreenAuxiliary`), left out of Cmd+` window switching, with a tabbing identifier
+of its own. Hidden, it's ordered out: its view counts a window that
 isn't `isVisible` as not seen, so it gives back its drawables as a
 covered window does, while its session and panes keep running. It has
 splits but no tabs (Cmd+T there opens a window), isn't saved for a
 restart, and its shell exiting closes it (the next press makes a new
-one). Pins have none, and under the test control the hotkey isn't
+one). Pins don't have one, and under the test control the hotkey isn't
 registered (the test-only `quick` command toggles it), so a test run
-leaves the keys alone.
+leaves your keys alone.
 
-Splits (docs/design/splits.md) are being built. In place so far, with no
-AppKit yet: the pane tree (`panes`: layout in whole device pixels with a
+Splits (docs/design/splits.md) are in the app: split, close and focus
+panes, drag dividers, zoom and restore (splits design B2.3a–B2.4; the
+docs and pressure runs of B2.5 are still to come). Underneath, with no
+AppKit: the pane tree (`panes`: layout in whole device pixels with a
 1 pt divider and a minimum pane size, focus by direction and in order,
 zoom, close, equalize, divider drags and keyboard resizes, all property
 tested), the per-pane and per-window frame decisions
-(`frame_policy::pane` / `combine`; `decide` is now the one-pane case), the
-pane actions and their keys, and `reload::SavedPanes`, the tree with each
-pane's directory, which `SavedWindow` carries (absent in older files: one
-pane). `unfocused_pane_opacity` (default 1.0: not dimmed) is read but not
-yet drawn.
+(`frame_policy::pane` / `combine`; `decide` is now the one-pane case),
+the pane actions and their keys, and `reload::SavedPanes`, the tree with
+each pane's directory, which `SavedWindow` carries (absent in older
+files: one pane). `unfocused_pane_opacity` (default 1.0: not dimmed) is
+read but not drawn yet.
 
 ## Files, folders and Services
 
@@ -615,32 +758,33 @@ What the app does with files and folders from the rest of macOS
 (`desktop`, used by `view` and `app`):
 
 - Files or folders dragged onto a window are typed into it as a paste
-  (bracketed when the program asked for bracketed paste): each path quoted
-  for the shell the way Terminal.app does it (`My\ File.txt`; a name with
-  a control character, which a paste would drop, as `$'…'`), separated by
-  spaces. Finder's file reference URLs are resolved to paths. A dragged
-  URL or text is typed as it is.
-- A folder dropped on the Dock icon, or `open -a "Decline" DIR`
+  (bracketed when the program asked for bracketed paste): each path is
+  quoted for the shell the way Terminal.app does it (`My\ File.txt`; a
+  name with a control character, which a paste would drop, as `$'…'`),
+  separated by spaces. Finder's file reference URLs are resolved to
+  paths. A dragged URL or text is typed as it is.
+- A folder dropped on the Dock icon, or `open -a "Terminal Decline" DIR`
   (`application:openURLs:`; the bundle declares `public.folder` in
-  `CFBundleDocumentTypes`): a new window whose shell starts there; a file
-  opens in its folder. It is a tab of the window in front when macOS's
-  "Prefer tabs when opening documents" says so (Always, or In Full Screen
-  while that window is full screen; `NSWindow.userTabbingPreference`). An
-  app not yet running opens those windows instead of its first one.
+  `CFBundleDocumentTypes`), opens a new window whose shell starts there; a
+  file opens in its folder. It's a tab of the window in front when
+  macOS's "Prefer tabs when opening documents" says so (Always, or In
+  Full Screen while that window is full screen;
+  `NSWindow.userTabbingPreference`). An app that isn't running yet opens
+  those windows instead of its first one.
 - Services (`NSServices` in the Info.plist that `scripts/bundle.sh`
-  writes): "New Decline Window at Folder" and "New Terminal
+  writes): "New Terminal Decline Window at Folder" and "New Terminal
   Decline Tab at Folder", for folders in Finder (its right-click menu's
   Services, or Finder > Services). The app delegate is the services
   provider (`newWindowAtFolder:userData:error:`,
   `newTabAtFolder:userData:error:`); the tab one falls back to a window
   when none is open. The app menu has the standard Services submenu.
   `scripts/dogfood.sh` runs `pbs -update` so a new build's items show.
-- `confirm_close = true` (off by default): closing a window or tab while a
-  program other than the shell runs in its foreground asks first, in a
+- `confirm_close = true` (off by default): closing a window or tab while
+  a program other than the shell runs in its foreground asks first, in a
   sheet ("vim is still running in it"), and quitting asks once for all of
   them. "Running" is read from the shell's `proc_bsdinfo`: the terminal's
   foreground process group (`e_tpgid`) isn't the shell's own (`running`).
-  A window started with `-e PROGRAM` counts only while that program runs
+  A window started with `-e PROGRAM` only counts while that program runs
   another in the foreground. A dogfood restart and the test-only `quit`
   never ask.
 
@@ -653,36 +797,37 @@ The product's name in these strings is `PRODUCT_NAME` in the code and
   `ESC ] 777 ; notify ; title ; body BEL` (rxvt's), a bell, and a long
   command finishing post a macOS notification through
   `UNUserNotificationCenter` when you aren't looking at their pane: the
-  app inactive, another window or tab key, or another pane focused. While
-  you look at it, nothing is shown. term-core keeps the latest one not yet
-  taken, so several in one parse slice give one notification.
-  Permission is asked once, on the first notification; notifications wait
-  for the answer. Focus and the app's notification settings apply as for
-  any app. A click brings that window, tab and pane to the front.
+  app inactive, another window or tab key, or another pane focused.
+  While you're looking at it, nothing is shown. term-core keeps the
+  latest one not yet taken, so several in one parse give one
+  notification. Permission is asked once, on the first notification, and
+  notifications wait for the answer. Focus and the app's notification
+  settings apply as for any app. A click brings that window, tab and pane
+  to the front.
 - **Commands finishing** (`crate::activity`): term-core reports the
-  shell's OSC 133 A, C and D marks as they are parsed (`take_commands`:
-  a prompt, a command started with the text typed after B, a command
-  finished with its exit status). A command that ran at least
+  shell's OSC 133 A, C and D marks as they're parsed (`take_commands`: a
+  prompt, a command started with the text typed after B, a command
+  finished with its exit status). A command that ran for at least
   `notify_after` seconds (10) finishing where you aren't looking is
-  "✓ cargo build — 1m 12s" or "✗ cargo build — exit 101", with its
-  folder (`notify_on_finish = true`). Shells without the marks get none:
+  `✓ cargo build — 1m 12s` or `✗ cargo build — exit 101`, with its folder
+  (`notify_on_finish = true`). Shells without the marks get none:
   watching the PTY's foreground process group instead would mean
   checking it on every read, and silent commands would still be missed.
 - **No spam**: notifications from one window within 10 s of each other
   (for at most a minute) are one burst, shown as one notification that
   later ones replace ("…· and 2 more"). A bell joining a burst shows
   nothing new, and a program's message after its own bell (Claude Code
-  rings, then says it waits for input) takes the bell's place. No timers:
-  a burst ends when the next notification comes too late for it.
+  rings, then says it's waiting for input) takes the bell's place. No
+  timers: a burst ends when the next notification comes too late for it.
 - **The title** (`title_status = true`): with the marks, each tab's title
-  says what its focused pane does: "cargo build · 12s — Terminal
-  Decline" while it runs, "✓ cargo build · 1m 12s" for 5 s after a long
-  one, "waiting · ~/src/project" at the prompt. A program that sets its
+  says what its focused pane is doing: `cargo build · 12s — Terminal
+  Decline` while it runs, `✓ cargo build · 1m 12s` for 5 s after a long
+  one, `waiting · ~/src/project` at the prompt. A program that sets its
   own title while it runs keeps it, without a clock. The clock is a
-  one-shot timer to the next second (then minute) boundary, armed only
+  one-shot timer to the next second (then minute) boundary, only armed
   while a command runs and the window can be seen; showing a hidden tab
   brings its title up to date.
-- Under the test control nothing reaches the notification center: each
+- Under the test control nothing reaches the notification centre: each
   notification is listed in the dump (`notifications.sent`), unless
   `DECLINE_TEST_REAL_NOTIFY=1`.
 - `UNUserNotificationCenter` throws outside an app bundle, so a bare
@@ -692,86 +837,116 @@ The product's name in these strings is `PRODUCT_NAME` in the code and
   app isn't active. The bell itself is unchanged.
 - `ESC ] 9 ; 4 ; state ; percent BEL` (ConEmu's progress) shows on the
   Dock icon's badge: the lowest percentage of the windows reporting one,
-  "!" while one reports an error, "…" while they are only busy; state 0
+  "!" while one reports an error, "…" while they're only busy; state 0
   or closing the window clears it. Without progress the badge counts the
-  notifications for windows not looked at since; a window becoming key in
-  the active app takes its count off. Pins have their own Dock icon, so
-  their own badge.
-- Like the title, these are taken by the reader thread as they are parsed,
-  so a background tab (never drawn) still notifies.
+  notifications for windows not looked at since; a window becoming key
+  in the active app takes its count off. Pins have their own Dock icon,
+  so their own badge.
+- Like the title, these are taken by the reader thread as they're
+  parsed, so a background tab (never drawn) still notifies.
 
 What Claude Code sends (checked in its 2.1.306 binary): with
-`preferredNotifChannel` at its default `auto`, it picks a channel only
-for `TERM_PROGRAM` iTerm.app (OSC 9, `Claude Code: <message>`), kitty (OSC
-99), ghostty (OSC 777 `notify;<title>;<message>`) and Apple_Terminal (a
-bell, if the profile's bell is on); anything else, `terminal-decline` included,
-gets nothing, not even a bell. So in Decline set it once:
-`claude config set --global preferredNotifChannel iterm2` (or `ghostty`;
-`iterm2_with_bell` adds a bell). Its OSC 9;4 progress
-(`terminalProgressBarEnabled`) is sent only to ghostty ≥ 1.2.0, iTerm.app
-≥ 3.6.6 and ConEmu, so Decline doesn't get it from Claude Code today. A
-Notification or Stop hook can also return `terminalSequence` (OSC 9 / 777
-/ 9;4) for Claude Code to print. OSC 99 (kitty) isn't handled.
+`preferredNotifChannel` at its default `auto`, it only picks a channel
+for `TERM_PROGRAM` iTerm.app (OSC 9, `Claude Code: <message>`), kitty
+(OSC 99), ghostty (OSC 777 `notify;<title>;<message>`) and
+Apple_Terminal (a bell, if the profile's bell is on). Anything else,
+`terminal-decline` included, gets nothing, not even a bell. So in
+Decline, set it once: `claude config set --global preferredNotifChannel
+iterm2` (or `ghostty`; `iterm2_with_bell` adds a bell). Its OSC 9;4
+progress (`terminalProgressBarEnabled`) is only sent to ghostty ≥ 1.2.0,
+iTerm.app ≥ 3.6.6 and ConEmu, so Decline doesn't get it from Claude Code
+today. A Notification or Stop hook can also return `terminalSequence`
+(OSC 9 / 777 / 9;4) for Claude Code to print. OSC 99 (kitty) isn't
+handled.
 
 ## Dock pins ("make ./rush its own app")
 
 `terminal-decline pin Rush [--icon rush.png] [--config rush.toml] [--dock] -- ./rush`
-creates `~/Applications/Rush.app`:
+creates `~/Applications/Rush.app`. Made from the app (Terminal
+Decline.app), a pin is a stub pin (docs/design/pins.md §3):
+
+```
+Rush.app/Contents/
+  Info.plist           CFBundleIdentifier = red.forbes.terminal-decline.pin.rush, frozen at creation
+  MacOS/rush           the stub, copied from the app's Helpers/terminal-decline-pin, then signed
+  Resources/icon.icns  from --icon, else generated by term-icon
+~/.config/terminal-decline/pins/rush.toml       command, cwd, env, any config setting
+~/.config/terminal-decline/pins/rush.pin.toml   the pin's record, written by Decline
+```
+
+The stub never changes once it's signed, so the pin keeps its identity to
+macOS's privacy settings across upgrades. When it starts, it reads its
+Info.plist (`TDPinAbi`, `TDPinId`, `TDAppBundleId`,
+`TDLibraryRequirement`), finds Terminal Decline.app, checks the library's
+signature, and loads `libterminal_decline.dylib` from it. A bare binary
+(`cargo install`, no app bundle) still makes clone pins, as every pin was
+before stubs:
 
 ```
 Rush.app/Contents/
   Info.plist           CFBundleIdentifier = red.forbes.terminal-decline.pin.rush
   MacOS/rush           APFS clone of the Decline binary (no extra disk)
   Resources/icon.icns  generated from --icon (via `sips` + `iconutil`)
-~/.config/terminal-decline/pins/rush.toml   command, cwd, env, any config setting
 ```
 
-Each pin has its own bundle id, so macOS gives it its own Dock icon, Cmd+Tab
-entry and window list. The binary knows it is a pin from its own file name.
-Settings live outside the bundle so editing them doesn't break the signature.
-The bundle is ad-hoc signed with its own identifier, the quarantine flag is
-removed, and it is registered with LaunchServices. The program runs through a
-login shell, so it gets the user's `PATH` even when started from the Dock.
-A missing or nonexistent `cwd` starts in `HOME` (the app's own working
-directory is `/` when started from the Dock).
-`terminal-decline pin rush` (no `--`) runs the program named like the pin.
-Without `--icon`, the pin takes the program's own icon when it has one: its
-app bundle's `CFBundleIconFile` if it lives in a `.app`, else `NAME.icns`,
-`NAME.png`, `icon.icns` or `icon.png` beside it (the program found on
-`PATH`, links followed); otherwise a generated one. A relative `--icon` not
-found in the current folder is looked for beside the program.
-The bundle has `Contents/Resources/bin/decline`, a link to the launcher,
-and the shell integration adds that folder last to `PATH` when no `decline`
-is found, so `decline pin …` works in the app's shells without the cask.
-`terminal-decline pin --update` re-clones the binary after upgrades, and
-rewrites each pin's Info.plist (name from the bundle's file name, its icon
-if it has one), so pins made before the rename (ids
-`red.forbes.decline.pin.*`) get the new id prefix and their Secure Keyboard
-Entry choice.
-`terminal-decline pin --remove` deletes a bundle only if it is a `.app` inside the
-apps dir containing `Contents/MacOS/<id>`, since the settings file naming it
-can be edited. Pin names can't contain `/` or `..`, and can't take the app's
-own names (`terminal-decline`, `decline`): the binary under those names is
-never a pin, also when started through the cask's `decline` link.
+Each pin has its own bundle id, so macOS gives it its own Dock icon,
+Cmd+Tab entry and window list. A clone knows it's a pin from its own file
+name. Settings live outside the bundle, so editing them doesn't break the
+signature. The bundle is signed ad-hoc with its own identifier, the
+quarantine flag is removed, and it's registered with LaunchServices. The
+program runs through a login shell, so it gets your `PATH` even when
+started from the Dock. A missing or nonexistent `cwd` starts in `HOME`
+(the app's own working directory is `/` when it's started from the
+Dock). `terminal-decline pin rush` (no `--`) runs the program with the
+pin's name. Without `--icon`, the pin takes the program's own icon when
+it has one: its app bundle's `CFBundleIconFile` if it lives in a `.app`,
+else `NAME.icns`, `NAME.png`, `icon.icns` or `icon.png` beside it (the
+program found on `PATH`, links followed); otherwise a generated one. A
+relative `--icon` not found in the current folder is looked for beside
+the program. The app bundle has `Contents/Resources/bin/decline`, a link
+to the launcher, and the shell integration adds that folder to the end of
+`PATH` when no `decline` is found, so `decline pin …` works in the app's
+shells without the cask.
 
-Known limit: an ad-hoc signature is tied to the binary's hash, so after
-`--update` macOS asks again for permissions the pin was granted (Documents,
-Full Disk Access, …). The fix (next milestone) is Chrome's web-app approach:
-a small launcher executable that never changes, loading Decline's code from
-the installed `Terminal Decline.app`, found by its bundle id.
+`terminal-decline pin --repair` registers pins again, follows moved
+ones, and rebuilds old clone pins and damaged ones as stub pins in place
+(name, icon file, settings and Secure Keyboard Entry kept; it asks
+first, since macOS resets a rebuilt pin's permissions). `scripts/dogfood.sh`
+runs it. `terminal-decline pin --update` leaves stub pins alone; for
+clone pins it re-clones the binary after upgrades and rewrites each
+pin's Info.plist (name from the bundle's file name, its icon if it has
+one), so pins made before the rename (ids `red.forbes.decline.pin.*`)
+get the new id prefix and their Secure Keyboard Entry choice. Run from
+the app, it migrates clone pins to stubs the same way `--repair` does.
+`terminal-decline pin --remove` only deletes a bundle if it's a `.app`
+inside the apps dir containing `Contents/MacOS/<id>`, since the settings
+file naming it can be edited. Pin names can't contain `/` or `..`, and
+can't take the app's own names (`terminal-decline`, `decline`): the
+binary under those names is never a pin, including when it's started
+through the cask's `decline` link.
 
-Generated icons (`term-icon`, docs/design/pins.md §8; not yet used by
-`pin`): `term_icon::generate(name)` gives the kept record (canonical name,
-FNV-1a hash, palette index and colours, initial, its outline as path data)
-and `render_icns` draws it. Measured (release, M-series, macOS 27): ~65 ms
-per pin for the outline and all ten `.icns` sizes, ~1.2 MB per `.icns`;
-the outline of "R" equals the brand template's point for point (±0.01),
-and 128/32/16 px renders differ from `docs/brand/pins.png` by 0.35–0.46
-per channel on average. Samples: `docs/brand/samples-generated/`.
+Known limit, for clone pins: an ad-hoc signature is tied to the binary's
+hash, so after `--update` macOS asks again for permissions the pin was
+granted (Documents, Full Disk Access, …). Stub pins are the fix, after
+Chrome's web-app approach: a small executable that never changes,
+loading Decline's code from the installed `Terminal Decline.app`, found
+by its bundle id. What's protected and what isn't, and the steps still
+left, are in docs/design/pins.md.
+
+Generated icons (`term-icon`, docs/design/pins.md §8): `pin` uses them
+for new pins without an icon of their own. `term_icon::generate(name)`
+gives the record that's kept (canonical name, FNV-1a hash, palette index
+and colours, initial, its outline as path data) and `render_icns` draws
+it. Measured (release, M-series, macOS 27): ~65 ms per pin for the
+outline and all ten `.icns` sizes, ~1.2 MB per `.icns`. The outline of
+"R" matches the brand template point for point (±0.01), and 128/32/16 px
+renders differ from `docs/brand/pins.png` by 0.35–0.46 per channel on
+average. Samples: `docs/brand/samples-generated/`.
 
 ## The name
 
-The app was called Decline until E.17; it is Decline now:
+The app was called Decline until E.17; it's Terminal Decline now (and
+Decline for short):
 
 | | now | before |
 |---|---|---|
@@ -786,210 +961,222 @@ The defaults domain, os_log subsystem and tab group follow the bundle id.
 The `DECLINE_*` variables for tests and measurements keep their names.
 
 Moving over (`Paths::move_old_config`, before anything else runs, even
-`pin`): if only `~/.config/decline` exists it is renamed to the new name
+`pin`): if only `~/.config/decline` exists, it's renamed to the new name
 and the old name becomes a link to it, so pins made before the rename
-still find their settings. If the old one is itself a link (dotfiles), the
-new one links to the same place. If both exist the new one is used, nothing
-is merged, and the window says so once. Another process doing the same at
-once (the app and a pin starting together) is fine: the move is one
-`rename`, and whoever loses looks again. The app copies its Secure Keyboard
-Entry choice from the old defaults domain when the new one has none; old
-crash logs stay where they are. macOS treats the renamed app and pins as new
-apps, so permissions they were granted are asked for again.
+still find their settings. If the old one is itself a link (dotfiles),
+the new one links to the same place. If both exist, the new one is used,
+nothing is merged, and the window says so once. Another process doing
+the same at the same moment (the app and a pin starting together) is
+fine: the move is one `rename`, and whoever loses looks again. The app
+copies its Secure Keyboard Entry choice from the old defaults domain when
+the new one has none; old crash logs stay where they are. macOS treats
+the renamed app and pins as new apps, so it asks again for the
+permissions they'd been granted.
 
 ## Config
 
-`~/.config/terminal-decline/config.toml`: font family/size, colours (16 + fg/bg/cursor/
-selection), padding, opacity/blur, option-as-meta, scrollback lines, shell,
-and the cursor (`cursor_style` block/bar/underline, `cursor_blink`): the
-cursor until a program sets its own with DECSCUSR; `CSI 0 SP q` and a
-reset go back to it, and a changed setting reaches panes whose program
-hasn't set one (`Terminal::set_cursor_default`).
+`~/.config/terminal-decline/config.toml`: font family/size, colours (16
++ fg/bg/cursor/selection), padding, opacity/blur, option-as-meta,
+scrollback lines, shell, and the cursor (`cursor_style`
+block/bar/underline, `cursor_blink`): that's the cursor until a program
+sets its own with DECSCUSR; `CSI 0 SP q` and a reset go back to it, and a
+changed setting reaches panes whose program hasn't set one
+(`Terminal::set_cursor_default`).
 
-Themes (`theme`): `theme = "name"` loads `~/.config/terminal-decline/themes/<name>.toml`,
-else the built-in theme of that name; `theme = { light = "x", dark = "y" }`
-picks by each window's macOS appearance and switches when it changes
+Themes (`theme`): `theme = "name"` loads
+`~/.config/terminal-decline/themes/<name>.toml`, else the built-in theme
+with that name; `theme = { light = "x", dark = "y" }` picks by each
+window's macOS appearance and switches when it changes
 (`viewDidChangeEffectiveAppearance`, a notification, no polling). A theme
-file has the keys of `[colors]` (foreground, background, cursor, selection,
-split_divider (unset: the background mixed 25% towards the foreground),
-`palette` of up to 16; unset ones are the defaults'), and any `[colors]` in
-the config override the theme's, one by one (`""` in `palette` keeps the
-theme's entry). Colours must be `#rrggbb`; a bad one, a bad theme file or a
-missing theme is a notice. The built-in set is embedded TOML
-(`crates/term-config/themes/`, each file naming its source and licence):
-31 themes: slope-dark and slope-light (Decline's own, from the
-Slope brand palette), Solarized, Gruvbox, Catppuccin (4), Tokyo Night (3;
-colours from tokyonight.nvim, Apache-2.0), Rosé Pine (3), Kanagawa wave and
-lotus, Everforest, One Dark/Light, GitHub, Ayu (3), Night Owl/Light Owl,
-Dracula and Nord, all MIT unless said; `theme::PAIRS` lists the light/dark
-pairs. With no theme the colours are Decline's defaults, as before.
+file has the keys of `[colors]` (foreground, background, cursor,
+selection, split_divider (unset: the background mixed 25% towards the
+foreground), `palette` of up to 16; unset ones are the defaults'), and
+any `[colors]` in the config override the theme's one by one (`""` in
+`palette` keeps the theme's entry). Colours must be `#rrggbb`; a bad
+one, a bad theme file or a missing theme is a notice. The built-in set
+is embedded TOML (`crates/term-config/themes/`, each file naming its
+source and licence): 31 themes, slope-dark and slope-light (Decline's
+own, from the Slope brand palette), Solarized, Gruvbox, Catppuccin (4),
+Tokyo Night (3; colours from tokyonight.nvim, Apache-2.0), Rosé Pine (3),
+Kanagawa wave and lotus, Everforest, One Dark/Light, GitHub, Ayu (3),
+Night Owl/Light Owl, Dracula and Nord, all MIT unless said otherwise;
+`theme::PAIRS` lists the light/dark pairs. With no theme, the colours are
+Decline's defaults, as before.
 
 Appearance (`appearance = "system" | "light" | "dark"`, default system):
 the app's `NSApplication` appearance is left to macOS or set to Aqua or
-Dark Aqua, so title bars match and every view's effective appearance picks
-its side of a pair; it applies live. Programs are told whether the colours
-are dark or light: DSR 996 answers and mode 2031 reports
+Dark Aqua, so title bars match and every view's effective appearance
+picks its side of a pair; it applies live. Programs are told whether the
+colours are dark or light: DSR 996 answers, and mode 2031 reports
 (`CSI ? 997 ; 1 n` dark, `2 n` light) on every change. Dark means the
-theme's background has relative luminance under ½, so a light theme used
-in dark mode is reported light. Settings shows Appearance, Light theme and
-Dark theme rows; picking a side turns a single theme into a pair (with no
-theme before, the other side is the theme's partner from `PAIRS`).
+theme's background has a relative luminance under ½, so a light theme
+used in dark mode is reported as light. Settings shows Appearance, Light
+theme and Dark theme rows; picking a side turns a single theme into a
+pair (with no theme before, the other side is the theme's partner from
+`PAIRS`).
 
-Importers (`import`): `terminal-decline import ghostty [PATH]` reads Ghostty's config
-(default: the first of `~/.config/ghostty/config.ghostty`, `…/config` and
-the same in `~/Library/Application Support/com.mitchellh.ghostty`) and maps
-theme (a built-in Decline theme by loose name, else the Ghostty theme file
-becomes `themes/<name>.toml`; `light:x,dark:y` becomes a pair), palette,
-foreground/background/cursor/selection colours, font-family (the first is
-`font_family`, the rest `font_fallback`), the bold/italic faces,
+Importers (`import`): `terminal-decline import ghostty [PATH]` reads
+Ghostty's config (by default the first of
+`~/.config/ghostty/config.ghostty`, `…/config` and the same in
+`~/Library/Application Support/com.mitchellh.ghostty`) and maps theme (a
+built-in Decline theme by loose name, else the Ghostty theme file becomes
+`themes/<name>.toml`; `light:x,dark:y` becomes a pair), palette,
+foreground/background/cursor/selection colours, font-family (the first
+is `font_family`, the rest `font_fallback`), the bold/italic faces,
 font-feature (`font_features`; CSS-style `"cv05" 2` and `liga off`
 converted, one line's comma-separated entries split, the last setting of
-a tag kept), font-size, adjust-cell-height/width percentages, background-opacity,
-background-blur, macos-option-as-alt, cursor-style, cursor-style-blink,
-copy-on-select, window-padding-x,
+a tag kept), font-size, adjust-cell-height/width percentages,
+background-opacity, background-blur, macos-option-as-alt, cursor-style,
+cursor-style-blink, copy-on-select, window-padding-x,
 window-width/height, split-divider-color (`[colors] split_divider`),
 unfocused-split-opacity (`unfocused_pane_opacity`) and keybinds (actions
-with a Decline equivalent, new_split right/down, goto_split,
+with a Decline equivalent, including new_split right/down, goto_split,
 resize_split (its amount dropped: our keys move a divider one cell),
-equalize_splits and toggle_split_zoom included; text:/csi:/esc:, unbind;
-not sequences or global ones). `terminal-decline import
-iterm FILE.itermcolors [--name NAME]` turns an iTerm2 preset (XML, or
-binary through `plutil`) into `themes/<name>.toml`, converting calibrated
-and P3 colours to sRGB with AppKit. Both print the TOML; `--write` writes
-it and refuses to replace any existing file without `--force` (nothing is
-written if one would be). Whatever doesn't map is listed as comments with
-the reason.
+equalize_splits and toggle_split_zoom; text:/csi:/esc:, unbind; not
+sequences or global ones). `terminal-decline import iterm
+FILE.itermcolors [--name NAME]` turns an iTerm2 preset (XML, or binary
+through `plutil`) into `themes/<name>.toml`, converting calibrated and
+P3 colours to sRGB with AppKit. Both print the TOML; `--write` writes it
+and refuses to replace any existing file without `--force` (nothing is
+written if one would be). Whatever doesn't map is listed as comments,
+with the reason.
 
-Live reload (`watch`, `AppDelegate::reload_config`): the config files (the
-user's, a pin's, `--config`, and the theme files the config names) are
-watched with kqueue vnode watches on each file and its directory (editors save by renaming a new file over the old;
-a missing file is watched through the nearest directory that exists, a
-symlink at its target too). One thread blocks in `kevent`, so idle stays at
-0 wakeups (`top -l 2 -s 5 -stats idlew` with the watcher on: 0). After an
-event it waits 40 ms, arms the watches again and compares the files'
-contents, so only a real change reloads. A reload reads every layer again
+Live reload (`watch`, `AppDelegate::reload_config`): the config files
+(yours, a pin's, `--config`, and the theme files the config names) are
+watched with kqueue vnode watches on each file and its directory (editors
+save by renaming a new file over the old one; a missing file is watched
+through the nearest directory that exists, and a symlink at its target
+too). One thread blocks in `kevent`, so idle stays at 0 wakeups
+(`top -l 2 -s 5 -stats idlew` with the watcher on: 0). After an event it
+waits 40 ms, arms the watches again and compares the files' contents, so
+only a real change reloads. A reload reads every layer again
 (`-e PROGRAM` still wins) and applies:
 
 - to every window at once: `theme` and `[colors]`, the font settings
-  (`font_family`, `font_size`, `font_fallback`, `font_bold`/`_italic`/`_bold_italic`,
-  `line_height`, `cell_width`, `font_features`; Fonts rebuilt as Cmd+= does; a new
-  `font_size` replaces a size set with Cmd+= / Cmd+-), `padding`,
-  `opacity`, `option_as_meta`, `copy_on_select`, `scroll_multiplier` and `[keybind]` (the menus
-  are rebuilt);
+  (`font_family`, `font_size`, `font_fallback`,
+  `font_bold`/`_italic`/`_bold_italic`, `line_height`, `cell_width`,
+  `font_features`; Fonts rebuilt as Cmd+= does; a new `font_size`
+  replaces a size set with Cmd+= / Cmd+-), `padding`, `opacity`,
+  `option_as_meta`, `copy_on_select`, `scroll_multiplier` and `[keybind]`
+  (the menus are rebuilt);
 - to new windows only: `command`, `cwd`, `env`, `columns`, `lines`,
-  `blur` (a view set up with the window), `title`, and `scrollback`
-  (term-core has no way to change a running terminal's limit; once it
-  does, the new limit can apply from the next line). The list is the
-  settings schema's (`term_prefs::schema::new_windows_keys`, read by
+  `blur` (a view set up with the window), `title`, `shell_integration`
+  and `scrollback` (term-core can now change a running terminal's limit,
+  `Terminal::set_scrollback_limit`, but a reload doesn't call it yet;
+  once it does, the new limit can apply from the next line). The list is
+  the settings schema's (`term_prefs::schema::new_windows_keys`, read by
   `config::new_windows_only`); Settings marks those rows, and a reload
-  says so on stderr only (`terminal-decline: config: columns changed: it
+  only says so on stderr (`terminal-decline: config: columns changed: it
   applies to new windows`), never in a window.
 
-`confirm_close` (see Files, folders and Services) applies at once, and so
-do `restore_scrollback` and `restore_scrollback_limit` (see Windows and
-tabs), read when the app restarts or quits.
+`confirm_close` (see Files, folders and Services) applies at once, and
+so do `restore_scrollback` and `restore_scrollback_limit` (see Windows
+and tabs), which are read when the app restarts or quits.
 
 Errors in the edited file are notices in every window, written after the
-program's output, as at startup, but only those new since the last load,
-and never into a terminal on the alternate screen (vim, Claude Code, the
-preferences), where they would land under the program's cursor in its
-colours. While the Settings tab is open no notices are written at all:
-it shows the same messages, from the same loader. New windows show the
-errors of the config in effect.
+program's output as at startup, but only the ones new since the last
+load, and never into a terminal on the alternate screen (vim, Claude
+Code, the preferences), where they'd land under the program's cursor in
+its colours. While the Settings tab is open, no notices are written at
+all: it shows the same messages, from the same loader. New windows show
+the errors of the config in effect.
 
-Settings… (Terminal Decline menu, Cmd+, — the `settings` action) is
+Settings… (Terminal Decline menu, Cmd+,; the `settings` action) is
 `terminal-decline prefs` (crate `term-prefs`, design in
 docs/design/preferences.md) in a tab of the front window; a second
 Cmd+, brings the same tab back. The app runs its own binary (the main
-app's, found by bundle id, when in a pin) directly, not through the
-login shell (term-pty's `Command::direct`), with `--layer` for each
-config file, `--edit` for the one edited (the user's, or a pin's own
-file) and `--in-app`. The tab is titled "Settings", stays opaque, gets no
-startup notices, and isn't a running program for `confirm_close`.
+app's, found by bundle id, when in a pin) directly rather than through
+the login shell (term-pty's `Command::direct`), with `--layer` for each
+config file, `--edit` for the one being edited (yours, or a pin's own
+file) and `--in-app`. The tab is titled "Settings", stays opaque, gets
+no startup notices, and isn't a running program for `confirm_close`.
 "Edit config.toml" beside it opens the file with `open -t`. The program
 checks each edit with the app's loader through `prefs::AppHost`
 (`term_prefs::Host`) before writing it, so the TUI's messages are the
-app's own. To record a shortcut it sends `OSC 7771 ; record-chord`,
-honoured only in that tab (a session hook set by the app, so no other
-program can ask): a local key-down monitor takes the next key in that
-window before the menus, the input method and `[keybind]`, and the app
-replies through the PTY input with `OSC 7771 ; chord ; <chord>`
+app's own. To record a shortcut it sends `OSC 7771 ; record-chord`, only
+honoured in that tab (a session hook the app sets, so no other program
+can ask): a local key-down monitor takes the next key in that window
+before the menus, the input method and `[keybind]`, and the app replies
+through the PTY input with `OSC 7771 ; chord ; <chord>`
 (`keybind::recorded_chord`, spelled as `Chord`'s `Display`) or
-`OSC 7771 ; cancelled` (plain Esc, the window losing focus, a tab switch,
-or 10 s).
+`OSC 7771 ; cancelled` (plain Esc, the window losing focus, a tab
+switch, or 10 s).
 
-Shortcuts (`[keybind]`, `keybind`): a chord (`"cmd+k"`, `"ctrl+shift+t"`,
-`"cmd+enter"`; modifiers cmd, ctrl, alt, shift; keys by character or name)
-set to a menu action (new_window, new_tab, close, copy, paste, select_all,
-clear_scrollback, font_bigger, font_smaller, font_reset,
-toggle_full_screen, next_tab, previous_tab, settings (Cmd+,), and find, a placeholder whose
-Edit > Find… item stays disabled until the find bar exists; and the pane
-actions of docs/design/splits.md §5, split_right/down, close_tab,
-close_window, focus_pane_left/right/up/down/next/previous,
+Shortcuts (`[keybind]`, `keybind`): a chord (`"cmd+k"`,
+`"ctrl+shift+t"`, `"cmd+enter"`; modifiers cmd, ctrl, alt, shift; keys
+by character or name) set to a menu action, `"none"`, or
+`{ text = "…" }`. The menu actions are new_window, new_tab, close, copy,
+paste, select_all, clear_scrollback, font_bigger, font_smaller,
+font_reset, toggle_full_screen, next_tab, previous_tab, settings
+(Cmd+,), and find, a placeholder whose Edit > Find… item stays disabled
+until the find bar exists; plus the pane actions of
+docs/design/splits.md §5, split_right/down, close_tab, close_window,
+focus_pane_left/right/up/down/next/previous,
 resize_pane_left/right/up/down, equalize_panes and toggle_pane_zoom, in
 the Shell and Window menus with their defaults (Cmd+D, Cmd+Opt+arrows,
-…)),
-`"none"`, or
-`{ text = "…" }`. The menus' own shortcuts are the defaults and each entry
-replaces or removes one chord; the menus are built from the result, so
-they show what works (an action's first chord shows, any others work
-hidden, as Cmd+1…9 do), and the fixed items (Quit, Hide, Minimize,
-Cmd+1…9) give up a chord the config names. Cmd chords bound to actions
-are matched by the menus; the view performs those without Cmd and sends
-text bindings before `keys::translate`. An unbound key, `"none"`
-included, does what it does with no config: Cmd+← / → / ⌫ edit the line,
-other Cmd keys do nothing, the rest go to the program. Characters are
-matched on the ASCII-capable layout, so bindings work on non-Latin
-layouts. A pin's `[keybind]` merges over the user's chord by chord (each
-layer's chords are spelled one way before merging, so `"command+D"`
-replaces `"cmd+d"`). A bad entry is a config notice naming it and is
-ignored.
+…). The menus' own shortcuts are the defaults, and each entry replaces
+or removes one chord. The menus are built from the result, so they show
+what works (an action's first chord shows, and any others work hidden,
+as Cmd+1…9 do), and the fixed items (Quit, Hide, Minimize, Cmd+1…9) give
+up a chord the config names. Cmd chords bound to actions are matched by
+the menus; the view performs the ones without Cmd and sends text
+bindings before `keys::translate`. An unbound key, `"none"` included,
+does what it does with no config: Cmd+← / → / ⌫ edit the line, other Cmd
+keys do nothing, and the rest go to the program. Characters are matched
+on the ASCII-capable layout, so bindings work on non-Latin layouts. A
+pin's `[keybind]` merges over yours chord by chord (each layer's chords
+are spelled one way before merging, so `"command+D"` replaces
+`"cmd+d"`). A bad entry is a config notice naming it, and is ignored.
 
 Fonts (`config::Config::font_config` → `term_font::Fonts::with_config`):
 `font_family`, `font_size`, `font_fallback = [..]` (tried in order before
 the system's fallback), `font_bold` / `font_italic` / `font_bold_italic`
-(faces by name; unset, the family's own), `line_height = 1.0` (multiplies
-the cell height; must be above 0) and `cell_width = "0"` (points, e.g.
-`"1.5"` or `-1`, or a percentage of the advance, `"10%"`), and
-`font_features = ["-calt", "-liga", "zero", "ss01=1"]` (OpenType features
-on all four faces, Ghostty's and kitty's syntax: `tag` or `+tag` on,
-`-tag` off, `tag=n` an alternate; parsed by `term_font::Tag::parse_feature`).
-Ligatures are on where the font has them (ligatures design §8) and
-`["-calt", "-liga"]` turns them off; until the renderer draws them (B1.2
-sets `Fonts::allow_runs`) every cell is still shaped alone, so only
-single-glyph features such as `zero` and `ss01` show. A bad
-`line_height` or `cell_width` is reported like any other bad setting; a
-bad `font_features` entry is a notice naming it and only that entry is
-left out. The
-first window checks the named fonts are installed (`Fonts::missing`); any
-that aren't become config notices in that window and later ones
-(`terminal-decline: config: font_fallback: no font named "X" is installed;
-ignored`). Cmd+= / Cmd+- change only the size; the other font settings
-stay.
+(faces by name; unset, the family's own), `line_height = 1.0`
+(multiplies the cell height; must be above 0), `cell_width = "0"`
+(points, e.g. `"1.5"` or `-1`, or a percentage of the advance, `"10%"`),
+and `font_features = ["-calt", "-liga", "zero", "ss01=1"]` (OpenType
+features on all four faces, in Ghostty's and kitty's syntax: `tag` or
+`+tag` on, `-tag` off, `tag=n` an alternate; parsed by
+`term_font::Tag::parse_feature`). Ligatures are on where the font has
+them (ligatures design §8) and `["-calt", "-liga"]` turns them off. The
+renderer draws them (ligatures design B1.2: `FontSet::add` turns
+`Fonts::allow_runs` on for every renderer's fonts, and only stretches
+that can ligate are shaped). A bad `line_height` or `cell_width` is
+reported like any other bad setting; a bad `font_features` entry is a
+notice naming it, and only that entry is left out. The first window
+checks the named fonts are installed (`Fonts::missing`); any that aren't
+become config notices in that window and later ones
+(`terminal-decline: config: font_fallback: no font named "X" is
+installed; ignored`). Cmd+= / Cmd+- only change the size; the other font
+settings stay.
 
 ## Performance testing
 
-- `term-core` benchmarks (criterion): plain ASCII, coloured output (SGR-heavy),
-  cursor-movement-heavy (vim/htop style), `seq`-style short lines, Unicode/wide
-  text, all with a full scrollback; each fed in 64 KB pieces (`parse`) and in
-  1 KB pieces (`parse_1k`, what a macOS PTY returns per read).
-- Render benchmark: frame build time for 300×100 grid (CPU side) and GPU time
-  via Metal counters.
-- End-to-end: wall time of `cat` 100 MB file; idle CPU over 60 s
-  (`top -l`/`powermetrics`); resident memory with empty and full scrollback;
-  input latency (keypress → on screen), see "Input latency" below.
+- `term-core` benchmarks (criterion): plain ASCII, coloured output
+  (SGR-heavy), cursor-movement-heavy (vim/htop style), `seq`-style short
+  lines, Unicode/wide text, all with a full scrollback; each fed in 64 KB
+  pieces (`parse`) and in 1 KB pieces (`parse_1k`, what a macOS PTY
+  returns per read).
+- Render benchmark: frame build time for a 300×100 grid (CPU side) and
+  GPU time via Metal counters.
+- End to end: wall time of `cat` of a 100 MB file; idle CPU over 60 s
+  (`top -l`/`powermetrics`); resident memory with empty and full
+  scrollback; input latency (keypress → on screen), see "Input latency"
+  below.
 - Profile with `samply` and Instruments (`xctrace` Time Profiler + Metal
   System Trace). Compare against Ghostty on the same machine.
 
 ## Conformance (vttest, esctest2)
 
-`scripts/conformance/run.py` runs vttest's named menus and esctest2 against
-term-core on a real PTY with no window (`crates/term-pty/examples/headless.rs`),
-nightly in CI when main changed. Known failures are checked in
-(`tests/conformance/accepted-failures.txt`, each `to-fix` or `not-planned`)
-and explained in `docs/conformance-failures.md`; how to run and update it is
-in `docs/conformance.md`. The harness answers DECRQCRA itself, from the
-screen, because esctest reads the screen back through it.
+`scripts/conformance/run.py` runs vttest's named menus and esctest2
+against term-core on a real PTY with no window
+(`crates/term-pty/examples/headless.rs`), nightly in CI when main has
+changed. Known failures are checked in
+(`tests/conformance/accepted-failures.txt`, each `to-fix` or
+`not-planned`) and explained in `docs/conformance-failures.md`; how to
+run and update it is in `docs/conformance.md`. The harness answers
+DECRQCRA itself, from the screen, because esctest reads the screen back
+through it.
 
 ## Measured (M-series Mac, macOS 27, release build)
 
@@ -1006,9 +1193,9 @@ screen, because esctest reads the screen back through it.
 | Parse, plain text (1 KB pieces) | 423 MB/s | — |
 | Parse, coloured / TUI / `seq` / Unicode | 172 / 289 / 110 / 131 MB/s | — |
 
-`term-core` parse throughput (criterion, `cargo bench -p term-core --bench
-parse`, M1 Max, MB/s; 64 KB pieces, then 1 KB pieces). Before the bulk ASCII
-work, then after it:
+`term-core` parse throughput (criterion, `cargo bench -p term-core
+--bench parse`, M1 Max, MB/s; 64 KB pieces, then 1 KB pieces), before
+the bulk ASCII work and after it:
 
 | input | before | after |
 |---|---|---|
@@ -1019,51 +1206,54 @@ work, then after it:
 | Unicode / wide | 121 / 124 | 132 / 131 |
 
 By step (1 KB pieces, plain / coloured / TUI / `seq`): bulk ASCII runs
-201 / 164 / 290 / 43; faster scrollback encoding 328 / 167 / 280 / 74; 8-byte
-run scan 355 / 164 / 286 / 73; screen as a ring 419 / 171 / 285 / 102;
-memset row reset 423 / 172 / 289 / 110. Plain text is now above the PTY's
-~240 MB/s but short of the 2× goal.
-Caveats: window sizes, fonts and scrollback limits were not matched exactly
-yet; Decline does less work (no text shaping, no grapheme clusters, no
-reflow). See the performance-testing section for the fair-comparison plan.
+201 / 164 / 290 / 43; faster scrollback encoding 328 / 167 / 280 / 74;
+8-byte run scan 355 / 164 / 286 / 73; screen as a ring 419 / 171 / 285 /
+102; memset row reset 423 / 172 / 289 / 110. Plain text is now above the
+PTY's ~240 MB/s, but short of the 2× goal.
+
+Caveats: window sizes, fonts and scrollback limits weren't matched
+exactly yet, and when these were measured Decline did less work (no text
+shaping, no grapheme clusters, no reflow; all three have landed since).
+See the performance testing section for the plan for a fair comparison.
 
 ### Input latency (keypress → on screen)
 
-`scripts/latency/run.py` (roadmap N.5). Two methods:
+`scripts/latency/run.py` (roadmap N.5) has two methods:
 
-- **In decline.** With `DECLINE_LATENCY_LOG=<file>` (test and bench runs
-  only; unset, it costs one check per key, parse and frame) Decline writes
-  a JSON line per key: the event's timestamp (t0), `keyDown`, the bytes
-  handed to the writer thread (t1), the next parse in that window, taken
-  with the terminal locked (t2), the frame that shows it (start, commit,
-  GPU done) and the drawable's `presentedTime` (t3), all on one clock
-  (`CLOCK_UPTIME_RAW`, which `NSEvent`, `CACurrentMediaTime` and Metal use).
-  The driver starts Decline as a throwaway app bundle through `open` (an
-  app started from a script may not be given the focus), running
-  `scripts/latency/echo.py` (raw mode, echoes each key at once) or
-  `htop -d 1` (typing into its search bar). Keys: Decline posts key events
-  to its own process with `CGEventPostToPid` when asked through
+- **In Decline.** With `DECLINE_LATENCY_LOG=<file>` (test and bench runs
+  only; unset, it costs one check per key, parse and frame), Decline
+  writes a JSON line per key: the event's timestamp (t0), `keyDown`, the
+  bytes handed to the writer thread (t1), the next parse in that window,
+  taken with the terminal locked (t2), the frame that shows it (start,
+  commit, GPU done) and the drawable's `presentedTime` (t3), all on one
+  clock (`CLOCK_UPTIME_RAW`, which `NSEvent`, `CACurrentMediaTime` and
+  Metal use). The driver starts Decline as a throwaway app bundle through
+  `open` (an app started from a script may not be given the focus),
+  running `scripts/latency/echo.py` (raw mode, echoes each key at once)
+  or `htop -d 1` (typing into its search bar). Keys: Decline posts key
+  events to its own process with `CGEventPostToPid` when asked through
   `DECLINE_LATENCY_INPUT` (a FIFO). That needs no permission (posting to
   another process needs Accessibility) and still goes through the window
-  server. 200 keys per run, 50–150 ms apart at random, after 6 warm-up keys.
-  Scenarios: idle; flood (a second window of the same process running
-  `yes`); htop in the same window; the display link fixed at 120 or 60 Hz
-  (`DECLINE_LATENCY_HZ`). With `--type` the driver instead sends the FIFO
-  command `type <hex>`, which hands the key's bytes to the first window as
-  `keyDown` would, without the window server: it works without the focus
-  (macOS refuses to activate an app while someone types in another), and
-  t0 is then `keyDown`.
-- **From outside, for Ghostty and Decline alike.** `scripts/latency/probe.swift`
-  posts the key to the app with `CGEventPostToPid` and watches its window
-  with ScreenCaptureKit at every refresh; the latency is the display time
-  of the first frame whose pixels changed minus the time just before
-  posting. Needs Accessibility and Screen Recording for the terminal
-  running it. Error bars: one refresh (8.3 ms at 120 Hz) per sample. On the
-  same Decline frames, ScreenCaptureKit's display time is 5–13 ms (median
-  11 ms) earlier than Metal's `presentedTime`, so add about 11 ms for the
-  time to the glass; the comparison between terminals is like for like.
-  Ghostty is started with Decline's defaults (Menlo 13, 100×30, padding 6,
-  no cursor blink, no config file).
+  server. 200 keys per run, 50–150 ms apart at random, after 6 warm-up
+  keys. Scenarios: idle; flood (a second window of the same process
+  running `yes`); htop in the same window; the display link fixed at 120
+  or 60 Hz (`DECLINE_LATENCY_HZ`). With `--type`, the driver instead
+  sends the FIFO command `type <hex>`, which hands the key's bytes to the
+  first window as `keyDown` would, without the window server: it works
+  without the focus (macOS refuses to activate an app while someone types
+  in another), and t0 is then `keyDown`.
+- **From outside, for Ghostty and Decline alike.**
+  `scripts/latency/probe.swift` posts the key to the app with
+  `CGEventPostToPid` and watches its window with ScreenCaptureKit at
+  every refresh; the latency is the display time of the first frame whose
+  pixels changed, minus the time just before posting. It needs
+  Accessibility and Screen Recording for the terminal running it. Error
+  bars: one refresh (8.3 ms at 120 Hz) per sample. On the same Decline
+  frames, ScreenCaptureKit's display time is 5–13 ms (median 11 ms)
+  earlier than Metal's `presentedTime`, so add about 11 ms for the time
+  to the glass; the comparison between terminals is like for like.
+  Ghostty is started with Decline's defaults (Menlo 13, 100×30, padding
+  6, no cursor blink, no config file).
 
 M1 Max, built-in ProMotion display, macOS 27, release build; the Mac was
 in use (other apps and agents running) during the runs. In Decline, ms,
@@ -1078,22 +1268,22 @@ p50 / p95 / p99, 200 keys per run:
 | htop, 120 Hz | 37.2 / 48.7 / 61.6 | 3.7 / 9.3 / 12.4 | 0.9 / 3.9 / 6.0 | 5.4 / 8.9 / 11.6 | 0.7 / 8.8 / 17.1 | 23.8 / 32.1 / 32.2 |
 | htop, 60 Hz | 36.4 / 48.9 / 51.7 | 3.2 / 9.7 / 11.7 | 0.9 / 3.9 / 6.9 | 5.6 / 14.9 / 16.7 | 0.5 / 5.2 / 9.8 | 23.9 / 32.1 / 32.3 |
 
-The GPU itself takes 0.3–0.7 ms (p50). These runs were made before t1 was
-logged ahead of the hand-off to the writer: a key whose echo was parsed
-before it was logged went unrecorded (46 of 200 at idle 60 Hz, at most 3
-elsewhere) rather than mistimed. In htop, t2 is the first output after the
-key, which can be htop's own refresh rather than its answer.
+The GPU itself takes 0.3–0.7 ms (p50). These runs were made before t1
+was logged ahead of the hand-off to the writer, so a key whose echo was
+parsed before it was logged went unrecorded (46 of 200 at idle 60 Hz, at
+most 3 elsewhere) rather than mistimed. In htop, t2 is the first output
+after the key, which can be htop's own refresh rather than its answer.
 
-From outside (key posted → pixels changed, ms; 29 and 20 keys, too few for
-a p99):
+From outside (key posted → pixels changed, ms; 29 and 20 keys, too few
+for a p99):
 
 | scenario | Decline p50 / p95 / max | Ghostty 1.4.0 p50 / p95 / max |
 |---|---|---|
 | idle | 29.7 / 43.1 / 45.4 | 23.4 / 37.0 / 40.5 |
 | flood (second window running `yes`) | 19.5 / 28.5 / 28.5 | 9.8 / 48.3 / 48.3 |
 
-Screen Recording and Accessibility were granted only briefly, so the full
-outside comparison (200 keys, htop) is still to run:
+Screen Recording and Accessibility were only granted briefly, so the
+full outside comparison (200 keys, htop) is still to run:
 `scripts/latency/run.py --rates "" --external decline,ghostty`.
 
 What this showed: Decline was 6–10 ms slower than Ghostty at the median.
@@ -1102,49 +1292,52 @@ Where its time went:
   display link rate: a frame reached the glass about three 120 Hz
   refreshes after it was sent to the GPU.
 - The key's own redraw: typing marked the screen dirty and, with the
-  display link paused, drew at once, before the echo had arrived; the echo
-  then waited for the next tick (4–5 ms p50, up to a full tick at 60 Hz).
-- 2–8 ms (p50) from the event's timestamp to the bytes reaching the writer:
-  window-server delivery plus the text input system (`interpretKeyEvents`).
+  display link paused, drew at once, before the echo had arrived; the
+  echo then waited for the next tick (4–5 ms p50, up to a full tick at
+  60 Hz).
+- 2–8 ms (p50) from the event's timestamp to the bytes reaching the
+  writer: window server delivery plus the text input system
+  (`interpretKeyEvents`).
 
 #### The fix (October 2026)
 
-Cause: the layer had `displaySyncEnabled` on (the default), so each
-drawable was held for the display's next refresh before the window server
-even saw it, and the window server then composited it on the refresh after
-that. With only two drawables, a second frame inside that window (the
-key's own redraw, then its echo; or the flood window's frames)
-also blocked in `nextDrawable`, on the main thread, until one came back:
-that is the 5–10 ms p95 of "frame build + encode" above, and it held up
-every other window's drawing too.
+The cause: the layer had `displaySyncEnabled` on (the default), so each
+drawable was held for the display's next refresh before the window
+server even saw it, and the window server then composited it on the
+refresh after that. With only two drawables, a second frame inside that
+window (the key's own redraw, then its echo; or the flood window's
+frames) also blocked in `nextDrawable`, on the main thread, until one
+came back. That's the 5–10 ms p95 of "frame build + encode" above, and
+it held up every other window's drawing too.
 
 Two changes:
 1. `displaySyncEnabled = false` (term-render `configure_layer`): the
-   drawable goes to the window server as soon as the GPU is done. A window
-   doesn't tear, since the window server composites at the refresh anyway.
-   Commit → on glass drops from 23–31 ms to 4–9 ms at the median. Not
-   checked: a full-screen window, where macOS may show an opaque layer
-   directly without compositing it, and frames could then tear.
-2. Input no longer draws at once (view `send_input`): it starts the display
-   link and waits for the echo, and the first output after it is drawn as
-   soon as the reader has parsed it (`output_arrived`) instead of on the
-   next tick. With no output within `ECHO_WAIT` (8 ms) a tick draws the
-   input's own changes (cursor, scroll to the bottom). Parsed → frame
-   starts drops from 4–9 ms to 0.1 ms, and the wasted frame before the echo
-   is gone, so the echo's frame never waits for a drawable.
+   drawable goes to the window server as soon as the GPU is done. A
+   window doesn't tear, since the window server composites at the
+   refresh anyway. Commit → on glass drops from 23–31 ms to 4–9 ms at the
+   median. Not checked: a full-screen window, where macOS may show an
+   opaque layer directly without compositing it, and frames could then
+   tear.
+2. Input no longer draws at once (view `send_input`): it starts the
+   display link and waits for the echo, and the first output after it is
+   drawn as soon as the reader has parsed it (`output_arrived`) instead
+   of on the next tick. With no output within `ECHO_WAIT` (8 ms), a tick
+   draws the input's own changes (cursor, scroll to the bottom). Parsed →
+   frame starts drops from 4–9 ms to 0.1 ms, and the wasted frame before
+   the echo is gone, so the echo's frame never waits for a drawable.
 
-Tried and dropped: three drawables (the harness hung after a few keys, and
-a third drawable only queues more), `presentsWithTransaction` with
-`waitUntilScheduled` and `present` (frames took 400 ms to build, as the
-main thread waited on the transaction). `CAMetalDisplayLink` and
-`presentDrawable:atTime:` were not needed once the two changes above
+Tried and dropped: three drawables (the harness hung after a few keys,
+and a third drawable only queues more), and `presentsWithTransaction`
+with `waitUntilScheduled` and `present` (frames took 400 ms to build, as
+the main thread waited on the transaction). `CAMetalDisplayLink` and
+`presentDrawable:atTime:` weren't needed once the two changes above
 closed the gap.
 
-Before and after, in Decline with `--type` (t0 = `keyDown`), ms, p50 / p95
-/ p99, 200 keys per run, the same M1 Max with other agents' builds and
-benchmarks running (load average 5–24). The window was never the key
-window (Alex was typing elsewhere), which is why the old build's commit →
-on glass reads 24–31 ms rather than the 23 ms above:
+Before and after, in Decline with `--type` (t0 = `keyDown`), ms, p50 /
+p95 / p99, 200 keys per run, on the same M1 Max with other agents'
+builds and benchmarks running (load average 5–24). The window was never
+the key window (Alex was typing elsewhere), which is why the old build's
+commit → on glass reads 24–31 ms rather than the 23 ms above:
 
 | scenario | before: keyDown → on glass | after | before: commit → on glass | after |
 |---|---|---|---|---|
@@ -1155,37 +1348,38 @@ on glass reads 24–31 ms rather than the 23 ms above:
 | htop, 120 Hz | 36.3 / 43.8 / 48.0 | 5.8 / 22.1 / 27.5 | 25.7 / 32.4 / 36.6 | 5.2 / 17.8 / 24.4 |
 | htop, 60 Hz | 36.5 / 43.7 / 48.8 | 5.4 / 21.5 / 28.7 | 24.2 / 32.4 / 36.5 | 4.2 / 19.0 / 24.1 |
 
-Every p50 and p99 is lower. The new tail is no longer steady: commit → on
-glass is mostly 3–10 ms with some keys at 17–31 ms, in stretches of
-seconds. One flood 120 Hz run of the new build had such a stretch through
-a third of its keys (7.5 / 32.9 / 41.3 key → glass, the old build's p99
-then being 32.9); the run in the table, minutes later, had none. Likely
-causes, not yet confirmed: the window server busy with other apps' frames,
-and the panel slowing its refresh while the screen is still (ProMotion),
-so the first frame after a pause waits for a slow refresh. Before, every
-frame waited a fixed two to three refreshes, which hid both. The idle
-60 Hz run lost its window to other apps after 146 keys (the 54 left had no
-frame, as for the old build in runs that were stopped).
+Every p50 and p99 is lower. The new tail isn't steady any more: commit →
+on glass is mostly 3–10 ms, with some keys at 17–31 ms in stretches of
+seconds. One flood 120 Hz run of the new build had such a stretch
+through a third of its keys (7.5 / 32.9 / 41.3 key → glass, with the old
+build's p99 then at 32.9); the run in the table, minutes later, had
+none. Likely causes, not confirmed yet: the window server busy with
+other apps' frames, and the panel slowing its refresh while the screen
+is still (ProMotion), so the first frame after a pause waits for a slow
+refresh. Before, every frame waited a fixed two to three refreshes,
+which hid both. The idle 60 Hz run lost its window to other apps after
+146 keys (the 54 left had no frame, as for the old build in runs that
+were stopped).
 
-Idle: 0.0% CPU and 0 idle wakeups (`top -stats cpu,idlew`), as before:
-the display link still pauses after two ticks with nothing new, and an
+Idle: 0.0% CPU and 0 idle wakeups (`top -stats cpu,idlew`), as before.
+The display link still pauses after two ticks with nothing new, and an
 input with no echo keeps it running for at most `ECHO_WAIT`.
 
-The outside comparison with Ghostty could not be run again: Screen
+The outside comparison with Ghostty couldn't be run again: Screen
 Recording and Accessibility are off for the terminal running the harness
 (`probe check`: `screen_recording=false post_events=false`). Against the
 outside numbers above (Ghostty idle 23.4 ms p50, flood 9.8 ms), Decline's
-in-app key → glass gained 25–30 ms at the median, so it should now be well
-ahead; to confirm, with the permissions on:
+in-app key → glass gained 25–30 ms at the median, so it should now be
+well ahead. To confirm, with the permissions on:
 `scripts/latency/run.py --rates "" --external decline,ghostty`.
 
 CI: hosted macOS runners have no real display, so presented times mean
-nothing there. CI can track the part that is Decline's own work, from the
-key's bytes to the encoded frame (t1 → commit): a headless test sending a
-key through `session` to `echo.py` and timing until the reader has parsed
-the echo, then `Renderer::prepare` and `encode` into an offscreen texture
-(as term-render's offscreen test does), reported like the other benches.
-Not built yet.
+nothing there. CI can track the part that's Decline's own work, from the
+key's bytes to the encoded frame (t1 → commit): a headless test sending
+a key through `session` to `echo.py` and timing until the reader has
+parsed the echo, then `Renderer::prepare` and `encode` into an offscreen
+texture (as term-render's offscreen test does), reported like the other
+benches. Not built yet.
 
 ### Build times (term-app split into crates)
 
@@ -1208,28 +1402,29 @@ file. "Bundle" is what `scripts/dogfood.sh` builds: `-p term-dylib
 | `nextest --workspace --no-run`, after a debug build | 41.9 s | 44.8 s |
 | `nextest --workspace --no-run` after editing view.rs | 9.1 s | 7.1 s |
 
-What the split changes is release builds: term-app is one codegen unit
-in release (`codegen-units = 1`), so each edit rebuilt all of it; now
-the moved code builds alongside it and is not rebuilt when the app's
-own code changes. The dylib's thin-LTO link (≈24 s) is the same. Debug
-builds were already incremental, and testing only term-app is cheaper
-because the moved tests are in their own crates; the workspace's tests
-cost the same. A clean debug build waits on objc2-foundation and
-objc2-app-kit (≈13 s and ≈19 s, one after the other, before term-app can
-start), not on our crates: their features (all of AppKit by default) were
-the next thing to look at, below. Line-tables-only debug info for dependencies
-in dev made no difference that held up at low load. Apple's linker
-(ld-prime) is the default; release `lto`/`codegen-units` are unchanged.
+The split helps release builds: term-app is one codegen unit in release
+(`codegen-units = 1`), so each edit rebuilt all of it, whereas now the
+moved code builds alongside it and isn't rebuilt when the app's own code
+changes. The dylib's thin-LTO link (≈24 s) is the same. Debug builds were
+already incremental, and testing only term-app is cheaper because the
+moved tests are in their own crates; the workspace's tests cost the
+same. A clean debug build waits on objc2-foundation and objc2-app-kit
+(≈13 s and ≈19 s, one after the other, before term-app can start), not
+on our crates, so their features (all of AppKit by default) were the
+next thing to look at (below). Line-tables-only debug info for
+dependencies in dev made no difference that held up at low load. Apple's
+linker (ld-prime) is the default; release `lto`/`codegen-units` are
+unchanged.
 
 Then the objc2 framework crates (objc2-app-kit, -foundation, -metal,
 -quartz-core, -io-surface, -core-text, -core-graphics, -core-foundation,
 -image-io, -user-notifications) lost their default features: the
 workspace asks for `std` only and each crate lists the headers it uses
 (`NSWindow`, `MTLDevice`, `CTFont`, ...). That also drops
-objc2-cloud-kit, -core-data, -core-image, -core-location and
--core-video from the build. Medians of 3 clean builds, before (main at
-579c155) and after taking turns, load 6–27 (falling during the runs);
-"starts" is when term-app's own compile begins in `--timings`.
+objc2-cloud-kit, -core-data, -core-image, -core-location and -core-video
+from the build. Medians of 3 clean builds, before (main at 579c155) and
+after taking turns, load 6–27 (falling during the runs); "starts" is when
+term-app's own compile begins in `--timings`.
 
 | clean build | before | after |
 |---|---|---|
@@ -1241,22 +1436,22 @@ objc2-cloud-kit, -core-data, -core-image, -core-location and
 | release: objc2-foundation / objc2-app-kit | 15.2 / 21.2 s | 6.2 / 7.7 s |
 | release: term-app's own compile | 22.5 s | 29.8 s |
 
-A clean debug build now takes about half as long. In release term-app
+A clean debug build now takes about half as long. In release, term-app
 starts 20 s sooner, but its own compile is the critical path and ran
-longer here (it now overlaps other crates still building), so the
-whole build saves about 11 s; paired runs saved 10.7–19.3 s. Builds
-after an edit don't rebuild these crates, so they are unchanged. A new
-AppKit or Foundation class needs its header added to the crate's
-features in its Cargo.toml (the feature is named after the header file
-in the objc2 crate's `src/generated/`); until then the import fails.
+longer here (it now overlaps other crates still building), so the whole
+build saves about 11 s; paired runs saved 10.7–19.3 s. Builds after an
+edit don't rebuild these crates, so they're unchanged. A new AppKit or
+Foundation class needs its header added to the crate's features in its
+Cargo.toml (the feature is named after the header file in the objc2
+crate's `src/generated/`); until then the import fails.
 
 The second split moved completion (term-complete), the updater
 (term-update), the settings import (term-import) and the Dock pin
-commands (term-pins) out of term-app. Builds after an edit, before
-(main at 579c155) and after (main at c80bd95, which includes the objc2
-trim); same method as the first table (both trees warmed first, each
-edit reverted and rebuilt before the next), medians of 3 taking turns,
-load 4–25 (3.8 at the start, 20.7 at the end).
+commands (term-pins) out of term-app. Builds after an edit, before (main
+at 579c155) and after (main at c80bd95, which includes the objc2 trim);
+same method as the first table (both trees warmed first, each edit
+reverted and rebuilt before the next), medians of 3 taking turns, load
+4–25 (3.8 at the start, 20.7 at the end).
 
 | build after an edit | before | after |
 |---|---|---|
@@ -1270,43 +1465,48 @@ load 4–25 (3.8 at the start, 20.7 at the end).
 A release bundle after an edit is about 11–15 s faster, because the
 release term-app compile (one codegen unit) has less code in it. Editing
 the updater or completion costs about the same as editing the app
-itself: term-app depends on them, so it is compiled again either way,
-and the dylib's link is the same. Debug builds and test builds after an
-edit were already a few seconds and stay so.
+itself: term-app depends on them, so it's compiled again either way, and
+the dylib's link is the same. Debug builds and test builds after an edit
+were already a few seconds and stay that way.
 
 ## Reviews
 
-Design reviewed by Opus (xhigh effort); code reviewed by Astra (OpenAI) and
-tested by Kimi. Fixed from those reviews: PTY write deadlocks, 1 KB read
-batching, resize in the alt screen losing shell lines, scrollback view
-sliding when full, origin-mode cursor panic, wide characters split by
-insert/delete, G1 charset, DECSTR as soft reset, RIS keeping counters,
-pending-wrap after erase, query replies (DECRQM, OSC 10/11/12, kitty flags,
-XTVERSION, window size), VS16 emoji width, OSC 52/7, kitty keyboard,
-keypad mode, paste filtering, environment for bare program names, child
-reaping, glyph upload synchronisation, glyph texture caps, 16-bit position
-overflow, synchronized-update stall, drawing while hidden, IME text overlap,
-pin identity collisions, pin signing and quarantine.
+Design reviewed by Opus (xhigh effort); code reviewed by Astra (OpenAI)
+and tested by Kimi. Fixed from those reviews: PTY write deadlocks, 1 KB
+read batching, resize in the alt screen losing shell lines, scrollback
+view sliding when full, origin-mode cursor panic, wide characters split
+by insert/delete, G1 charset, DECSTR as soft reset, RIS keeping
+counters, pending-wrap after erase, query replies (DECRQM, OSC 10/11/12,
+kitty flags, XTVERSION, window size), VS16 emoji width, OSC 52/7, kitty
+keyboard, keypad mode, paste filtering, environment for bare program
+names, child reaping, glyph upload synchronisation, glyph texture caps,
+16-bit position overflow, synchronized-update stall, drawing while
+hidden, IME text overlap, pin identity collisions, pin signing and
+quarantine.
 
 ## Next milestone
 
 1. ~~Scrollback as text + style runs~~ (done), ~~compress sealed blocks~~
    (done, R.7: idle LZ4 compression, cells design §11.8).
 2. ~~8-byte cells with a style table per screen~~ (done, cells design
-   PR 5), ~~grapheme clusters per row and mode 2027~~ (done, PR 6). Next:
-   scrollback v2 (PR 7), OSC 8 links (PR 9).
-3. ~~Parse plain-text runs in bulk~~ (done). Next: a CSI/SGR fast path.
-4. **Copy cells under the lock, build GPU instances outside it**, with
-   per-row dirty flags so a spinner doesn't rebuild the whole screen.
+   PR 5), ~~grapheme clusters per row and mode 2027~~ (done, PR 6),
+   ~~scrollback v2~~ (done, PR 7), ~~OSC 8 links~~ (done, PR 9).
+3. ~~Parse plain-text runs in bulk~~ (done), ~~a CSI/SGR fast path~~
+   (done: CSI parameters in one loop, SGR before other CSIs).
+4. ~~Copy cells under the lock, build GPU instances outside it, with
+   per-row dirty flags so a spinner doesn't rebuild the whole screen~~
+   (done: cells design R.1, R.2).
 5. ~~Box-drawing and Powerline glyphs drawn in code~~ (done).
-6. **Pin launcher** (see Dock pins).
-7. Reflow on resize; Ctrl keys on non-Latin layouts; OSC 8 links.
+6. ~~Pin launcher~~ (done: stub pins, docs/design/pins.md P-1 to P-5; see
+   Dock pins).
+7. ~~Reflow on resize~~ (done, primary screen), ~~Ctrl keys on non-Latin
+   layouts~~ (done), ~~OSC 8 links~~ (done).
 
 ## Pressure tests
 
-`scripts/pressure/run.py target/release/terminal-decline <workdir>` (inputs from
-`scripts/pressure/gen.py`). All survived, release and debug (overflow-checked)
-builds:
+`scripts/pressure/run.py target/release/terminal-decline <workdir>`
+(inputs from `scripts/pressure/gen.py`). Everything survived, in release
+and debug (overflow-checked) builds:
 
 | scenario | time | CPU | peak | after |
 |---|---|---|---|---|
@@ -1321,24 +1521,25 @@ builds:
 | 10 windows idle (separate processes) | – | 0% | – | 286 MB total |
 | 56 resizes during 1 GB output; 60 in htop | – | – | – | survived |
 
-Heavier campaigns against the real app live beside it in `scripts/pressure/`
-(each opens real windows and runs for minutes, so they are run by hand, not
-in CI; `--help` or `--list` shows the options): `hostile.py` (streams meant
-to break a terminal, several instances at once, each repeated), `campaign.py`
-(many instances at once, many tabs in one, and a mixed soak), `storms.py`
-(resize, font and tab storms while output floods) and `latency_load.py`
-(keypress-to-present latency while other instances or a tab flood).
+Heavier campaigns against the real app live beside it in
+`scripts/pressure/` (each opens real windows and runs for minutes, so
+they're run by hand, not in CI; `--help` or `--list` shows the options):
+`hostile.py` (streams meant to break a terminal, several instances at
+once, each repeated), `campaign.py` (many instances at once, many tabs in
+one, and a mixed soak), `storms.py` (resize, font and tab storms while
+output floods) and `latency_load.py` (keypress-to-present latency while
+other instances or a tab flood).
 
 ### Frame building after the cell interface (F3.1)
 
-`cargo bench -p term-render --bench frame`, best of 5 alternating runs under
-load: 80×24 plain 8.31 → 6.55 µs, 300×100 plain 126.4 → 97.0 µs, 300×100
-coloured 113.5 → 110.4 µs (before PR 1 → after F3.1). Rows are built from
-their stored cells, with selection/cursor/IME checks only on rows that need
-them, and runs of same-styled cells share one resolved style. Text whose
-style changes every one or two cells is still 10–25% slower than before PR 1
-(each change re-reads the style); PR 5's style ids make that a single
-compare.
+`cargo bench -p term-render --bench frame`, best of 5 alternating runs
+under load: 80×24 plain 8.31 → 6.55 µs, 300×100 plain 126.4 → 97.0 µs,
+300×100 coloured 113.5 → 110.4 µs (before PR 1 → after F3.1). Rows are
+built from their stored cells, with selection/cursor/IME checks only on
+rows that need them, and runs of cells with the same style share one
+resolved style. Text whose style changes every one or two cells is still
+10–25% slower than before PR 1 (each change re-reads the style); PR 5's
+style ids make that a single compare.
 
 ### 8-byte cells and style tables (cells design PR 5)
 
@@ -1346,45 +1547,47 @@ Interleaved A/B against `main`, best of 5, busy machine. Parse
 (`cargo bench -p term-core --bench parse`, 64 KB / 1 KB pieces): plain
 418 → 534 / 413 → 520 MiB/s, `seq` +29% / +28%, coloured +8.5% / +7.6%,
 unicode +19% / +19%, `tui` 0.0% / −1.5% (noise). Frames
-(`cargo bench -p term-render --bench frame`): 80×24 plain 6.61 → 6.33 µs,
-300×100 plain 99.3 → 93.4 µs, coloured 112.6 → 106.8 µs, a different
-style every cell 152.8 → 140.9 µs. Memory: 8 B a cell (was 12); style
-tables 92 B for plain text, 14 KB for 256 colours, 117 KB / 1.83 MB at
-80×24 / 300×100 for a truecolour gradient, back under 4 KB once the screen
-is cleared.
+(`cargo bench -p term-render --bench frame`): 80×24 plain 6.61 →
+6.33 µs, 300×100 plain 99.3 → 93.4 µs, coloured 112.6 → 106.8 µs, a
+different style every cell 152.8 → 140.9 µs. Memory: 8 B a cell (was
+12); style tables 92 B for plain text, 14 KB for 256 colours, 117 KB /
+1.83 MB at 80×24 / 300×100 for a truecolour gradient, back under 4 KB
+once the screen is cleared.
 
 ### Grapheme clusters (cells design PR 6)
 
 Interleaved A/B against `main`, best of 5, busy machine. Parse (64 KB /
 1 KB pieces): plain +0.6% / +0.9%, coloured +3.0% / +3.4%, `tui` +1.1% /
 +1.3%, `seq` +0.9% / +2.0%, unicode +4.5% / +4.5%; the new `clusters`
-input (marks, emoji sequences, flags, keycaps, a conjunct) 30.9 → 44.6
-ms, as `main` dropped what this stores (about 20 ns a cluster). Frames
-from the snapshot, every row rebuilt (best of 3): 300×100 plain 126.9 →
-125.8 µs, coloured 144.2 → 143.8 µs; the new 300×100 unicode screen
-119 µs. Memory: a row is 48 B (was 40) plus, only in rows with
+input (marks, emoji sequences, flags, keycaps, a conjunct) 30.9 →
+44.6 ms, since `main` dropped what this stores (about 20 ns a cluster).
+Frames from the snapshot, every row rebuilt (best of 3): 300×100 plain
+126.9 → 125.8 µs, coloured 144.2 → 143.8 µs; the new 300×100 unicode
+screen 119 µs. Memory: a row is 48 B (was 40) plus, only in rows with
 clusters, a store of 8 B a slot and the clusters' UTF-8.
 
 ### Frames from the snapshot (cells design F3.3)
 
-Frames are built from term-core's snapshot with a row cache keyed by each
-row's change counter; the cursor, selection and input-method text are
-drawn over the cached rows (cells.md §9.3, "Landed (F3.3)"). Still under
-the lock. `cargo bench -p term-render --bench frame`, main and this
-interleaved, best of 3, load 5–13: when nothing changed 80×24 6.4 → 1.2 µs
-and 300×100 coloured 108 → 26 µs; one row changed (a spinner) at 300×100
-coloured 114 → 24 µs; scrolled a line 118 → 44 µs. When every row changed
-it costs more, 80×24 6.4 → 8.3 µs and 300×100 plain 94.6 → 127.2 µs,
-coloured 108.2 → 143.6 µs, a style per cell 142.1 → 179.3 µs: the snapshot
-copy and copying the rows' instances into the frame, which R.2 removes.
+Frames are built from term-core's snapshot with a row cache keyed by
+each row's change counter; the cursor, selection and input-method text
+are drawn over the cached rows (cells.md §9.3, "Landed (F3.3)"). At the
+time this was still under the lock. `cargo bench -p term-render --bench
+frame`, main and this interleaved, best of 3, load 5–13: when nothing
+changed, 80×24 6.4 → 1.2 µs and 300×100 coloured 108 → 26 µs; one row
+changed (a spinner) at 300×100 coloured 114 → 24 µs; scrolled a line
+118 → 44 µs. When every row changed it costs more, 80×24 6.4 → 8.3 µs and
+300×100 plain 94.6 → 127.2 µs, coloured 108.2 → 143.6 µs, a style per
+cell 142.1 → 179.3 µs: that's the snapshot copy and copying the rows'
+instances into the frame, which R.2 removes.
 
 ### Panes in one layer, shared glyph textures (splits design B2.1)
 
 Each window's frame draws any number of panes into its one layer, and
-every window shares one device, one pair of glyph textures and one `Fonts`
-per font setting (splits.md §3, "Landed (B2.1)"). The app still draws one
-full-window pane. Interleaved with main, best of 3, load 5–8, Menlo 28 px
-with real glyphs (`cargo bench -p term-render --bench renderer`):
+every window shares one device, one pair of glyph textures and one
+`Fonts` per font setting (splits.md §3, "Landed (B2.1)"). When this was
+measured the app still drew one full-window pane. Interleaved with main,
+best of 3, load 5–8, Menlo 28 px with real glyphs (`cargo bench -p
+term-render --bench renderer`):
 
 | case | main | B2.1 |
 |---|---|---|
@@ -1398,6 +1601,6 @@ with real glyphs (`cargo bench -p term-render --bench renderer`):
 The same cells in four panes cost 3% more to build when every row
 changed, 1.6 µs more when nothing did (four snapshots and row caches),
 and 2 µs more to encode (eight draws and four scissors). With the bench
-glyph source (`--bench frame`): 160×48 coloured 36.4 µs against 4 × 80×24
-37.2 µs, and 4.8 against 6.3 µs unchanged. The `frame` cases of one pane
-are unchanged (the code is the same).
+glyph source (`--bench frame`): 160×48 coloured 36.4 µs against
+4 × 80×24 37.2 µs, and 4.8 against 6.3 µs unchanged. The `frame` cases
+of one pane are unchanged (the code is the same).

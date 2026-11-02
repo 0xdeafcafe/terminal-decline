@@ -487,15 +487,17 @@ impl OpenBlock {
             dict.shrink_to(2 * used);
         }
         self.dict = dict;
-        // The next block starts as big as this one ended: grown from
+        // The next block starts half as big as this one ended: grown from
         // nothing, each of its buffers is reallocated (and the old copy
-        // handed back) a dozen times on the way to a block's size.
-        self.meta.reserve_exact(b.meta.len());
-        self.starts.reserve_exact(b.starts.len());
-        self.text.reserve_exact(b.text.len());
-        self.checkpoints.reserve_exact(b.checkpoints.len());
-        self.styles.reserve_exact(b.styles.len());
-        self.style_starts.reserve_exact(b.style_starts.len());
+        // handed back) a dozen times on the way to a block's size; from
+        // half, once. The whole size would leave the open block's spare
+        // room at half a block on average (CJK 69 to 76 bytes a line).
+        self.meta.reserve_exact(b.meta.len() / 2);
+        self.starts.reserve_exact(b.starts.len() / 2);
+        self.text.reserve_exact(b.text.len() / 2);
+        self.checkpoints.reserve_exact(b.checkpoints.len() / 2);
+        self.styles.reserve_exact(b.styles.len() / 2);
+        self.style_starts.reserve_exact(b.style_starts.len() / 2);
         BlockData {
             meta: b.meta.into_boxed_slice(),
             starts: b.starts.into_boxed_slice(),

@@ -236,6 +236,18 @@ fn write_dim(term: &mut Term, text: &str) {
     term.state.take_replies();
 }
 
+/// Run the calling thread (the PTY's reader or writer) as the window's
+/// own: on a performance core, woken at once. A macOS PTY holds ~2 KB, so
+/// a program writing a flood waits on the reader every kilobyte; at the
+/// default class the reader is put on an efficiency core when the Mac is
+/// busy, where each kilobyte takes longer and costs more CPU time.
+fn interactive() {
+    // SAFETY: sets the calling thread's own class; no pointers.
+    unsafe {
+        libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE, 0);
+    }
+}
+
 /// The terminal's lock. Panics while parsing are caught with the lock held
 /// (see [`parse`]), so they never poison it; should anything else, the
 /// state is used as it is rather than taking the app down.
@@ -469,6 +481,7 @@ impl Session {
         let (tx, rx) = mpsc::channel::<Vec<u8>>();
         let mut writer = pty.writer()?;
         let writer = std::thread::Builder::new().name("pty-writer".into()).spawn(move || {
+            interactive();
             for bytes in rx {
                 if writer.write_all(&bytes).is_err() {
                     break;
@@ -496,6 +509,7 @@ impl Session {
         let images = Some(SessionImages::for_process(&term, terminal_id, dirty.clone(), wake.clone()));
         let images2 = images.clone();
         let reader = std::thread::Builder::new().name("pty-reader".into()).spawn(move || {
+            interactive();
             // A panic anywhere else in the loop stops the session too.
             let read = catch_unwind(AssertUnwindSafe(|| -> Result<(), Bug> {
                 let mut buf = vec![0u8; READ_BUF];

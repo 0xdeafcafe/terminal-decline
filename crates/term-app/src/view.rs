@@ -357,6 +357,9 @@ pub struct Ivars {
     /// The window whose `contentLayoutRect` this view observes (it changes
     /// when the tab bar shows or hides), until the window closes.
     observed: RefCell<Option<Retained<NSWindow>>>,
+    /// The window's frame from before it went full screen, saved for a
+    /// restart in its place; `None` while it isn't full screen.
+    normal_frame: StdCell<Option<NSRect>>,
 }
 
 /// The key path observed for the tab bar showing or hiding.
@@ -741,6 +744,18 @@ define_class!(
         fn window_will_close(&self, _n: &NSNotification) {
             self.shut_down();
         }
+
+        #[unsafe(method(windowWillEnterFullScreen:))]
+        fn window_will_enter_full_screen(&self, _n: &NSNotification) {
+            if let Some(window) = self.window() {
+                self.ivars().normal_frame.set(Some(window.frame()));
+            }
+        }
+
+        #[unsafe(method(windowDidExitFullScreen:))]
+        fn window_did_exit_full_screen(&self, _n: &NSNotification) {
+            self.ivars().normal_frame.set(None);
+        }
     }
 );
 
@@ -783,6 +798,11 @@ fn window_theme(config: &Config, appearance: Appearance, settings: bool) -> Them
 }
 
 impl WindowView {
+    /// The frame the window had before it went full screen, if it is.
+    pub fn normal_frame(&self) -> Option<NSRect> {
+        self.ivars().normal_frame.get()
+    }
+
     pub fn new(mtm: MainThreadMarker, frame: NSRect) -> Retained<WindowView> {
         let id = NEXT_ID.with(|n| {
             let id = n.get();
@@ -795,6 +815,7 @@ impl WindowView {
             state: RefCell::new(None),
             first: RefCell::new(None),
             observed: RefCell::new(None),
+            normal_frame: StdCell::new(None),
         });
         let view: Retained<WindowView> = unsafe { msg_send![super(this), initWithFrame: frame] };
         view.setWantsLayer(true);

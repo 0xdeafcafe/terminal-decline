@@ -595,9 +595,12 @@ bar; the bell) is taken out of the terminal by the reader thread as it
 parses (`session::Events`) and handed to the main thread, rather than
 when a frame is drawn.
 
-A dogfood restart saves each window's directory and frame, plus, for
-tabs, the index of their tab group and which tab was in front
-(`reload::SavedWindow`); they reopen as tabs of one window, in order.
+A dogfood restart saves each window's directory and frame, whether it
+was full screen (then the frame it had before, noted as it went full
+screen, so leaving full screen after the restart puts it back), plus,
+for tabs, the index of their tab group and which tab was in front
+(`reload::SavedWindow`); they reopen as tabs of one window, in order, and
+a full-screen one goes full screen again once it's on screen.
 Files from builds before tabs restore as plain windows. The build keeps
 its bundle path from startup: if the bundle is gone rather than replaced
 (the build from before the rename to Terminal Decline, removed by the

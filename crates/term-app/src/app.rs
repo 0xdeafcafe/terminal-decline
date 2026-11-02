@@ -929,11 +929,18 @@ impl AppDelegate {
                 .map(|(_, v)| v.clone())
         };
         let save = |w: &NSWindow, tab_group, selected| {
-            let f = w.frame();
             let view = ours(w);
+            let full_screen = w.styleMask().contains(NSWindowStyleMask::FullScreen);
+            // Full screen: the frame to come back to when it leaves.
+            let f = view
+                .as_ref()
+                .and_then(|v| v.normal_frame())
+                .filter(|_| full_screen)
+                .unwrap_or_else(|| w.frame());
             SavedWindow {
                 cwd: view.as_ref().and_then(|v| v.foreground_cwd()),
                 frame: [f.origin.x, f.origin.y, f.size.width, f.size.height],
+                full_screen,
                 tab_group,
                 selected,
                 panes: view.as_ref().and_then(|v| v.saved_panes(history)),
@@ -976,6 +983,7 @@ impl AppDelegate {
         for group in crate::reload::tab_groups(saved) {
             let mut first: Option<Retained<NSWindow>> = None;
             let mut front = None;
+            let full_screen = group.iter().any(|w| w.full_screen);
             for w in group {
                 let place = match &first {
                     Some(window) => Place::TabOf(window.clone()),
@@ -999,6 +1007,11 @@ impl AppDelegate {
             }
             if let Some(front) = front {
                 crate::background::make_key_and_order_front(&front);
+            }
+            // Into full screen once it's on screen, at its saved frame so
+            // leaving full screen puts it back there.
+            if let Some(window) = first.filter(|_| full_screen) {
+                window.toggleFullScreen(None);
             }
         }
     }

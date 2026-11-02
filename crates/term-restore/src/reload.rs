@@ -56,6 +56,10 @@ pub struct SavedWindow {
     /// `restore_scrollback = false`, and in files from builds before this.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub history: Option<String>,
+    /// It was full screen; `frame` is then the one it had before. For
+    /// tabs, any tab of the group.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub full_screen: bool,
 }
 
 /// A window's panes as saved: the tree with its shares, each pane's
@@ -481,6 +485,7 @@ mod tests {
                 panes: None,
                 command: None,
                 history: None,
+                full_screen: false,
             },
             SavedWindow {
                 cwd: None,
@@ -490,6 +495,7 @@ mod tests {
                 panes: None,
                 command: None,
                 history: None,
+                full_screen: false,
             },
             SavedWindow {
                 cwd: Some("/b".into()),
@@ -521,6 +527,7 @@ mod tests {
                 }),
                 command: None,
                 history: None,
+                full_screen: false,
             },
         ];
         std::fs::write(&path, serde_json::to_vec(&w).unwrap()).unwrap();
@@ -538,7 +545,24 @@ mod tests {
             panes: None,
             command: None,
             history: None,
+            full_screen: false,
         }
+    }
+
+    /// Full screen is written only when set, and files from builds before
+    /// it read as not full screen.
+    #[test]
+    fn full_screen_round_trips_and_old_files_are_windowed() {
+        let old = br#"[{"cwd":"/a","frame":[1.0,2.0,3.0,4.0]}]"#;
+        let list: Vec<SavedWindow> = serde_json::from_slice(old).unwrap();
+        assert!(!list[0].full_screen);
+        assert!(!serde_json::to_string(&list).unwrap().contains("full_screen"));
+
+        let mut w = window("/a", None, false);
+        w.full_screen = true;
+        let json = serde_json::to_string(&[w.clone()]).unwrap();
+        let back: Vec<SavedWindow> = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, [w]);
     }
 
     /// The running build writes the file and the new one reads it, so a

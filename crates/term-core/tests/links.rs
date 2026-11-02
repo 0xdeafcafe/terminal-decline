@@ -197,11 +197,7 @@ fn plain_urls_are_found_across_wraps_and_hovered_like_links() {
 #[test]
 fn paths_a_program_breaks_over_rows_are_found_whole() {
     let mut t = Term::new(20, 4, 10, term_core::ImagePool::process());
-    t.advance(
-        b"  cat ~/tmp/abc-
-    def/out.txt
-  sleep 2",
-    );
+    t.advance(b"  cat ~/tmp/abc-\r\n    def/out.txt\r\n  sleep 2");
     let exists = |p: &str| p == "/Users/me/tmp/abc-def/out.txt";
     let found = |t: &Term, line, col| t.state.path_at(t.state.point_at(line, col), Some("/Users/me"), exists);
     let f = found(&t, 0, 8).unwrap();
@@ -215,10 +211,7 @@ fn paths_a_program_breaks_over_rows_are_found_whole() {
 
     // Rows that only happen to meet don't make a path that isn't there.
     let mut t = Term::new(20, 4, 10, term_core::ImagePool::process());
-    t.advance(
-        b"abc
-def",
-    );
+    t.advance(b"abc\r\ndef");
     assert_eq!(t.state.path_at(t.state.point_at(0, 1), None, |_| false), None);
 }
 

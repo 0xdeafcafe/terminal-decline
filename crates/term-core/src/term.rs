@@ -1491,6 +1491,7 @@ impl Terminal {
     /// the first ends in a path character and the second starts with one
     /// (spaces and box drawing between them left out).
     pub fn path_at(&self, p: Point, home: Option<&str>, mut exists: impl FnMut(&str) -> bool) -> Option<PathAt> {
+        type Cells = Vec<(Point, Point)>;
         let (text, cells, at) = self.logical_text(p);
         let at = at?;
         let found = |text: &[char], cells: &[(Point, Point)], f: crate::paths::Found| PathAt {
@@ -1522,7 +1523,7 @@ impl Terminal {
                 let (t, c, _) = self.logical_text(Point { line: first - 1, col: 0 });
                 tail(&t).map(|e| (s, t[..=e].to_vec(), c[..=e].to_vec()))
             });
-        let join = |with_prev: bool, with_next: bool| -> Option<(Vec<char>, Vec<(Point, Point)>, usize)> {
+        let join = |with_prev: bool, with_next: bool| -> Option<(Vec<char>, Cells, usize)> {
             let (mut t, mut c, mut i) = (text.clone(), cells.clone(), at);
             if with_next {
                 let (e, nt, nc) = next.as_ref()?;

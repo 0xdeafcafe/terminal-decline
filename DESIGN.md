@@ -1205,6 +1205,12 @@ settings stay.
   below.
 - Profile with `samply` and Instruments (`xctrace` Time Profiler + Metal
   System Trace). Compare against Ghostty on the same machine.
+- The perf watch (`.github/workflows/perf-watch.yml`, after every push
+  to main and nightly) reports allocation counts, scrollback bytes per
+  line, the app's footprint after a scrollback flood, its idle CPU time
+  and wake-ups, and binary sizes, and opens a `performance` issue when
+  one goes up past its limit. A report, never a gate: see
+  `docs/perf-watch.md`.
 
 ## Conformance (vttest, esctest2)
 

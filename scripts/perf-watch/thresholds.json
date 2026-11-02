@@ -1,0 +1,17 @@
+{
+  "_comment": "Limits for scripts/perf-watch/perf_watch.py: how far a number may go up before the perf watch opens a `performance` issue. A report, never a gate: crossing one never fails a build. The first rule whose `match` (fnmatch) fits a metric's name applies. A number is over when it is more than `percent` above its reference AND more than `min_delta` above it, in the metric's unit, so a tiny number moving by a little doesn't count. Counts are deterministic and get tight limits; footprint and idle CPU move between runs of the same build on a CI machine and get looser ones. See docs/perf-watch.md.",
+  "rules": [
+    {"match": "alloc.*.allocs", "percent": 10, "min_delta": 100},
+    {"match": "alloc.*.peak_heap", "percent": 10, "min_delta": 65536},
+    {"match": "alloc.*.retained_heap", "percent": 10, "min_delta": 65536},
+    {"match": "scrollback.*", "percent": 5, "min_delta": 1},
+    {"match": "app.history_bytes", "percent": 10, "min_delta": 65536},
+    {"match": "app.footprint*", "percent": 10, "min_delta": 4194304},
+    {"match": "app.threads", "percent": 10, "min_delta": 2},
+    {"match": "app.idle_cpu_ms_per_min", "percent": 20, "min_delta": 20},
+    {"match": "app.idle_wakeups_per_min", "percent": 20, "min_delta": 30},
+    {"match": "app.idle_context_switches_per_min", "percent": 20, "min_delta": 60},
+    {"match": "size.*", "percent": 5, "min_delta": 16384},
+    {"match": "*", "percent": 10, "min_delta": 0}
+  ]
+}

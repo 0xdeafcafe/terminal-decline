@@ -1,0 +1,134 @@
+name: Perf watch
+
+# Is memory or CPU creeping up as features land? A report, never a gate
+# (docs/perf-watch.md): allocation counts, scrollback bytes per line, the
+# app's footprint after a scrollback flood, its CPU time and wake-ups
+# sitting idle for a minute, and binary sizes. Each run on main is
+# compared with the previous one and the one from about a week before;
+# numbers over scripts/perf-watch/thresholds.json open (or update) a
+# `performance` issue, closed when they are back under. History lives on
+# the `perf-history` branch. A step going wrong is a warning in the
+# summary, never a failed run.
+
+on:
+  push:
+    # `ci/perf-watch**`: try a change to the watch itself (report only:
+    # no history, no issue).
+    branches: [main, "ci/perf-watch**"]
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+  schedule:
+    - cron: "30 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One at a time; while one runs, only the newest push waits (GitHub drops
+# the older pending one), so a burst of pushes is measured at its end.
+concurrency:
+  group: perf-watch-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  changed:
+    # Scheduled macOS runs cost 10x while the repo is private: skip them
+    # when main hasn't changed since the last scheduled run.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.check.outputs.run }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: check
+        run: |
+          if [[ "${{ github.event_name }}" != "schedule" ]] || [[ -n "$(git log --since='25 hours ago' --format=%H -1)" ]]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "main unchanged since the last scheduled run; skipping" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  perf:
+    needs: changed
+    if: needs.changed.outputs.run == 'true'
+    # The app needs macOS (AppKit, Metal), and macOS is what we ship.
+    runs-on: macos-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write # push to perf-history
+      issues: write # the performance issue and its label
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98.1"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: perf-watch
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Self-test
+        continue-on-error: true
+        run: python3 scripts/perf-watch/perf_watch.py --self-test
+
+      # Builds the term-core examples and a release bundle, runs the app
+      # in the background under the test control (it never takes focus).
+      - name: Measure
+        continue-on-error: true
+        run: python3 scripts/perf-watch/perf_watch.py measure --out perf.json
+
+      - name: History so far
+        continue-on-error: true
+        run: |
+          if git fetch --depth=1 origin perf-history 2> /dev/null; then
+            git show FETCH_HEAD:runs.jsonl > runs.jsonl 2> /dev/null || : > runs.jsonl
+          else
+            : > runs.jsonl
+          fi
+          echo "$(wc -l < runs.jsonl) runs in the history"
+
+      - name: Report
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          issues=()
+          if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then issues=(--issues); fi
+          python3 scripts/perf-watch/perf_watch.py report --current perf.json --history runs.jsonl "${issues[@]}"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: perf
+          path: perf.json
+          if-no-files-found: ignore
+
+      - name: Record in perf-history
+        if: github.ref == 'refs/heads/main' && hashFiles('perf.json') != ''
+        continue-on-error: true
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if ! git ls-remote --exit-code --heads origin perf-history > /dev/null; then
+            commit=$(git commit-tree "$(git hash-object -t tree /dev/null)" -m "Start perf watch history")
+            git push origin "$commit:refs/heads/perf-history"
+          fi
+          for _ in 1 2 3; do
+            rm -rf "$RUNNER_TEMP/history"
+            git fetch --depth=1 origin perf-history
+            git worktree add --detach "$RUNNER_TEMP/history" FETCH_HEAD
+            python3 scripts/perf-watch/perf_watch.py record --current perf.json --history "$RUNNER_TEMP/history/runs.jsonl"
+            git -C "$RUNNER_TEMP/history" add runs.jsonl
+            git -C "$RUNNER_TEMP/history" commit -q -m "perf watch: ${GITHUB_SHA::7} (${{ github.event_name }})"
+            if git -C "$RUNNER_TEMP/history" push origin HEAD:perf-history; then exit 0; fi
+            git worktree remove --force "$RUNNER_TEMP/history"
+          done
+          echo "::warning title=perf watch::couldn't push to perf-history"

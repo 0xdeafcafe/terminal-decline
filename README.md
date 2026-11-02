@@ -6,15 +6,26 @@ Terminal Decline (Decline for short) is a GPU-accelerated terminal for
 macOS, written in Rust. It aims to use less memory and CPU than Ghostty and
 Warp, has no UI of its own, and can turn any program into its own Dock app.
 
-- **Light.** Under half Ghostty's memory.
-- **Fast.** `cat` of 100 MB faster than Ghostty, on a third of the CPU.
-- **No UI of its own.** Native macOS tabs and splits, a config file and
-  a Settings screen in a tab.
-- **Any program as a Dock app.** `decline pin rush` and rush gets its own
-  icon in the Dock.
-- **Shell-aware.** Prompt marks, a completion list with descriptions,
-  command timings, finish notifications.
-- **For agents.** `decline ctl` drives real terminals without windows.
+- **Under half Ghostty's memory.** 26 MB idle against 60, 19 MB after
+  10k lines against 56. Scrollback is kept as text and style runs,
+  LZ4-compressed once it goes quiet.
+- **Faster `cat`, on a third of the CPU.** 100 MB in 0.58 s (Ghostty
+  0.66 s), using 0.66 s of CPU with WindowServer against Ghostty's 2.04 s.
+- **Quiet when idle.** No timers, no redraws while nothing changes:
+  0.02% CPU and about one wake-up every two seconds.
+- **Native, with no UI of its own.** AppKit window tabs, splits, Core
+  Text shaping (ligatures included) and Metal; settings are a config file
+  or a Settings screen in a tab.
+- **Current protocols.** kitty keyboard and graphics, Sixel and iTerm2
+  images, OSC 8 links, OSC 133 prompt marks; checked against vttest and
+  esctest2.
+- **Terminals you can script.** `decline ctl` runs real terminals without
+  windows: send keys, wait for text or for a command to finish (with its
+  exit status), read the screen as JSON, screenshot it.
+- **Any program as a Dock app.** `decline pin rush --dock` gives rush its
+  own icon, opening straight into it.
+- **Easy to move to.** `decline import ghostty` converts your Ghostty
+  config, and the config reloads when you save it.
 
 ## Install
 

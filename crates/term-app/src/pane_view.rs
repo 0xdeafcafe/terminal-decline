@@ -1713,6 +1713,24 @@ impl PaneView {
             }
             return;
         }
+        // A plain click on an underlined link or path while the program
+        // takes the mouse: the click is ours, not the program's, and the
+        // menu opens once a double-click can no longer come (the rest of
+        // the click goes nowhere). Only links and paths that exist: the
+        // underline said so.
+        if button == mouse::LEFT
+            && press
+            && event.clickCount() <= 1
+            && event.modifierFlags().is_empty()
+            && self.reporting(event).is_some()
+            && let Some(target) = self.target_at_cell(line, col)
+        {
+            let in_view = self.convertPoint_fromView(event.locationInWindow(), None);
+            self.with(|_, p| p.swallow_click = true);
+            self.ivars().click.replace(Some((target, in_view)));
+            self.schedule_click_menu();
+            return;
+        }
         if let Some((_, sgr)) = self.reporting(event) {
             let cleared = self.with(|_, p| {
                 p.mouse_button = press.then_some(button);

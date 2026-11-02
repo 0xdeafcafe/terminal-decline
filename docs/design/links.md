@@ -27,8 +27,10 @@ by Alex.
   `Target::Missing`; asked for by Alex, 2 Nov 2026).
 - **Unchanged:** double-click selects a word, triple-click a line, a drag
   selects, Option-click on the command line moves the shell's cursor,
-  and a program taking the mouse gets the clicks. There, Shift-click (which
-  already keeps a click from the program) is what brings up the menu.
+  and a program taking the mouse gets the clicks, except a plain click on
+  an underlined link or path, which opens its menu (the program doesn't
+  get that click; Alex, 2 Nov 2026). There, Shift-click (which already
+  keeps a click from the program) also brings up the menu.
 
 ## 2. What counts
 

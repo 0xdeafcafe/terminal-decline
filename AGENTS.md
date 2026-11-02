@@ -22,9 +22,24 @@ Use [Conventional Commits](https://www.conventionalcommits.org/):
   `docs` where they fit.
   Leave the scope out for changes across many modules.
 - Breaking changes: `feat(core)!: …` and a `BREAKING CHANGE:` footer.
-- One logical change per commit. Before committing, run `cargo fmt --all`,
-  `cargo clippy --workspace --all-targets -- -D warnings` and
-  `cargo test --workspace`, and don't commit if any of them fail.
+- One logical change per commit, formatted (`cargo fmt --all` is quick).
+
+## Building, testing and landing
+
+Builds and tests run on GitHub CI, not on the Mac the agents share
+(since 2 Nov 2026, as rush does):
+
+- Keep your work on your own branch (`rush/**` or `ci/**`), rebased onto
+  `origin/main`, and push it: CI runs fmt, clippy and the tests there.
+- Wait for it with `gh run watch <id> --exit-status --interval 120`
+  (or `rush watch pr <n>` once a PR exists). Never poll faster: GitHub's
+  limit on Actions requests is shared by all of Alex's repositories,
+  and eight agents checking every 3 s used it up for an hour.
+- Green: land it with `git rebase origin/main && git push origin HEAD:main`.
+- No local `cargo build`/`test` runs, except what only the Mac can do:
+  benchmarks and comparisons (a release build for them), and the
+  dogfood install. CI pins Rust to Homebrew's (1.98.1), so clippy here
+  and there agree.
 
 ## Working here
 

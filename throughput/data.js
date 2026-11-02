@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793507906598,
+  "lastUpdate": 1793594457611,
   "repoUrl": "https://github.com/0xdeafcafe/terminal-decline",
   "entries": {
     "Throughput": [
@@ -587,6 +587,188 @@ window.BENCHMARK_DATA = {
           {
             "name": "history push/plain",
             "value": 29504569,
+            "unit": "elem/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Alexander Forbes-Reed",
+            "username": "0xdeafcafe",
+            "email": "git@alex.forbes.red"
+          },
+          "committer": {
+            "name": "Alexander Forbes-Reed",
+            "username": "0xdeafcafe",
+            "email": "git@alex.forbes.red"
+          },
+          "id": "81463a2495d70eed38a537c4ada16bcc4a6d2af4",
+          "message": "feat(restore): reopen the windows after any quit\n\nQuitting now always saves the window list (places, tabs, panes, full\nscreen) and the next launch reopens it. History still follows\nrestore_scrollback: saved on quit only with \"always\", never while\nSecure Keyboard Entry is on. Before, a plain quit with the default\nsettings forgot every window and the next launch opened one in the\nmiddle of the screen.",
+          "timestamp": "2026-11-02T03:20:23Z",
+          "url": "https://github.com/0xdeafcafe/terminal-decline/commit/81463a2495d70eed38a537c4ada16bcc4a6d2af4"
+        },
+        "date": 1793594456563,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "parse/clusters",
+            "value": 109.16,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse/coloured",
+            "value": 248.08,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse/plain",
+            "value": 726.14,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse/seq",
+            "value": 215.23,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse/tui",
+            "value": 391.78,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse/unicode",
+            "value": 141.5,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse_1k/clusters",
+            "value": 100.09,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse_1k/coloured",
+            "value": 257.79,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse_1k/plain",
+            "value": 670.27,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse_1k/seq",
+            "value": 195.14,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse_1k/tui",
+            "value": 379.79,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse_1k/unicode",
+            "value": 141.68,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "history decode/background",
+            "value": 13290466,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history decode/cjk",
+            "value": 6606579,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history decode/emoji",
+            "value": 5001253,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history decode/gradient",
+            "value": 576024,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history decode/ls",
+            "value": 7772482,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history decode/plain",
+            "value": 14015322,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/background",
+            "value": 6644708,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/cjk",
+            "value": 7674447,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/emoji",
+            "value": 9923449,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/gradient",
+            "value": 407855,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/keyed/background",
+            "value": 6660678,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/keyed/cjk",
+            "value": 8449215,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/keyed/emoji",
+            "value": 9406682,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/keyed/gradient",
+            "value": 419876,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/keyed/ls",
+            "value": 14047249,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/keyed/plain",
+            "value": 31928594,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/ls",
+            "value": 11139546,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/plain",
+            "value": 32203392,
+            "unit": "elem/s"
+          },
+          {
+            "name": "typing/echo",
+            "value": 20164903,
+            "unit": "elem/s"
+          },
+          {
+            "name": "typing/echo+report",
+            "value": 2001407,
             "unit": "elem/s"
           }
         ]

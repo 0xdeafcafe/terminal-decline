@@ -218,6 +218,7 @@ jobs:
     environment: release
     permissions:
       contents: read
+      actions: read
     outputs:
       publish: ${{ steps.decide.outputs.publish }}
     env:
@@ -227,10 +228,11 @@ jobs:
       ZIP: dist/${{ needs.build.outputs.zip }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: terminal-decline-macos-arm64
-          path: dist
+      # gh rather than actions/download-artifact, which failed on the
+      # macOS runner after 5 retries every time for v0.1.0 while the same
+      # artifact downloaded fine with gh.
+      - name: Download the build
+        run: gh run download "$GITHUB_RUN_ID" -n terminal-decline-macos-arm64 -D dist
 
       - name: Fetch Sparkle
         run: scripts/sparkle.sh

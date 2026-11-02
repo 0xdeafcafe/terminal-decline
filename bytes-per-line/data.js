@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793507903571,
+  "lastUpdate": 1793594454212,
   "repoUrl": "https://github.com/0xdeafcafe/terminal-decline",
   "entries": {
     "Scrollback bytes per line": [
@@ -232,6 +232,68 @@ window.BENCHMARK_DATA = {
           {
             "name": "scrollback plain 40 chars",
             "value": 44,
+            "unit": "bytes/line"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Alexander Forbes-Reed",
+            "username": "0xdeafcafe",
+            "email": "git@alex.forbes.red"
+          },
+          "committer": {
+            "name": "Alexander Forbes-Reed",
+            "username": "0xdeafcafe",
+            "email": "git@alex.forbes.red"
+          },
+          "id": "81463a2495d70eed38a537c4ada16bcc4a6d2af4",
+          "message": "feat(restore): reopen the windows after any quit\n\nQuitting now always saves the window list (places, tabs, panes, full\nscreen) and the next launch reopens it. History still follows\nrestore_scrollback: saved on quit only with \"always\", never while\nSecure Keyboard Entry is on. Before, a plain quit with the default\nsettings forgot every window and the next launch opened one in the\nmiddle of the screen.",
+          "timestamp": "2026-11-02T03:20:23Z",
+          "url": "https://github.com/0xdeafcafe/terminal-decline/commit/81463a2495d70eed38a537c4ada16bcc4a6d2af4"
+        },
+        "date": 1793594452794,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "scrollback CJK",
+            "value": 76,
+            "unit": "bytes/line"
+          },
+          {
+            "name": "scrollback compiler error",
+            "value": 66,
+            "unit": "bytes/line"
+          },
+          {
+            "name": "scrollback emoji-heavy",
+            "value": 85,
+            "unit": "bytes/line"
+          },
+          {
+            "name": "scrollback full-width background",
+            "value": 26,
+            "unit": "bytes/line"
+          },
+          {
+            "name": "scrollback gradient 160 cells",
+            "value": 2020,
+            "unit": "bytes/line"
+          },
+          {
+            "name": "scrollback ls --color",
+            "value": 64,
+            "unit": "bytes/line"
+          },
+          {
+            "name": "scrollback placeholder image row",
+            "value": 60,
+            "unit": "bytes/line"
+          },
+          {
+            "name": "scrollback plain 40 chars",
+            "value": 49,
             "unit": "bytes/line"
           }
         ]

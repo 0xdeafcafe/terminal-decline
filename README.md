@@ -5,6 +5,10 @@
 Terminal Decline (Decline for short) is a terminal for macOS, written in
 Rust and drawn on the GPU. Quick, light, and out of your way.
 
+<p align="center">
+  <img src="docs/img/screenshot.webp" width="860" alt="A Decline window in the home folder: git fetch - typed, and the autocomplete list showing each flag with what it does">
+</p>
+
 - **Fast, properly fast**: `cat` a 100 MB file in 0.58 s. Apple's
   Terminal takes nearly 4.
 - **Tiny footprint**: 26 MB idle, and 0.02% CPU, so low epstein wants

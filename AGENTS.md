@@ -46,7 +46,7 @@ After merging changes to `main` that affect the app, run
 `scripts/dogfood.sh`: it installs, and the running copy restarts into
 the new build and reopens its windows in the same folders and places,
 but only once every tab is at its prompt and nobody has used it for a
-couple of minutes (or when Alex picks Restart to Update); it never ends a
+couple of minutes (or when Alex picks Update Now, Cmd+U); it never ends a
 program he is running. `--now` restarts it at once, only for when nobody
 is using it. The bundle is the
 launcher, `Frameworks/libterminal_decline.dylib` and the pin stub in

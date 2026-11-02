@@ -663,8 +663,10 @@ module's `source` and `dogfood` parts).
   program running in any pane, looking again every 15 minutes until
   then; `"off"` → no checks.
 - **Menus.** Decline › Check for Updates… (Sparkle's check in
-  release builds, this one in builds from source) and, for builds from
-  source, Update to Latest.
+  release builds, this one in builds from source) and Update Now (Cmd+U),
+  which installs whatever waits. Update to Latest and Restart to Update
+  were items too until 2 Nov 2026, at Alex's ask ("only need 2"); they
+  are key actions now (`update_to_latest`, `restart_to_update`), unbound.
 - **Updating.** The tree is checked again, then the checkout's `main`
   is brought up to GitHub's: ahead only → nothing to merge, the build is
   of what's there; behind only → `git merge --ff-only origin/main`;

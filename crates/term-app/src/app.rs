@@ -1687,8 +1687,8 @@ pub(crate) fn new_build_pending() -> bool {
     delegate().is_some_and(|d| d.ivars().new_build.borrow().pending)
 }
 
-/// Whether Terminal Decline › Restart to Update is in the menu: a
-/// dogfood build watching for new ones.
+/// Whether this is a dogfood build watching for new ones: Update Now is
+/// in the menu, to restart into one.
 pub(crate) fn restart_menu_shown() -> bool {
     delegate().is_some_and(|d| d.ivars().new_build.borrow().watching.is_some())
 }
@@ -1874,19 +1874,13 @@ pub fn build_menus(mtm: MainThreadMarker, app_name: &str, binds: &Keybinds) -> R
                     vec![NSMenuItem::separatorItem(mtm)],
                 ]
                 .concat(),
+                // Two items at most: Update Now does whichever update
+                // waits (restart into a new build, else update to the
+                // latest commits), so Update to Latest and Restart to
+                // Update are key actions only, not items of their own.
                 (false, source) => [
                     if source {
-                        [
-                            b(MenuAction::CheckForUpdates.label(), MenuAction::CheckForUpdates),
-                            b(MenuAction::UpdateToLatest.label(), MenuAction::UpdateToLatest),
-                        ]
-                        .concat()
-                    } else {
-                        Vec::new()
-                    },
-                    // A dogfood build, which restarts into new ones.
-                    if restart_menu_shown() {
-                        b(MenuAction::RestartToUpdate.label(), MenuAction::RestartToUpdate)
+                        b(MenuAction::CheckForUpdates.label(), MenuAction::CheckForUpdates)
                     } else {
                         Vec::new()
                     },

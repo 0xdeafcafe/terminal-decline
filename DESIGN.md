@@ -467,8 +467,8 @@ every pane at its prompt and no key or mouse input to the app for
 input) it restarts at once. Otherwise the old build carries on (its
 library stays mapped; nothing loads it again) and says so once, in a
 notification "Decline updated — restart when you're ready" with
-a Restart button; Decline › Restart to Update
-(`restart_to_update`, unbound) is enabled meanwhile. It looks again when
+a Restart button; Decline › Update Now (Cmd+U; the key action
+`restart_to_update` does only this, unbound) restarts meanwhile. It looks again when
 a command finishes in some pane, when a window closes, and on a one-shot
 timer (the rest of the idle time, or 2 minutes while busy); nothing
 polls the panes. Restart (button or menu) while programs run asks first,

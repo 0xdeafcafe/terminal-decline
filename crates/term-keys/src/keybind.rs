@@ -103,12 +103,13 @@ pub enum MenuAction {
     /// Terminal Decline > Check for Updates… (only while the updater is
     /// on; unbound by default).
     CheckForUpdates,
-    /// Terminal Decline > Update to Latest (updates from source only;
-    /// does nothing otherwise, and unbound by default).
+    /// Update to the latest commits (updates from source only; does
+    /// nothing otherwise, and unbound by default). A key action only:
+    /// Update Now is the menu's item for it.
     UpdateToLatest,
-    /// Terminal Decline > Restart to Update: restart into a dogfood build
-    /// installed while programs ran (asking first if they still do; does
-    /// nothing otherwise, and unbound by default).
+    /// Restart into a dogfood build installed while programs ran (asking
+    /// first if they still do; does nothing otherwise, and unbound by
+    /// default). A key action only: Update Now is the menu's item for it.
     RestartToUpdate,
     /// Terminal Decline > Update Now (Cmd+U): install the update the
     /// welcome line names ([`crate::welcome`]): Restart to Update for a

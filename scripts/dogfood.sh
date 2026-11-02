@@ -3,7 +3,7 @@
 # for daily use. A running dogfood build notices the new one and restarts into
 # it, reopening its windows in the same folders and places, but never under a
 # running program: it waits until every tab is at its prompt and nobody has
-# used it for a couple of minutes, or for Terminal Decline > Restart to Update
+# used it for a couple of minutes, or for Update Now (Cmd+U) in the app menu
 # (crates/term-restore/src/reload.rs). With --now it restarts at once, for when
 # nobody is using it.
 #
@@ -20,7 +20,7 @@
 # (a Developer ID Application certificate in the keychain; pins.md §11,
 # question 2), which signs with the hardened runtime and a timestamp.
 #
-# The app runs this itself to update (Terminal Decline > Update to Latest),
+# The app runs this itself to update (Update Now with new commits waiting),
 # with DECLINE_DOGFOOD_DIR set to the folder it is installed in.
 #
 # Usage: scripts/dogfood.sh [--open] [--now]
@@ -80,7 +80,7 @@ if pgrep -f "$dest/Contents/MacOS/terminal-decline" >/dev/null; then
   if [[ $now == 1 ]]; then
     echo "installed; the app restarts into it now"
   else
-    echo "installed; the app restarts when you're idle, or use Restart to Update"
+    echo "installed; the app restarts when you're idle, or press Cmd+U (Update Now)"
   fi
 fi
 

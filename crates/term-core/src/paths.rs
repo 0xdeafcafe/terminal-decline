@@ -63,6 +63,64 @@ pub fn path_at(text: &[char], i: usize, cwd: Option<&str>, home: Option<&str>, m
             return Some(f);
         }
     }
+    spaced(text, a, b, i, cwd, home, &mut exists)
+}
+
+/// Words a path with spaces may take in on either side, written without
+/// quotes.
+const SPACED_WORDS: usize = 3;
+
+/// A path holding spaces written without quotes, as programs print them
+/// (`installed /Applications/Terminal Decline.app`): the run `a..=b` with
+/// up to [`SPACED_WORDS`] words on either side, each one space away. It
+/// must start with `/` or `~` (a bare name with spaces would be any
+/// prose) and exist; the longest from the nearest start wins.
+fn spaced(
+    text: &[char],
+    a: usize,
+    b: usize,
+    i: usize,
+    cwd: Option<&str>,
+    home: Option<&str>,
+    exists: &mut impl FnMut(&str) -> bool,
+) -> Option<Found> {
+    let mut starts = vec![a];
+    while starts.len() <= SPACED_WORDS {
+        let s = *starts.last()?;
+        if s < 2 || text[s - 1] != ' ' || !is_path_char(text[s - 2]) {
+            break;
+        }
+        let mut k = s - 2;
+        while k > 0 && is_path_char(text[k - 1]) {
+            k -= 1;
+        }
+        starts.push(k);
+    }
+    let mut ends = vec![b];
+    while ends.len() <= SPACED_WORDS {
+        let e = *ends.last()?;
+        if e + 2 >= text.len() || text[e + 1] != ' ' || !is_path_char(text[e + 2]) {
+            break;
+        }
+        let mut k = e + 2;
+        while k + 1 < text.len() && is_path_char(text[k + 1]) {
+            k += 1;
+        }
+        ends.push(k);
+    }
+    for &s in &starts {
+        if !matches!(text[s], '/' | '~') {
+            continue;
+        }
+        for &e in ends.iter().rev() {
+            if (s, e) == (a, b) {
+                continue;
+            }
+            if let Some(f) = candidate(text, s, e, i, true, cwd, home, exists) {
+                return Some(f);
+            }
+        }
+    }
     None
 }
 
@@ -194,6 +252,7 @@ mod tests {
         "/Users/me",
         "/tmp/a b/c.txt",
         "/etc/hosts",
+        "/Applications/Terminal Decline.app",
         "/Users/me/src/app/app/[id]/page.tsx",
         "/Users/me/src/app/crates",
     ];
@@ -230,7 +289,23 @@ mod tests {
             ("\"main.rs\"", 0, None),
             ("open \"/tmp/a b/c.txt\" now", 9, Some(("/tmp/a b/c.txt", "/tmp/a b/c.txt"))),
             ("open \"/tmp/a b/c.txt\" now", 13, Some(("/tmp/a b/c.txt", "/tmp/a b/c.txt"))),
-            ("open /tmp/a b/c.txt now", 13, None),
+            // Without quotes too, when it starts with `/` or `~` and the
+            // longer path exists, from any of its words.
+            ("open /tmp/a b/c.txt now", 13, Some(("/tmp/a b/c.txt", "/tmp/a b/c.txt"))),
+            ("open /tmp/a b/c.txt now", 6, Some(("/tmp/a b/c.txt", "/tmp/a b/c.txt"))),
+            (
+                "installed /Applications/Terminal Decline.app (0.0.1)",
+                12,
+                Some(("/Applications/Terminal Decline.app", "/Applications/Terminal Decline.app")),
+            ),
+            (
+                "installed /Applications/Terminal Decline.app: done",
+                36,
+                Some(("/Applications/Terminal Decline.app", "/Applications/Terminal Decline.app")),
+            ),
+            ("installed /Applications/Terminal Decline.app (0.0.1)", 47, None),
+            // Not from a bare name: prose naming it isn't a path.
+            ("see Terminal Decline.app here", 6, None),
             (
                 "--manifest-path=Cargo.toml",
                 18,

@@ -58,8 +58,12 @@ wins.
    - Trailing punctuation is left out as for URLs; quotes, `<`, `>`, `|`,
      `;` and backticks end a path. A path may follow `=`, `(`, `[` or `{`:
      `--manifest-path=a/Cargo.toml`, `[notes](docs/a.md)`.
-   - A path holding spaces is found only when written in quotes
-     (`"/tmp/a b/c.txt"`).
+   - A path holding spaces is found in quotes (`"/tmp/a b/c.txt"`), and
+     without them when it starts with `/` or `~` and the longer path
+     exists: up to three words on either side of the pointer's, one
+     space apart, longest first (`installed /Applications/Terminal
+     Decline.app (0.0.1)`; asked for by Alex, 2 Nov 2026). A bare name
+     with spaces isn't tried: that would be any prose.
    - Only while the shell is on this Mac: OSC 7's host is empty,
      `localhost` or this Mac's name. Over ssh the paths would name the
      other machine's files, which can't be checked or opened here.

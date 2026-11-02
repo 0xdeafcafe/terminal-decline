@@ -222,6 +222,25 @@ fn paths_a_program_breaks_over_rows_are_found_whole() {
     use HighlightKind::HoveredLink;
     assert_eq!(rows, vec![vec![(6..16, HoveredLink)], vec![(4..15, HoveredLink)], vec![], vec![]]);
 
+    // Over three rows, found from any of them.
+    let mut t = Term::new(20, 5, 10, term_core::ImagePool::process());
+    t.advance(b"  file: /Users/me/a-\r\n    bb-\r\n    cc/x.txt\r\n  next");
+    let exists = |p: &str| p == "/Users/me/a-bb-cc/x.txt";
+    let found = |t: &Term, line, col| t.state.path_at(t.state.point_at(line, col), None, exists);
+    let f = found(&t, 0, 10).unwrap();
+    assert_eq!(f.shown, "/Users/me/a-bb-cc/x.txt");
+    assert_eq!(
+        f.pieces,
+        vec![
+            (t.state.point_at(0, 8), t.state.point_at(0, 19)),
+            (t.state.point_at(1, 4), t.state.point_at(1, 6)),
+            (t.state.point_at(2, 4), t.state.point_at(2, 11)),
+        ]
+    );
+    assert_eq!(found(&t, 1, 5), Some(f.clone()), "from the middle row");
+    assert_eq!(found(&t, 2, 6), Some(f.clone()), "from the last row");
+    assert_eq!(found(&t, 3, 3), None);
+
     // Rows that only happen to meet don't make a path that isn't there.
     let mut t = Term::new(20, 4, 10, term_core::ImagePool::process());
     t.advance(b"abc\r\ndef");

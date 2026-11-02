@@ -85,12 +85,13 @@ their cells.
 **Lines a program broke itself.** A TUI that lays out its own text
 (rush printing a long path indented onto the next row, a panel) leaves
 newlines, not soft wraps, inside a path. When nothing is found on the
-pointer's line, it is tried joined to the line after (its last path
-character to the next line's first) and then to the line before, each
-on its own, then both; spaces and box drawing at the joins are left
-out. Only a path that exists counts, so rows that merely meet don't make
-one (`Terminal::path_at`). The underline then runs from the path's first
-cell to its last, the indent between included. URLs aren't joined yet.
+pointer's line, it is tried joined to the lines after (each one's last
+path character to the next one's first) and before, up to two each way,
+fewest rows first: one after, one before, both, then two; spaces and box
+drawing at the joins are left out. Only a path that exists counts, so
+rows that merely meet don't make one (`Terminal::path_at`). The
+underline covers only the path's own cells on each row, not the indent
+(`PathAt::pieces`; asked for by Alex, 2 Nov 2026). URLs aren't joined yet.
 
 **Whether a path exists** is asked of the filesystem (`stat`) in the app;
 term-core only takes a function that answers, so it stays free of the

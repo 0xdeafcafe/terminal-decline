@@ -1491,8 +1491,8 @@ impl Terminal {
     /// A program that breaks long lines itself (a TUI's panel, rush
     /// printing a long path indented) leaves a path over rows with no
     /// soft wrap between them; when nothing is found on its own line, the
-    /// line is tried joined to the one before and the one after, where
-    /// the first ends in a path character and the second starts with one
+    /// line is tried joined to up to two lines before and two after,
+    /// where each ends in a path character and the next starts with one
     /// (spaces and box drawing between them left out).
     pub fn path_at(&self, p: Point, home: Option<&str>, mut exists: impl FnMut(&str) -> bool) -> Option<PathAt> {
         type Cells = Vec<(Point, Point)>;
@@ -1521,43 +1521,70 @@ impl Terminal {
         let tail = |t: &[char]| t.iter().rposition(|&c| content(c)).filter(|&k| crate::paths::is_path_char(t[k]));
         let head = |t: &[char]| t.iter().position(|&c| content(c)).filter(|&k| crate::paths::is_path_char(t[k]));
         let (first, last) = self.logical_line(p.line);
-        // This line up to its last path character, joined to the start
-        // of the next (unless the pointer is past that end).
-        let next = self.row_at(last + 1).and_then(|_| tail(&text).filter(|&e| at <= e)).and_then(|e| {
-            let (t, c, _) = self.logical_text(Point { line: last + 1, col: 0 });
-            head(&t).map(|s| (e, t[s..].to_vec(), c[s..].to_vec()))
-        });
-        // The end of the line before, joined to this line from its first
-        // path character (unless the pointer is on the indent).
-        let prev = (first > 0)
-            .then(|| self.row_at(first - 1))
-            .flatten()
-            .and_then(|_| head(&text).filter(|&s| s <= at))
-            .and_then(|s| {
-                let (t, c, _) = self.logical_text(Point { line: first - 1, col: 0 });
-                tail(&t).map(|e| (s, t[..=e].to_vec(), c[..=e].to_vec()))
-            });
-        let join = |with_prev: bool, with_next: bool| -> Option<(Vec<char>, Cells, usize)> {
-            let (mut t, mut c, mut i) = (text.clone(), cells.clone(), at);
-            if with_next {
-                let (e, nt, nc) = next.as_ref()?;
-                t.truncate(e + 1);
-                c.truncate(e + 1);
-                t.extend_from_slice(nt);
-                c.extend_from_slice(nc);
+        // Up to two rows after this line, while each ends in a path
+        // character and the next starts with one (unless the pointer is
+        // past this line's end): where each starts, and ends if it goes on.
+        type Row = (Option<usize>, Option<usize>, Vec<char>, Cells);
+        const MORE: usize = 2;
+        let mut after: Vec<Row> = Vec::new();
+        if tail(&text).is_some_and(|e| at <= e) {
+            let mut line = last + 1;
+            while after.len() < MORE && self.row_at(line).is_some() {
+                let (t, c, _) = self.logical_text(Point { line, col: 0 });
+                let Some(s) = head(&t) else { break };
+                let e = tail(&t);
+                after.push((Some(s), e, t, c));
+                if e.is_none() {
+                    break;
+                }
+                line = self.logical_line(line).1 + 1;
             }
-            if with_prev {
-                let (s, pt, pc) = prev.as_ref()?;
-                i = i - s + pt.len();
-                t = pt.iter().chain(&t[*s..]).copied().collect();
-                c = pc.iter().chain(&c[*s..]).copied().collect();
+        }
+        // The same for rows before it (unless the pointer is on the indent).
+        let mut before: Vec<Row> = Vec::new();
+        if head(&text).is_some_and(|s| s <= at) {
+            let mut line = first;
+            while before.len() < MORE && line > 0 && self.row_at(line - 1).is_some() {
+                let (t, c, _) = self.logical_text(Point { line: line - 1, col: 0 });
+                let Some(e) = tail(&t) else { break };
+                let s = head(&t);
+                before.push((s, Some(e), t, c));
+                if s.is_none() {
+                    break;
+                }
+                line = self.logical_line(line - 1).0;
             }
-            Some((t, c, i))
+        }
+        // This line with `back` rows before it and `ahead` after, each
+        // cut to the path characters where it meets the next.
+        let join = |back: usize, ahead: usize| -> Option<(Vec<char>, Cells, usize)> {
+            if back > before.len() || ahead > after.len() {
+                return None;
+            }
+            let mut out: (Vec<char>, Cells) = (Vec::new(), Vec::new());
+            let push = |out: &mut (Vec<char>, Cells), rt: &[char], rc: &[(Point, Point)], from: usize, to: usize| {
+                out.0.extend_from_slice(&rt[from..to]);
+                out.1.extend_from_slice(&rc[from..to]);
+            };
+            for k in (0..back).rev() {
+                let (s, e, rt, rc) = &before[k];
+                let from = if k + 1 == back { 0 } else { (*s)? };
+                push(&mut out, rt, rc, from, (*e)? + 1);
+            }
+            let from = if back > 0 { head(&text)? } else { 0 };
+            let to = if ahead > 0 { tail(&text)? + 1 } else { text.len() };
+            let i = out.0.len() + at - from;
+            push(&mut out, &text, &cells, from, to);
+            for (k, (s, e, rt, rc)) in after.iter().take(ahead).enumerate() {
+                let to = if k + 1 == ahead { rt.len() } else { (*e)? + 1 };
+                push(&mut out, rt, rc, (*s)?, to);
+            }
+            Some((out.0, out.1, i))
         };
-        // Each neighbour alone first, so a command printed on the next
-        // row isn't glued to a path that ends this one.
-        for (with_prev, with_next) in [(false, true), (true, false), (true, true)] {
-            if let Some((t, c, i)) = join(with_prev, with_next)
+        // Fewest rows first, so a command printed on the next row isn't
+        // glued to a path that ends this one.
+        for (back, ahead) in [(0, 1), (1, 0), (1, 1), (0, 2), (2, 0), (2, 1), (1, 2), (2, 2)] {
+            if let Some((t, c, i)) = join(back, ahead)
                 && let Some(f) = crate::paths::path_at(&t, i, self.cwd(), home, &mut exists)
             {
                 return Some(found(&t, &c, f));

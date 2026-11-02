@@ -2,21 +2,28 @@
 
 ![Decline — less overhead, more terminal](docs/brand/readme-header.png)
 
-Terminal Decline (Decline for short) is a GPU-accelerated terminal for
-macOS, written in Rust. It aims to use less memory and CPU than Ghostty and
-Warp, has no UI of its own, and can turn any program into its own Dock app.
+Terminal Decline (Decline for short) is a terminal for macOS, written in
+Rust and drawn on the GPU. It's here to be quicker and lighter than
+Ghostty, and to stay out of your way while it does it.
 
-- **Fast.** `cat` 100 MB in 0.58 s, quicker than Ghostty on a third of
-  the CPU.
-- **Tiny.** 26 MB idle, under half Ghostty's. Asleep when nothing's
-  happening: 0.02% CPU.
-- **GPU-drawn.** Metal, one layer per window, Core Text for the fonts.
-- **Autocomplete.** Tab shows a list of matches with what each flag does,
-  pulled from man pages and `--help`.
-- **Pin a TUI.** `decline pin rush --dock` and rush is its own app in the
-  Dock.
-- **No bloat.** Native tabs and splits, a config file, nothing else in the
-  way.
+- **Fast, properly fast**: `cat` a 100 MB file in 0.58 s. Ghostty takes
+  0.66 s and burns three times the CPU doing it (2.04 s against our 0.66 s).
+- **Tiny footprint**: 26 MB of memory sat idle, less than half of
+  Ghostty's 60. When nothing's happening it really does nothing - 0.02%
+  CPU and about one wake-up every two seconds, so it isn't quietly eating
+  your battery.
+- **GPU all the way down**: every window is a single Metal layer, with
+  text shaped by Core Text, ligatures and all.
+- **Autocomplete that tells you things**: hit Tab and you get a list of
+  matches with what each flag and subcommand actually does, pulled from
+  man pages and `--help`. The rest of the top match sits in grey after
+  your cursor, and Right takes it.
+- **Pin a TUI to the Dock**: `decline pin rush --dock` and rush gets its
+  own icon, opening straight into it. Works for htop, lazygit, whatever
+  you live in.
+- **No bloaty shit**: native macOS tabs and splits, a config file that
+  reloads when you save it, and a Settings screen in a tab. No account,
+  no AI sidebar, no custom window chrome.
 
 ## Install
 

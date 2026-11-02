@@ -66,14 +66,27 @@ impl Target {
         }
     }
 
-    /// What Copy (Copy Path) puts on the clipboard: the URL, or the path
-    /// as shown, `:line:col` and all.
-    pub fn copy_text(&self) -> &str {
+    /// What Copy (Copy Path) puts on the clipboard: the URL, or the full
+    /// path with the `:line:col` it was shown with (a name alone, or
+    /// `$TMPDIR/…`, means nothing pasted elsewhere).
+    pub fn copy_text(&self) -> String {
         match self {
-            Target::Url { uri, .. } => uri,
-            Target::Path { shown, .. } | Target::Missing { shown, .. } => shown,
+            Target::Url { uri, .. } => uri.clone(),
+            Target::Path { shown, path, .. } | Target::Missing { shown, path, .. } => format!("{path}{}", location_suffix(shown)),
         }
     }
+}
+
+/// The `:line` or `:line:col` at the end of `shown`, or nothing.
+fn location_suffix(shown: &str) -> &str {
+    let mut start = shown.len();
+    for _ in 0..2 {
+        match shown[..start].rfind(':') {
+            Some(k) if k + 1 < start && shown[k + 1..start].bytes().all(|b| b.is_ascii_digit()) => start = k,
+            _ => break,
+        }
+    }
+    &shown[start..]
 }
 
 /// What a click at `p` acts on: [`target_at`], else a path that doesn't

@@ -253,7 +253,12 @@ fn resolutions(written: &str, at: Where) -> Vec<String> {
         }
     };
     let home = at.places.home.as_deref();
-    let cwds = || at.cwd.into_iter().chain(at.places.cwds.iter().map(String::as_str));
+    // A bare name (no `/`) only in the shell's folder: any word of prose
+    // names something in one of many folders.
+    let cwds = |w: &str| {
+        let others = if w.contains('/') { at.places.cwds.as_slice() } else { &[] };
+        at.cwd.into_iter().chain(others.iter().map(String::as_str))
+    };
     for w in expand(written, at.places) {
         if w.starts_with('/') || w == "~" || w.starts_with("~/") {
             if let Some(p) = resolve(&w, None, home) {
@@ -261,13 +266,13 @@ fn resolutions(written: &str, at: Where) -> Vec<String> {
             }
             continue;
         }
-        for cwd in cwds() {
+        for cwd in cwds(&w) {
             if let Some(p) = resolve(&w, Some(cwd), home) {
                 push(p);
             }
         }
         if let Some(rest) = w.strip_prefix("a/").or_else(|| w.strip_prefix("b/")) {
-            for cwd in cwds() {
+            for cwd in cwds(rest) {
                 if let Some(p) = resolve(rest, Some(cwd), home) {
                     push(p);
                 }

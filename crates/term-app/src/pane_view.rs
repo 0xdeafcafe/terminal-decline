@@ -1083,6 +1083,12 @@ impl PaneView {
         true
     }
 
+    /// Whether the program handles clicks on links and paths itself
+    /// (mode 7702).
+    fn program_links(&self) -> bool {
+        self.with(|_, p| p.session.lock_term().state.modes().program_links) == Some(true)
+    }
+
     /// The link or path at visible `line`, `col` ([`crate::links::target_at`]).
     fn target_at_cell(&self, line: usize, col: usize) -> Option<crate::links::Target> {
         let mut cache = self.ivars().exists.borrow_mut();
@@ -1675,14 +1681,21 @@ impl PaneView {
         }
         // Cmd-click on a link or path opens it, even while the program
         // takes the mouse; the rest of the click (drag, release) goes
-        // nowhere.
+        // nowhere. A program that handles plain clicks on links itself
+        // (mode 7702) has them, so there Cmd-click opens the menu.
         if button == mouse::LEFT
             && press
             && event.modifierFlags().contains(NSEventModifierFlags::Command)
             && let Some(target) = self.target_at_cell(line, col)
         {
             self.with(|_, p| p.swallow_click = true);
-            self.open_target(&target);
+            if self.reporting(event).is_some() && self.program_links() {
+                let in_view = self.convertPoint_fromView(event.locationInWindow(), None);
+                self.ivars().click.replace(Some((target, in_view)));
+                self.show_click_menu();
+            } else {
+                self.open_target(&target);
+            }
             return;
         }
         // A selection being made ends on its own button's release, even
@@ -1717,12 +1730,14 @@ impl PaneView {
         // takes the mouse: the click is ours, not the program's, and the
         // menu opens once a double-click can no longer come (the rest of
         // the click goes nowhere). Only links and paths that exist: the
-        // underline said so.
+        // underline said so. Not when the program handles them itself
+        // (mode 7702).
         if button == mouse::LEFT
             && press
             && event.clickCount() <= 1
             && event.modifierFlags().is_empty()
             && self.reporting(event).is_some()
+            && !self.program_links()
             && let Some(target) = self.target_at_cell(line, col)
         {
             let in_view = self.convertPoint_fromView(event.locationInWindow(), None);

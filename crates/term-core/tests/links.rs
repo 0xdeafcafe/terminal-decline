@@ -771,3 +771,21 @@ fn failed_prompts_in_history_follow_their_end_on_the_screen() {
     t.advance(b"\x1b]133;D;1\x07");
     assert_eq!(failed(&mut t), vec![0]);
 }
+
+#[test]
+fn a_program_can_take_clicks_on_links_until_it_ends() {
+    let mut t = Term::new(20, 4, 10, term_core::ImagePool::process());
+    let on = |t: &Term| t.state.modes().program_links;
+    assert!(!on(&t));
+    t.advance(b"\x1b[?7702h");
+    assert!(on(&t));
+    t.advance(b"\x1b[?7702$p");
+    t.advance(b"\x1b[?7702l");
+    assert!(!on(&t));
+    // Leaving the alternate screen ends it.
+    t.advance(b"\x1b[?1049h\x1b[?7702h\x1b[?1049l");
+    assert!(!on(&t));
+    // So does the shell's next prompt, for a program inline that died.
+    t.advance(b"\x1b[?7702h\x1b]133;A\x07");
+    assert!(!on(&t));
+}

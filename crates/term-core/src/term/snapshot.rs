@@ -551,9 +551,11 @@ impl Terminal {
                     }
                 }
             }
-            if let Some(url) = hovered_url.or(self.hover_span) {
+            if hovered_url.is_some() || !self.hover_span.is_empty() {
                 ranges.clear();
-                span(url, &mut ranges);
+                for &piece in hovered_url.as_slice().iter().chain(&self.hover_span) {
+                    span(piece, &mut ranges);
+                }
                 for r in merge(&mut ranges) {
                     out.highlights.push(Highlight {
                         cols: to_u16(r.start)..to_u16(r.end),

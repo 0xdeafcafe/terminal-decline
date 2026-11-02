@@ -209,6 +209,19 @@ fn paths_a_program_breaks_over_rows_are_found_whole() {
     assert_eq!(found(&t, 0, 3), None, "not on the command");
     assert_eq!(found(&t, 2, 3), None);
 
+    // Hovered, only its own cells are underlined: not the rest of the
+    // first row, nor the second row's indent.
+    let mut snap = Snapshot::default();
+    t.state.set_hover_span(&f.pieces);
+    t.state.snapshot(&mut snap, |_| true);
+    let rows: Vec<Vec<(std::ops::Range<u16>, HighlightKind)>> = snap
+        .rows
+        .iter()
+        .map(|r| snap.row_highlights(r).iter().map(|h| (h.cols.clone(), h.kind)).collect())
+        .collect();
+    use HighlightKind::HoveredLink;
+    assert_eq!(rows, vec![vec![(6..16, HoveredLink)], vec![(4..15, HoveredLink)], vec![], vec![]]);
+
     // Rows that only happen to meet don't make a path that isn't there.
     let mut t = Term::new(20, 4, 10, term_core::ImagePool::process());
     t.advance(b"abc\r\ndef");
@@ -233,7 +246,7 @@ fn paths_are_found_across_wraps_in_the_shells_folder() {
 
     // Hovered, it is highlighted as a link is.
     let mut snap = Snapshot::default();
-    t.state.set_hover_span(Some((f.start, f.end)));
+    t.state.set_hover_span(&f.pieces);
     t.state.snapshot(&mut snap, |_| true);
     let rows: Vec<Vec<(std::ops::Range<u16>, HighlightKind)>> = snap
         .rows
@@ -242,7 +255,7 @@ fn paths_are_found_across_wraps_in_the_shells_folder() {
         .collect();
     use HighlightKind::HoveredLink;
     assert_eq!(rows, vec![vec![(3..12, HoveredLink)], vec![(0..7, HoveredLink)], vec![], vec![]]);
-    t.state.set_hover_span(None);
+    t.state.set_hover_span(&[]);
     t.state.snapshot(&mut snap, |_| true);
     assert!(snap.highlights.is_empty());
 }

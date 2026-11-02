@@ -289,6 +289,9 @@ pub struct PathAt {
     /// Its first and last cell, with its `:line:col`.
     pub start: Point,
     pub end: Point,
+    /// Its cells row by row, first and last: a path a program broke over
+    /// rows leaves out the indent and whatever else is between them.
+    pub pieces: Vec<(Point, Point)>,
     /// The text there: the path as written, with its `:line:col`.
     pub shown: String,
     /// The path it names, absolute, without `:line:col`.
@@ -430,7 +433,7 @@ pub struct Terminal {
     hover: Option<Point>,
     /// Cells the app found something under the pointer in (a file path),
     /// highlighted as the hovered link is.
-    hover_span: Option<(Point, Point)>,
+    hover_span: Vec<(Point, Point)>,
     saved_primary: Option<SavedCursor>,
     saved_alt: Option<SavedCursor>,
     scroll_top: usize,
@@ -635,7 +638,7 @@ impl Terminal {
             pen_link: None,
             pen_link_id: 0,
             hover: None,
-            hover_span: None,
+            hover_span: Vec::new(),
             saved_primary: None,
             saved_alt: None,
             scroll_top: 0,
@@ -1131,18 +1134,19 @@ impl Terminal {
         self.hover
     }
 
-    /// The pointer is over something the app found from `a` to `b` (both
-    /// included), as a file path ([`Terminal::path_at`]), or nothing: the
-    /// snapshot highlights those cells as it does the hovered link.
-    pub fn set_hover_span(&mut self, span: Option<(Point, Point)>) {
-        if span != self.hover_span {
-            self.hover_span = span;
+    /// The pointer is over something the app found, as a file path
+    /// ([`Terminal::path_at`]): its pieces, each from `a` to `b` (both
+    /// included), or none: the snapshot highlights those cells as it does
+    /// the hovered link.
+    pub fn set_hover_span(&mut self, pieces: &[(Point, Point)]) {
+        if pieces != self.hover_span.as_slice() {
+            self.hover_span = pieces.to_vec();
             self.touch();
         }
     }
 
-    pub fn hover_span(&self) -> Option<(Point, Point)> {
-        self.hover_span
+    pub fn hover_span(&self) -> &[(Point, Point)] {
+        &self.hover_span
     }
 
     /// The OSC 8 link new characters get, if any.
@@ -1494,11 +1498,21 @@ impl Terminal {
         type Cells = Vec<(Point, Point)>;
         let (text, cells, at) = self.logical_text(p);
         let at = at?;
-        let found = |text: &[char], cells: &[(Point, Point)], f: crate::paths::Found| PathAt {
-            start: cells[f.start].0,
-            end: cells[f.end].1,
-            shown: text[f.start..=f.end].iter().collect(),
-            path: f.path,
+        let found = |text: &[char], cells: &[(Point, Point)], f: crate::paths::Found| {
+            let mut pieces: Cells = Vec::new();
+            for &(a, b) in &cells[f.start..=f.end] {
+                match pieces.last_mut() {
+                    Some(last) if last.0.line == a.line => last.1 = b,
+                    _ => pieces.push((a, b)),
+                }
+            }
+            PathAt {
+                start: cells[f.start].0,
+                end: cells[f.end].1,
+                pieces,
+                shown: text[f.start..=f.end].iter().collect(),
+                path: f.path,
+            }
         };
         if let Some(f) = crate::paths::path_at(&text, at, self.cwd(), home, &mut exists) {
             return Some(found(&text, &cells, f));
@@ -2467,7 +2481,7 @@ impl Terminal {
         fresh.ambiguous = self.ambiguous;
         fresh.grapheme_log = self.grapheme_log.take();
         fresh.hover = self.hover;
-        fresh.hover_span = self.hover_span;
+        fresh.hover_span = std::mem::take(&mut self.hover_span);
         fresh.cursor_default = self.cursor_default;
         fresh.report_token = self.report_token;
         (fresh.cursor_shape, fresh.cursor_blink) = self.cursor_default;

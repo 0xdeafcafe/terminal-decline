@@ -1297,14 +1297,14 @@ impl PaneView {
             let (hover, span) = match &target {
                 Some(url @ crate::links::Target::Url { .. }) => {
                     let (a, b) = url.span();
-                    (t.state.hover().filter(|old| a <= *old && *old <= b).or(point), None)
+                    (t.state.hover().filter(|old| a <= *old && *old <= b).or(point), Vec::new())
                 }
-                Some(path) => (None, Some(path.span())),
-                None => (None, None),
+                Some(path) => (None, path.pieces()),
+                None => (None, Vec::new()),
             };
-            let changed = t.state.hover() != hover || t.state.hover_span() != span;
+            let changed = t.state.hover() != hover || t.state.hover_span() != span.as_slice();
             t.state.set_hover(hover);
-            t.state.set_hover_span(span);
+            t.state.set_hover_span(&span);
             (changed, target.is_some())
         }) else {
             return;

@@ -33,6 +33,8 @@ pub enum Target {
         path: String,
         start: Point,
         end: Point,
+        /// Its cells row by row ([`term_core::PathAt::pieces`]).
+        pieces: Vec<(Point, Point)>,
     },
     /// Something written as a path (with a `/`, or starting with `~`)
     /// that doesn't exist: found only for a click, whose menu offers to
@@ -42,6 +44,7 @@ pub enum Target {
         path: String,
         start: Point,
         end: Point,
+        pieces: Vec<(Point, Point)>,
     },
 }
 
@@ -50,6 +53,15 @@ impl Target {
     pub fn span(&self) -> (Point, Point) {
         match self {
             Target::Url { start, end, .. } | Target::Path { start, end, .. } | Target::Missing { start, end, .. } => (*start, *end),
+        }
+    }
+
+    /// Its cells row by row, for the hover underline: a path's pieces,
+    /// or a link's first and last cell.
+    pub fn pieces(&self) -> Vec<(Point, Point)> {
+        match self {
+            Target::Url { start, end, .. } => vec![(*start, *end)],
+            Target::Path { pieces, .. } | Target::Missing { pieces, .. } => pieces.clone(),
         }
     }
 
@@ -87,6 +99,7 @@ fn missing_at(t: &Terminal, p: Point) -> Option<Target> {
         path: found.path,
         start: found.start,
         end: found.end,
+        pieces: found.pieces,
     })
 }
 
@@ -121,6 +134,7 @@ pub fn target_at(t: &Terminal, p: Point, cache: &mut ExistsCache) -> Option<Targ
         path: found.path,
         start: found.start,
         end: found.end,
+        pieces: found.pieces,
     })
 }
 

@@ -35,7 +35,9 @@ by Alex.
   underlined, still selects it and opens a menu: a greyed **Not found**,
   **Reveal Closest Folder ("name") in Finder** for the nearest folder
   above it that exists, and **Copy Path** (`links::click_target_at`,
-  `Target::Missing`; asked for by Alex, 2 Nov 2026).
+  `Target::Missing`; asked for by Alex, 2 Nov 2026). Cmd-click opens
+  the same menu, which is how to reach it in a program taking the mouse
+  (rush), where a plain click is the program's.
 - **Unchanged:** double-click selects a word, triple-click a line, a drag
   selects, Option-click on the command line moves the shell's cursor,
   and a program taking the mouse (rush, vim, htop) gets every plain

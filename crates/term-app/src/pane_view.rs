@@ -1736,14 +1736,23 @@ impl PaneView {
         }
         // Cmd-click on a link or path opens it, even while the program
         // takes the mouse; the rest of the click (drag, release) goes
-        // nowhere.
+        // nowhere. On a path that isn't there it opens that one's menu
+        // (Not found, the closest folder, Copy Path): a plain click is
+        // the program's, so this is the only way to it there (Alex, 2 Nov
+        // 2026).
         if button == mouse::LEFT
             && press
             && event.modifierFlags().contains(NSEventModifierFlags::Command)
-            && let Some(target) = self.target_at_cell(line, col)
+            && let Some(target) = self.click_target_at_cell(line, col)
         {
             self.with(|_, p| p.swallow_click = true);
-            self.open_target(&target);
+            if matches!(target, crate::links::Target::Missing { .. }) {
+                let in_view = self.convertPoint_fromView(event.locationInWindow(), None);
+                self.ivars().click.replace(Some((target, in_view)));
+                self.show_click_menu();
+            } else {
+                self.open_target(&target);
+            }
             return;
         }
         // A selection being made ends on its own button's release, even

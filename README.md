@@ -102,29 +102,10 @@ Warp and Terminal.app, measured the same way on 30 October, took 3.6 s
 and 4.0 s for the `cat` and 310–333 MB and 48–139 MB of memory:
 [docs/comparison-2026-10-30.md](docs/comparison-2026-10-30.md).
 
-```mermaid
-xychart-beta
-    title "cat 100 MB: seconds (lower is better)"
-    x-axis [Decline, Ghostty, kitty]
-    y-axis "seconds" 0 --> 1.2
-    bar [0.58, 0.66, 1.05]
-```
-
-```mermaid
-xychart-beta
-    title "CPU for that cat, with WindowServer: seconds"
-    x-axis [Decline, Ghostty, kitty]
-    y-axis "seconds" 0 --> 2.2
-    bar [0.66, 2.04, 1.63]
-```
-
-```mermaid
-xychart-beta
-    title "Memory with 4 tabs open: MB"
-    x-axis [Decline, Ghostty, kitty]
-    y-axis "MB" 0 --> 120
-    bar [47, 87, 104]
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/bench-dark.svg">
+  <img alt="cat 100 MB: Decline 0.58 s, Ghostty 0.66 s, kitty 1.05 s. CPU with WindowServer: 0.66 s, 2.04 s, 1.63 s. Memory with 4 tabs: 47 MB, 87 MB, 104 MB." src="docs/img/bench-light.svg" width="720">
+</picture>
 
 ## Using it
 

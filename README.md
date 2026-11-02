@@ -3,29 +3,19 @@
 ![Decline — less overhead, more terminal](docs/brand/readme-header.png)
 
 Terminal Decline (Decline for short) is a terminal for macOS, written in
-Rust and drawn on the GPU. It's here to be quick, light, and to stay
-out of your way while it does it.
+Rust and drawn on the GPU. Quick, light, and out of your way.
 
 - **Fast, properly fast**: `cat` a 100 MB file in 0.58 s. Apple's
-  Terminal takes nearly 4 s for the same file, and Decline keeps pace
-  with the fastest terminals out there on a fraction of the CPU.
-- **Tiny footprint**: 26 MB of memory sat idle, about half of what
-  Terminal uses. When nothing's happening it really does nothing - 0.02%
-  CPU and about one wake-up every two seconds, so it isn't quietly eating
-  your battery.
-- **GPU all the way down**: every window is a single Metal layer, with
-  text shaped by Core Text, ligatures and all.
-- **Autocomplete that tells you things**: hit Tab and you get a list of
-  matches with what each flag and subcommand actually does, pulled from
-  man pages and `--help`. The rest of the top match sits in grey after
-  your cursor, and Right takes it.
+  Terminal takes nearly 4.
+- **Tiny footprint**: 26 MB idle, and 0.02% CPU when nothing's happening.
+- **GPU all the way down**: Metal for drawing, Core Text for fonts,
+  ligatures and all.
+- **Autocomplete that tells you things**: Tab lists matches with what
+  each flag does, from man pages and `--help`.
 - **Pin a TUI to the Dock**: `decline pin rush --dock` and rush gets its
-  own icon, opening straight into it. Works for htop, lazygit, whatever
-  you live in.
-- **No bloaty shit**: native macOS tabs and splits, a config file that
-  reloads when you save it, and a simple settings TUI bundled for your
-  convenience (Cmd+, or `decline settings`, even over ssh). No account,
-  no AI sidebar, no custom window chrome.
+  own icon.
+- **No bloaty shit**: native tabs and splits, a config file, and a simple
+  settings TUI bundled for your convenience. No account, no AI sidebar.
 
 ## Install
 

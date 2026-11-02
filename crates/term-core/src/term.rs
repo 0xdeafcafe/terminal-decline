@@ -234,12 +234,6 @@ pub struct Modes {
     /// 2031: report the colour scheme (`CSI ? 997 ; 1 n` dark, `2 n`
     /// light) whenever it changes.
     pub color_scheme_reports: bool,
-    /// 7702, Decline's own: the program handles clicks on links and paths
-    /// itself, so while it takes the mouse a plain click on one goes to
-    /// it, and Decline's menu opens on Cmd-click instead. Ends with the
-    /// alternate screen and at the shell's next prompt (OSC 133 A), so a
-    /// program that dies doesn't leave it set.
-    pub program_links: bool,
 }
 
 impl Default for Modes {
@@ -262,7 +256,6 @@ impl Default for Modes {
             sixel_private_colors: true,
             sixel_cursor_right: false,
             color_scheme_reports: false,
-            program_links: false,
         }
     }
 }
@@ -2149,7 +2142,6 @@ impl Terminal {
                 if rest.iter().any(|p| matches!(*p, b"k=s" | b"k=c" | b"k=r")) {
                     return;
                 }
-                self.modes.program_links = false;
                 MarkKind::Prompt
             }
             b"B" => MarkKind::Input,
@@ -2352,9 +2344,6 @@ impl Terminal {
     fn set_alt_screen(&mut self, on: bool, clear: bool) {
         if on == self.alt_active {
             return;
-        }
-        if !on {
-            self.modes.program_links = false;
         }
         std::mem::swap(&mut self.screen, &mut self.other_screen);
         std::mem::swap(&mut self.styles, &mut self.other_styles);
@@ -3106,7 +3095,6 @@ impl Terminal {
             1070 => set(self.modes.sixel_private_colors),
             8452 => set(self.modes.sixel_cursor_right),
             2031 => set(self.modes.color_scheme_reports),
-            7702 => set(self.modes.program_links),
             _ => 0,
         }
     }
@@ -3185,7 +3173,6 @@ impl Terminal {
             1070 => self.modes.sixel_private_colors = on,
             8452 => self.modes.sixel_cursor_right = on,
             2031 => self.modes.color_scheme_reports = on,
-            7702 => self.modes.program_links = on,
             _ => {}
         }
     }

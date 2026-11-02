@@ -1371,13 +1371,28 @@ impl Frame {
         for (line, row) in snap.rows.iter().enumerate() {
             for h in snap.row_highlights(row) {
                 let (a, b) = (h.cols.start as usize, (h.cols.end as usize).min(cols));
-                // Underlined in the text colour, over the backgrounds.
+                // Underlined in the text colour, over the backgrounds; not
+                // across an image, where a line looks like a flaw in it.
                 if a < b && h.kind == HighlightKind::HoveredLink {
-                    over.push(RectInstance {
-                        y: s16(row_y(line) + (m.baseline + m.underline_offset) as i32),
-                        h: m.underline_thickness.max(1) as u16,
-                        ..full(line, a..b, theme.paint(slot::FOREGROUND))
-                    });
+                    let mut at = a;
+                    let mut underline = |from: usize, to: usize| {
+                        if from < to {
+                            over.push(RectInstance {
+                                y: s16(row_y(line) + (m.baseline + m.underline_offset) as i32),
+                                h: m.underline_thickness.max(1) as u16,
+                                ..full(line, from..to, theme.paint(slot::FOREGROUND))
+                            });
+                        }
+                    };
+                    for c in images.covered_on(line) {
+                        let (c0, c1) = ((c.start as usize).max(at), (c.end as usize).min(b));
+                        if c0 >= c1 {
+                            continue;
+                        }
+                        underline(at, c0);
+                        at = c1;
+                    }
+                    underline(at, b);
                 }
             }
         }

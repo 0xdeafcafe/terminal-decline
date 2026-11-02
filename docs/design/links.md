@@ -38,18 +38,17 @@ by Alex.
   `Target::Missing`; asked for by Alex, 2 Nov 2026).
 - **Unchanged:** double-click selects a word, triple-click a line, a drag
   selects, Option-click on the command line moves the shell's cursor,
-  and a program taking the mouse gets the clicks, except a plain click on
-  an underlined link or path, which opens its menu (the program doesn't
-  get that click; Alex, 2 Nov 2026). There, Shift-click (which already
-  keeps a click from the program) also brings up the menu.
-- **A program that handles clicks on links itself** (rush opens its own
-  dialog for an image) says so with `CSI ? 7702 h`, Decline's own mode:
-  while it takes the mouse it then gets plain clicks on underlined text
-  too, and Cmd-click opens Decline's menu there instead of opening the
-  target. `CSI ? 7702 l` ends it, as do leaving the alternate screen, a
-  reset and the shell's next prompt (OSC 133 A), so a program that dies
-  doesn't leave it set. `CSI ? 7702 $ p` asks whether it is on
-  (`Modes::program_links`; Alex, 2 Nov 2026).
+  and a program taking the mouse (rush, vim, htop) gets every plain
+  click, on links and paths too. There Cmd-click opens one, and a
+  right-click on an underlined link or path opens its menu at once; any
+  other right-click is the program's. Shift-click (which keeps a click
+  from the program) also brings up the menu. (From 2 Nov 2026 a plain
+  click there opened the menu and the program missed it; Alex found that
+  not nice, as rush has its own dialog on a click.)
+- **Pictures.** The underline leaves out cells drawn as a picture: block
+  elements (the half blocks TUIs draw images with), legacy computing
+  blocks, kitty placeholders and cells under an image placement. The
+  pointer is still a hand there.
 
 ## 2. What counts
 

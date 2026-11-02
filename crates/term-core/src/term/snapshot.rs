@@ -592,6 +592,41 @@ impl Terminal {
                     }
                 }
             }
+            // A hovered link's underline leaves out cells drawn as a
+            // picture (block elements, as TUIs draw images with them).
+            if out.highlights[highlights as usize..]
+                .iter()
+                .any(|h| h.kind == HighlightKind::HoveredLink)
+            {
+                let row = self.view_row(at);
+                let mut k = highlights as usize;
+                while k < out.highlights.len() {
+                    if out.highlights[k].kind != HighlightKind::HoveredLink {
+                        k += 1;
+                        continue;
+                    }
+                    let cols = out.highlights.remove(k).cols;
+                    let mut run: Option<u16> = None;
+                    for col in cols.start..=cols.end {
+                        let text = col < cols.end && !is_picture(&row.cell(col as usize).content());
+                        match (text, run) {
+                            (true, None) => run = Some(col),
+                            (false, Some(start)) => {
+                                out.highlights.insert(
+                                    k,
+                                    Highlight {
+                                        cols: start..col,
+                                        kind: HighlightKind::HoveredLink,
+                                    },
+                                );
+                                k += 1;
+                                run = None;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
             // Left to right.
             out.highlights[highlights as usize..].sort_by_key(|h| h.cols.start);
             let highlights = highlights..out.highlights.len() as u32;
@@ -844,5 +879,17 @@ impl Terminal {
             return Err(format!("batch starts at {}, counter at {}", self.batch_start, self.counter));
         }
         Ok(())
+    }
+}
+
+/// A cell drawn as part of a picture, not text: block elements (U+2580 to
+/// U+259F: the half blocks and shades TUIs draw images with), the
+/// sextants and other legacy computing blocks (U+1FB00 to U+1FB8B), and
+/// kitty's placeholders.
+fn is_picture(content: &crate::rows::Content) -> bool {
+    match content {
+        crate::rows::Content::Placeholder { .. } => true,
+        crate::rows::Content::Char(c) => matches!(*c as u32, 0x2580..=0x259F | 0x1FB00..=0x1FB8B),
+        _ => false,
     }
 }

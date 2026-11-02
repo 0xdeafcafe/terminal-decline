@@ -773,24 +773,6 @@ fn failed_prompts_in_history_follow_their_end_on_the_screen() {
 }
 
 #[test]
-fn a_program_can_take_clicks_on_links_until_it_ends() {
-    let mut t = Term::new(20, 4, 10, term_core::ImagePool::process());
-    let on = |t: &Term| t.state.modes().program_links;
-    assert!(!on(&t));
-    t.advance(b"\x1b[?7702h");
-    assert!(on(&t));
-    t.advance(b"\x1b[?7702$p");
-    t.advance(b"\x1b[?7702l");
-    assert!(!on(&t));
-    // Leaving the alternate screen ends it.
-    t.advance(b"\x1b[?1049h\x1b[?7702h\x1b[?1049l");
-    assert!(!on(&t));
-    // So does the shell's next prompt, for a program inline that died.
-    t.advance(b"\x1b[?7702h\x1b]133;A\x07");
-    assert!(!on(&t));
-}
-
-#[test]
 fn links_without_an_id_are_highlighted_one_at_a_time() {
     let mut t = Term::new(12, 4, 0, term_core::ImagePool::process());
     // The same file twice, as rush lists it, with no id; the second wraps.
@@ -812,4 +794,16 @@ fn links_without_an_id_are_highlighted_one_at_a_time() {
         vec![vec![], vec![2..12], vec![0..7], vec![]],
         "the second, across its wrap"
     );
+}
+
+#[test]
+fn a_links_underline_leaves_out_picture_cells() {
+    let mut t = Term::new(12, 2, 0, term_core::ImagePool::process());
+    // A TUI's picture of half blocks inside a link, between its caption.
+    t.advance("\x1b]8;;file:///a.png\x1b\\ab\u{2580}\u{2584}\u{2588}cd\x1b]8;;\x1b\\".as_bytes());
+    t.state.set_hover(Some(t.state.point_at(0, 0)));
+    let mut snap = Snapshot::default();
+    t.state.snapshot(&mut snap, |_| true);
+    let cols: Vec<_> = snap.row_highlights(&snap.rows[0]).iter().map(|h| h.cols.clone()).collect();
+    assert_eq!(cols, vec![0..2, 5..7]);
 }

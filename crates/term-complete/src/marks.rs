@@ -110,8 +110,10 @@ impl Marks {
         }
     }
 
-    /// The faint line above each prompt but the top row's, and the mark
-    /// at the right of each finished command's line where it is blank.
+    /// The faint line above each prompt but the top row's and the pane's
+    /// first (under a restored or welcome line, it only underlined that),
+    /// and the mark at the right of each finished command's line where it
+    /// is blank.
     fn marks_and_lines(&mut self, t: &Terminal, s: Settings) {
         self.separators.clear();
         self.marks.clear();
@@ -120,7 +122,7 @@ impl Marks {
         }
         let cols = t.cols();
         for c in &self.commands {
-            if let Some(r) = c.prompt_row.filter(|&r| r > 0)
+            if let Some(r) = c.prompt_row.filter(|&r| r > 0 && !c.first)
                 && self.separators.last() != Some(&r)
             {
                 self.separators.push(r);
@@ -363,6 +365,19 @@ mod tests {
         };
         let snap = frame(&t, off);
         assert!(snap.separators.is_empty() && snap.command_marks.is_empty());
+    }
+
+    /// Under a line written before the shell's first prompt (restored
+    /// from, the welcome line) there's no command to mark off: no line
+    /// there, only between commands.
+    #[test]
+    fn no_line_above_the_first_prompt() {
+        let mut t = term();
+        t.advance(b"\x1b[2mrestored from Mon 2 Nov 13:24\x1b[0m\r\n");
+        run(&mut t, "ls", "ls", "", 0, 10);
+        t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07");
+        // Prompts on rows 1 and 2: only the second is marked off.
+        assert_eq!(frame(&t, ON).separators, [2]);
     }
 
     #[test]

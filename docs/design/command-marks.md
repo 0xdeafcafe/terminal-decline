@@ -49,7 +49,10 @@ the renderer like the ghost text and the completion list.
   cells that match the text and are drawn in the default colour with
   no attributes are coloured, and placing stops at the first cell that
   doesn't match. What the shell coloured itself keeps its colour.
-- **The line** goes at the top of every prompt row in view but row 0.
+- **The line** goes at the top of every prompt row in view but row 0
+  and the pane's first prompt, which has no command above it to mark off
+  (under the "restored from …" or welcome line it only underlined that;
+  Alex, 2 Nov 2026).
 - **The mark** is drawn only for a command that finished (a D mark with
   an exit status; a D mark without one gets no mark), ending one cell
   short of the right edge, and only when every cell it covers and the

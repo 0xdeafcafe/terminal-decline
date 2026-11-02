@@ -90,6 +90,9 @@ pub struct ViewCommand {
     pub id: Option<u32>,
     /// The view row of the prompt's first row (its A mark), if in view.
     pub prompt_row: Option<u16>,
+    /// The pane's first prompt: none comes before it, so there's no
+    /// command above to mark it off from (its line isn't drawn).
+    pub first: bool,
     /// Where the command line starts (its B mark), if in view.
     pub input: Option<(u16, u16)>,
     /// The command line run: the shell's own (`cmdline_url`), else read
@@ -219,6 +222,7 @@ impl Terminal {
         let c = ViewCommand {
             id: output.and_then(|(_, m)| m.status),
             prompt_row: in_view(prompt).then(|| map.pos(prompt, cols)).flatten().map(|p| p.0),
+            first: self.previous_prompt(prompt.line).is_none(),
             input: input.filter(|&p| in_view(p)).and_then(|p| map.pos(p, cols)),
             text: record.and_then(|r| r.text.clone()),
             output: output_view,

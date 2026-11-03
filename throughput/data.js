@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793614387196,
+  "lastUpdate": 1793680963349,
   "repoUrl": "https://github.com/0xdeafcafe/terminal-decline",
   "entries": {
     "Throughput": [
@@ -951,6 +951,188 @@ window.BENCHMARK_DATA = {
           {
             "name": "typing/echo+report",
             "value": 1961315,
+            "unit": "elem/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Alexander Forbes-Reed",
+            "username": "0xdeafcafe",
+            "email": "git@alex.forbes.red"
+          },
+          "committer": {
+            "name": "Alexander Forbes-Reed",
+            "username": "0xdeafcafe",
+            "email": "git@alex.forbes.red"
+          },
+          "id": "a053e5b334cdd0edc28531d4fe81aad77d28f6cd",
+          "message": "fix(complete): no command line above a pane's first prompt\n\nThe faint line marks one command off from the one before it, but it\nwas drawn above the first prompt too whenever that wasn't on the top\nrow: under the \"restored from …\" or welcome line it only underlined\nthat line. The first prompt has no command above it, so it gets none.",
+          "timestamp": "2026-11-02T12:26:38Z",
+          "url": "https://github.com/0xdeafcafe/terminal-decline/commit/a053e5b334cdd0edc28531d4fe81aad77d28f6cd"
+        },
+        "date": 1793680962588,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "parse/clusters",
+            "value": 55.19,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse/coloured",
+            "value": 205.39,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse/plain",
+            "value": 559.85,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse/seq",
+            "value": 157.04,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse/tui",
+            "value": 313.77,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse/unicode",
+            "value": 111.3,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse_1k/clusters",
+            "value": 81.43,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse_1k/coloured",
+            "value": 194.54,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse_1k/plain",
+            "value": 411.03,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse_1k/seq",
+            "value": 162.48,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse_1k/tui",
+            "value": 307.06,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse_1k/unicode",
+            "value": 118.44,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "history decode/background",
+            "value": 7066009,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history decode/cjk",
+            "value": 3749777,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history decode/emoji",
+            "value": 2698334,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history decode/gradient",
+            "value": 474622,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history decode/ls",
+            "value": 5053923,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history decode/plain",
+            "value": 10244338,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/background",
+            "value": 4829030,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/cjk",
+            "value": 6556715,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/emoji",
+            "value": 8869266,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/gradient",
+            "value": 265322,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/keyed/background",
+            "value": 5413714,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/keyed/cjk",
+            "value": 6045829,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/keyed/emoji",
+            "value": 8422553,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/keyed/gradient",
+            "value": 360364,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/keyed/ls",
+            "value": 9345712,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/keyed/plain",
+            "value": 19326072,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/ls",
+            "value": 8158274,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/plain",
+            "value": 18965236,
+            "unit": "elem/s"
+          },
+          {
+            "name": "typing/echo",
+            "value": 17626428,
+            "unit": "elem/s"
+          },
+          {
+            "name": "typing/echo+report",
+            "value": 1785627,
             "unit": "elem/s"
           }
         ]

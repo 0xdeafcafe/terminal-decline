@@ -66,9 +66,38 @@ one `FontsId`, which builds, `is_current` and `encode` use for every pane.
   calls, `encode`'s current check, done per pane) takes the pane's.
   `Renderer::metrics_of(&pane)` gives its cells.
 - Cost: none for panes at the window's size (one `Option` read). A second
-  size is a second `Fonts` (its faces and shaping cache, ~1–2 MB
-  footprint, measured when it lands) and its glyphs in the shared
-  textures, as a second window at another size costs today.
+  size is a second `Fonts` (its faces and shaping cache) and its glyphs in
+  the shared textures, as a second window at another size costs today.
+
+### 1.2 Measured (landed, 4 Nov 2026)
+
+`cargo bench -p term-render --bench renderer`, `a053e5b` (before) and
+`30af107` (after) interleaved, best of 3 medians, load 2.7–4.2, Menlo
+28 px with real glyphs. Every pane at the window's fonts, so this is
+the cost of looking up a pane's fonts where the window's were used:
+
+| case | before | after |
+|---|---|---|
+| 1 pane 160×48, every row changed (build) | 60.95 µs | 61.01 µs |
+| 1 pane 160×48, nothing changed (build) | 2.87 µs | 2.84 µs |
+| 1 pane 160×48, encode | 9.09 µs | 9.53 µs |
+| 1 pane 160×48, encode one row | 10.94 µs | 10.53 µs |
+| 4 panes 80×24, every row changed (build) | 65.36 µs | 65.77 µs |
+| 4 panes 80×24, nothing changed (build) | 6.29 µs | 6.29 µs |
+| 4 panes 80×24, encode | 11.43 µs | 10.89 µs |
+
+All within the runs' spread (encode moves ±1 µs between runs of the
+same build): no cost measured. The `frame` bench's code didn't change.
+
+Memory, `phys_footprint` of a throwaway program (not kept): one renderer
+at Menlo 13 pt, 2× scale, two 80×24 panes built (4.87–4.90 MB); one pane
+then given 15 pt and built again: +0.02 to +0.07 MB over three runs;
+back at the window's fonts, within 0.03 MB of where it started (the
+fonts are dropped and the glyph textures emptied). Core Text's faces are
+shared by the process, so a second size costs its glyphs and shaping
+caches, not the faces: well under the 1–2 MB estimated before. Printable
+ASCII only; a pane full of CJK or emoji at its own size adds those
+glyphs to the shared textures, as a second window at that size would.
 
 ## 2. Pane titles
 

@@ -37,7 +37,7 @@ jobs:
         with:
           toolchain: "1.98.1"
           components: rustfmt
-      - uses: mozilla-actions/sccache-action@v0.0.9
+      - uses: mozilla-actions/sccache-action@v0.0.11
       - run: cargo fmt --all -- --check
       - name: fmt (fuzz crate, outside the workspace)
         run: cargo fmt --manifest-path fuzz/Cargo.toml -- --check
@@ -59,7 +59,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.98.1"
-      - uses: mozilla-actions/sccache-action@v0.0.9
+      - uses: mozilla-actions/sccache-action@v0.0.11
       - uses: Swatinem/rust-cache@v2
         with:
           # Branches start from main's; only main saves.
@@ -82,7 +82,7 @@ jobs:
         with:
           toolchain: "1.98.1"
           components: clippy
-      - uses: mozilla-actions/sccache-action@v0.0.9
+      - uses: mozilla-actions/sccache-action@v0.0.11
       # Also keeps target/bundle-test, where the bundle tests build the
       # library, launcher and stub (rust-cache cleans and keeps target
       # dirs nested in target/).
@@ -119,7 +119,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
-      - uses: mozilla-actions/sccache-action@v0.0.9
+      - uses: mozilla-actions/sccache-action@v0.0.11
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: fuzz -> target
@@ -140,7 +140,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.98.1"
-      - uses: mozilla-actions/sccache-action@v0.0.9
+      - uses: mozilla-actions/sccache-action@v0.0.11
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: macos

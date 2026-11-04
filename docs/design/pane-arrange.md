@@ -98,18 +98,24 @@ one `FontsId`, which builds, `is_current` and `encode` use for every pane.
   for panes at the top, so the grid is one strip shorter (the program is
   resized when strips come and go: on the second pane's split and the
   last close, not on every frame). The find bar goes below it.
-- **Clicks**: a click focuses the pane; a double-click renames it.
+- **Clicks**: a click focuses the pane; a double-click renames it. The
+  label takes no clicks of its own (the strip's `hitTest:`).
+- **Clocks**: while strips show, the title's one-shot clock runs to the
+  next change of any pane's status (`cargo test · 12s` counts up in
+  every strip), not only the focused one's.
 
 ### 2.1 Renaming
 
 - **Rename Pane…** (Window menu, `rename_pane`, no default key) and a
-  double-click on the strip edit the name in place in the strip: Return
-  sets it, Esc cancels, an empty name goes back to the automatic one.
-  With no strip showing (one pane, title bar visible) the menu item asks
-  in a sheet instead.
-- The name is saved for a restart (`SavedPane::name`) and set by the
-  agent API (`rename-pane N NAME`; dumps give each pane's `name` and
-  `title`).
+  double-click on the strip ask for the name in a sheet (an `NSAlert`
+  with a text field): Rename sets it, Cancel leaves it, an empty name
+  goes back to the automatic one. (Editing in the strip itself was the
+  first idea; a sheet is the standard control and works with no strip
+  showing.)
+- The name is saved for a restart (`SavedPane::name`; a window with one
+  named pane saves its panes, as for a size of its own) and set by the
+  agent API's test control (`rename-pane N NAME`); dumps give each
+  pane's `name` and what its `strip` says.
 
 ## 3. Arranging panes
 

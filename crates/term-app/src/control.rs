@@ -224,7 +224,7 @@ pub enum Control {
         cols: u16,
         lines: u16,
     },
-    /// Change the font size by this many points.
+    /// Change the focused pane's text size by this many points.
     Font(i32),
     /// Open a tab beside this window (Shell > New Tab).
     Tab,
@@ -252,6 +252,12 @@ pub enum Control {
     Equalize,
     /// Window > Zoom Pane.
     Zoom,
+    /// Window > Rename Pane… for the pane at `index` in tree order, with
+    /// no sheet: the rest of the line is the name (none: no name).
+    RenamePane {
+        index: usize,
+        name: String,
+    },
     /// The next build of this pane's frame panics (`test-hooks` only),
     /// taking the snapshot or building from it.
     BuildPanic {
@@ -398,6 +404,10 @@ impl Control {
             "close-pane" => Control::ClosePane,
             "equalize" => Control::Equalize,
             "zoom" => Control::Zoom,
+            "rename-pane" => Control::RenamePane {
+                index: words.next()?.parse().ok()?,
+                name: words.by_ref().collect::<Vec<_>>().join(" "),
+            },
             "find-click" => Control::FindClick(words.next()?.parse().ok()?),
             "build-panic" => Control::BuildPanic {
                 index: words.next()?.parse().ok()?,
@@ -649,6 +659,10 @@ pub struct PaneDump {
     pub screen: String,
     /// Its text size, points.
     pub font_size: f64,
+    /// Its name (Rename Pane…), and what its title strip says while it
+    /// shows one.
+    pub name: Option<String>,
+    pub strip: Option<String>,
 }
 
 /// This process's memory footprint as Activity Monitor and `footprint`
@@ -773,6 +787,21 @@ mod tests {
             ("split", None),
             ("split up", None),
             ("focus 2", Some(Control::Focus(FocusTarget::Index(2)))),
+            (
+                "rename-pane 1 build logs",
+                Some(Control::RenamePane {
+                    index: 1,
+                    name: "build logs".into(),
+                }),
+            ),
+            (
+                "rename-pane 0",
+                Some(Control::RenamePane {
+                    index: 0,
+                    name: String::new(),
+                }),
+            ),
+            ("rename-pane", None),
             ("find-click 1", Some(Control::FindClick(1))),
             ("find-click", None),
             (

@@ -143,6 +143,9 @@ pub(crate) struct Win {
     recordings: u64,
     /// The colour of the dividers between panes.
     divider: Rgba,
+    /// Panes show their title strips (pane-arrange design §2), as of the
+    /// last layout.
+    pub(crate) strips: bool,
     /// The theme transition playing, if one is (see
     /// [`term_render::transition`]): the display link runs until it ends.
     transition: Option<Transition>,
@@ -258,6 +261,11 @@ pub(crate) struct Pane {
     /// The labels saying its text size: the badge after a change, and the
     /// faint difference from the default while there is one.
     size_labels: crate::size_labels::SizeLabels,
+    /// Its name, set with Rename Pane…; `None`: its strip says what it
+    /// is doing.
+    pub(crate) name: Option<String>,
+    /// Its title strip.
+    strip: Retained<crate::pane_strip::PaneStrip>,
 }
 
 /// Building a pane's frame panicked: when last, how many times, and
@@ -550,6 +558,14 @@ define_class!(
         #[unsafe(method(resetFontSize:))]
         fn reset_font_size(&self, _sender: Option<&AnyObject>) {
             self.change_text_size(false, |_, c| c.font_size);
+        }
+
+        /// Window > Rename Pane…: the focused pane's name.
+        #[unsafe(method(renamePane:))]
+        fn rename_pane_action(&self, _sender: Option<&AnyObject>) {
+            if let Some(pane) = self.focused_pane() {
+                self.rename_pane(pane);
+            }
         }
 
         /// View > Bigger in Every Pane (Cmd+Opt+=): each pane's text
@@ -917,6 +933,7 @@ impl WindowView {
                     font_size: config.font_size,
                     render: PaneRender::new(),
                     metrics: m,
+                    name: None,
                 })?;
                 panes.insert(pane_id, pane);
                 first_tree
@@ -949,7 +966,14 @@ impl WindowView {
                         id: pane_id,
                         view: view.clone(),
                         command: &command,
-                        grid: grid_of(&config, titlebar, scale, pm, rect),
+                        grid: grid_of(
+                            &config,
+                            titlebar,
+                            scale,
+                            pm,
+                            rect,
+                            crate::pane_strip::shown(laid.panes.len(), titlebar),
+                        ),
                         notices: if focused { &launch.notices } else { &[] },
                         program: saved.program,
                         settings: false,
@@ -960,6 +984,7 @@ impl WindowView {
                         font_size,
                         render,
                         metrics: pm,
+                        name: saved.name.clone(),
                     });
                     match made {
                         Ok(pane) => {
@@ -1018,6 +1043,7 @@ impl WindowView {
                 recordings: 0,
                 base_min: None,
                 min: None,
+                strips: false,
             },
             tree,
             panes,
@@ -1081,7 +1107,8 @@ impl WindowView {
             // A new build waiting for programs to end looks again.
             crate::app::busy_may_have_changed();
         }
-        if focused && (events.title.is_some() || !events.commands.is_empty()) {
+        let strips = self.with_state(|st| st.win.strips).unwrap_or(false);
+        if (focused || strips) && (events.title.is_some() || !events.commands.is_empty()) {
             self.refresh_title();
         }
         if settings {
@@ -1127,26 +1154,34 @@ impl WindowView {
             let status = st.win.config.title_status;
             let after = Duration::from_secs(st.win.config.notify_after.into());
             let shown = st.win.shown;
+            let strips = st.win.strips;
+            // Strips say what every pane does, so their clocks count too.
+            let strip_tick = (strips && status && shown)
+                .then(|| {
+                    st.panes
+                        .values()
+                        .filter(|p| !p.settings && p.name.is_none())
+                        .filter_map(|p| crate::activity::next_change(&p.activity, after, now))
+                        .min()
+                })
+                .flatten();
             let p = st.focused()?;
             let title = match (p.settings, fixed) {
-                (true, _) => "Settings".to_string(),
                 (false, Some(t)) => t,
-                (false, None) => status
-                    .then(|| {
-                        let folder = p.activity.marks.then(|| pane_cwd(p)).flatten();
-                        let folder = folder.map(|f| crate::activity::tilde(&f, home.as_deref()));
-                        crate::activity::status_title(&p.activity, p.title.as_deref(), folder.as_deref(), after, now)
-                    })
-                    .flatten()
-                    .unwrap_or_else(|| p.title.clone().unwrap_or_else(|| crate::PRODUCT_NAME.into())),
+                _ => pane_status(p, status, after, now, home.as_deref()),
             };
             let tick = (status && shown && !p.settings && !pinned)
                 .then(|| crate::activity::next_change(&p.activity, after, now))
                 .flatten();
+            let tick = match (tick, strip_tick) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
             st.win.title_clock += 1;
             Some((title, tick, st.win.title_clock))
         });
         let Some(Some((title, tick, clock))) = got else { return };
+        self.refresh_strips();
         if let Some(window) = self.window()
             && window.title().to_string() != title
         {
@@ -1165,6 +1200,76 @@ impl WindowView {
                 })
             });
         }
+    }
+
+    /// Each pane's title strip (pane-arrange design §2): placed at its
+    /// top, below the title bar, saying its name or what it does; hidden
+    /// while strips don't show or a zoom hides the pane.
+    fn refresh_strips(&self) {
+        let titlebar = self.titlebar_height();
+        let now = Instant::now();
+        let home = std::env::var("HOME").ok();
+        self.with_state(|st| {
+            let focused = st.tree.focused();
+            let zoomed = st.tree.zoomed();
+            let after = Duration::from_secs(st.win.config.notify_after.into());
+            let status = st.win.config.title_status;
+            for (id, p) in &st.panes {
+                if !st.win.strips || zoomed.is_some_and(|z| z != *id) {
+                    p.strip.hide();
+                    continue;
+                }
+                let text = crate::pane_strip::title_text(p.name.as_deref(), &pane_status(p, status, after, now, home.as_deref()));
+                let inset = if p.rect.y == 0 { titlebar } else { 0.0 };
+                p.strip.show(p.view.frame().size.width, inset, &text, *id == focused);
+            }
+        });
+    }
+
+    /// Window > Rename Pane…: ask, in a sheet, for pane `pane`'s name. An
+    /// empty name goes back to saying what it does.
+    pub(crate) fn rename_pane(&self, pane: PaneId) {
+        let Some(window) = self.window() else { return };
+        if window.attachedSheet().is_some() {
+            return;
+        }
+        let Some(name) = self
+            .with_state(|st| st.panes.get(&pane).map(|p| p.name.clone().unwrap_or_default()))
+            .flatten()
+        else {
+            return;
+        };
+        let mtm = MainThreadMarker::from(self);
+        let alert = NSAlert::new(mtm);
+        alert.setMessageText(&NSString::from_str("Rename Pane"));
+        alert.setInformativeText(&NSString::from_str("Leave it empty to show what the pane is doing."));
+        alert.addButtonWithTitle(&NSString::from_str("Rename"));
+        alert.addButtonWithTitle(&NSString::from_str("Cancel"));
+        let field = objc2_app_kit::NSTextField::textFieldWithString(&NSString::from_str(&name), mtm);
+        field.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(260.0, 24.0)));
+        field.setPlaceholderString(Some(&NSString::from_str("Name")));
+        alert.setAccessoryView(Some(&field));
+        alert.window().setInitialFirstResponder(Some(&field));
+        let id = self.ivars().id;
+        let typed = field.clone();
+        let done = RcBlock::new(move |response: NSModalResponse| {
+            if response == NSAlertFirstButtonReturn {
+                let name = typed.stringValue().to_string();
+                with_view(id, |v| v.set_pane_name(pane, &name));
+            }
+        });
+        alert.beginSheetModalForWindow_completionHandler(&window, Some(&done));
+    }
+
+    /// Name pane `pane` (`""`: no name).
+    pub(crate) fn set_pane_name(&self, pane: PaneId, name: &str) {
+        let name = name.trim();
+        self.with_state(|st| {
+            if let Some(p) = st.panes.get_mut(&pane) {
+                p.name = (!name.is_empty()).then(|| name.to_string());
+            }
+        });
+        self.refresh_title();
     }
 
     /// Where you are looking, for pane `pane`: the app in front, this
@@ -1701,7 +1806,7 @@ impl WindowView {
             if t.state.take_colors_changed() {
                 p.theme = crate::config::program_theme(&win.theme, &t.state);
             }
-            let pad = pane_padding(&win.config, titlebar, win.scale, p.rect);
+            let pad = pane_padding(&win.config, titlebar, win.scale, p.rect, win.strips);
             let (padding, cursor_on) = ((pad.x, pad.top), p.cursor_on || !focused);
             let input = FrameInput {
                 theme: p.theme.as_ref().unwrap_or(&win.theme),
@@ -2142,6 +2247,8 @@ impl WindowView {
             crate::images::window_size(&term_core::ImagePool::process(), self.ivars().id, pixels.0 as u32, pixels.1 as u32);
             let layout = st.tree.layout(&self.geometry(st, titlebar));
             let alone = layout.panes.len() == 1;
+            let strips = crate::pane_strip::shown(layout.panes.len(), titlebar);
+            st.win.strips = strips;
             for (id, p) in st.panes.iter_mut() {
                 let shown = layout.rect(*id).is_some();
                 if p.view.isHidden() == shown {
@@ -2161,15 +2268,17 @@ impl WindowView {
                     points(rect, scale)
                 };
                 p.view.setFrame(frame);
+                let inset = if rect.y == 0 { titlebar } else { 0.0 };
                 if let Some(f) = &p.find {
-                    f.bar.place(frame.size.width, if rect.y == 0 { titlebar } else { 0.0 });
+                    f.bar
+                        .place(frame.size.width, inset + if strips { crate::pane_strip::HEIGHT } else { 0.0 });
                 }
                 if p.image_scale != scale {
                     p.image_scale = scale;
                     p.session.set_image_scale(scale as f32);
                 }
                 let m = st.win.renderer.metrics_of(&p.render);
-                let pad = pane_padding(&st.win.config, titlebar, scale, rect);
+                let pad = pane_padding(&st.win.config, titlebar, scale, rect, strips);
                 let (cols, lines) = layout::grid_size((frame.size.width, frame.size.height), scale, m.into(), pad);
                 p.size_labels.place(frame.size);
                 let size = pty_size(cols, lines, m);
@@ -2219,6 +2328,7 @@ impl WindowView {
         if let Some(Some(min)) = min {
             window.setContentMinSize(min);
         }
+        self.refresh_strips();
         window.invalidateCursorRectsForView(self);
         true
     }
@@ -2517,7 +2627,7 @@ impl WindowView {
                     id: new,
                     view: view.clone(),
                     command: &command,
-                    grid: grid_of(&win.config, titlebar, scale, m, rect),
+                    grid: grid_of(&win.config, titlebar, scale, m, rect, true),
                     notices: &[],
                     program: false,
                     settings: false,
@@ -2528,6 +2638,7 @@ impl WindowView {
                     font_size,
                     render,
                     metrics: m,
+                    name: None,
                 },
             );
             match pane {
@@ -2945,6 +3056,7 @@ impl WindowView {
                     program: p.program,
                     history: history.and_then(|(store, limit)| save_history(p, store, limit)),
                     font_size: (p.font_size != default_size).then_some(p.font_size),
+                    name: p.name.clone(),
                 },
                 None => SavedPane::default(),
             }))
@@ -3260,8 +3372,9 @@ pub(crate) fn padding_for(config: &Config, titlebar: f64, scale: f64) -> Padding
 /// How many of `p`'s grid rows its find bar is over.
 pub(crate) fn rows_under_find_bar(win: &Win, p: &Pane, titlebar: f64) -> usize {
     let top = p.rect.y == 0;
-    let bottom = (if top { titlebar } else { 0.0 } + crate::find_bar::HEIGHT) * win.scale;
-    let grid_top = pane_padding(&win.config, titlebar, win.scale, p.rect).top as f64;
+    let strip = if win.strips { crate::pane_strip::HEIGHT } else { 0.0 };
+    let bottom = (if top { titlebar } else { 0.0 } + strip + crate::find_bar::HEIGHT) * win.scale;
+    let grid_top = pane_padding(&win.config, titlebar, win.scale, p.rect, win.strips).top as f64;
     let cell = win.renderer.metrics_of(&p.render).cell_height.max(1) as f64;
     ((bottom - grid_top) / cell).ceil().max(0.0) as usize
 }
@@ -3292,7 +3405,7 @@ fn pane_scroll(win: &Win, p: &Pane, titlebar: f64) -> Option<term_render::Scroll
     if snap.rows.len() <= snap.lines as usize {
         return None;
     }
-    let pad = pane_padding(&win.config, titlebar, win.scale, p.rect);
+    let pad = pane_padding(&win.config, titlebar, win.scale, p.rect, win.strips);
     Some(term_render::Scroll {
         up,
         clip: term_render::PxRect {
@@ -3304,8 +3417,12 @@ fn pane_scroll(win: &Win, p: &Pane, titlebar: f64) -> Option<term_render::Scroll
     })
 }
 
-pub(crate) fn pane_padding(config: &Config, titlebar: f64, scale: f64, rect: PxRect) -> Padding {
-    padding_for(config, if rect.y == 0 { titlebar } else { 0.0 }, scale)
+pub(crate) fn pane_padding(config: &Config, titlebar: f64, scale: f64, rect: PxRect, strip: bool) -> Padding {
+    let mut pad = padding_for(config, if rect.y == 0 { titlebar } else { 0.0 }, scale);
+    if strip {
+        pad.top += (crate::pane_strip::HEIGHT * scale).round() as u32;
+    }
+    pad
 }
 
 /// What closing does once its question is answered with Close.
@@ -3367,6 +3484,8 @@ struct NewPane<'a> {
     font_size: f64,
     render: PaneRender,
     metrics: term_font::Metrics,
+    /// Its name from before a restart.
+    name: Option<String>,
 }
 
 /// Start pane `n` of window `window`: its terminal and program.
@@ -3411,6 +3530,7 @@ fn spawn_pane(window: usize, config: &Config, theme: &Theme, test: bool, n: NewP
         ready(&session);
     }
     let size_labels = crate::size_labels::SizeLabels::new(&n.view, n.font_size - config.font_size);
+    let strip = crate::pane_strip::PaneStrip::new(&n.view);
     Ok(Pane {
         view: n.view,
         session,
@@ -3454,14 +3574,37 @@ fn spawn_pane(window: usize, config: &Config, theme: &Theme, test: bool, n: NewP
         activity: crate::activity::Activity::default(),
         font_size: n.font_size,
         size_labels,
+        name: n.name,
+        strip,
     })
+}
+
+/// What pane `p` is doing, as the window's title says it with the pane
+/// focused: its status from the shell's marks with `status`
+/// (`title_status`), else its program's title, else the app's name.
+fn pane_status(p: &Pane, status: bool, after: Duration, now: Instant, home: Option<&str>) -> String {
+    if p.settings {
+        return "Settings".to_string();
+    }
+    status
+        .then(|| {
+            let folder = p.activity.marks.then(|| pane_cwd(p)).flatten();
+            let folder = folder.map(|f| crate::activity::tilde(&f, home));
+            crate::activity::status_title(&p.activity, p.title.as_deref(), folder.as_deref(), after, now)
+        })
+        .flatten()
+        .unwrap_or_else(|| p.title.clone().unwrap_or_else(|| crate::PRODUCT_NAME.into()))
 }
 
 /// Whether a restart saves the window's panes ([`SavedPanes`]), each
 /// with its own history, rather than only the window's: when it has
 /// several, or its one pane has something of its own to keep.
 fn saves_panes(st: &State) -> bool {
-    st.tree.len() > 1 || st.panes.values().any(|p| p.font_size != st.win.config.font_size)
+    st.tree.len() > 1
+        || st
+            .panes
+            .values()
+            .any(|p| p.font_size != st.win.config.font_size || p.name.is_some())
 }
 
 /// What a pane at `size` points draws with: fonts of its own, unless that
@@ -3565,9 +3708,9 @@ fn points(r: PxRect, scale: f64) -> NSRect {
 }
 
 /// Columns and lines of a pane at `rect` (window pixels).
-fn grid_of(config: &Config, titlebar: f64, scale: f64, m: term_font::Metrics, rect: PxRect) -> (usize, usize) {
+fn grid_of(config: &Config, titlebar: f64, scale: f64, m: term_font::Metrics, rect: PxRect, strip: bool) -> (usize, usize) {
     let r = points(rect, scale);
-    let pad = pane_padding(config, titlebar, scale, rect);
+    let pad = pane_padding(config, titlebar, scale, rect, strip);
     layout::grid_size((r.size.width, r.size.height), scale, m.into(), pad)
 }
 
@@ -3583,9 +3726,10 @@ fn geometry_of(config: &Config, m: term_font::Metrics, scale: f64, size: NSSize,
             h: (size.height * scale).round() as i32,
         },
         top_inset: (titlebar * scale).round() as i32,
+        // With the title strip, which shows whenever there are several.
         min: (
             (10 * m.cell_width + 2 * pad.x) as i32,
-            (3 * m.cell_height + pad.top + pad.bottom) as i32,
+            (3 * m.cell_height + pad.top + pad.bottom) as i32 + (crate::pane_strip::HEIGHT * scale).round() as i32,
         ),
         divider: scale.round().max(1.0) as i32,
     }
@@ -3842,6 +3986,11 @@ impl WindowView {
                     Some(Control::ResizePane(dir)) => self.resize_pane(dir),
                     Some(Control::Equalize) => self.equalize(),
                     Some(Control::Zoom) => self.toggle_zoom(),
+                    Some(Control::RenamePane { index, name }) => {
+                        if let Some(pane) = self.with_state(|st| st.tree.ids().get(index).copied()).flatten() {
+                            self.set_pane_name(pane, &name);
+                        }
+                    }
                     Some(Control::BuildPanic { index, snapshot }) => {
                         let pane = self.with_state(|st| st.tree.ids().get(index).copied()).flatten();
                         if let Some(pane) = pane {
@@ -4100,6 +4249,8 @@ fn write_dump(st: &mut State, window: Window) {
                 history_bytes: t.state.scrollback_bytes(),
                 screen: t.state.dump(),
                 font_size: p.font_size,
+                name: p.name.clone(),
+                strip: p.strip.text(),
             })
         })
         .collect();
@@ -4112,7 +4263,7 @@ fn write_dump(st: &mut State, window: Window) {
     let Some(p) = panes.get(&focused) else { return };
     // The focused pane's colours, a program's included.
     let theme = p.theme.as_ref().unwrap_or(&win.theme);
-    let pad_top = pane_padding(&win.config, window.top_inset, win.scale, p.rect).top;
+    let pad_top = pane_padding(&win.config, window.top_inset, win.scale, p.rect, win.strips).top;
     let Some(test) = &mut win.test else { return };
     test.seq += 1;
     test.dump = DumpState::Idle;

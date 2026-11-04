@@ -2418,7 +2418,11 @@ esac
     );
     assert_eq!(std::fs::read_to_string(dir.path().join("size2")).unwrap().trim(), grid(&p[1]));
     assert!((p[0]["cols"].as_u64().unwrap() as u32) < full[1], "{split}");
-    assert_eq!(p[0]["lines"].as_u64().unwrap() as u32, full[0], "{split}");
+    // With two panes each has a title strip across its top
+    // (pane-arrange design §2): a line or two fewer, no more.
+    let lines = p[0]["lines"].as_u64().unwrap() as u32;
+    assert!(lines < full[0] && lines + 2 >= full[0], "{split}");
+    assert!(p.iter().all(|p| p["strip"].is_string()), "{split}");
 
     // The keys went to the focused (new) pane only.
     let p = panes(typed);

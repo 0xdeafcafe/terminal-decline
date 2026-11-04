@@ -107,6 +107,9 @@ pub struct SavedPane {
     /// design §1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub font_size: Option<f64>,
+    /// Its name (Rename Pane…), shown in its title strip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 /// Saved windows as they reopen: one list per window, its tabs in order.

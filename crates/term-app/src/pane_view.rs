@@ -553,7 +553,7 @@ define_class!(
             let titlebar = self.window_view().map_or(0.0, |w| w.titlebar_height());
             let rect = self.with(|win, p| {
                 let m = win.renderer.metrics_of(&p.render);
-                let pad = pane_padding(&win.config, titlebar, win.scale, p.rect);
+                let pad = pane_padding(&win.config, titlebar, win.scale, p.rect, win.strips);
                 let t = p.session.lock_term();
                 let (x, y) = layout::cell_origin(t.state.cursor().row(), t.state.cursor().col(), m.into(), pad);
                 let (x, y) = (x as f64 / win.scale, y as f64 / win.scale);
@@ -717,6 +717,20 @@ impl PaneView {
 
     fn pane(&self) -> PaneId {
         self.ivars().pane
+    }
+
+    /// A double-click on its title strip: rename it.
+    pub(crate) fn rename(&self) {
+        if let Some(w) = self.window_view() {
+            w.rename_pane(self.pane());
+        }
+    }
+
+    /// A click on its title strip: it gets the keys.
+    pub(crate) fn focus_from_strip(&self) {
+        if let Some(w) = self.window_view() {
+            w.focus_pane(self.pane());
+        }
     }
 
     /// `f` on the window and this pane; `None` before the window view
@@ -1060,7 +1074,7 @@ impl PaneView {
         let titlebar = self.window_view().map_or(0.0, |w| w.titlebar_height());
         let Some(at) = self.with(|win, p| {
             let m = win.renderer.metrics_of(&p.render);
-            let pad = pane_padding(&win.config, titlebar, win.scale, p.rect);
+            let pad = pane_padding(&win.config, titlebar, win.scale, p.rect, win.strips);
             let (x, y) = layout::cell_origin(line, col, m.into(), pad);
             NSPoint::new(
                 (x as f64 + m.cell_width as f64 / 2.0) / win.scale,
@@ -1111,7 +1125,7 @@ impl PaneView {
         let titlebar = self.window_view().map_or(0.0, |w| w.titlebar_height());
         self.with(|win, p| {
             let m = win.renderer.metrics_of(&p.render);
-            let pad = pane_padding(&win.config, titlebar, win.scale, p.rect);
+            let pad = pane_padding(&win.config, titlebar, win.scale, p.rect, win.strips);
             let t = p.session.lock_term();
             layout::cell_at((at.x, at.y), win.scale, m.into(), pad, t.state.cols(), t.state.lines())
         })
@@ -2022,7 +2036,7 @@ impl PaneView {
         let titlebar = self.window_view().map_or(0.0, |w| w.titlebar_height());
         self.with(|win, p| {
             let m = win.renderer.metrics_of(&p.render);
-            let pad = pane_padding(&win.config, titlebar, win.scale, p.rect);
+            let pad = pane_padding(&win.config, titlebar, win.scale, p.rect, win.strips);
             let lines = p.session.lock_term().state.lines();
             let top = pad.top as f64;
             let bottom = top + (lines as u32 * m.cell_height) as f64;

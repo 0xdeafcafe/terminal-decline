@@ -81,6 +81,8 @@ pub enum MenuAction {
     EqualizePanes,
     /// The focused pane fills the window, or no longer does.
     TogglePaneZoom,
+    /// Window > Rename Pane…: name the focused pane (its title strip).
+    RenamePane,
     /// Terminal Decline > Settings…: the preferences in a tab.
     Settings,
     /// Scroll the view to the prompt above or below its top line (OSC 133
@@ -125,7 +127,7 @@ pub enum MenuAction {
 }
 
 impl MenuAction {
-    pub const ALL: [MenuAction; 50] = [
+    pub const ALL: [MenuAction; 51] = [
         MenuAction::NewWindow,
         MenuAction::NewTab,
         MenuAction::Close,
@@ -162,6 +164,7 @@ impl MenuAction {
         MenuAction::ResizePaneDown,
         MenuAction::EqualizePanes,
         MenuAction::TogglePaneZoom,
+        MenuAction::RenamePane,
         MenuAction::Settings,
         MenuAction::PreviousPrompt,
         MenuAction::NextPrompt,
@@ -217,6 +220,7 @@ impl MenuAction {
             MenuAction::ResizePaneDown => "resize_pane_down",
             MenuAction::EqualizePanes => "equalize_panes",
             MenuAction::TogglePaneZoom => "toggle_pane_zoom",
+            MenuAction::RenamePane => "rename_pane",
             MenuAction::Settings => "settings",
             MenuAction::PreviousPrompt => "previous_prompt",
             MenuAction::NextPrompt => "next_prompt",
@@ -273,6 +277,7 @@ impl MenuAction {
             MenuAction::ResizePaneDown => "Move Divider Down",
             MenuAction::EqualizePanes => "Equalize Panes",
             MenuAction::TogglePaneZoom => "Zoom Pane",
+            MenuAction::RenamePane => "Rename Pane…",
             MenuAction::Settings => "Settings…",
             MenuAction::PreviousPrompt => "Jump to Previous Prompt",
             MenuAction::NextPrompt => "Jump to Next Prompt",
@@ -331,6 +336,7 @@ impl MenuAction {
             MenuAction::ResizePaneDown => c"resizePaneDown:",
             MenuAction::EqualizePanes => c"equalizePanes:",
             MenuAction::TogglePaneZoom => c"togglePaneZoom:",
+            MenuAction::RenamePane => c"renamePane:",
             MenuAction::Settings => c"showSettings:",
             MenuAction::PreviousPrompt => c"jumpToPreviousPrompt:",
             MenuAction::NextPrompt => c"jumpToNextPrompt:",
@@ -362,7 +368,9 @@ impl MenuAction {
             FontBigger | FontSmaller | FontReset | FontBiggerAll | FontSmallerAll | FontResetAll | PreviousPrompt | NextPrompt
             | PreviousFailed | NextFailed | ToggleFullScreen => "View",
             FocusPaneLeft | FocusPaneRight | FocusPaneUp | FocusPaneDown | FocusPaneNext | FocusPanePrevious | ResizePaneLeft
-            | ResizePaneRight | ResizePaneUp | ResizePaneDown | EqualizePanes | TogglePaneZoom | NextTab | PreviousTab => "Window",
+            | ResizePaneRight | ResizePaneUp | ResizePaneDown | EqualizePanes | TogglePaneZoom | RenamePane | NextTab | PreviousTab => {
+                "Window"
+            }
         }
     }
 

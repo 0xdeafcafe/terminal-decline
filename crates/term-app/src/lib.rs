@@ -25,6 +25,7 @@ pub mod links;
 pub mod memory;
 pub mod mouse;
 pub mod notify;
+mod pane_strip;
 mod pane_view;
 pub mod paths;
 pub mod pin;

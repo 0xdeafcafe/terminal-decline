@@ -566,6 +566,74 @@ struct Pieces {
     run: RunText,
     shaped: Vec<ShapedGlyph>,
     clusters: Clusters,
+    /// Styles resolved to pens in this build.
+    pens: PenCache,
+}
+
+/// Pens resolved in one build, by style id (a snapshot's style table
+/// index), in direct-mapped slots: a coloured screen comes back to the
+/// same few styles row after row, so most changes of style find their pen
+/// here rather than resolving the style against the theme again. Valid
+/// for one build (one snapshot's styles, one theme): each build bumps
+/// `build`, which every slot is stamped with. A build whose styles keep
+/// missing (a screen where almost every run has a style of its own) stops
+/// asking, so it pays no more than resolving each style.
+#[derive(Default)]
+struct PenCache {
+    build: u32,
+    slots: Vec<Option<(u32, u32, Pen)>>,
+    hits: u32,
+    misses: u32,
+    off: bool,
+}
+
+/// Changes of style a build looks up before it decides whether to keep
+/// the cache (the first are misses on any screen: it starts empty), and
+/// the share of them that must have hit, in quarters.
+const PEN_TRIAL: u32 = 512;
+const PEN_KEEP_QUARTERS: u32 = 1;
+
+const PEN_SLOTS: usize = 256;
+
+impl PenCache {
+    /// Forget the pens of builds before.
+    fn next_build(&mut self) {
+        (self.hits, self.misses, self.off) = (0, 0, false);
+        self.build = self.build.wrapping_add(1);
+        if self.build == 0 {
+            // Wrapped: stamps from long ago could match again.
+            self.slots.clear();
+            self.build = 1;
+        }
+    }
+
+    /// The pen of style `id`, made with `make` unless this build has it.
+    #[inline]
+    fn get(&mut self, id: u32, make: impl FnOnce() -> Pen) -> Pen {
+        if self.off {
+            return make();
+        }
+        if self.slots.is_empty() {
+            self.slots.resize(PEN_SLOTS, None);
+        }
+        let slot = &mut self.slots[id as usize % PEN_SLOTS];
+        let pen = match slot {
+            Some((build, have, pen)) if *build == self.build && *have == id => {
+                self.hits += 1;
+                *pen
+            }
+            _ => {
+                let pen = make();
+                *slot = Some((self.build, id, pen));
+                self.misses += 1;
+                pen
+            }
+        };
+        if self.hits + self.misses == PEN_TRIAL && self.hits * 4 < PEN_TRIAL * PEN_KEEP_QUARTERS {
+            self.off = true;
+        }
+        pen
+    }
 }
 
 /// A cell as frame building reads it: `CellRef`, a snapshot's cells, and
@@ -582,6 +650,13 @@ pub(crate) trait CellView {
     /// Neither a cluster nor either half of a two-cell cell: drawn as its
     /// character alone, if any.
     fn is_simple(&self) -> bool;
+    /// Its style's index in a table fixed for the whole build (a
+    /// snapshot's), by which its pen can be kept for the build; `None`
+    /// where styles have no such index.
+    #[inline]
+    fn style_index(&self) -> Option<u32> {
+        None
+    }
     /// A kitty placeholder cell's image row and column.
     #[inline]
     fn placeholder(&self) -> Option<(u16, u16)> {
@@ -643,6 +718,10 @@ impl CellView for SnapCell<'_> {
     #[inline]
     fn key(&self) -> u32 {
         self.cell.style_id()
+    }
+    #[inline]
+    fn style_index(&self) -> Option<u32> {
+        Some(self.cell.style_id())
     }
     #[inline]
     fn style(&self) -> term_core::Style {
@@ -1140,6 +1219,7 @@ impl Frame {
     /// Build the rows the snapshot copied into the row cache, where they
     /// are drawn this frame.
     fn build_rows(&mut self, input: &FrameInput, glyphs: &mut impl GlyphSource) {
+        self.pieces.pens.next_build();
         let cols = self.rows.snap.cols as usize;
         let (py, ch) = (input.padding.1 as i32, input.metrics.cell_height as i32);
         let shaping = glyphs.fonts().is_some_and(shapes_runs);
@@ -1999,7 +2079,10 @@ fn row_cells<const OVERLAY: bool, const LIG: bool, C: CellView, S: RowSink>(
         let key = cell.key();
         if last_key != Some(key) {
             last_key = Some(key);
-            pen = Pen::new(&cell.style(), theme);
+            pen = match cell.style_index() {
+                Some(id) => pieces.pens.get(id, || Pen::new(&cell.style(), theme)),
+                None => Pen::new(&cell.style(), theme),
+            };
         }
         let spacer = cell.is_spacer();
         let (mut fg, mut bg) = (pen.fg, pen.bg);
@@ -2423,6 +2506,52 @@ fn push_run(out: &mut impl RowSink, color: Paint, default_bg: Paint, start: usiz
 mod tests {
     use super::*;
     use term_core::{Color, Style};
+
+    /// The pen cache gives back a style's pen within a build, makes it
+    /// again in the next, and stops asking in a build whose lookups mostly
+    /// miss.
+    #[test]
+    fn pens_are_kept_for_a_build() {
+        let theme = Theme::default();
+        let pen = Pen::new(&Style::DEFAULT, &theme);
+        let mut cache = PenCache::default();
+        let mut made = 0;
+        cache.next_build();
+        for _ in 0..3 {
+            cache.get(7, || {
+                made += 1;
+                pen
+            });
+        }
+        assert_eq!(made, 1, "made once, then found");
+        // Another id in the same slot replaces it.
+        cache.get(7 + PEN_SLOTS as u32, || pen);
+        cache.get(7, || {
+            made += 1;
+            pen
+        });
+        assert_eq!(made, 2);
+        cache.next_build();
+        cache.get(7, || {
+            made += 1;
+            pen
+        });
+        assert_eq!(made, 3, "a new build makes it again");
+
+        // Every lookup a new style: past the trial it stops keeping them.
+        cache.next_build();
+        for id in 0..PEN_TRIAL {
+            cache.get(id * PEN_SLOTS as u32, || pen);
+        }
+        assert!(cache.off);
+        cache.next_build();
+        assert!(!cache.off, "each build tries again");
+        // Few styles: kept.
+        for i in 0..PEN_TRIAL {
+            cache.get(i % 8, || pen);
+        }
+        assert!(!cache.off);
+    }
 
     const M: Metrics = Metrics {
         cell_width: 16,

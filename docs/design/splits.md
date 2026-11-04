@@ -706,6 +706,8 @@ Decided 29 Oct 2026, all as proposed: 1 the §5 keybinds (iTerm2's);
 2 not dimmed, `unfocused_pane_opacity` default 1.0; 3 font size per
 window; 4 a split in a pin runs the user's shell; 5 views per pane;
 6 commit the marked text; 7 the focusing click is swallowed.
+3 was revisited on 4 Nov 2026: text size per pane, with pane titles and
+moving panes by keyboard (docs/design/pane-arrange.md).
 
 1. **Keybinds** as in §5 (iTerm2/Ghostty defaults; Cmd+W closes a pane
    first; Cmd+Shift+W closes the whole window with its tabs).

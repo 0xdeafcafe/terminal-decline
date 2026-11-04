@@ -3461,3 +3461,82 @@ fn smoke_copy_last_command_and_its_output() {
     assert!(num(&d[0], "view_offset") > 0.0, "{}", d[0]);
     assert!(d[0]["selection"].is_null(), "{}", d[0]);
 }
+
+/// Text size per pane, title strips and arranging panes
+/// (docs/design/pane-arrange.md): after a split, `font +2` changes only
+/// the focused pane's size; both panes show strips, a renamed pane's
+/// saying its name; Move Pane lifts the split, ← takes it to the left of
+/// the first pane, and Return places it there, the panes trading sides;
+/// Esc after another lift leaves them as they are.
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_text_size_strips_and_arranging_panes() {
+    if !have_metal() {
+        return;
+    }
+    let dir = TempDir::new("arrange");
+    let d = dir.path().display();
+    let zshrc = format!("PS1='%% '\necho split\ntouch '{d}/up'\n");
+    let dump = dump_and_wait(&dir);
+    let script = format!(
+        "{split}{wait_split}{dump}{font}{dump}{rename}{dump}{lift}{left}{dump}{place}{dump}{lift}{cancel}{dump}{quit}sleep 20",
+        split = osc("split right"),
+        wait_split = wait_for(&format!("[ -e '{d}/up' ]")),
+        font = osc("font 2"),
+        rename = osc("rename-pane 0 build logs"),
+        lift = osc("arrange move"),
+        left = osc("arrange-key left"),
+        place = osc("arrange-key return"),
+        cancel = osc("arrange-key esc"),
+        quit = osc("quit"),
+    );
+    let mut cmd = Command::new(APP);
+    cmd.args(["-e", "/bin/sh", "-c", &script])
+        .env("XDG_CONFIG_HOME", dir.config_home())
+        .env("DECLINE_TEST_DUMP", dir.dump_file())
+        .current_dir(dir.path());
+    with_zsh(&mut cmd, &dir, &zshrc);
+    let (status, _) = run(&mut cmd);
+    assert!(status.success(), "{status}");
+    let all = dumps(&dir);
+    assert_eq!(all.len(), 6, "{all:?}");
+    // The first may come before the split has drawn its first line.
+    for x in &all[1..] {
+        check_dump(x);
+    }
+    let (split, bigger, renamed, lifted, placed, cancelled) = (&all[0], &all[1], &all[2], &all[3], &all[4], &all[5]);
+    let ids = |d: &Value| -> Vec<Value> { panes(d).iter().map(|p| p["id"].clone()).collect() };
+    let size = |d: &Value, i: usize| num(&panes(d)[i], "font_size");
+
+    // Split: both panes at the default size, each with a strip.
+    let p = panes(split);
+    assert_eq!(size(split, 0), size(split, 1), "{split}");
+    assert!(p.iter().all(|p| p["strip"].is_string()), "{split}");
+    let (first, second) = (p[0]["id"].clone(), p[1]["id"].clone());
+    assert_eq!(p[1]["focused"], true, "{split}");
+
+    // `font 2`: the focused pane (the split) only, its cells bigger.
+    assert_eq!(size(bigger, 0), size(split, 0), "{bigger}");
+    assert_eq!(size(bigger, 1), size(split, 1) + 2.0, "{bigger}");
+    assert!(num(bigger, "cell_width") > num(split, "cell_width"), "{bigger}");
+
+    // Renamed: its strip says the name.
+    let p = panes(renamed);
+    assert_eq!(p[0]["name"], "build logs", "{renamed}");
+    assert_eq!(p[0]["strip"], "build logs", "{renamed}");
+
+    // Lifted and moved left: nothing has moved yet.
+    assert!(lifted["arranging"].is_string(), "{lifted}");
+    assert_eq!(ids(lifted), [first.clone(), second.clone()], "{lifted}");
+
+    // Placed: the split is now on the left, focused, at its size.
+    assert!(placed["arranging"].is_null(), "{placed}");
+    assert_eq!(ids(placed), [second.clone(), first.clone()], "{placed}");
+    let p = panes(placed);
+    assert_eq!(p[0]["focused"], true, "{placed}");
+    assert_eq!(size(placed, 0), size(split, 1) + 2.0, "{placed}");
+
+    // Lifted again and cancelled: as it was.
+    assert!(cancelled["arranging"].is_null(), "{cancelled}");
+    assert_eq!(ids(cancelled), [second, first], "{cancelled}");
+}

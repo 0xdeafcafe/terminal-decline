@@ -83,6 +83,11 @@ pub enum MenuAction {
     TogglePaneZoom,
     /// Window > Rename Pane…: name the focused pane (its title strip).
     RenamePane,
+    /// Window > Move Pane…: move the focused pane with the keyboard,
+    /// seeing each layout before it happens.
+    ArrangePane,
+    /// Shell > New Pane…: place a new pane with the keyboard, the same way.
+    PlaceNewPane,
     /// Terminal Decline > Settings…: the preferences in a tab.
     Settings,
     /// Scroll the view to the prompt above or below its top line (OSC 133
@@ -127,7 +132,7 @@ pub enum MenuAction {
 }
 
 impl MenuAction {
-    pub const ALL: [MenuAction; 51] = [
+    pub const ALL: [MenuAction; 53] = [
         MenuAction::NewWindow,
         MenuAction::NewTab,
         MenuAction::Close,
@@ -165,6 +170,8 @@ impl MenuAction {
         MenuAction::EqualizePanes,
         MenuAction::TogglePaneZoom,
         MenuAction::RenamePane,
+        MenuAction::ArrangePane,
+        MenuAction::PlaceNewPane,
         MenuAction::Settings,
         MenuAction::PreviousPrompt,
         MenuAction::NextPrompt,
@@ -221,6 +228,8 @@ impl MenuAction {
             MenuAction::EqualizePanes => "equalize_panes",
             MenuAction::TogglePaneZoom => "toggle_pane_zoom",
             MenuAction::RenamePane => "rename_pane",
+            MenuAction::ArrangePane => "arrange_pane",
+            MenuAction::PlaceNewPane => "place_new_pane",
             MenuAction::Settings => "settings",
             MenuAction::PreviousPrompt => "previous_prompt",
             MenuAction::NextPrompt => "next_prompt",
@@ -278,6 +287,8 @@ impl MenuAction {
             MenuAction::EqualizePanes => "Equalize Panes",
             MenuAction::TogglePaneZoom => "Zoom Pane",
             MenuAction::RenamePane => "Rename Pane…",
+            MenuAction::ArrangePane => "Move Pane…",
+            MenuAction::PlaceNewPane => "New Pane…",
             MenuAction::Settings => "Settings…",
             MenuAction::PreviousPrompt => "Jump to Previous Prompt",
             MenuAction::NextPrompt => "Jump to Next Prompt",
@@ -337,6 +348,8 @@ impl MenuAction {
             MenuAction::EqualizePanes => c"equalizePanes:",
             MenuAction::TogglePaneZoom => c"togglePaneZoom:",
             MenuAction::RenamePane => c"renamePane:",
+            MenuAction::ArrangePane => c"arrangePane:",
+            MenuAction::PlaceNewPane => c"placeNewPane:",
             MenuAction::Settings => c"showSettings:",
             MenuAction::PreviousPrompt => c"jumpToPreviousPrompt:",
             MenuAction::NextPrompt => c"jumpToNextPrompt:",
@@ -362,15 +375,14 @@ impl MenuAction {
         use MenuAction::*;
         match self {
             Settings | CheckForUpdates | UpdateToLatest | RestartToUpdate | UpdateNow => "App",
-            NewWindow | NewTab | SplitRight | SplitDown | Close | CloseTab | CloseWindow => "Shell",
+            NewWindow | NewTab | SplitRight | SplitDown | PlaceNewPane | Close | CloseTab | CloseWindow => "Shell",
             Copy | Paste | SelectAll | SelectOutput | CopyCommand | CopyOutput | ReadFlagsFromHelp | ShowCompletions | ClearScrollback
             | Find | FindNext | FindPrevious | UseSelectionForFind => "Edit",
             FontBigger | FontSmaller | FontReset | FontBiggerAll | FontSmallerAll | FontResetAll | PreviousPrompt | NextPrompt
             | PreviousFailed | NextFailed | ToggleFullScreen => "View",
             FocusPaneLeft | FocusPaneRight | FocusPaneUp | FocusPaneDown | FocusPaneNext | FocusPanePrevious | ResizePaneLeft
-            | ResizePaneRight | ResizePaneUp | ResizePaneDown | EqualizePanes | TogglePaneZoom | RenamePane | NextTab | PreviousTab => {
-                "Window"
-            }
+            | ResizePaneRight | ResizePaneUp | ResizePaneDown | EqualizePanes | TogglePaneZoom | RenamePane | ArrangePane | NextTab
+            | PreviousTab => "Window",
         }
     }
 
@@ -386,7 +398,7 @@ impl MenuAction {
 /// for failed commands: Option-Shift with the prompt ones. Cmd+U, which
 /// no terminal uses, is Update Now, as the welcome line says.
 /// Ctrl+Space shows completions, as in VS Code.
-pub const DEFAULTS: [(&str, MenuAction); 47] = [
+pub const DEFAULTS: [(&str, MenuAction); 49] = [
     ("cmd+n", MenuAction::NewWindow),
     ("cmd+t", MenuAction::NewTab),
     ("cmd+w", MenuAction::Close),
@@ -408,6 +420,8 @@ pub const DEFAULTS: [(&str, MenuAction); 47] = [
     ("shift+ctrl+tab", MenuAction::PreviousTab),
     ("cmd+d", MenuAction::SplitRight),
     ("shift+cmd+d", MenuAction::SplitDown),
+    ("shift+cmd+n", MenuAction::PlaceNewPane),
+    ("shift+cmd+m", MenuAction::ArrangePane),
     ("shift+cmd+w", MenuAction::CloseWindow),
     ("alt+cmd+left", MenuAction::FocusPaneLeft),
     ("alt+cmd+right", MenuAction::FocusPaneRight),

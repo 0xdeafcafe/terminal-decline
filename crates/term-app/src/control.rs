@@ -217,6 +217,24 @@ impl ControlScanner {
 }
 
 /// A parsed control command.
+/// A key of the arrange mode (pane-arrange design §3.2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArrangeKey {
+    /// An arrow: the next place that way.
+    Towards(Direction),
+    /// Tab and Shift+Tab: the next and previous place, in order.
+    Next,
+    Previous,
+    /// Space: trade places with the pane it is beside, or back.
+    Swap,
+    /// 1–9: trade places with that pane (in tree order, from 1).
+    Pane(usize),
+    /// Return: place it.
+    Place,
+    /// Esc: put everything back.
+    Cancel,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Control {
     Dump,
@@ -252,6 +270,12 @@ pub enum Control {
     Equalize,
     /// Window > Zoom Pane.
     Zoom,
+    /// Window > Move Pane… (`new`: Shell > New Pane…).
+    Arrange {
+        new: bool,
+    },
+    /// A key of the arrange mode.
+    ArrangeKey(ArrangeKey),
     /// Window > Rename Pane… for the pane at `index` in tree order, with
     /// no sheet: the rest of the line is the name (none: no name).
     RenamePane {
@@ -404,6 +428,25 @@ impl Control {
             "close-pane" => Control::ClosePane,
             "equalize" => Control::Equalize,
             "zoom" => Control::Zoom,
+            "arrange" => Control::Arrange {
+                new: match words.next()? {
+                    "move" => false,
+                    "new" => true,
+                    _ => return None,
+                },
+            },
+            "arrange-key" => Control::ArrangeKey(match words.next()? {
+                "left" => ArrangeKey::Towards(Direction::Left),
+                "right" => ArrangeKey::Towards(Direction::Right),
+                "up" => ArrangeKey::Towards(Direction::Up),
+                "down" => ArrangeKey::Towards(Direction::Down),
+                "tab" => ArrangeKey::Next,
+                "backtab" => ArrangeKey::Previous,
+                "space" => ArrangeKey::Swap,
+                "return" => ArrangeKey::Place,
+                "esc" => ArrangeKey::Cancel,
+                n => ArrangeKey::Pane(n.parse().ok().filter(|n| (1..=9).contains(n))?),
+            }),
             "rename-pane" => Control::RenamePane {
                 index: words.next()?.parse().ok()?,
                 name: words.by_ref().collect::<Vec<_>>().join(" "),
@@ -567,6 +610,8 @@ pub struct Dump {
     pub lines: usize,
     /// Every pane, in tree order (left to right, top to bottom).
     pub panes: Vec<PaneDump>,
+    /// Arranging panes (pane-arrange design §3): the place it is at.
+    pub arranging: Option<String>,
     /// The focused pane's hovered link (OSC 8 or a plain URL), if the
     /// pointer is over one with Cmd held.
     pub hovered_link: Option<String>,
@@ -802,6 +847,17 @@ mod tests {
                 }),
             ),
             ("rename-pane", None),
+            ("arrange move", Some(Control::Arrange { new: false })),
+            ("arrange new", Some(Control::Arrange { new: true })),
+            ("arrange", None),
+            (
+                "arrange-key right",
+                Some(Control::ArrangeKey(ArrangeKey::Towards(Direction::Right))),
+            ),
+            ("arrange-key backtab", Some(Control::ArrangeKey(ArrangeKey::Previous))),
+            ("arrange-key 3", Some(Control::ArrangeKey(ArrangeKey::Pane(3)))),
+            ("arrange-key 0", None),
+            ("arrange-key esc", Some(Control::ArrangeKey(ArrangeKey::Cancel))),
             ("find-click 1", Some(Control::FindClick(1))),
             ("find-click", None),
             (

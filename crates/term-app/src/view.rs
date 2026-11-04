@@ -293,6 +293,8 @@ pub(crate) struct State {
     divider_views: Vec<Retained<DividerView>>,
     /// The divider being dragged with the mouse.
     dragging: Option<Drag>,
+    /// Panes being arranged with the keyboard (pane-arrange design §3).
+    arrange: Option<crate::arrange_view::Arrange>,
 }
 
 /// A divider drag under way: its split, which way it moves, and where in
@@ -506,6 +508,8 @@ define_class!(
         #[unsafe(method(setFrameSize:))]
         fn set_frame_size(&self, size: NSSize) {
             let _: () = unsafe { msg_send![super(self), setFrameSize: size] };
+            // The places were for the old size.
+            self.end_arrange(false);
             self.resize();
         }
 
@@ -558,6 +562,18 @@ define_class!(
         #[unsafe(method(resetFontSize:))]
         fn reset_font_size(&self, _sender: Option<&AnyObject>) {
             self.change_text_size(false, |_, c| c.font_size);
+        }
+
+        /// Window > Move Pane… (Cmd+Shift+M).
+        #[unsafe(method(arrangePane:))]
+        fn arrange_pane_action(&self, _sender: Option<&AnyObject>) {
+            self.start_arrange(false);
+        }
+
+        /// Shell > New Pane… (Cmd+Shift+N).
+        #[unsafe(method(placeNewPane:))]
+        fn place_new_pane_action(&self, _sender: Option<&AnyObject>) {
+            self.start_arrange(true);
         }
 
         /// Window > Rename Pane…: the focused pane's name.
@@ -1051,6 +1067,7 @@ impl WindowView {
             grabs: Vec::new(),
             divider_views: Vec::new(),
             dragging: None,
+            arrange: None,
         });
         if let Some(window) = self.window() {
             unsafe {
@@ -2525,6 +2542,10 @@ impl WindowView {
     /// The window became key or stopped being key: the focused pane's
     /// program is told if it asked (focus events).
     fn set_focus(&self, focused: bool) {
+        if !focused {
+            // Arranging needs the keys: it ends with the window's.
+            self.end_arrange(false);
+        }
         let report = self.with_state(|st| {
             st.win.focused = focused;
             let id = st.tree.focused();
@@ -2601,14 +2622,30 @@ impl WindowView {
     /// `-e PROGRAM` window), gets focus. Beeps if the two wouldn't both
     /// fit at their minimum size.
     pub(crate) fn split(&self, dir: Dir) {
+        let titlebar = self.titlebar_height();
+        let made = self.with_state(|st| {
+            let g = self.geometry(st, titlebar);
+            let mut tree = st.tree.clone();
+            let new = tree.split(dir, &g).ok()?;
+            Some((tree, new))
+        });
+        match made.flatten() {
+            Some((tree, new)) => self.open_pane(tree, new),
+            None => NSBeep(),
+        }
+    }
+
+    /// Open pane `new`, which `tree` has and the window doesn't yet: the
+    /// user's shell in the focused pane's folder, at its text size; then
+    /// `tree` is the window's, and the new pane gets focus. Beeps if it
+    /// can't start.
+    fn open_pane(&self, tree: Panes, new: PaneId) {
         let mtm = MainThreadMarker::from(self);
         let titlebar = self.titlebar_height();
         let cwd = self.foreground_cwd();
         let id = self.ivars().id;
         let made = self.with_state(|st| {
             let g = self.geometry(st, titlebar);
-            let mut tree = st.tree.clone();
-            let new = tree.split(dir, &g).ok()?;
             let rect = tree.layout(&g).rect(new)?;
             let font_size = st.panes.get(&st.tree.focused()).map_or(st.win.font_size, |p| p.font_size);
             let win = &mut st.win;
@@ -2662,6 +2699,178 @@ impl WindowView {
         if let Some(window) = self.window() {
             window.makeFirstResponder(Some(&view));
         }
+    }
+
+    /// Window > Move Pane… (Cmd+Shift+M) or Shell > New Pane…
+    /// (Cmd+Shift+N): start arranging the focused pane, or a new one
+    /// (pane-arrange design §3). Beeps when there is nowhere to put it
+    /// (one pane, to move). Ends a zoom first.
+    pub(crate) fn start_arrange(&self, new: bool) {
+        if self.with_state(|st| st.arrange.is_some()) != Some(false) {
+            return;
+        }
+        let unzoom = self.with_state(|st| st.tree.zoomed().is_some() && st.tree.toggle_zoom());
+        if unzoom == Some(true) {
+            self.resize();
+            self.redraw_all();
+        }
+        let titlebar = self.titlebar_height();
+        let started = self.with_state(|st| {
+            let g = self.geometry(st, titlebar);
+            let focused = st.tree.focused();
+            let moving = if new {
+                crate::panes::Moving::New(crate::panes::new_id())
+            } else {
+                crate::panes::Moving::Pane(focused)
+            };
+            let places = st.tree.places(moving, &g);
+            // A new pane starts right of the focused one, as Cmd+D puts it.
+            let at = match moving {
+                crate::panes::Moving::New(_) => places
+                    .iter()
+                    .position(|p| {
+                        p.beside == Some(focused)
+                            && matches!(
+                                p.spot,
+                                crate::panes::Spot::Beside {
+                                    side: crate::panes::Side::Right,
+                                    ..
+                                }
+                            )
+                    })
+                    .unwrap_or(0),
+                crate::panes::Moving::Pane(_) => 0,
+            };
+            if places.len() < 2 && !(new && places.len() == 1) {
+                return false;
+            }
+            st.arrange = Some(crate::arrange_view::Arrange {
+                moving,
+                places,
+                at,
+                view: crate::arrange_view::ArrangeView::new(self),
+            });
+            true
+        });
+        if started != Some(true) {
+            NSBeep();
+            return;
+        }
+        self.show_arrange();
+        let view = self.with_state(|st| st.arrange.as_ref().map(|a| a.view.clone())).flatten();
+        if let (Some(view), Some(window)) = (view, self.window()) {
+            window.makeFirstResponder(Some(&view));
+        }
+    }
+
+    /// The arrange mode's overlay, for the place it is at.
+    fn show_arrange(&self) {
+        let titlebar = self.titlebar_height();
+        let now = Instant::now();
+        let home = std::env::var("HOME").ok();
+        let bounds = self.bounds();
+        self.with_state(|st| {
+            let Some(a) = &st.arrange else { return };
+            let g = self.geometry(st, titlebar);
+            let win = &st.win;
+            let after = Duration::from_secs(win.config.notify_after.into());
+            let status = win.config.title_status;
+            let order = st.tree.ids();
+            let name = |id: PaneId| match st.panes.get(&id) {
+                Some(p) => crate::pane_strip::title_text(p.name.as_deref(), &pane_status(p, status, after, now, home.as_deref())),
+                None => "new pane".to_string(),
+            };
+            let place = a.place();
+            let focused_metrics = st
+                .panes
+                .get(&st.tree.focused())
+                .map_or(win.renderer.metrics(), |p| win.renderer.metrics_of(&p.render));
+            let strips = crate::pane_strip::shown(place.tree.len(), titlebar);
+            let outlines: Vec<crate::arrange_view::Outline> = place
+                .tree
+                .full_layout(&g)
+                .panes
+                .iter()
+                .map(|&(id, rect)| {
+                    let m = st.panes.get(&id).map_or(focused_metrics, |p| win.renderer.metrics_of(&p.render));
+                    let (cols, lines) = grid_of(&win.config, titlebar, win.scale, m, rect, strips);
+                    let number = order
+                        .iter()
+                        .position(|&o| o == id)
+                        .map(|i| format!("{}  ", i + 1))
+                        .unwrap_or_default();
+                    let new = !st.panes.contains_key(&id);
+                    let text = if new {
+                        let folder = st.panes.get(&st.tree.focused()).and_then(pane_cwd);
+                        let folder = folder.map(|f| crate::activity::tilde(&f, home.as_deref())).unwrap_or_default();
+                        format!("+ new   {folder}   {cols}\u{d7}{lines}")
+                    } else {
+                        format!("{number}{}   {cols}\u{d7}{lines}", name(id))
+                    };
+                    crate::arrange_view::Outline {
+                        rect: points(rect, win.scale),
+                        text,
+                        arranged: (id == a.moving.id()).then_some(!new),
+                    }
+                })
+                .collect();
+            let hint = crate::arrange_view::describe(a.moving, place, &st.tree, &name);
+            a.view.show(bounds, &outlines, &hint);
+        });
+    }
+
+    /// A key while arranging (pane-arrange design §3.2).
+    pub(crate) fn arrange_key(&self, key: crate::control::ArrangeKey) {
+        use crate::control::ArrangeKey;
+        match key {
+            ArrangeKey::Place => return self.end_arrange(true),
+            ArrangeKey::Cancel => return self.end_arrange(false),
+            _ => {}
+        }
+        let moved = self.with_state(|st| {
+            let order = st.tree.ids();
+            st.arrange.as_mut().map(|a| a.key(key, &order))
+        });
+        match moved.flatten() {
+            Some(true) => self.show_arrange(),
+            Some(false) => NSBeep(),
+            None => {}
+        }
+    }
+
+    /// Stop arranging: with `place`, the panes take the place's layout (a
+    /// new pane opens there), each program told its new grid once; else
+    /// nothing changes. Focus goes back to a pane.
+    pub(crate) fn end_arrange(&self, place: bool) {
+        let Some(Some(a)) = self.with_state(|st| st.arrange.take()) else {
+            return;
+        };
+        a.view.removeFromSuperview();
+        let crate::arrange_view::Arrange {
+            moving, mut places, at, ..
+        } = a;
+        let chosen = places.swap_remove(at);
+        match (place, moving) {
+            (true, crate::panes::Moving::New(id)) => self.open_pane(chosen.tree, id),
+            (true, crate::panes::Moving::Pane(id)) => {
+                self.with_state(|st| st.tree.apply(chosen));
+                self.resize();
+                self.redraw_all();
+                self.focus_pane(id);
+            }
+            (false, _) => {
+                if let Some(id) = self.focused_pane() {
+                    self.focus_pane(id);
+                }
+            }
+        }
+        self.refresh_title();
+    }
+
+    /// Whether the window is arranging panes (for the test dumps): the
+    /// hint bar's text.
+    fn arranging(st: &State) -> Option<String> {
+        st.arrange.as_ref().map(|a| format!("{:?} at {}", a.place().spot, a.at))
     }
 
     /// Shell > Close: the focused pane, asking first with `confirm_close`
@@ -3986,6 +4195,8 @@ impl WindowView {
                     Some(Control::ResizePane(dir)) => self.resize_pane(dir),
                     Some(Control::Equalize) => self.equalize(),
                     Some(Control::Zoom) => self.toggle_zoom(),
+                    Some(Control::Arrange { new }) => self.start_arrange(new),
+                    Some(Control::ArrangeKey(key)) => self.arrange_key(key),
                     Some(Control::RenamePane { index, name }) => {
                         if let Some(pane) = self.with_state(|st| st.tree.ids().get(index).copied()).flatten() {
                             self.set_pane_name(pane, &name);
@@ -4218,6 +4429,7 @@ fn write_dump(st: &mut State, window: Window) {
     use std::io::Write;
     let focused = st.tree.focused();
     let zoomed = st.tree.zoomed();
+    let arranging = WindowView::arranging(st);
     let mut images = control::ImagesDump::default();
     let every: Vec<PaneDump> = st
         .tree
@@ -4301,6 +4513,7 @@ fn write_dump(st: &mut State, window: Window) {
     let m = win.renderer.metrics_of(&p.render);
     let (mask_texture, color_texture) = win.renderer.glyph_texture_sizes();
     let dump = Dump {
+        arranging,
         seq: test.seq,
         window: window.id,
         tabs: window.tabs,

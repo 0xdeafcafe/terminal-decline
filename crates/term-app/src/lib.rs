@@ -6,6 +6,7 @@
 //! [`frame_policy`], [`panes`], [`config`] and [`pin`].
 
 pub mod app;
+mod arrange_view;
 mod background;
 pub mod control;
 pub mod crash;

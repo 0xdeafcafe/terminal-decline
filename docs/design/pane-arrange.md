@@ -209,27 +209,37 @@ has no places; a lone pane moved has only Home.
 | Space | swap with the pane the place is beside (or, on a swap, back beside it) |
 | 1–9 | swap with pane n (the outline numbers the panes) |
 | Return | place it: the tree becomes the place's, each pane resized once |
-| Esc, a click, the window losing key | cancel: nothing changed |
+| Esc, a click, the window losing key or resizing | cancel: nothing changed |
 
-Any other key is swallowed. The moving pane keeps focus after Return; a
-new pane gets focus, opened in the focused pane's folder at its text
-size. Entering ends a zoom. With one pane, Cmd+Shift+M beeps;
-Cmd+Shift+N offers the four sides. Cmd+D / Cmd+Shift+D are unchanged.
+Other keys beep, and the menus' shortcuts (any chord with Cmd or Ctrl)
+do nothing while the mode lasts (`performKeyEquivalent:` takes them).
+The moving pane keeps focus after Return; a new pane gets focus,
+opened in the focused pane's folder at its text size. Entering ends a
+zoom. With one pane, Cmd+Shift+M beeps; Cmd+Shift+N offers the four
+sides, starting right of the focused pane as Cmd+D would put it.
+Cmd+D / Cmd+Shift+D are unchanged.
 
 ### 3.3 The overlay
 
 An `ArrangeView` (`arrange_view.rs`) over the whole window view, while
-the mode lasts: plain layer-backed views, no drawing of our own.
+the mode lasts: standard views (`NSBox` fills and `NSTextField`
+labels), no drawing of our own. It is made again for each place, a
+handful of views.
 
-- A dimming layer over the panes (black at 45%).
-- The place's layout: each pane's rect as an outline (1 pt, the theme's
-  foreground at 70%) with its title (§2) and size in cells (`80×14`); the
-  moving pane filled with the accent colour at 35%; a new pane dashed,
-  `+ new` and its folder. Digits 1–9 at each pane's centre for a swap.
-- A hint bar at the bottom: `MOVE A → left of B` (or `NEW PANE →
-  below B`) and the keys.
+- A dimming fill over the panes (black at 45%).
+- The place's layout: each pane's rect as a rounded outline (1 pt,
+  white at 70%) saying its number (1–9 in tree order, for the digit
+  keys), its name or status (§2) and the grid it would have (`80×14`);
+  the moving pane outlined and filled with the accent colour at 35%; a
+  new pane at 20%, saying `+ new`, its folder and grid.
+- A hint bar at the bottom: `MOVE nvim → right of cargo test` (or
+  `NEW PANE → below htop`, `→ the window's right edge`, `→ left of
+  cargo + htop` beside a split, `→ swap with htop`) and the keys.
 - It takes the keys while it is up (first responder); the pane views
   don't see them, so no program gets one.
+- Test control: `arrange move|new`, `arrange-key
+  left|right|up|down|tab|backtab|space|return|esc|1-9`; dumps give
+  `arranging` (the place it is at).
 
 ## 4. Data and modules
 

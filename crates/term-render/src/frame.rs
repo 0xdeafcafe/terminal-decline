@@ -570,8 +570,9 @@ struct Pieces {
     pens: PenCache,
 }
 
-/// Pens resolved in one build, by style id (a snapshot's style table
-/// index), in direct-mapped slots: a coloured screen comes back to the
+/// Pens resolved in one build, by style table and id (history rows and
+/// the screen's have tables of their own, so an id alone can name two
+/// styles in one build), in direct-mapped slots: a coloured screen comes back to the
 /// same few styles row after row, so most changes of style find their pen
 /// here rather than resolving the style against the theme again. Valid
 /// for one build (one snapshot's styles, one theme): each build bumps
@@ -581,7 +582,8 @@ struct Pieces {
 #[derive(Default)]
 struct PenCache {
     build: u32,
-    slots: Vec<Option<(u32, u32, Pen)>>,
+    /// Stamped with the build, the table (its address) and the id.
+    slots: Vec<Option<(u32, usize, u32, Pen)>>,
     hits: u32,
     misses: u32,
     off: bool,
@@ -607,9 +609,10 @@ impl PenCache {
         }
     }
 
-    /// The pen of style `id`, made with `make` unless this build has it.
+    /// The pen of style `id` of table `table`, made with `make` unless
+    /// this build has it.
     #[inline]
-    fn get(&mut self, id: u32, make: impl FnOnce() -> Pen) -> Pen {
+    fn get(&mut self, (table, id): (usize, u32), make: impl FnOnce() -> Pen) -> Pen {
         if self.off {
             return make();
         }
@@ -618,13 +621,13 @@ impl PenCache {
         }
         let slot = &mut self.slots[id as usize % PEN_SLOTS];
         let pen = match slot {
-            Some((build, have, pen)) if *build == self.build && *have == id => {
+            Some((build, t, have, pen)) if *build == self.build && *t == table && *have == id => {
                 self.hits += 1;
                 *pen
             }
             _ => {
                 let pen = make();
-                *slot = Some((self.build, id, pen));
+                *slot = Some((self.build, table, id, pen));
                 self.misses += 1;
                 pen
             }
@@ -650,11 +653,11 @@ pub(crate) trait CellView {
     /// Neither a cluster nor either half of a two-cell cell: drawn as its
     /// character alone, if any.
     fn is_simple(&self) -> bool;
-    /// Its style's index in a table fixed for the whole build (a
-    /// snapshot's), by which its pen can be kept for the build; `None`
-    /// where styles have no such index.
+    /// Its style's table (its address) and index in it, both fixed for
+    /// the whole build (a snapshot's), by which its pen can be kept for the
+    /// build; `None` where styles have no such index.
     #[inline]
-    fn style_index(&self) -> Option<u32> {
+    fn style_index(&self) -> Option<(usize, u32)> {
         None
     }
     /// A kitty placeholder cell's image row and column.
@@ -720,8 +723,8 @@ impl CellView for SnapCell<'_> {
         self.cell.style_id()
     }
     #[inline]
-    fn style_index(&self) -> Option<u32> {
-        Some(self.cell.style_id())
+    fn style_index(&self) -> Option<(usize, u32)> {
+        Some((self.styles.as_ptr() as usize, self.cell.style_id()))
     }
     #[inline]
     fn style(&self) -> term_core::Style {
@@ -2518,37 +2521,48 @@ mod tests {
         let mut made = 0;
         cache.next_build();
         for _ in 0..3 {
-            cache.get(7, || {
+            cache.get((1, 7), || {
                 made += 1;
                 pen
             });
         }
         assert_eq!(made, 1, "made once, then found");
         // Another id in the same slot replaces it.
-        cache.get(7 + PEN_SLOTS as u32, || pen);
-        cache.get(7, || {
+        cache.get((1, 7 + PEN_SLOTS as u32), || pen);
+        cache.get((1, 7), || {
             made += 1;
             pen
         });
         assert_eq!(made, 2);
-        cache.next_build();
-        cache.get(7, || {
+        // The same id in another table (history rows') is another style.
+        cache.get((2, 7), || {
             made += 1;
             pen
         });
-        assert_eq!(made, 3, "a new build makes it again");
+        assert_eq!(made, 3);
+        cache.get((1, 7), || {
+            made += 1;
+            pen
+        });
+        assert_eq!(made, 4, "it took the slot");
+        cache.next_build();
+        cache.get((1, 7), || {
+            made += 1;
+            pen
+        });
+        assert_eq!(made, 5, "a new build makes it again");
 
         // Every lookup a new style: past the trial it stops keeping them.
         cache.next_build();
         for id in 0..PEN_TRIAL {
-            cache.get(id * PEN_SLOTS as u32, || pen);
+            cache.get((1, id * PEN_SLOTS as u32), || pen);
         }
         assert!(cache.off);
         cache.next_build();
         assert!(!cache.off, "each build tries again");
         // Few styles: kept.
         for i in 0..PEN_TRIAL {
-            cache.get(i % 8, || pen);
+            cache.get((1, i % 8), || pen);
         }
         assert!(!cache.off);
     }

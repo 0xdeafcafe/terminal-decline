@@ -784,6 +784,246 @@ impl Panes {
     }
 }
 
+/// What is being arranged (pane-arrange design §3): a pane of the tree
+/// being moved, or a new pane, with a fresh id not in the tree, being
+/// placed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Moving {
+    Pane(PaneId),
+    New(PaneId),
+}
+
+impl Moving {
+    pub fn id(self) -> PaneId {
+        match self {
+            Moving::Pane(id) | Moving::New(id) => id,
+        }
+    }
+}
+
+/// Which side of a node the arranged pane goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Side {
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
+/// A place an arranged pane can go.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Spot {
+    /// Where it is now (a moved pane only).
+    Home,
+    /// A new split around the node at `node`, a path in the tree without
+    /// the moving pane, with the moving pane on `side`.
+    Beside { node: SplitPath, side: Side },
+    /// Trading places with that pane.
+    Swap(PaneId),
+}
+
+/// A place, with the panes it makes and where the arranged pane would be
+/// in them (the preview's layout is `tree.full_layout`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Place {
+    pub spot: Spot,
+    /// The panes after it, the arranged pane focused, not zoomed.
+    pub tree: Panes,
+    /// The arranged pane's rect in `tree`'s full layout.
+    pub rect: PxRect,
+    /// The pane it is beside, or trades places with: what Space swaps with.
+    pub beside: Option<PaneId>,
+}
+
+impl Node {
+    /// Every node's path, the root's first.
+    fn paths(&self, path: &mut Vec<bool>, out: &mut Vec<Vec<bool>>) {
+        out.push(path.clone());
+        if let Node::Split { a, b, .. } = self {
+            path.push(false);
+            a.paths(path, out);
+            path.pop();
+            path.push(true);
+            b.paths(path, out);
+            path.pop();
+        }
+    }
+
+    fn swap_leaves(&mut self, x: PaneId, y: PaneId) {
+        match self {
+            Node::Leaf(p) if *p == x => *p = y,
+            Node::Leaf(p) if *p == y => *p = x,
+            Node::Leaf(_) => {}
+            Node::Split { a, b, .. } => {
+                a.swap_leaves(x, y);
+                b.swap_leaves(x, y);
+            }
+        }
+    }
+}
+
+/// Twice a rect's centre, so it stays in whole numbers.
+fn centre2(r: PxRect) -> (i64, i64) {
+    (2 * r.x as i64 + r.w as i64, 2 * r.y as i64 + r.h as i64)
+}
+
+impl Panes {
+    /// Every place `moving` can go (pane-arrange design §3.1): first where
+    /// it is (a moved pane), then beside each node of the tree without it,
+    /// nearest the root first, on each side, leaving out those that break
+    /// a pane's minimum and those that put it where an earlier place does;
+    /// then trading places with each other pane (a moved pane). Empty when
+    /// a moved pane isn't in the tree, or a new pane's id is.
+    pub fn places(&self, moving: Moving, g: &Geometry) -> Vec<Place> {
+        let id = moving.id();
+        let rest = match moving {
+            Moving::Pane(_) if !self.contains(id) => return Vec::new(),
+            Moving::New(_) if self.contains(id) => return Vec::new(),
+            Moving::Pane(_) => {
+                let mut rest = self.root.clone();
+                rest.remove(id).map(|_| rest)
+            }
+            Moving::New(_) => Some(self.root.clone()),
+        };
+        let tree = |root: Node| Panes {
+            root,
+            focused: id,
+            zoomed: None,
+        };
+        let rect_of = |p: &Panes| p.full_layout(g).rect(id).unwrap_or_default();
+        let fits = |root: &Node| {
+            let (w, h) = root.min_size(g, true);
+            w <= g.bounds.w && h <= g.bounds.h
+        };
+        let mut out: Vec<Place> = Vec::new();
+        if let Moving::Pane(_) = moving {
+            let home = tree(self.root.clone());
+            out.push(Place {
+                spot: Spot::Home,
+                rect: rect_of(&home),
+                tree: home,
+                beside: None,
+            });
+        }
+        if let Some(rest) = rest {
+            let mut paths = Vec::new();
+            rest.paths(&mut Vec::new(), &mut paths);
+            paths.sort_by_key(|p| p.len());
+            for path in paths {
+                for side in [Side::Left, Side::Right, Side::Top, Side::Bottom] {
+                    let mut root = rest.clone();
+                    let Some(node) = root.node_at(&path) else { continue };
+                    let beside = match node {
+                        Node::Leaf(p) => Some(*p),
+                        Node::Split { .. } => None,
+                    };
+                    let old = Box::new(std::mem::replace(node, Node::Leaf(id)));
+                    let new = Box::new(Node::Leaf(id));
+                    *node = match side {
+                        Side::Left => Node::Split {
+                            dir: Dir::Right,
+                            ratio: 0.5,
+                            a: new,
+                            b: old,
+                        },
+                        Side::Right => Node::Split {
+                            dir: Dir::Right,
+                            ratio: 0.5,
+                            a: old,
+                            b: new,
+                        },
+                        Side::Top => Node::Split {
+                            dir: Dir::Down,
+                            ratio: 0.5,
+                            a: new,
+                            b: old,
+                        },
+                        Side::Bottom => Node::Split {
+                            dir: Dir::Down,
+                            ratio: 0.5,
+                            a: old,
+                            b: new,
+                        },
+                    };
+                    if !fits(&root) {
+                        continue;
+                    }
+                    let t = tree(root);
+                    let rect = rect_of(&t);
+                    if out.iter().any(|p| p.rect == rect) {
+                        continue;
+                    }
+                    out.push(Place {
+                        spot: Spot::Beside {
+                            node: SplitPath(path.clone()),
+                            side,
+                        },
+                        tree: t,
+                        rect,
+                        beside,
+                    });
+                }
+            }
+        }
+        if let Moving::Pane(_) = moving {
+            for (other, r) in self.full_layout(g).panes {
+                if other == id {
+                    continue;
+                }
+                let mut root = self.root.clone();
+                root.swap_leaves(id, other);
+                out.push(Place {
+                    spot: Spot::Swap(other),
+                    tree: tree(root),
+                    rect: r,
+                    beside: Some(other),
+                });
+            }
+        }
+        out
+    }
+
+    /// The place an arrow takes the arranged pane to from `places[from]`:
+    /// of the places (not swaps) whose rect's centre and trailing edge are
+    /// both past the current one's that way (so → never just stretches
+    /// the pane across the window), the nearest by centre, distance
+    /// across the arrow counting twice; ties go to the larger rect, then
+    /// the earlier place. `None` when there is none (beep).
+    pub fn step(places: &[Place], from: usize, dir: Direction) -> Option<usize> {
+        let cur = places.get(from)?.rect;
+        let (cx, cy) = centre2(cur);
+        let mut best: Option<(i64, i64, usize)> = None;
+        for (i, p) in places.iter().enumerate() {
+            if i == from || matches!(p.spot, Spot::Swap(_)) {
+                continue;
+            }
+            let r = p.rect;
+            let (x, y) = centre2(r);
+            let (along, across, edge) = match dir {
+                Direction::Left => (cx - x, (y - cy).abs(), r.right() < cur.right()),
+                Direction::Right => (x - cx, (y - cy).abs(), r.x > cur.x),
+                Direction::Up => (cy - y, (x - cx).abs(), r.bottom() < cur.bottom()),
+                Direction::Down => (y - cy, (x - cx).abs(), r.y > cur.y),
+            };
+            if along <= 0 || !edge {
+                continue;
+            }
+            let score = along + 2 * across;
+            let area = p.rect.w as i64 * p.rect.h as i64;
+            if best.is_none_or(|(s, a, _)| (score, -area) < (s, -a)) {
+                best = Some((score, area, i));
+            }
+        }
+        best.map(|(_, _, i)| i)
+    }
+
+    /// Arrange as `place` says: its panes, the arranged pane focused, any
+    /// zoom ended.
+    pub fn apply(&mut self, place: Place) {
+        *self = place.tree;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1203,6 +1443,94 @@ mod tests {
         assert_eq!(r.layout(&g).rect(cwds[0].0).unwrap().h, 300);
     }
 
+    fn place_of(places: &[Place], spot: &Spot) -> usize {
+        places.iter().position(|p| p.spot == *spot).unwrap_or_else(|| panic!("no {spot:?}"))
+    }
+
+    fn beside(path: &[bool], side: Side) -> Spot {
+        Spot::Beside {
+            node: SplitPath(path.to_vec()),
+            side,
+        }
+    }
+
+    #[test]
+    fn arrows_step_a_pane_through_its_places() {
+        let g = geometry(800, 600);
+        // A | (B / C), moving A. Without it: B / C, so B is [false] and C [true].
+        let p = panes(split(Dir::Right, leaf(1), split(Dir::Down, leaf(2), leaf(3))), 1);
+        let places = p.places(Moving::Pane(1), &g);
+        assert_eq!(places[0].spot, Spot::Home);
+        assert_eq!(places[0].tree.root, p.root);
+        assert_eq!(places[0].rect, rect(0, 0, 400, 600));
+        assert!(
+            !places.iter().any(|q| q.spot == beside(&[], Side::Left)),
+            "left of everything is where it is: one place"
+        );
+        let home = 0;
+        let right_edge = place_of(&places, &beside(&[], Side::Right));
+        let left_of_b = place_of(&places, &beside(&[false], Side::Left));
+        let right_of_b = place_of(&places, &beside(&[false], Side::Right));
+        let left_of_c = place_of(&places, &beside(&[true], Side::Left));
+        assert_eq!(places[right_edge].rect, rect(401, 0, 399, 600));
+        assert_eq!(places[left_of_b].rect, rect(0, 0, 400, 300));
+        assert_eq!(places[left_of_b].beside, Some(2));
+        assert_eq!(places[right_edge].beside, None);
+        assert_eq!(places[right_of_b].rect, rect(401, 0, 399, 300));
+        assert_eq!(
+            places[right_of_b].tree.root,
+            *split(Dir::Down, split(Dir::Right, leaf(2), leaf(1)), leaf(3))
+        );
+        assert_eq!(Panes::step(&places, home, Direction::Right), Some(right_edge));
+        assert_eq!(Panes::step(&places, home, Direction::Up), Some(left_of_b));
+        assert_eq!(Panes::step(&places, home, Direction::Down), Some(left_of_c));
+        assert_eq!(Panes::step(&places, home, Direction::Left), None);
+        assert_eq!(Panes::step(&places, right_edge, Direction::Up), Some(right_of_b));
+        assert_eq!(Panes::step(&places, right_edge, Direction::Left), Some(home));
+        assert_eq!(Panes::step(&places, right_edge, Direction::Right), None);
+        // Swaps: one per other pane, reached by Space and digits only.
+        let swap_c = place_of(&places, &Spot::Swap(3));
+        assert_eq!(places[swap_c].rect, rect(401, 301, 399, 299));
+        assert_eq!(
+            places[swap_c].tree.root,
+            *split(Dir::Right, leaf(3), split(Dir::Down, leaf(2), leaf(1)))
+        );
+        assert!(places.iter().any(|q| q.spot == Spot::Swap(2)));
+        // Applying one: its tree, the pane focused, no zoom.
+        let mut q = p.clone();
+        q.zoomed = Some(2);
+        q.apply(places[right_of_b].clone());
+        assert_eq!(q.focused(), 1);
+        assert_eq!(q.zoomed(), None);
+        assert_eq!(q.layout(&g).rect(1), Some(rect(401, 0, 399, 300)));
+    }
+
+    #[test]
+    fn a_new_pane_goes_on_any_side_but_has_no_home_or_swaps() {
+        let g = geometry(800, 600);
+        let p = Panes::new();
+        let places = p.places(Moving::New(999_999), &g);
+        let spots: Vec<Spot> = places.iter().map(|q| q.spot.clone()).collect();
+        assert_eq!(
+            spots,
+            [
+                beside(&[], Side::Left),
+                beside(&[], Side::Right),
+                beside(&[], Side::Top),
+                beside(&[], Side::Bottom)
+            ]
+        );
+        assert!(places.iter().all(|q| q.tree.len() == 2 && q.tree.focused() == 999_999));
+        assert!(p.places(Moving::New(p.focused()), &g).is_empty(), "the id must be new");
+        assert!(p.places(Moving::Pane(999_999), &g).is_empty(), "the pane must be there");
+        // One pane moved: only where it is.
+        let only = p.places(Moving::Pane(p.focused()), &g);
+        assert_eq!(only.len(), 1);
+        assert_eq!(only[0].spot, Spot::Home);
+        // Too small to split: no places beside.
+        assert!(p.places(Moving::New(999_999), &geometry(30, 15)).is_empty());
+    }
+
     // Property tests.
 
     #[derive(Clone, Debug)]
@@ -1429,6 +1757,90 @@ mod tests {
             let rects = |p: &Panes| p.layout(&g).panes.into_iter().map(|(_, r)| r).collect::<Vec<_>>();
             prop_assert_eq!(rects(&r), rects(&p));
             prop_assert_eq!(r.ids().iter().position(|&i| i == r.focused()), p.ids().iter().position(|&i| i == p.focused()));
+        }
+
+        #[test]
+        fn every_place_is_a_whole_layout_and_arrows_never_go_back(
+            g in window(),
+            dirs in prop::collection::vec(any::<(bool, usize, i32)>(), 0..8),
+            pick in any::<usize>(),
+            new in any::<bool>(),
+        ) {
+            let mut p = Panes::new();
+            for (down, f, to) in dirs {
+                let ids = p.ids();
+                p.focus(ids[f % ids.len()]);
+                let _ = p.split(if down { Dir::Down } else { Dir::Right }, &g);
+                let l = p.layout(&g);
+                if let Some(d) = l.dividers.get(f % l.dividers.len().max(1)) {
+                    p.drag(&d.path.clone(), to.rem_euclid(3000), &g);
+                }
+            }
+            let ids = p.ids();
+            let moving = if new { Moving::New(new_id()) } else { Moving::Pane(ids[pick % ids.len()]) };
+            let id = moving.id();
+            let mut want = ids.clone();
+            if new {
+                want.push(id);
+            }
+            want.sort();
+            let rest = match moving {
+                Moving::Pane(_) => {
+                    let mut r = p.root.clone();
+                    r.remove(id).map(|_| r)
+                }
+                Moving::New(_) => Some(p.root.clone()),
+            };
+            let places = p.places(moving, &g);
+            prop_assert_eq!(places.iter().any(|q| q.spot == Spot::Home), !new);
+            let (mw, mh) = p.min_size(&g);
+            let fits = mw <= g.bounds.w && mh <= g.bounds.h;
+            for q in &places {
+                let mut got = q.tree.ids();
+                got.sort();
+                prop_assert_eq!(&got, &want);
+                prop_assert_eq!(q.tree.focused(), id);
+                prop_assert_eq!(q.tree.zoomed(), None);
+                prop_assert_eq!(q.tree.full_layout(&g).rect(id), Some(q.rect));
+                check(&q.tree, &g)?;
+                match &q.spot {
+                    Spot::Home => prop_assert_eq!(&q.tree.root, &p.root),
+                    Spot::Beside { .. } => {
+                        let (w, h) = q.tree.min_size(&g);
+                        prop_assert!(w <= g.bounds.w && h <= g.bounds.h);
+                        // Taking the pane back out gives the tree without it.
+                        let mut back = q.tree.root.clone();
+                        prop_assert!(back.remove(id).is_some());
+                        prop_assert_eq!(Some(back), rest.clone());
+                    }
+                    Spot::Swap(other) => {
+                        prop_assert!(fits);
+                        prop_assert_eq!(Some(q.rect), p.full_layout(&g).rect(*other));
+                    }
+                }
+            }
+            // No two places (bar swaps) put the pane in the same rect.
+            let rects: Vec<PxRect> = places.iter().filter(|q| !matches!(q.spot, Spot::Swap(_))).map(|q| q.rect).collect();
+            for (i, r) in rects.iter().enumerate() {
+                prop_assert!(!rects[i + 1..].contains(r), "{:?} twice", r);
+            }
+            // Each arrow goes strictly that way, to a place not a swap.
+            for from in 0..places.len() {
+                let (cx, cy) = centre2(places[from].rect);
+                for dir in [Direction::Left, Direction::Right, Direction::Up, Direction::Down] {
+                    let Some(to) = Panes::step(&places, from, dir) else { continue };
+                    prop_assert!(!matches!(places[to].spot, Spot::Swap(_)));
+                    let (x, y) = centre2(places[to].rect);
+                    let (a, b) = (places[from].rect, places[to].rect);
+                    let past = match dir {
+                        Direction::Left => x < cx && b.right() < a.right(),
+                        Direction::Right => x > cx && b.x > a.x,
+                        Direction::Up => y < cy && b.bottom() < a.bottom(),
+                        Direction::Down => y > cy && b.y > a.y,
+                    };
+                    prop_assert!(past, "{:?} from {} went to {}", dir, from, to);
+                }
+            }
         }
     }
 }

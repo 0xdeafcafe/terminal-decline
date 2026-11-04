@@ -130,16 +130,18 @@ start: A lifted                         → : the layout you'd get
 │ MOVE A ←↑↓→ ␣ swap 1-9 ⏎ esc │       │ MOVE A → left of B   ⏎ esc   │
 └──────────────────────────────┘       └──────────────────────────────┘
 
-each → steps to the next place that way:
- start        →            →             →               ↓
-┌────┬────┐ ┌─────────┐ ┌─────────┐ ┌────┬────┐   ┌─────────┐
-│▓▓▓▓│ B  │ │▓▓▓▓│ B  │ │ B  │▓▓▓▓│ │ B  │▓▓▓▓│   │    B    │
-│▓▓▓▓├────┤ ├────┴────┤ ├────┴────┤ ├────┤▓▓▓▓│   ├─────────┤
-│▓▓▓▓│ C  │ │    C    │ │    C    │ │ C  │▓▓▓▓│   │    C    │
-└────┴────┘ └─────────┘ └─────────┘ └────┴────┘   ├─────────┤
- where it    left of B   right of B  window's      │▓▓▓▓▓▓▓▓▓│
- is now                              right edge    └─────────┘
+each arrow steps to the nearest place that way (the pane moves that way):
+ start        ↑ (from start) ↓ (from start)  → (from start)   then ↑
+┌────┬────┐ ┌─────────┐    ┌─────────┐     ┌────┬────┐     ┌─────────┐
+│▓▓▓▓│ B  │ │▓▓▓▓│ B  │    │    B    │     │ B  │▓▓▓▓│     │ B  │▓▓▓▓│
+│▓▓▓▓├────┤ ├────┴────┤    ├────┬────┤     ├────┤▓▓▓▓│     ├────┴────┤
+│▓▓▓▓│ C  │ │    C    │    │▓▓▓▓│ C  │     │ C  │▓▓▓▓│     │    C    │
+└────┴────┘ └─────────┘    └────┴────┘     └────┴────┘     └─────────┘
+ where it    left of B      left of C       window's        right of B
+ is now                                     right edge
 ```
+(The 4 Nov mockup had → from the start go to "left of B"; in the real
+geometry that place is up from the start, not right of it.)
 
 ### 3.1 Places (`panes`, pure)
 
@@ -156,8 +158,14 @@ pub struct Place { pub spot: Spot, pub tree: Panes, pub rect: PxRect, pub beside
 impl Panes {
     pub fn places(&self, moving: Moving, g: &Geometry) -> Vec<Place>;
     pub fn step(places: &[Place], from: usize, dir: Direction) -> Option<usize>;
+    pub fn apply(&mut self, place: Place);         // its tree; the pane focused, no zoom
 }
 ```
+
+Places come in order: Home (a moved pane), then Beside, nearest the
+root first and Left, Right, Top, Bottom for each node, then Swap in tree
+order. A moved pane that isn't in the tree, or a new pane whose id is,
+has no places; a lone pane moved has only Home.
 
 - **Beside**: take the moving pane out of the tree (`T'`); for every node
   of `T'`, a leaf or a split (the root included: the window's edges), and
@@ -167,16 +175,22 @@ impl Panes {
   giving the moving pane the same rect, the one nearest the root stays
   (left of B's right neighbour and right of B are one place).
 - **Swap**: one per other pane; `rect` is that pane's.
-- **Step** (an arrow): of the places whose rect's centre is past the
-  current one's that way, the nearest, counting distance across the
-  arrow at twice its weight; ties go to the larger rect. Swap places are
+- **Step** (an arrow): of the places whose rect's centre and trailing
+  edge are both past the current one's that way (→: its centre further
+  right and its left edge too, so → never just stretches the pane into
+  a full-width strip), the nearest by centre, counting distance across
+  the arrow at twice its weight; ties go to the larger rect, then the
+  earlier place. Swap places are
   reached with Space and the digits only, not the arrows. Tab and
   Shift+Tab go through every place in order, so any place can be
   reached even when the arrows skip one.
-- Property tests: every place's tree has the same panes (plus the new
-  one) and lays out within the minimums; stepping is monotonic along the
-  arrow, so it never cycles; Home's tree is the tree; applying a place
-  and taking the pane back out gives `T'`.
+- Property tests (landed, A4): every place's tree has the same panes
+  (plus the new one), focused on the arranged pane, unzoomed, and lays
+  out within the minimums, the pane at `rect`; Home's tree is the tree;
+  taking the pane back out of a Beside place gives `T'`; a Swap's rect
+  is the other pane's; no two non-swap places share a rect; each step
+  is strictly past along the arrow (centre and trailing edge), so
+  stepping never cycles, and never lands on a swap.
 
 ### 3.2 Keys in the mode
 

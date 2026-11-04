@@ -34,6 +34,7 @@ pub mod search;
 pub mod secure_input;
 pub mod select;
 pub mod session;
+mod size_labels;
 #[cfg(test)]
 mod testutil;
 pub mod update;

@@ -41,6 +41,11 @@ pub enum MenuAction {
     FontBigger,
     FontSmaller,
     FontReset,
+    /// Bigger, Smaller and Actual Size for every pane of the window (the
+    /// three above are the focused pane's).
+    FontBiggerAll,
+    FontSmallerAll,
+    FontResetAll,
     ToggleFullScreen,
     NextTab,
     PreviousTab,
@@ -120,7 +125,7 @@ pub enum MenuAction {
 }
 
 impl MenuAction {
-    pub const ALL: [MenuAction; 47] = [
+    pub const ALL: [MenuAction; 50] = [
         MenuAction::NewWindow,
         MenuAction::NewTab,
         MenuAction::Close,
@@ -131,6 +136,9 @@ impl MenuAction {
         MenuAction::FontBigger,
         MenuAction::FontSmaller,
         MenuAction::FontReset,
+        MenuAction::FontBiggerAll,
+        MenuAction::FontSmallerAll,
+        MenuAction::FontResetAll,
         MenuAction::ToggleFullScreen,
         MenuAction::NextTab,
         MenuAction::PreviousTab,
@@ -183,6 +191,9 @@ impl MenuAction {
             MenuAction::FontBigger => "font_bigger",
             MenuAction::FontSmaller => "font_smaller",
             MenuAction::FontReset => "font_reset",
+            MenuAction::FontBiggerAll => "font_bigger_all",
+            MenuAction::FontSmallerAll => "font_smaller_all",
+            MenuAction::FontResetAll => "font_reset_all",
             MenuAction::ToggleFullScreen => "toggle_full_screen",
             MenuAction::NextTab => "next_tab",
             MenuAction::PreviousTab => "previous_tab",
@@ -236,6 +247,9 @@ impl MenuAction {
             MenuAction::FontBigger => "Bigger",
             MenuAction::FontSmaller => "Smaller",
             MenuAction::FontReset => "Actual Size",
+            MenuAction::FontBiggerAll => "Bigger in Every Pane",
+            MenuAction::FontSmallerAll => "Smaller in Every Pane",
+            MenuAction::FontResetAll => "Actual Size in Every Pane",
             MenuAction::ToggleFullScreen => "Enter Full Screen",
             MenuAction::NextTab => "Show Next Tab",
             MenuAction::PreviousTab => "Show Previous Tab",
@@ -291,6 +305,9 @@ impl MenuAction {
             MenuAction::FontBigger => c"increaseFontSize:",
             MenuAction::FontSmaller => c"decreaseFontSize:",
             MenuAction::FontReset => c"resetFontSize:",
+            MenuAction::FontBiggerAll => c"increaseFontSizeEverywhere:",
+            MenuAction::FontSmallerAll => c"decreaseFontSizeEverywhere:",
+            MenuAction::FontResetAll => c"resetFontSizeEverywhere:",
             MenuAction::ToggleFullScreen => c"toggleFullScreen:",
             MenuAction::NextTab => c"selectNextTab:",
             MenuAction::PreviousTab => c"selectPreviousTab:",
@@ -342,7 +359,8 @@ impl MenuAction {
             NewWindow | NewTab | SplitRight | SplitDown | Close | CloseTab | CloseWindow => "Shell",
             Copy | Paste | SelectAll | SelectOutput | CopyCommand | CopyOutput | ReadFlagsFromHelp | ShowCompletions | ClearScrollback
             | Find | FindNext | FindPrevious | UseSelectionForFind => "Edit",
-            FontBigger | FontSmaller | FontReset | PreviousPrompt | NextPrompt | PreviousFailed | NextFailed | ToggleFullScreen => "View",
+            FontBigger | FontSmaller | FontReset | FontBiggerAll | FontSmallerAll | FontResetAll | PreviousPrompt | NextPrompt
+            | PreviousFailed | NextFailed | ToggleFullScreen => "View",
             FocusPaneLeft | FocusPaneRight | FocusPaneUp | FocusPaneDown | FocusPaneNext | FocusPanePrevious | ResizePaneLeft
             | ResizePaneRight | ResizePaneUp | ResizePaneDown | EqualizePanes | TogglePaneZoom | NextTab | PreviousTab => "Window",
         }
@@ -360,7 +378,7 @@ impl MenuAction {
 /// for failed commands: Option-Shift with the prompt ones. Cmd+U, which
 /// no terminal uses, is Update Now, as the welcome line says.
 /// Ctrl+Space shows completions, as in VS Code.
-pub const DEFAULTS: [(&str, MenuAction); 44] = [
+pub const DEFAULTS: [(&str, MenuAction); 47] = [
     ("cmd+n", MenuAction::NewWindow),
     ("cmd+t", MenuAction::NewTab),
     ("cmd+w", MenuAction::Close),
@@ -371,6 +389,9 @@ pub const DEFAULTS: [(&str, MenuAction); 44] = [
     ("cmd+=", MenuAction::FontBigger),
     ("cmd+-", MenuAction::FontSmaller),
     ("cmd+0", MenuAction::FontReset),
+    ("alt+cmd+=", MenuAction::FontBiggerAll),
+    ("alt+cmd+-", MenuAction::FontSmallerAll),
+    ("alt+cmd+0", MenuAction::FontResetAll),
     ("ctrl+cmd+f", MenuAction::ToggleFullScreen),
     ("cmd+}", MenuAction::NextTab),
     ("cmd+{", MenuAction::PreviousTab),

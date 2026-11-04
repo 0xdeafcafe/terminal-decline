@@ -103,6 +103,10 @@ pub struct SavedPane {
     /// Its history's file, as [`SavedWindow::history`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub history: Option<String>,
+    /// Its text size in points, when not the config's (pane-arrange
+    /// design §1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_size: Option<f64>,
 }
 
 /// Saved windows as they reopen: one list per window, its tabs in order.

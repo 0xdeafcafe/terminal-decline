@@ -552,7 +552,7 @@ define_class!(
             let Some(window) = self.window() else { return NSRect::ZERO };
             let titlebar = self.window_view().map_or(0.0, |w| w.titlebar_height());
             let rect = self.with(|win, p| {
-                let m = win.renderer.metrics();
+                let m = win.renderer.metrics_of(&p.render);
                 let pad = pane_padding(&win.config, titlebar, win.scale, p.rect);
                 let t = p.session.lock_term();
                 let (x, y) = layout::cell_origin(t.state.cursor().row(), t.state.cursor().col(), m.into(), pad);
@@ -1059,7 +1059,7 @@ impl PaneView {
         let Some(window) = self.window() else { return };
         let titlebar = self.window_view().map_or(0.0, |w| w.titlebar_height());
         let Some(at) = self.with(|win, p| {
-            let m = win.renderer.metrics();
+            let m = win.renderer.metrics_of(&p.render);
             let pad = pane_padding(&win.config, titlebar, win.scale, p.rect);
             let (x, y) = layout::cell_origin(line, col, m.into(), pad);
             NSPoint::new(
@@ -1110,7 +1110,7 @@ impl PaneView {
     fn cell_at_point(&self, at: NSPoint) -> Option<(usize, usize)> {
         let titlebar = self.window_view().map_or(0.0, |w| w.titlebar_height());
         self.with(|win, p| {
-            let m = win.renderer.metrics();
+            let m = win.renderer.metrics_of(&p.render);
             let pad = pane_padding(&win.config, titlebar, win.scale, p.rect);
             let t = p.session.lock_term();
             layout::cell_at((at.x, at.y), win.scale, m.into(), pad, t.state.cols(), t.state.lines())
@@ -1869,7 +1869,7 @@ impl PaneView {
             let s = &mut t.state;
             // Cells are hit at whole lines: a view between two goes to the
             // nearer one first.
-            let snap = p.scroll.snap(win.renderer.metrics().cell_height as f64);
+            let snap = p.scroll.snap(win.renderer.metrics_of(&p.render).cell_height as f64);
             if snap != 0 {
                 s.scroll_view(snap);
                 p.session.mark_dirty();
@@ -2021,7 +2021,7 @@ impl PaneView {
         let at = self.convertPoint_fromView(event.locationInWindow(), None);
         let titlebar = self.window_view().map_or(0.0, |w| w.titlebar_height());
         self.with(|win, p| {
-            let m = win.renderer.metrics();
+            let m = win.renderer.metrics_of(&p.render);
             let pad = pane_padding(&win.config, titlebar, win.scale, p.rect);
             let lines = p.session.lock_term().state.lines();
             let top = pad.top as f64;
@@ -2103,7 +2103,7 @@ impl PaneView {
         let at = self.px_at(event);
         let (changed, start_timer) = self
             .with(|win, p| {
-                if !Self::start_pending(p, at, win.renderer.metrics().cell_width as f64) {
+                if !Self::start_pending(p, at, win.renderer.metrics_of(&p.render).cell_width as f64) {
                     return (false, false);
                 }
                 // Past the top or bottom edge, a timer keeps scrolling
@@ -2181,7 +2181,7 @@ impl PaneView {
         if reporting.is_some() || alt.is_some() {
             let lines = self
                 .with(|win, p| {
-                    let cell = win.renderer.metrics().cell_height as f64;
+                    let cell = win.renderer.metrics_of(&p.render).cell_height as f64;
                     p.scroll.reset();
                     p.scroll.whole(if input.precise {
                         input.dy * win.scale / cell
@@ -2216,7 +2216,7 @@ impl PaneView {
                 p.scroll.queue(input.t0, input.dy * win.scale);
                 return false;
             }
-            let cell = win.renderer.metrics().cell_height as f64;
+            let cell = win.renderer.metrics_of(&p.render).cell_height as f64;
             let locking = latency::get().map(|_| latency::now());
             let mut t = p.session.lock_term();
             if let (Some(lat), Some(at)) = (latency::get(), locking) {

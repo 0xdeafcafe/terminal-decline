@@ -25,22 +25,24 @@ size of a pane's text is its **text size**.
 
 - **Cmd+= / Cmd+- / Cmd+0** (`font_bigger`, `font_smaller`,
   `font_reset`, as before) change the **focused pane** by `font_size_step`,
-  or put it back to `font_size`. So do a pinch and the control's `font`.
+  or put it back to `font_size`. So does the control's `font`.
 - **Cmd+Opt+= / Cmd+Opt+- / Cmd+Opt+0** (new: `font_bigger_all`,
   `font_smaller_all`, `font_reset_all`) do it to **every pane of the
   window**: each moves by a step (their differences stay), or all go back
-  to `font_size`. View menu: Bigger, Smaller, Actual Size (pane), then
-  the three for the window under an Option-alternate.
+  to `font_size`. View menu: Bigger, Smaller, Actual Size (the pane's),
+  then Bigger / Smaller / Actual Size in Every Pane.
 - **Badge**: a change shows the pane's size, `16 pt  (+2)`, in a rounded
   label at the pane's bottom right for 1 s, then fades.
 - **The faint "+2"**: while a pane's size isn't `font_size`, a small
   label in its bottom-right corner says by how much (`+2`, `−1`), in the
-  theme's foreground at 35%, over the padding where it can (it covers a
-  cell's corner at worst; it takes no clicks).
+  system's label colour (which follows the light or dark appearance, as
+  the theme does) at 35%, over the padding where it can (it covers a
+  cell's corner at worst; clicks on it reach the pane).
 - **New panes** start at the size of the pane they were split from, or,
   for an arranged new pane (§3), the focused one.
 - **Saved** for a restart: `SavedPane::font_size` (points; absent: the
-  config's). A config reload that changes `font_size` puts every pane back
+  config's). A window with one pane at a size of its own saves its panes
+  as a window with several does (`saves_panes`), so the size comes back. A config reload that changes `font_size` puts every pane back
   to it, as it did the window.
 - **The window's size** for a new window, `set_grid` and the control's
   `resize` use the focused pane's cells. `Geometry::min` (10 × 3 cells)

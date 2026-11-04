@@ -647,6 +647,8 @@ pub struct PaneDump {
     pub history_bytes: usize,
     /// As [`Dump::screen`].
     pub screen: String,
+    /// Its text size, points.
+    pub font_size: f64,
 }
 
 /// This process's memory footprint as Activity Monitor and `footprint`

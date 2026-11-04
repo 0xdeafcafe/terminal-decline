@@ -101,7 +101,9 @@ pub(crate) struct Win {
     /// light/dark pair.
     appearance: Appearance,
     pub(crate) scale: f64,
-    /// Per window (Cmd+= and Cmd+-), not per pane (splits design §11).
+    /// The size the window's renderer draws at: the config's. A pane at
+    /// another size (Cmd+= and Cmd+-) has fonts of its own
+    /// (pane-arrange design §1).
     font_size: f64,
     /// The window is key.
     pub(crate) focused: bool,
@@ -250,6 +252,12 @@ pub(crate) struct Pane {
     pub(crate) find_query: crate::search::Query,
     /// What its shell is doing, from the OSC 133 marks.
     activity: crate::activity::Activity,
+    /// Its text size in points (pane-arrange design §1): the window's
+    /// unless changed with Cmd+= / Cmd+-.
+    pub(crate) font_size: f64,
+    /// The labels saying its text size: the badge after a change, and the
+    /// faint difference from the default while there is one.
+    size_labels: crate::size_labels::SizeLabels,
 }
 
 /// Building a pane's frame panicked: when last, how many times, and
@@ -495,7 +503,7 @@ define_class!(
 
         #[unsafe(method(viewDidChangeBackingProperties))]
         fn did_change_backing(&self) {
-            self.reload_fonts(None);
+            self.reload_fonts();
         }
 
         /// The window's `contentLayoutRect` changed: with full-size content
@@ -528,22 +536,37 @@ define_class!(
             self.appearance_changed();
         }
 
+        /// View > Bigger (Cmd+=): the focused pane's text.
         #[unsafe(method(increaseFontSize:))]
         fn increase_font_size(&self, _sender: Option<&AnyObject>) {
-            let size = self.with_state(|st| (st.win.font_size + st.win.config.font_size_step).min(200.0));
-            self.reload_fonts(size);
+            self.change_text_size(false, |size, c| size + c.font_size_step);
         }
 
         #[unsafe(method(decreaseFontSize:))]
         fn decrease_font_size(&self, _sender: Option<&AnyObject>) {
-            let size = self.with_state(|st| (st.win.font_size - st.win.config.font_size_step).max(6.0));
-            self.reload_fonts(size);
+            self.change_text_size(false, |size, c| size - c.font_size_step);
         }
 
         #[unsafe(method(resetFontSize:))]
         fn reset_font_size(&self, _sender: Option<&AnyObject>) {
-            let size = self.with_state(|st| st.win.config.font_size);
-            self.reload_fonts(size);
+            self.change_text_size(false, |_, c| c.font_size);
+        }
+
+        /// View > Bigger in Every Pane (Cmd+Opt+=): each pane's text
+        /// a step bigger, keeping their differences.
+        #[unsafe(method(increaseFontSizeEverywhere:))]
+        fn increase_font_size_everywhere(&self, _sender: Option<&AnyObject>) {
+            self.change_text_size(true, |size, c| size + c.font_size_step);
+        }
+
+        #[unsafe(method(decreaseFontSizeEverywhere:))]
+        fn decrease_font_size_everywhere(&self, _sender: Option<&AnyObject>) {
+            self.change_text_size(true, |size, c| size - c.font_size_step);
+        }
+
+        #[unsafe(method(resetFontSizeEverywhere:))]
+        fn reset_font_size_everywhere(&self, _sender: Option<&AnyObject>) {
+            self.change_text_size(true, |_, c| c.font_size);
         }
 
         /// Shell > Split Right (Cmd+D).
@@ -849,7 +872,7 @@ impl WindowView {
         };
         let mtm = MainThreadMarker::from(self);
         let layer = &self.ivars().layer;
-        let renderer = launch.renderer;
+        let mut renderer = launch.renderer;
         let settings = launch.settings;
         let scale = launch.scale;
         let mut adopt = launch.adopt;
@@ -871,7 +894,7 @@ impl WindowView {
             copied: Vec::new(),
             menus: Vec::new(),
         });
-        let spawn = |n: NewPane| spawn_pane(id, &config, &theme, m, test.is_some(), n);
+        let spawn = |n: NewPane| spawn_pane(id, &config, &theme, test.is_some(), n);
         let mut panes = HashMap::new();
         let tree = match &launch.layout {
             None => {
@@ -891,6 +914,9 @@ impl WindowView {
                     history: launch.history.as_deref(),
                     was_running: launch.was_running.as_deref(),
                     welcome: welcome.as_ref(),
+                    font_size: config.font_size,
+                    render: PaneRender::new(),
+                    metrics: m,
                 })?;
                 panes.insert(pane_id, pane);
                 first_tree
@@ -916,11 +942,14 @@ impl WindowView {
                         command.cwd = saved.cwd.clone();
                     }
                     let focused = pane_id == tree.focused();
+                    let font_size = saved.font_size.map_or(config.font_size, clamp_font_size);
+                    let render = pane_render(&mut renderer, &config, scale, font_size);
+                    let pm = renderer.metrics_of(&render);
                     let made = spawn(NewPane {
                         id: pane_id,
                         view: view.clone(),
                         command: &command,
-                        grid: grid_of(&config, titlebar, scale, m, rect),
+                        grid: grid_of(&config, titlebar, scale, pm, rect),
                         notices: if focused { &launch.notices } else { &[] },
                         program: saved.program,
                         settings: false,
@@ -928,6 +957,9 @@ impl WindowView {
                         history: saved.history.as_deref(),
                         was_running: saved.command.as_deref().filter(|_| !saved.program),
                         welcome: None,
+                        font_size,
+                        render,
+                        metrics: pm,
                     });
                     match made {
                         Ok(pane) => {
@@ -1445,7 +1477,6 @@ impl WindowView {
             .filter_map(|id| panes.get(id).map(|p| (*id, p.session.term().clone())))
             .collect();
         let mut ticks = Vec::with_capacity(terms.len());
-        let cell = win.renderer.metrics().cell_height as f64;
         let tick_start = Instant::now();
         let refresh_at = win.refresh_at.take().unwrap_or_else(latency::now);
         // A trackpad gesture moves a pane's view, or its shift between
@@ -1453,6 +1484,7 @@ impl WindowView {
         let mut scrolling = false;
         for (id, term) in &terms {
             let p = panes.get_mut(id).expect("shown pane");
+            let cell = win.renderer.metrics_of(&p.render).cell_height as f64;
             let queued = p.scroll.queued();
             let px = p.scroll.due(refresh_at);
             if px != 0.0 {
@@ -1673,7 +1705,7 @@ impl WindowView {
             let (padding, cursor_on) = ((pad.x, pad.top), p.cursor_on || !focused);
             let input = FrameInput {
                 theme: p.theme.as_ref().unwrap_or(&win.theme),
-                metrics: win.renderer.metrics(),
+                metrics: win.renderer.metrics_of(&p.render),
                 padding,
                 cursor_on,
                 focused,
@@ -1808,7 +1840,7 @@ impl WindowView {
             // program set included.
             let input = FrameInput {
                 theme: p.theme.as_ref().unwrap_or(&win.theme),
-                metrics: win.renderer.metrics(),
+                metrics: win.renderer.metrics_of(&p.render),
                 padding,
                 cursor_on,
                 focused,
@@ -2109,7 +2141,6 @@ impl WindowView {
             layer.setDrawableSize(NSSize::new(pixels.0, pixels.1));
             crate::images::window_size(&term_core::ImagePool::process(), self.ivars().id, pixels.0 as u32, pixels.1 as u32);
             let layout = st.tree.layout(&self.geometry(st, titlebar));
-            let m = st.win.renderer.metrics();
             let alone = layout.panes.len() == 1;
             for (id, p) in st.panes.iter_mut() {
                 let shown = layout.rect(*id).is_some();
@@ -2137,8 +2168,10 @@ impl WindowView {
                     p.image_scale = scale;
                     p.session.set_image_scale(scale as f32);
                 }
+                let m = st.win.renderer.metrics_of(&p.render);
                 let pad = pane_padding(&st.win.config, titlebar, scale, rect);
                 let (cols, lines) = layout::grid_size((frame.size.width, frame.size.height), scale, m.into(), pad);
+                p.size_labels.place(frame.size);
                 let size = pty_size(cols, lines, m);
                 if p.told != Some(told(&size)) {
                     p.told = Some(told(&size));
@@ -2196,24 +2229,68 @@ impl WindowView {
         self.addSubview_positioned_relativeTo(view, NSWindowOrderingMode::Below, None);
     }
 
-    fn reload_fonts(&self, size: Option<f64>) {
+    /// The window moved to a display of another backing scale: the window
+    /// and every pane draw with fonts for it.
+    fn reload_fonts(&self) {
         let Some(window) = self.window() else { return };
         let scale = window.backingScaleFactor();
         let changed = self.with_state(|st| {
             let win = &mut st.win;
-            let size = size.unwrap_or(win.font_size);
-            if size == win.font_size && scale == win.scale {
+            if scale == win.scale {
                 return false;
             }
-            win.font_size = size;
             win.scale = scale;
-            // Only the size changes: fallbacks, faces, line height, cell
-            // width and features stay as configured.
-            win.renderer.set_font_config(&win.config.font_config(size), scale);
+            win.renderer.set_font_config(&win.config.font_config(win.font_size), scale);
+            for p in st.panes.values_mut() {
+                set_pane_size(&mut win.renderer, &win.config, scale, &mut p.render, p.font_size);
+            }
             true
         });
         if changed == Some(true) {
             self.resize();
+        }
+    }
+
+    /// The badge pane `pane` showed `n`th fades, unless shown since.
+    pub(crate) fn fade_size_badge(&self, pane: PaneId, n: u64) {
+        self.with_state(|st| {
+            if let Some(p) = st.panes.get(&pane) {
+                p.size_labels.fade(n);
+            }
+        });
+    }
+
+    /// Cmd+= and the like (pane-arrange design §1): the focused pane's
+    /// text size, or every pane's with `all`, becomes `to(size, config)`,
+    /// within 6–200 pt. Only the size changes: fallbacks, faces, line
+    /// height, cell width and features stay as configured. The panes
+    /// changed show their new size for a moment; their programs are
+    /// told their new grids.
+    fn change_text_size(&self, all: bool, to: impl Fn(f64, &Config) -> f64) {
+        let changed = self.with_state(|st| {
+            let targets = if all { st.tree.ids() } else { vec![st.tree.focused()] };
+            let win = &mut st.win;
+            let mut changed = Vec::new();
+            for id in targets {
+                let Some(p) = st.panes.get_mut(&id) else { continue };
+                let size = clamp_font_size(to(p.font_size, &win.config));
+                if size == p.font_size {
+                    continue;
+                }
+                p.font_size = size;
+                set_pane_size(&mut win.renderer, &win.config, win.scale, &mut p.render, size);
+                p.size_labels.changed(size, size - win.config.font_size, self.ivars().id, id);
+                p.session.mark_dirty();
+                changed.push(id);
+            }
+            changed
+        });
+        match changed {
+            Some(c) if !c.is_empty() => {
+                self.resize();
+                self.redraw_all();
+            }
+            _ => NSBeep(),
         }
     }
 
@@ -2230,13 +2307,21 @@ impl WindowView {
             let win = &mut st.win;
             let old = std::mem::replace(&mut win.config, config.clone());
             let old_fonts = old.font_config(win.font_size);
-            if config.font_size != old.font_size {
-                win.font_size = config.font_size;
-            }
+            let new_size = config.font_size != old.font_size;
+            win.font_size = config.font_size;
             let fonts = config.font_config(win.font_size);
             if fonts != old_fonts || scale != win.scale {
                 win.scale = scale;
                 win.renderer.set_font_config(&fonts, scale);
+            }
+            // A new size puts every pane back to it; other font settings
+            // reach panes at sizes of their own too.
+            for p in st.panes.values_mut() {
+                if new_size {
+                    p.font_size = config.font_size;
+                }
+                set_pane_size(&mut win.renderer, &config, scale, &mut p.render, p.font_size);
+                p.size_labels.set_difference(p.font_size - config.font_size);
             }
             win.binds = config.keybinds();
             let shown = transition::slots(&win.theme, win.divider);
@@ -2415,8 +2500,11 @@ impl WindowView {
             let mut tree = st.tree.clone();
             let new = tree.split(dir, &g).ok()?;
             let rect = tree.layout(&g).rect(new)?;
-            let win = &st.win;
-            let (scale, m) = (win.scale, win.renderer.metrics());
+            let font_size = st.panes.get(&st.tree.focused()).map_or(st.win.font_size, |p| p.font_size);
+            let win = &mut st.win;
+            let scale = win.scale;
+            let render = pane_render(&mut win.renderer, &win.config, scale, font_size);
+            let m = win.renderer.metrics_of(&render);
             let view = PaneView::new(mtm, self, new, points(rect, scale));
             let mut command = shell_command(&win.config);
             command.cwd = cwd.clone().or(command.cwd);
@@ -2424,7 +2512,6 @@ impl WindowView {
                 id,
                 &win.config,
                 &win.theme,
-                m,
                 win.test.is_some(),
                 NewPane {
                     id: new,
@@ -2438,6 +2525,9 @@ impl WindowView {
                     history: None,
                     was_running: None,
                     welcome: None,
+                    font_size,
+                    render,
+                    metrics: m,
                 },
             );
             match pane {
@@ -2617,7 +2707,10 @@ impl WindowView {
             if st.tree.zoomed().is_some() {
                 return false;
             }
-            let m = st.win.renderer.metrics();
+            let m = match st.panes.get(&st.tree.focused()) {
+                Some(p) => st.win.renderer.metrics_of(&p.render),
+                None => st.win.renderer.metrics(),
+            };
             let by = match dir {
                 Direction::Left | Direction::Right => m.cell_width,
                 Direction::Up | Direction::Down => m.cell_height,
@@ -2840,16 +2933,18 @@ impl WindowView {
     /// limit, in the store's files.
     pub fn saved_panes(&self, history: Option<(&crate::saved_history::Store, usize)>) -> Option<SavedPanes> {
         self.with_state(|st| {
-            if st.tree.len() < 2 {
+            if !saves_panes(st) {
                 return None;
             }
             let panes = &st.panes;
+            let default_size = st.win.config.font_size;
             Some(st.tree.save(|id| match panes.get(&id) {
                 Some(p) => SavedPane {
                     cwd: pane_cwd(p),
                     command: command_to_restore(p),
                     program: p.program,
                     history: history.and_then(|(store, limit)| save_history(p, store, limit)),
+                    font_size: (p.font_size != default_size).then_some(p.font_size),
                 },
                 None => SavedPane::default(),
             }))
@@ -2861,7 +2956,7 @@ impl WindowView {
     /// [`WindowView::saved_panes`] saves each pane's.
     pub fn saved_history(&self, store: &crate::saved_history::Store, limit: usize) -> Option<String> {
         self.with_state(|st| {
-            if st.tree.len() > 1 {
+            if saves_panes(st) {
                 return None;
             }
             st.focused().and_then(|p| save_history(p, store, limit))
@@ -3167,7 +3262,7 @@ pub(crate) fn rows_under_find_bar(win: &Win, p: &Pane, titlebar: f64) -> usize {
     let top = p.rect.y == 0;
     let bottom = (if top { titlebar } else { 0.0 } + crate::find_bar::HEIGHT) * win.scale;
     let grid_top = pane_padding(&win.config, titlebar, win.scale, p.rect).top as f64;
-    let cell = win.renderer.metrics().cell_height.max(1) as f64;
+    let cell = win.renderer.metrics_of(&p.render).cell_height.max(1) as f64;
     ((bottom - grid_top) / cell).ceil().max(0.0) as usize
 }
 
@@ -3191,7 +3286,7 @@ fn move_view(p: &mut Pane, t: &mut term_core::Terminal, px: f64, cell: f64) {
 /// whole lines, and inside its rows, so that row shows only as it comes
 /// up, never in the padding below. `None` without that row.
 fn pane_scroll(win: &Win, p: &Pane, titlebar: f64) -> Option<term_render::Scroll> {
-    let cell = win.renderer.metrics().cell_height;
+    let cell = win.renderer.metrics_of(&p.render).cell_height;
     let up = p.scroll.shift_px(cell as f64);
     let snap = p.render.frame.last_snapshot();
     if snap.rows.len() <= snap.lines as usize {
@@ -3267,10 +3362,16 @@ struct NewPane<'a> {
     /// The welcome line, and the update line under it
     /// ([`crate::welcome::lines`]).
     welcome: Option<&'a crate::welcome::Lines>,
+    /// Its text size, and what it draws with at that size
+    /// ([`pane_render`]).
+    font_size: f64,
+    render: PaneRender,
+    metrics: term_font::Metrics,
 }
 
 /// Start pane `n` of window `window`: its terminal and program.
-fn spawn_pane(window: usize, config: &Config, theme: &Theme, m: term_font::Metrics, test: bool, n: NewPane) -> std::io::Result<Pane> {
+fn spawn_pane(window: usize, config: &Config, theme: &Theme, test: bool, n: NewPane) -> std::io::Result<Pane> {
+    let m = n.metrics;
     let (cols, lines) = n.grid;
     let mut t = Term::new(cols, lines, config.scrollback, term_core::ImagePool::process());
     t.state.set_ambiguous_width(config.ambiguous_width);
@@ -3309,10 +3410,11 @@ fn spawn_pane(window: usize, config: &Config, theme: &Theme, m: term_font::Metri
     if let Some(ready) = adopted {
         ready(&session);
     }
+    let size_labels = crate::size_labels::SizeLabels::new(&n.view, n.font_size - config.font_size);
     Ok(Pane {
         view: n.view,
         session,
-        render: PaneRender::new(),
+        render: n.render,
         theme: None,
         rect: PxRect::default(),
         cursor_on: true,
@@ -3350,7 +3452,35 @@ fn spawn_pane(window: usize, config: &Config, theme: &Theme, m: term_font::Metri
         find: None,
         find_query: crate::search::Query::default(),
         activity: crate::activity::Activity::default(),
+        font_size: n.font_size,
+        size_labels,
     })
+}
+
+/// Whether a restart saves the window's panes ([`SavedPanes`]), each
+/// with its own history, rather than only the window's: when it has
+/// several, or its one pane has something of its own to keep.
+fn saves_panes(st: &State) -> bool {
+    st.tree.len() > 1 || st.panes.values().any(|p| p.font_size != st.win.config.font_size)
+}
+
+/// What a pane at `size` points draws with: fonts of its own, unless that
+/// is the window's size (the config's).
+fn pane_render(renderer: &mut Renderer, config: &Config, scale: f64, size: f64) -> PaneRender {
+    let mut render = PaneRender::new();
+    set_pane_size(renderer, config, scale, &mut render, size);
+    render
+}
+
+/// Draw `render` at `size` points from its next build.
+fn set_pane_size(renderer: &mut Renderer, config: &Config, scale: f64, render: &mut PaneRender, size: f64) {
+    let fonts = config.font_config(size);
+    renderer.set_pane_fonts(render, (size != config.font_size).then_some((&fonts, scale)));
+}
+
+/// A text size as Cmd+= / Cmd+- may set it.
+pub(crate) fn clamp_font_size(size: f64) -> f64 {
+    if size.is_finite() { size.clamp(6.0, 200.0) } else { 12.0 }
 }
 
 /// The user's login shell with the config's environment, for a split:
@@ -3630,10 +3760,7 @@ impl WindowView {
                         self.redraw_all();
                     }
                     Some(Control::Resize { cols, lines }) => self.set_grid(cols as usize, lines as usize),
-                    Some(Control::Font(delta)) => {
-                        let size = self.with_state(|st| (st.win.font_size + delta as f64).max(6.0));
-                        self.reload_fonts(size);
-                    }
+                    Some(Control::Font(delta)) => self.change_text_size(false, |size, _| size + delta as f64),
                     Some(Control::Tab) => {
                         if let Some(window) = self.window() {
                             crate::app::open_tab_beside(&window);
@@ -3816,7 +3943,11 @@ impl WindowView {
         let titlebar = self.titlebar_height();
         let size = self.with_state(|st| {
             let pad = padding_for(&st.win.config, titlebar, st.win.scale);
-            layout::content_size(cols, lines, st.win.scale, st.win.renderer.metrics().into(), pad)
+            let m = match st.panes.get(&st.tree.focused()) {
+                Some(p) => st.win.renderer.metrics_of(&p.render),
+                None => st.win.renderer.metrics(),
+            };
+            layout::content_size(cols, lines, st.win.scale, m.into(), pad)
         });
         if let Some((w, h)) = size {
             window.setContentSize(NSSize::new(w, h));
@@ -3968,6 +4099,7 @@ fn write_dump(st: &mut State, window: Window) {
                 crashes: p.crash.map_or(0, |c| c.count),
                 history_bytes: t.state.scrollback_bytes(),
                 screen: t.state.dump(),
+                font_size: p.font_size,
             })
         })
         .collect();
@@ -4015,7 +4147,7 @@ fn write_dump(st: &mut State, window: Window) {
             t.state.selection_text(),
         )
     };
-    let m = win.renderer.metrics();
+    let m = win.renderer.metrics_of(&p.render);
     let (mask_texture, color_texture) = win.renderer.glyph_texture_sizes();
     let dump = Dump {
         seq: test.seq,
@@ -4057,7 +4189,7 @@ fn write_dump(st: &mut State, window: Window) {
         color_texture,
         cell_width: m.cell_width,
         cell_height: m.cell_height,
-        font_size: win.font_size,
+        font_size: p.font_size,
         scale: win.scale,
         foreground: format!("#{:06x}", crate::config::rgb_of(theme.foreground)),
         background: format!("#{:06x}", crate::config::rgb_of(theme.background)),

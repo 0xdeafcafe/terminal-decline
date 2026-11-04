@@ -1896,6 +1896,7 @@ impl WindowView {
                 past_commands: win.config.highlight_command_line,
                 command_marks: win.config.command_marks,
                 colour_output: win.config.colour_output,
+                failure_cause: win.config.mark_failure_cause,
             };
             {
                 let env = p.completion.shell_env.clone();

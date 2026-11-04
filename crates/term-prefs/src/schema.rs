@@ -738,6 +738,13 @@ pub const SETTINGS: &[Setting] = &[
         "Colour commit hashes, links, numbers and words like error and ok in command output the program left uncoloured",
     ),
     setting(
+        "mark_failure_cause",
+        "Mark why a command failed",
+        Completion,
+        Editor::Toggle,
+        "When a command exits with an error, a small net reads its output and puts ← cause beside the line that says why, if it recognises one (needs shell integration)",
+    ),
+    setting(
         "completion",
         "Completion list",
         Completion,
@@ -1074,6 +1081,7 @@ mod tests {
                 "highlight_command_line",
                 "command_marks",
                 "colour_output",
+                "mark_failure_cause",
                 "completion",
                 "completion_as_you_type",
                 "completion_delay",

@@ -35,6 +35,15 @@ $ █
    counts, dates and times read as random highlights when coloured), `error` `fatal` `failed` `panic` `denied` red,
    `warning` `warn` `deprecated` yellow, `ok` `done` `passed` `success`
    green.
+4. **Why a command failed** (setting `mark_failure_cause`, default off):
+   for each command in view that exited non-zero, its output's rows are
+   read by [linetag](https://github.com/0xdeafcafe/linetag)'s small
+   hand-weighted net, and a dim red `← cause` goes at the right of the
+   line (at most two) it reads as the cause, where the cells there are
+   blank: `error[E0425]: cannot find value` rather than the `could not
+   compile` after it. Where it recognises nothing, nothing is marked.
+   Read once per output (kept by its text), about 150 ns a row; the net
+   is built once, in under a millisecond, the first time it's needed.
 
 Nothing here changes a cell: the colours are `Snapshot::ink`, the lines
 `Snapshot::separators` and the marks `Snapshot::command_marks`, drawn by

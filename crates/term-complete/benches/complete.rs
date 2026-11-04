@@ -116,11 +116,16 @@ fn marks(c: &mut Criterion) {
     }
     t.advance(b"\x1b]133;A\x07~/src \x1b]133;B\x07");
     let known = |name: &str| Some(name == "git");
-    for (name, colour_output) in [("marks", false), ("marks with output", true)] {
+    for (name, colour_output, failure_cause) in [
+        ("marks", false, false),
+        ("marks with output", true, false),
+        ("marks with causes", false, true),
+    ] {
         let s = Settings {
             past_commands: true,
             command_marks: true,
             colour_output,
+            failure_cause,
         };
         let mut snap = term_core::Snapshot::default();
         let mut m = Marks::default();

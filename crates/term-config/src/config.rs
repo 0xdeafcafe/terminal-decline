@@ -373,6 +373,11 @@ pub struct Config {
     /// and words like `error`, `warning` and `ok`, only where the
     /// program left the text in the default colour.
     pub colour_output: bool,
+    /// Mark why a command failed: after one exits non-zero, a small
+    /// hand-weighted net (linetag) reads its output and puts `← cause` at
+    /// the right of the line it reads as the cause, when it recognises
+    /// one.
+    pub mark_failure_cause: bool,
     /// The completion list at zsh's prompt (docs/design/completion.md
     /// §9): files, folders and commands under the cursor after a pause in
     /// typing. A zsh started with the integration reports its line for
@@ -559,6 +564,7 @@ impl Default for Config {
             highlight_command_line: true,
             command_marks: true,
             colour_output: false,
+            mark_failure_cause: false,
             completion: true,
             completion_as_you_type: false,
             completion_delay: 300,

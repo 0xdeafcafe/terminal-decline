@@ -416,6 +416,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 
 [[package]]
+name = "linetag"
+version = "0.0.1"
+source = "git+https://github.com/0xdeafcafe/linetag?rev=0f0a801e6847761052795b686e1901bce1e27263#0f0a801e6847761052795b686e1901bce1e27263"
+dependencies = [
+ "regex",
+]
+
+[[package]]
 name = "linux-raw-sys"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -895,6 +903,7 @@ version = "0.0.1"
 dependencies = [
  "criterion",
  "libc",
+ "linetag",
  "miniz_oxide 0.8.9",
  "proptest",
  "term-core",

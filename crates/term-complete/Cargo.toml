@@ -10,6 +10,7 @@ publish = false
 [dependencies]
 term-core.workspace = true
 unicode-width.workspace = true
+linetag.workspace = true
 libc.workspace = true
 # Gzipped man pages.
 miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }

@@ -30,6 +30,8 @@ term-pins = { path = "crates/term-pins" }
 vte = "0.15"
 libc = "0.2"
 unicode-width = "0.2"
+# The hand-weighted net that marks why a command failed.
+linetag = { git = "https://github.com/0xdeafcafe/linetag", rev = "0f0a801e6847761052795b686e1901bce1e27263" }
 objc2 = "0.6"
 block2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std"] }

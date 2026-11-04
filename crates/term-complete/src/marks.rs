@@ -2,7 +2,9 @@
 //! (docs/design/command-marks.md): their command lines coloured as they
 //! were while typed, a faint line above each prompt, a worked/failed
 //! mark with the time taken at the right of each finished command's
-//! line, and (as a setting) plain output coloured ([`super::output`]).
+//! line, and (as settings) plain output coloured ([`super::output`]) and
+//! `← cause` beside the line of a failed command's output that linetag's
+//! hand-weighted net reads as why it failed.
 //! All of it goes into the snapshot; the cells are never changed.
 //!
 //! Worked out again only when the terminal changed (its generation) or
@@ -13,31 +15,48 @@
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::ops::Range;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
+
+use linetag::log::Log;
+use linetag::model::Tagger;
 
 use term_core::{Color, CommandMark, Content, Finished, Ink, Snapshot, Terminal, ViewCommand};
 
 use super::{ink, lex, output};
 
 /// Which of it is on: `highlight_command_line` (past command lines),
-/// `command_marks` (the lines and marks) and `colour_output`.
+/// `command_marks` (the lines and marks), `colour_output` and
+/// `mark_failure_cause`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub struct Settings {
     pub past_commands: bool,
     pub command_marks: bool,
     pub colour_output: bool,
+    pub failure_cause: bool,
 }
 
 impl Settings {
     fn any(self) -> bool {
-        self.past_commands || self.command_marks || self.colour_output
+        self.past_commands || self.command_marks || self.colour_output || self.failure_cause
     }
 }
+
+/// What's put beside the line the net reads as why a command failed.
+pub const CAUSE: &str = "← cause";
+
+/// The most lines of one command's output marked as its cause.
+const CAUSES_MARKED: usize = 2;
+
+/// The net, built once (under a millisecond) the first time a failed
+/// command is in view with the setting on.
+static TAGGER: LazyLock<Tagger> = LazyLock::new(Tagger::new);
 
 /// Command lines kept read into words, and output rows kept coloured,
 /// before the caches start again.
 const LEXED_KEPT: usize = 512;
 const ROWS_KEPT: usize = 4096;
+/// Failed commands' outputs kept read by the net.
+const CAUSES_KEPT: usize = 256;
 
 /// A pane's: what was worked out for its last frame, and the caches.
 #[derive(Default)]
@@ -57,6 +76,9 @@ pub struct Marks {
     rows: HashMap<u64, Vec<(Range<u16>, u8)>>,
     text: Vec<char>,
     plain: Vec<bool>,
+    /// A failed command's output in view (by its text) to the lines of
+    /// it the net reads as the cause, as offsets into its rows.
+    causes: HashMap<u64, Vec<u16>>,
 }
 
 impl Marks {
@@ -73,6 +95,7 @@ impl Marks {
             self.key = Some(key);
             t.view_commands(&mut self.commands);
             self.marks_and_lines(t, s);
+            self.cause_marks(t, s);
             self.output_ink(t, s);
             self.past_ink(t, s, known);
         } else if self.past_pending {
@@ -136,19 +159,84 @@ impl Marks {
             let Some(start) = cols.checked_sub(w + 1).filter(|&s| s > 0) else {
                 continue;
             };
-            let r = t.visible_row(row as usize);
-            let blank = (start - 1..cols).all(|col| {
-                let cell = r.cell(col);
-                let style = cell.style();
-                matches!(cell.content(), Content::Empty | Content::Char(' ')) && style.bg == Color::DEFAULT && style.attrs.is_empty()
-            });
-            if blank {
+            if blank(t, row, start - 1) {
                 self.marks.push(CommandMark {
                     row,
                     col: start as u16,
                     text,
                     ok: f.status == Some(0),
                 });
+            }
+        }
+    }
+
+    /// `← cause` at the right of the lines of each failed command's
+    /// output in view that the net reads as the cause (at most two), where
+    /// the cells there are blank. Read once per output, by its text.
+    fn cause_marks(&mut self, t: &Terminal, s: Settings) {
+        if !s.failure_cause {
+            return;
+        }
+        if self.causes.len() > CAUSES_KEPT {
+            self.causes.clear();
+        }
+        let (cols, lines) = (t.cols(), t.lines());
+        let w = CAUSE.chars().count();
+        let Some(start) = cols.checked_sub(w + 1).filter(|&s| s > 0) else {
+            return;
+        };
+        let mut texts: Vec<String> = Vec::new();
+        let mut rows: Vec<u16> = Vec::new();
+        for c in &self.commands {
+            let (Some(f), Some((from, to))) = (c.finished, c.output) else {
+                continue;
+            };
+            if f.status.is_none_or(|s| s == 0) {
+                continue;
+            }
+            texts.clear();
+            rows.clear();
+            for row in from.0..=to.0 {
+                let a = if row == from.0 { from.1 as usize } else { 0 };
+                let b = if row == to.0 { to.1 as usize } else { cols };
+                if a >= b || row as usize >= lines {
+                    continue;
+                }
+                let r = t.visible_row(row as usize);
+                let mut line = String::with_capacity(b - a);
+                for col in a..b {
+                    let cell = r.cell(col);
+                    if cell.is_spacer() {
+                        continue;
+                    }
+                    match cell.content() {
+                        Content::Char(ch) => line.push(ch),
+                        Content::Empty => line.push(' '),
+                        _ => line.push('\u{fffc}'),
+                    }
+                }
+                texts.push(line);
+                rows.push(row);
+            }
+            if texts.is_empty() {
+                continue;
+            }
+            let mut h = DefaultHasher::new();
+            texts.hash(&mut h);
+            let found = self.causes.entry(h.finish()).or_insert_with(|| {
+                let log = Log::from_output(texts.iter().map(String::as_str), true);
+                TAGGER.causes(&log, CAUSES_MARKED).into_iter().map(|i| i as u16).collect()
+            });
+            for &k in found.iter() {
+                let row = rows[k as usize];
+                if blank(t, row, start - 1) {
+                    self.marks.push(CommandMark {
+                        row,
+                        col: start as u16,
+                        text: CAUSE.to_string(),
+                        ok: false,
+                    });
+                }
             }
         }
     }
@@ -221,6 +309,17 @@ impl Marks {
     }
 }
 
+/// Whether view row `row` is blank from column `from` to its end: no
+/// text, colour or attributes, so a mark there hides nothing.
+fn blank(t: &Terminal, row: u16, from: usize) -> bool {
+    let r = t.visible_row(row as usize);
+    (from..t.cols()).all(|col| {
+        let cell = r.cell(col);
+        let style = cell.style();
+        matches!(cell.content(), Content::Empty | Content::Char(' ')) && style.bg == Color::DEFAULT && style.attrs.is_empty()
+    })
+}
+
 /// The mark's text: `✓` when the command exited 0, `✗` and the status
 /// otherwise, with the time taken when it was a second or more.
 /// Nothing when the shell gave no status.
@@ -279,6 +378,7 @@ mod tests {
         past_commands: true,
         command_marks: true,
         colour_output: true,
+        failure_cause: false,
     };
 
     /// A terminal 30 wide, 8 high; `run` runs a command with zsh's marks:
@@ -365,6 +465,36 @@ mod tests {
         };
         let snap = frame(&t, off);
         assert!(snap.separators.is_empty() && snap.command_marks.is_empty());
+    }
+
+    #[test]
+    fn a_failed_commands_cause_is_marked() {
+        let mut t = Term::new(60, 14, 100, ImagePool::process());
+        let out =
+            "   Compiling x v0.1.0\r\nerror[E0425]: cannot find value `y`\r\n  --> src/lib.rs:3:5\r\nerror: could not compile `x`\r\n";
+        run(&mut t, "cargo build", "cargo build", out, 101, 2_000);
+        // The same output from a command that worked: nothing to explain.
+        run(&mut t, "cat log", "cat log", out, 0, 10);
+        t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07");
+        let on = Settings { failure_cause: true, ..ON };
+        let causes = |s| -> Vec<(u16, u16)> {
+            frame(&t, s)
+                .command_marks
+                .iter()
+                .filter(|m| m.text == CAUSE)
+                .map(|m| (m.row, m.col))
+                .collect()
+        };
+        // The prompt on row 0, the output from row 1: the error[E0425]
+        // line, not the could-not-compile fallout after it.
+        assert_eq!(causes(on), [(2, 52)]);
+        assert!(causes(ON).is_empty());
+        // Only cause marks: the setting alone, without the other marks.
+        let alone = Settings {
+            failure_cause: true,
+            ..Settings::default()
+        };
+        assert_eq!(causes(alone), [(2, 52)]);
     }
 
     /// Under a line written before the shell's first prompt (restored

@@ -915,14 +915,14 @@ fn upload(mask: &mut Atlas, color: &mut Atlas, in_flight: &InFlight, g: &RasterG
     })
 }
 
-impl GlyphSource for PaneGlyphs<'_> {
-    #[inline]
-    fn glyph(&mut self, cp: u32, style: Style) -> Option<GlyphSlot> {
+impl PaneGlyphs<'_> {
+    /// [`GlyphSource::glyph`] for a glyph not found in the ASCII table:
+    /// out of line, so the hit, a load from the table, stays in the cell
+    /// loop.
+    #[inline(never)]
+    fn glyph_slow(&mut self, cp: u32, style: Style) -> Option<GlyphSlot> {
         if cp < 128 {
             let i = cp as usize * 4 + style as usize;
-            if let Some(slot) = self.chars.ascii[i] {
-                return slot;
-            }
             let slot = self.lookup(cp, style)?;
             self.chars.ascii[i] = Some(slot);
             return slot;
@@ -940,6 +940,19 @@ impl GlyphSource for PaneGlyphs<'_> {
         let slot = self.lookup(cp, style)?;
         self.chars.other.insert((cp, style), slot);
         slot
+    }
+}
+
+impl GlyphSource for PaneGlyphs<'_> {
+    /// Every cell of text asks: an ASCII glyph seen before is one load.
+    #[inline(always)]
+    fn glyph(&mut self, cp: u32, style: Style) -> Option<GlyphSlot> {
+        if cp < 128
+            && let Some(slot) = self.chars.ascii[cp as usize * 4 + style as usize]
+        {
+            return slot;
+        }
+        self.glyph_slow(cp, style)
     }
 
     /// Changes when glyphs are forgotten and with the fonts.

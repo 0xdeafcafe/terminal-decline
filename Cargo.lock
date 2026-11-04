@@ -904,7 +904,7 @@ dependencies = [
  "criterion",
  "libc",
  "linetag",
- "miniz_oxide 0.8.9",
+ "miniz_oxide 0.9.1",
  "proptest",
  "term-core",
  "unicode-width",
@@ -991,7 +991,7 @@ dependencies = [
  "gif",
  "image-webp",
  "jpeg-decoder",
- "miniz_oxide 0.8.9",
+ "miniz_oxide 0.9.1",
  "png",
 ]
 

@@ -82,7 +82,7 @@ jobs:
         with:
           toolchain: "1.98.1"
           targets: aarch64-apple-darwin
-      - uses: mozilla-actions/sccache-action@v0.0.9
+      - uses: mozilla-actions/sccache-action@v0.0.11
       - uses: Swatinem/rust-cache@v2
 
       - name: Build (Apple Silicon)

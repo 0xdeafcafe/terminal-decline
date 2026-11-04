@@ -1485,10 +1485,11 @@ fn smoke_themes_load_and_follow_the_appearance() {
 }
 
 /// A shell loop that sends `dump` every 0.1 s (for at most 10 s) until the
-/// dump file matches `pattern` (grep -E).
+/// dump file matches `pattern` (grep -E). Quiet while there is no dump
+/// file yet: grep's complaint would land on the screen the test reads.
 fn dump_until(dir: &TempDir, pattern: &str) -> String {
     format!(
-        "i=0; until grep -Eq '{pattern}' '{dump}' || [ $i -ge 100 ]; do {d}sleep 0.1; i=$((i+1)); done; ",
+        "i=0; until grep -Eq '{pattern}' '{dump}' 2>/dev/null || [ $i -ge 100 ]; do {d}sleep 0.1; i=$((i+1)); done; ",
         dump = dir.dump_file().display(),
         d = osc("dump"),
     )

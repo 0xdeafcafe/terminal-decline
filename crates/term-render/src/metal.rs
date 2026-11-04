@@ -1038,6 +1038,28 @@ pub struct PaneRender {
     wanted: (Option<FontsId>, Vec<Want>),
     /// Its instances on the GPU (roadmap R.2).
     gpu: RefCell<PaneBuffers>,
+    /// The fonts it draws with when not its window's (a text size of its
+    /// own, pane-arrange design §1.1).
+    fonts: Option<PaneFonts>,
+}
+
+/// Fonts one pane draws with instead of its window's: a use of a slot in
+/// the process's [`FontSet`], given back when the pane drops them.
+struct PaneFonts {
+    shared: Rc<Shared>,
+    id: FontsId,
+    fonts: Rc<Fonts>,
+}
+
+impl Drop for PaneFonts {
+    fn drop(&mut self) {
+        let (Ok(mut set), Ok(mut cache)) = (self.shared.fonts.try_borrow_mut(), self.shared.glyphs.try_borrow_mut()) else {
+            return;
+        };
+        if set.release(self.id) {
+            cache.fonts_dropped(self.id, &self.shared.gpu.device);
+        }
+    }
 }
 
 /// A pane's instance buffers, in use by turns, each holding the frame's
@@ -1290,7 +1312,7 @@ impl Window {
         self.in_flight.begin_below(FRAMES_IN_FLIGHT);
         let gpu = &shared.gpu;
         let cache = shared.glyphs.borrow();
-        let current = Some(cache.built_with(fonts));
+        let current = |p: &PaneRender| Some(cache.built_with(p.fonts.as_ref().map_or(fonts, |f| f.id)));
         let (width, height) = (target.width() as u32, target.height() as u32);
         let viewport = [width as f32, height as f32];
         let blend = Uniforms::of(blend, viewport);
@@ -1334,7 +1356,7 @@ impl Window {
             });
             // Glyphs placed in textures since emptied would draw other
             // glyphs: such a pane draws its backgrounds until rebuilt.
-            let with_glyphs = p.pane.built_with == current;
+            let with_glyphs = p.pane.built_with == current(p.pane);
             let mut bufs = p.pane.gpu.borrow_mut();
             let (rect_buf, glyph_buf) = bufs.upload(&gpu.device, frame, with_glyphs);
             pane_flights.push(bufs.in_flight.clone());
@@ -1825,6 +1847,53 @@ impl Renderer {
         self.fonts.metrics
     }
 
+    /// The cells `pane` is drawn with: its own fonts' or the window's.
+    pub fn metrics_of(&self, pane: &PaneRender) -> term_font::Metrics {
+        pane.fonts.as_ref().map_or(self.fonts.metrics, |f| f.fonts.metrics)
+    }
+
+    /// The fonts `pane` is built with.
+    fn fonts_of(&self, pane: &PaneRender) -> (FontsId, Rc<Fonts>) {
+        match &pane.fonts {
+            Some(f) => (f.id, f.fonts.clone()),
+            None => (self.fonts_id, self.fonts.clone()),
+        }
+    }
+
+    /// Draw `pane` with the fonts for `config` at `scale` (a text size of
+    /// its own), shared with every window and pane using the same, or with
+    /// the window's (`None`, or the window's own setting). Its next build
+    /// starts afresh: its rows were shaped and placed with the old fonts.
+    pub fn set_pane_fonts(&mut self, pane: &mut PaneRender, config: Option<(&FontConfig, f64)>) {
+        let next = config.and_then(|(config, scale)| {
+            let (id, fonts, new) = self.shared.fonts.borrow_mut().load(config, scale);
+            if id == self.fonts_id {
+                // The window's own: one use too many.
+                self.shared.fonts.borrow_mut().release(id);
+                return None;
+            }
+            if new {
+                preload(&mut self.shared.glyphs.borrow_mut(), id, &fonts);
+            }
+            Some(PaneFonts {
+                shared: self.shared.clone(),
+                id,
+                fonts,
+            })
+        });
+        if next.as_ref().map(|f| f.id) == pane.fonts.as_ref().map(|f| f.id) {
+            return; // the same fonts; `next`'s use is given back as it drops
+        }
+        pane.fonts = next;
+        pane.built_with = None;
+    }
+
+    /// The fonts `pane` draws with, if not the window's. Test aid.
+    #[doc(hidden)]
+    pub fn pane_fonts_id(&self, pane: &PaneRender) -> FontsId {
+        self.fonts_of(pane).0
+    }
+
     /// The fonts this window draws with.
     pub fn fonts_id(&self) -> FontsId {
         self.fonts_id
@@ -1871,6 +1940,15 @@ impl Renderer {
     pub fn forget_glyphs(&mut self) {
         self.shared.glyphs.borrow_mut().clear();
         self.fonts.clear_shaped_clusters();
+    }
+
+    /// With [`forget_glyphs`](Self::forget_glyphs): the fonts `pane`
+    /// draws with, if they aren't the window's, forget their shaped
+    /// clusters too.
+    pub fn forget_shaped_of(&mut self, pane: &PaneRender) {
+        if let Some(f) = &pane.fonts {
+            f.fonts.clear_shaped_clusters();
+        }
     }
 
     /// Under memory pressure (roadmap R.5): give back what the next
@@ -1920,7 +1998,8 @@ impl Renderer {
     /// Emptying a full texture (at its cap) or new fonts make every pane
     /// built before stale, also panes not built this frame.
     pub fn is_current(&self, pane: &PaneRender) -> bool {
-        pane.built_with == Some(self.shared.glyphs.borrow().built_with(self.fonts_id))
+        let (id, _) = self.fonts_of(pane);
+        pane.built_with == Some(self.shared.glyphs.borrow().built_with(id))
     }
 
     /// Build `pane`'s instances from a snapshot of `term` (cells design
@@ -1930,7 +2009,8 @@ impl Renderer {
     /// GPU state except new glyphs (and, rarely, a glyph texture that
     /// grows).
     pub fn build_pane(&mut self, pane: &mut PaneRender, term: &mut Terminal, input: &FrameInput) {
-        build(&self.shared, self.fonts_id, &self.fonts, &self.glyph_rules, pane, term, input);
+        let (id, fonts) = self.fonts_of(pane);
+        build(&self.shared, id, &fonts, &self.glyph_rules, pane, term, input);
     }
 
     /// Let each pane's build spend at most `limit` on glyphs it hasn't
@@ -1981,14 +2061,28 @@ impl Renderer {
         self.shared.glyphs.borrow().glyphs_pending(self.fonts_id)
     }
 
+    /// Whether the glyph thread of `pane`'s fonts has glyphs asked for and
+    /// not back yet.
+    pub fn pane_glyphs_pending(&self, pane: &PaneRender) -> bool {
+        self.shared.glyphs.borrow().glyphs_pending(self.fonts_of(pane).0)
+    }
+
     /// Woken by the glyph thread with no pane of this window waiting for
     /// glyphs: take in what it sent back and, once nothing is on its way,
     /// drop the bitmaps no build drew (a flood's rows scrolled away before
     /// they came), so they don't stay in memory until the next build.
-    pub fn drop_unused_glyphs(&mut self) {
+    pub fn drop_unused_glyphs<'a>(&mut self, panes: impl IntoIterator<Item = &'a PaneRender>) {
         let mut cache = self.shared.glyphs.borrow_mut();
         cache.receive(self.fonts_id);
         cache.settle(self.fonts_id);
+        let mut done = vec![self.fonts_id];
+        for id in panes.into_iter().filter_map(|p| p.fonts.as_ref().map(|f| f.id)) {
+            if !done.contains(&id) {
+                done.push(id);
+                cache.receive(id);
+                cache.settle(id);
+            }
+        }
     }
 
     /// The part of building `pane` that needs `term` locked: the snapshot,
@@ -1997,7 +2091,8 @@ impl Renderer {
     /// shapes and builds them (ligatures design §5: shaping is outside the
     /// lock).
     pub fn snapshot_pane(&mut self, pane: &mut PaneRender, term: &mut Terminal, input: &FrameInput) {
-        let generation = self.shared.glyphs.borrow_mut().source(self.fonts_id, &self.fonts).generation();
+        let (id, fonts) = self.fonts_of(pane);
+        let generation = self.shared.glyphs.borrow_mut().source(id, &fonts).generation();
         snapshot(pane, term, input, generation);
     }
 
@@ -2007,7 +2102,8 @@ impl Renderer {
     /// must be copied again): build it with
     /// [`build_pane`](Self::build_pane), with the terminal locked.
     pub fn build_from_snapshot(&mut self, pane: &mut PaneRender, input: &FrameInput) -> bool {
-        finish(&self.shared, self.fonts_id, &self.fonts, &self.glyph_rules, pane, input)
+        let (id, fonts) = self.fonts_of(pane);
+        finish(&self.shared, id, &fonts, &self.glyph_rules, pane, input)
     }
 
     /// [`build_pane`](Self::build_pane), with `inject` changing the

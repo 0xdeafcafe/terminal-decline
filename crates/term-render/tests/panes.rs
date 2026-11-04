@@ -6,7 +6,8 @@
 //! target; two windows draw correctly while glyphs are uploaded between
 //! their frames; closing a window gives its glyph space back; a pane
 //! built from its snapshot once the terminal is unlocked draws as one
-//! built with it. Without a
+//! built with it; a pane with fonts of its own draws as a window of
+//! that size would. Without a
 //! Metal device the tests are skipped locally and fail on CI (the `CI` env
 //! var is set).
 
@@ -774,7 +775,7 @@ fn a_complete_build_keeps_what_another_pane_waits_for() {
     // is taken in, and what no pane waits for would go.
     while r.glyphs_pending() {
         wakes.recv_timeout(std::time::Duration::from_secs(20)).expect("woken");
-        r.drop_unused_glyphs();
+        r.drop_unused_glyphs([]);
     }
     let input = input(&r, &theme);
     r.snapshot_pane(&mut a, &mut ta.state, &input);
@@ -1023,4 +1024,53 @@ fn a_purge_gives_glyph_space_back_and_redraws_the_same() {
     let input = input(&r1, &theme);
     r1.build_pane(&mut a, &mut ta.state, &input);
     assert!(alone(&mut r1, &a, size) == before);
+}
+
+/// A pane with a text size of its own (pane-arrange design §1.1) is
+/// built and drawn with its fonts beside one drawing with the window's:
+/// each draws as a window of its size would, both are current, and
+/// going back to the window's fonts gives the window's drawing again.
+#[test]
+fn a_pane_draws_with_fonts_of_its_own() {
+    if !have_gpu() {
+        return;
+    }
+    let theme = theme();
+    let small = term_font::FontConfig::new("Menlo", 12.0);
+    let big = term_font::FontConfig::new("Menlo", 24.0);
+    let mut r = Renderer::with_font_config(&small, 1.0);
+    let mut solo = Renderer::with_font_config(&big, 1.0);
+    let (ms, mb) = (r.metrics(), solo.metrics());
+    assert!(mb.cell_width > ms.cell_width && mb.cell_height > ms.cell_height);
+    let big_size = (4 * mb.cell_width as usize, mb.cell_height as usize);
+    let (want, _t) = built(&mut solo, &theme, 4, 1, "Abc!");
+    let expected = alone(&mut solo, &want, big_size);
+
+    let (mut a, mut ta) = built(&mut r, &theme, 4, 1, "Abc!");
+    let (b, _tb) = built(&mut r, &theme, 4, 1, "Abc!");
+    let window_fonts = r.fonts_id();
+    r.set_pane_fonts(&mut a, Some((&big, 1.0)));
+    assert_eq!(r.pane_fonts_id(&a), solo.fonts_id(), "shared with the window using that size");
+    assert_eq!(r.metrics_of(&a).cell_width, mb.cell_width);
+    assert_eq!(r.metrics_of(&b).cell_width, ms.cell_width);
+    assert!(!r.is_current(&a), "built with the old fonts");
+    assert!(r.is_current(&b));
+    let input_big = FrameInput {
+        metrics: r.metrics_of(&a),
+        ..input(&r, &theme)
+    };
+    r.build_pane(&mut a, &mut ta.state, &input_big);
+    assert!(r.is_current(&a) && r.is_current(&b));
+    let got = alone(&mut r, &a, big_size);
+    assert!(got == expected, "{}", got.diff(&expected));
+
+    // The window's own setting is the window's fonts, not a pane's.
+    r.set_pane_fonts(&mut a, Some((&small, 1.0)));
+    assert_eq!(r.pane_fonts_id(&a), window_fonts);
+    r.set_pane_fonts(&mut a, None);
+    assert_eq!(r.metrics_of(&a).cell_height, ms.cell_height);
+    let input = input(&r, &theme);
+    r.build_pane(&mut a, &mut ta.state, &input);
+    let small_size = (4 * ms.cell_width as usize, ms.cell_height as usize);
+    assert!(alone(&mut r, &a, small_size) == alone(&mut r, &b, small_size));
 }

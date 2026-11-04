@@ -1233,7 +1233,7 @@ impl WindowView {
                 st.win.idle_ticks = 0;
                 st.win.link.setPaused(false);
             } else {
-                st.win.renderer.drop_unused_glyphs();
+                st.win.renderer.drop_unused_glyphs(st.panes.values().map(|p| &p.render));
             }
         });
     }
@@ -1842,7 +1842,7 @@ impl WindowView {
             if !ok {
                 p.render.forget();
                 crashed.push(id);
-            } else if p.render.glyphs_deferred() && !win.renderer.glyphs_pending() {
+            } else if p.render.glyphs_deferred() && !win.renderer.pane_glyphs_pending(&p.render) {
                 // Drawn without some new glyphs, and none on their way
                 // from the glyph thread (which wakes the window when they
                 // are, `glyph_waker`): built again next tick.
@@ -3471,6 +3471,7 @@ fn crash_panes(win: &mut Win, panes: &mut HashMap<PaneId, Pane>, crashed: &[Pane
     let now = Instant::now();
     for id in crashed {
         let Some(p) = panes.get_mut(id) else { continue };
+        win.renderer.forget_shaped_of(&p.render);
         let again = p.crash.is_some_and(|c| now.duration_since(c.at) < CRASH_REPEAT);
         let count = p.crash.map_or(0, |c| c.count) + 1;
         p.crash = Some(Crash {

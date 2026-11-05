@@ -438,6 +438,13 @@ define_class!(
             self.show_settings();
         }
 
+        /// Terminal Decline > What's New: the changes since the build
+        /// that ran before, in a tab (docs/design/updater.md §12).
+        #[unsafe(method(showWhatsNew:))]
+        fn show_whats_new_item(&self, _sender: Option<&AnyObject>) {
+            show_whats_new();
+        }
+
         /// Terminal Decline > Edit config.toml: the file in your
         /// editor (the `editor` setting, else `$VISUAL`/`$EDITOR`, else nano,
         /// vim or vi) in a new tab, for anyone who prefers it to Settings….
@@ -1736,6 +1743,23 @@ pub(crate) fn settings_status() -> (bool, bool) {
         .map_or((false, false), |v| v.settings_status())
 }
 
+/// What's New (the menu item, or a click on "Updated to …"): the page
+/// is written on a thread (it may read the checkout's history), then
+/// paged through in a tab of the window in front, which `q` closes.
+pub(crate) fn show_whats_new() {
+    std::thread::spawn(|| {
+        let Some(page) = crate::update::announce::whats_new_page() else {
+            return;
+        };
+        dispatch2::DispatchQueue::main().exec_async(move || {
+            let delegate = DELEGATE.with(|d| d.borrow().as_ref().and_then(|w| w.load()));
+            if let Some(delegate) = delegate {
+                delegate.open_command_in_front(crate::update::announce::pager_argv(&page));
+            }
+        });
+    });
+}
+
 /// Terminal Decline > Edit config.toml (the test-only `edit-config`
 /// command).
 pub(crate) fn edit_config_now() {
@@ -1904,6 +1928,15 @@ pub fn build_menus(mtm: MainThreadMarker, app_name: &str, binds: &Keybinds) -> R
                     },
                 ]
                 .concat(),
+            },
+            // While an updater runs and has said which build this is.
+            if crate::update::announce::current().is_some() {
+                vec![
+                    item(mtm, "What's New", Some(sel!(showWhatsNew:)), ""),
+                    NSMenuItem::separatorItem(mtm),
+                ]
+            } else {
+                Vec::new()
             },
             b(MenuAction::Settings.label(), MenuAction::Settings),
             vec![

@@ -18,6 +18,7 @@ impl Host for App {
     fn show(&self, n: Notice) {
         let Some(mtm) = objc2::MainThreadMarker::new() else { return };
         let target = match n.open {
+            _ if n.whats_new => Target::WhatsNew,
             Some(open) => Target::Open(open),
             None => Target::App,
         };

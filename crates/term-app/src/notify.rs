@@ -65,6 +65,8 @@ pub enum Target {
     Open(String),
     /// Nothing but bring the app forward.
     App,
+    /// Show What's New (after an update).
+    WhatsNew,
 }
 
 /// A button on a notification, besides clicking it.
@@ -469,6 +471,7 @@ fn clicked(ident: &str, button: Option<Button>) {
                 objc2_app_kit::NSWorkspace::sharedWorkspace().openURL(&url);
             }
         }
+        Some(Target::WhatsNew) => crate::app::show_whats_new(),
         Some(Target::App) | None => {}
     }
 }

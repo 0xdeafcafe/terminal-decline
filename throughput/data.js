@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793680963349,
+  "lastUpdate": 1793853869552,
   "repoUrl": "https://github.com/0xdeafcafe/terminal-decline",
   "entries": {
     "Throughput": [
@@ -1133,6 +1133,188 @@ window.BENCHMARK_DATA = {
           {
             "name": "typing/echo+report",
             "value": 1785627,
+            "unit": "elem/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "dependabot[bot]",
+            "username": "dependabot[bot]",
+            "email": "49699333+dependabot[bot]@users.noreply.github.com"
+          },
+          "committer": {
+            "name": "GitHub",
+            "username": "web-flow",
+            "email": "noreply@github.com"
+          },
+          "id": "394c9c9a20d04261bfee6e3e313c160fa014fe21",
+          "message": "build(deps): bump miniz_oxide from 0.8.9 to 0.9.1 (#13)\n\nBumps [miniz_oxide](https://github.com/Frommi/miniz_oxide) from 0.8.9 to 0.9.1.\n- [Changelog](https://github.com/Frommi/miniz_oxide/blob/master/CHANGELOG.md)\n- [Commits](https://github.com/Frommi/miniz_oxide/commits)\n\n---\nupdated-dependencies:\n- dependency-name: miniz_oxide\n  dependency-version: 0.9.1\n  dependency-type: direct:production\n  update-type: version-update:semver-minor\n...\n\nSigned-off-by: dependabot[bot] <support@github.com>\nCo-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>",
+          "timestamp": "2026-11-04T20:50:02Z",
+          "url": "https://github.com/0xdeafcafe/terminal-decline/commit/394c9c9a20d04261bfee6e3e313c160fa014fe21"
+        },
+        "date": 1793853868787,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "parse/clusters",
+            "value": 82.8,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse/coloured",
+            "value": 189.41,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse/plain",
+            "value": 438.36,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse/seq",
+            "value": 153.16,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse/tui",
+            "value": 300.71,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse/unicode",
+            "value": 118.86,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse_1k/clusters",
+            "value": 83.31,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse_1k/coloured",
+            "value": 186.55,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse_1k/plain",
+            "value": 448.79,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse_1k/seq",
+            "value": 156.39,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse_1k/tui",
+            "value": 297.53,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse_1k/unicode",
+            "value": 115.66,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "history decode/background",
+            "value": 7846373,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history decode/cjk",
+            "value": 4520679,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history decode/emoji",
+            "value": 3605852,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history decode/gradient",
+            "value": 481709,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history decode/ls",
+            "value": 5347100,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history decode/plain",
+            "value": 8374255,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/background",
+            "value": 4693437,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/cjk",
+            "value": 7222585,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/emoji",
+            "value": 6435865,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/gradient",
+            "value": 324643,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/keyed/background",
+            "value": 5387234,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/keyed/cjk",
+            "value": 6540597,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/keyed/emoji",
+            "value": 7483375,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/keyed/gradient",
+            "value": 333718,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/keyed/ls",
+            "value": 11825966,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/keyed/plain",
+            "value": 24105983,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/ls",
+            "value": 7349032,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/plain",
+            "value": 22467082,
+            "unit": "elem/s"
+          },
+          {
+            "name": "typing/echo",
+            "value": 14992798,
+            "unit": "elem/s"
+          },
+          {
+            "name": "typing/echo+report",
+            "value": 1695159,
             "unit": "elem/s"
           }
         ]

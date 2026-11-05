@@ -25,6 +25,7 @@ use term_activity::{BUNDLE_ID, PRODUCT_NAME};
 pub mod announce;
 pub mod dogfood;
 pub mod source;
+pub mod whats_new;
 
 /// The test feed's env var, honoured only with the test control on
 /// ([`TEST_CONTROL_ENV`]).
@@ -109,6 +110,8 @@ pub struct Notice {
     pub update_button: bool,
     /// Clicking it opens this file or URL; `None` brings the app forward.
     pub open: Option<String>,
+    /// Clicking it shows What's New (over `open`).
+    pub whats_new: bool,
 }
 
 impl Notice {
@@ -120,6 +123,7 @@ impl Notice {
             group: None,
             update_button: false,
             open: None,
+            whats_new: false,
         }
     }
 }

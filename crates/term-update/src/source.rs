@@ -262,6 +262,22 @@ pub fn subjects_between(repo: &Path, from: &str, to: &str) -> Result<Vec<String>
         .collect())
 }
 
+/// Every commit subject from `from` to `to`, oldest first and without
+/// merges, for What's New when git-cliff didn't make the notes
+/// ([`crate::whats_new::from_subjects`]). At most [`ALL_SUBJECTS`].
+pub fn all_subjects_between(repo: &Path, from: &str, to: &str) -> Result<Vec<String>, String> {
+    let range = format!("{from}..{to}");
+    let n = ALL_SUBJECTS.to_string();
+    let newest: Vec<String> = git(repo, &["log", "--no-merges", "--format=%s", "-n", &n, &range])?
+        .lines()
+        .map(str::to_string)
+        .collect();
+    Ok(newest.into_iter().rev().collect())
+}
+
+/// The most commits What's New reads from a checkout.
+pub const ALL_SUBJECTS: usize = 500;
+
 /// Whether the checkout has uncommitted changes, and its branch.
 pub fn tree(repo: &Path) -> Result<Tree, String> {
     let status = git(repo, &["status", "--porcelain", "--untracked-files=no"])?;
@@ -857,6 +873,11 @@ mod tests {
         assert_eq!(r.subjects, ["add b", "add a"]);
         assert!(r.conflicts.is_empty());
         assert_eq!(subjects_between(&f.work, &f.src.commit, &r.head).unwrap(), ["add b", "add a"]);
+        assert_eq!(
+            all_subjects_between(&f.work, &f.src.commit, &r.head).unwrap(),
+            ["add a", "add b"],
+            "What's New reads them oldest first"
+        );
         assert_eq!(
             tree(&f.work).unwrap(),
             Tree {

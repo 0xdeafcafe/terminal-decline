@@ -1231,6 +1231,12 @@ impl WindowView {
             let zoomed = st.tree.zoomed();
             let after = Duration::from_secs(st.win.config.notify_after.into());
             let status = st.win.config.title_status;
+            let look = crate::pane_strip::Look {
+                foreground: crate::config::rgb_of(st.win.theme.foreground),
+                background: crate::config::rgb_of(st.win.theme.background),
+                divider: crate::config::rgb_of(st.win.divider),
+                opacity: st.win.theme.background_opacity,
+            };
             for (id, p) in &st.panes {
                 if !st.win.strips || zoomed.is_some_and(|z| z != *id) {
                     p.strip.hide();
@@ -1238,7 +1244,7 @@ impl WindowView {
                 }
                 let text = crate::pane_strip::title_text(p.name.as_deref(), &pane_status(p, status, after, now, home.as_deref()));
                 let inset = if p.rect.y == 0 { titlebar } else { 0.0 };
-                p.strip.show(p.view.frame().size.width, inset, &text, *id == focused);
+                p.strip.show(p.view.frame().size.width, inset, &text, *id == focused, look);
             }
         });
     }

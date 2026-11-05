@@ -119,10 +119,16 @@ glyphs to the shared textures, as a second window at that size would.
   the program's title), without the app's name: `cargo test · 12s`,
   `✓ cargo build · 1m 12s`, `waiting · ~/src/decline`.
 - **Look**: one line of the system's small font, its height
-  (`STRIP_HEIGHT`, 20 pt), on the pane's background; the focused pane's
-  in the theme's foreground, the others' at 55%. Text is truncated in
-  the middle. It is an `NSTextField` label in a plain view, a subview of
-  the pane view (as the find bar is): the Metal path doesn't change.
+  (`STRIP_HEIGHT`, 20 pt), on a band of the theme's background tinted
+  towards its foreground (9% on the focused pane, 4% on the others,
+  at the theme's background opacity) with a 1 pt hairline in the
+  divider colour under it; the focused pane's text in the theme's
+  foreground, the others' halfway to the background. Text is truncated
+  in the middle. The band, the hairline and an `NSTextField` label sit
+  in a plain view, a subview of the pane view (as the find bar is): the
+  Metal path doesn't change. (The first cut was the label alone, in the
+  system's label colour on the pane's background: it read as stray text
+  over the prompt, Alex, 5 Nov 2026.)
 - **Space**: it takes the top of the pane, below the title-bar inset
   for panes at the top, so the grid is one strip shorter (the program is
   resized when strips come and go: on the second pane's split and the

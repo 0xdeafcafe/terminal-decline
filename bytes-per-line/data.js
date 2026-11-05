@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793680960537,
+  "lastUpdate": 1793853866649,
   "repoUrl": "https://github.com/0xdeafcafe/terminal-decline",
   "entries": {
     "Scrollback bytes per line": [
@@ -378,6 +378,68 @@ window.BENCHMARK_DATA = {
           "url": "https://github.com/0xdeafcafe/terminal-decline/commit/a053e5b334cdd0edc28531d4fe81aad77d28f6cd"
         },
         "date": 1793680959319,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "scrollback CJK",
+            "value": 72,
+            "unit": "bytes/line"
+          },
+          {
+            "name": "scrollback compiler error",
+            "value": 67,
+            "unit": "bytes/line"
+          },
+          {
+            "name": "scrollback emoji-heavy",
+            "value": 81,
+            "unit": "bytes/line"
+          },
+          {
+            "name": "scrollback full-width background",
+            "value": 26,
+            "unit": "bytes/line"
+          },
+          {
+            "name": "scrollback gradient 160 cells",
+            "value": 2020,
+            "unit": "bytes/line"
+          },
+          {
+            "name": "scrollback ls --color",
+            "value": 61,
+            "unit": "bytes/line"
+          },
+          {
+            "name": "scrollback placeholder image row",
+            "value": 56,
+            "unit": "bytes/line"
+          },
+          {
+            "name": "scrollback plain 40 chars",
+            "value": 46,
+            "unit": "bytes/line"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "dependabot[bot]",
+            "username": "dependabot[bot]",
+            "email": "49699333+dependabot[bot]@users.noreply.github.com"
+          },
+          "committer": {
+            "name": "GitHub",
+            "username": "web-flow",
+            "email": "noreply@github.com"
+          },
+          "id": "394c9c9a20d04261bfee6e3e313c160fa014fe21",
+          "message": "build(deps): bump miniz_oxide from 0.8.9 to 0.9.1 (#13)\n\nBumps [miniz_oxide](https://github.com/Frommi/miniz_oxide) from 0.8.9 to 0.9.1.\n- [Changelog](https://github.com/Frommi/miniz_oxide/blob/master/CHANGELOG.md)\n- [Commits](https://github.com/Frommi/miniz_oxide/commits)\n\n---\nupdated-dependencies:\n- dependency-name: miniz_oxide\n  dependency-version: 0.9.1\n  dependency-type: direct:production\n  update-type: version-update:semver-minor\n...\n\nSigned-off-by: dependabot[bot] <support@github.com>\nCo-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>",
+          "timestamp": "2026-11-04T20:50:02Z",
+          "url": "https://github.com/0xdeafcafe/terminal-decline/commit/394c9c9a20d04261bfee6e3e313c160fa014fe21"
+        },
+        "date": 1793853865429,
         "tool": "customSmallerIsBetter",
         "benches": [
           {

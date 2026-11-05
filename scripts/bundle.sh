@@ -34,6 +34,11 @@
 # written. SPARKLE_REQUIRED=1 (the release job) fails without it. The
 # updater still only runs in Developer ID builds that aren't dogfood or
 # nightly builds (crates/term-update/src/lib.rs).
+#
+# What's New (docs/design/updater.md §12): WHATS_NEW names a file of
+# git-cliff notes (the release job's, or the range dogfood.sh picked),
+# copied in as Contents/Resources/whats-new.md for the app to show after
+# an update.
 set -euo pipefail
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -49,7 +54,7 @@ while [[ $# -gt 0 ]]; do
     --launcher) launcher=$2; shift 2 ;;
     --stub) stub=$2; shift 2 ;;
     -h|--help)
-      sed -n '2,34p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      sed -n '2,39p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     -*) echo "unknown option $1" >&2; exit 64 ;;
@@ -306,6 +311,10 @@ if [[ "${DOGFOOD:-}" == "1" ]]; then
   else
     touch "$contents/Resources/dogfood"
   fi
+fi
+
+if [[ -n "${WHATS_NEW:-}" && -s "$WHATS_NEW" ]]; then
+  cp "$WHATS_NEW" "$contents/Resources/whats-new.md"
 fi
 
 # Inside out, never --deep (it would sign nested code with the app's

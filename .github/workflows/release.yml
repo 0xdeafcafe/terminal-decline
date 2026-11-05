@@ -114,12 +114,23 @@ jobs:
       - name: Fetch Sparkle
         run: scripts/sparkle.sh
 
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: git-cliff
+
+      - name: Write What's New
+        run: |
+          # Every version's notes, as the release notes are written
+          # (cliff.toml): after an update the app shows the versions it
+          # brought (docs/design/updater.md §12).
+          git cliff --strip header --output "$RUNNER_TEMP/whats-new.md"
+
       - name: Bundle and sign Terminal Decline.app
         env:
           SIGN_IDENTITY: ${{ steps.cert.outputs.identity }}
         run: |
           # Falls back to ad-hoc signing when no certificate was imported.
-          SPARKLE_REQUIRED=1 CODESIGN_IDENTITY="${SIGN_IDENTITY:--}" scripts/bundle.sh \
+          WHATS_NEW="$RUNNER_TEMP/whats-new.md" SPARKLE_REQUIRED=1 CODESIGN_IDENTITY="${SIGN_IDENTITY:--}" scripts/bundle.sh \
             --lib target/aarch64-apple-darwin/release/libterminal_decline.dylib \
             --launcher target/aarch64-apple-darwin/release-stub/terminal-decline-launcher \
             --stub target/aarch64-apple-darwin/release-stub/terminal-decline-pin \

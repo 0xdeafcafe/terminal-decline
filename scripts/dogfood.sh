@@ -54,10 +54,38 @@ version="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json
 
 stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
+head=$(git rev-parse HEAD)
+
+# What's New (docs/design/updater.md §12): the changes from the build the
+# app last launched (its record in updates-seen, else the installed
+# bundle's marker) to this one, as git-cliff groups them, shown once
+# after the restart. A start that isn't behind HEAD (another branch, a
+# rebuild) gives none. Without git-cliff nothing goes in and the app
+# groups the checkout's commits itself, by the same rules.
+commit_in() { sed -n 's/^commit=//p' "$1" 2>/dev/null | head -1 || true; }
+from=""
+for c in "$(commit_in "$HOME/Library/Caches/terminal-decline/updates-seen")" "$(commit_in "$dest/Contents/Resources/dogfood")"; do
+  if [[ -n "$c" && "$c" != "$head" ]] && git merge-base --is-ancestor "$c" "$head" 2>/dev/null; then
+    from=$c
+    break
+  fi
+done
+cliff=$(command -v git-cliff || true)
+if [[ -z "$cliff" && -x /opt/homebrew/bin/git-cliff ]]; then
+  cliff=/opt/homebrew/bin/git-cliff
+fi
+whats_new=""
+if [[ -n "$from" && -n "$cliff" ]]; then
+  whats_new="$stage/whats-new.md"
+  if ! { echo "<!-- whats-new from=$from to=$head -->"; "$cliff" --strip header "$from..$head" 2>/dev/null; } > "$whats_new"; then
+    whats_new=""
+  fi
+fi
+
 # The checkout and commit go into the bundle's dogfood marker, so the app
 # can check origin/main for new commits and update itself from here
 # (docs/design/updater.md §11).
-DOGFOOD=1 DOGFOOD_REPO="$repo" DOGFOOD_COMMIT="$(git rev-parse HEAD)" CODESIGN_IDENTITY="${DECLINE_DOGFOOD_IDENTITY:--}" scripts/bundle.sh "$stage" "$version" >/dev/null
+DOGFOOD=1 DOGFOOD_REPO="$repo" DOGFOOD_COMMIT="$head" WHATS_NEW="$whats_new" CODESIGN_IDENTITY="${DECLINE_DOGFOOD_IDENTITY:--}" scripts/bundle.sh "$stage" "$version" >/dev/null
 
 mkdir -p "$apps"
 if [[ $now == 1 ]]; then
@@ -76,6 +104,14 @@ rm -rf "$dest.old"
 lsregister=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 "$lsregister" -f "$dest" || true
 echo "installed $dest ($version)"
+if [[ -n "$from" ]]; then
+  if [[ -n "$whats_new" ]]; then
+    changes=$(grep -c '^- ' "$whats_new" || true)
+    echo "what's new: $changes change(s) since ${from:0:9}, shown once after the restart"
+  else
+    echo "what's new: since ${from:0:9} (git-cliff not found: the app lists the commits itself)"
+  fi
+fi
 if pgrep -f "$dest/Contents/MacOS/terminal-decline" >/dev/null; then
   if [[ $now == 1 ]]; then
     echo "installed; the app restarts into it now"

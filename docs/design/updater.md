@@ -217,8 +217,13 @@ keybind list.
 `confirm_close = true`, which is off by default, so the alert itself lists
 running programs, with the question the app already asks on quit
 (`running::quit_question`): "Quit and Install will end top and 2 other
-programs." [Quit and Install] [Later]. The app doesn't relaunch afterwards
-(open question 2 asks whether it should, with windows reopened).
+programs." [Quit and Install] [Later]. Sparkle then relaunches the app,
+with a new window (open question 2 asks whether to reopen the windows,
+as the dogfood restart does). The delegate must not answer
+`updaterShouldRelaunchApplication:` with NO to stop the relaunch:
+Sparkle takes that as "don't install" and ends the session without
+quitting (`SPUInstallerDriver`'s `mayUpdateAndRestart`), which is how
+Quit and Install did nothing until 5 Nov 2026.
 
 **Update Now (Cmd+U) and the welcome line.** A new tab or window running
 the login shell starts with one faint line (`welcome`, default `"full"`;

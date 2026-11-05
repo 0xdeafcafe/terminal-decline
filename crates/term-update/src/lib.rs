@@ -425,7 +425,7 @@ pub fn quit_and_install_text(version: Option<&str>, programs: &[String]) -> (Str
         None => format!("An update to {product} is ready to install"),
     };
     let text = match programs {
-        [] => format!("It installs when {product} quits."),
+        [] => format!("{product} quits, installs it and opens again."),
         [one] => format!("Quit and Install will end {one}."),
         [first, rest @ ..] => {
             let n = rest.len();
@@ -693,7 +693,10 @@ mod tests {
             "Quit and Install will end top and 1 other program."
         );
         assert_eq!(quit_and_install_text(None, &p(&["top"])).1, "Quit and Install will end top.");
-        assert_eq!(quit_and_install_text(None, &[]).1, "It installs when Terminal Decline quits.");
+        assert_eq!(
+            quit_and_install_text(None, &[]).1,
+            "Terminal Decline quits, installs it and opens again."
+        );
     }
 
     #[test]

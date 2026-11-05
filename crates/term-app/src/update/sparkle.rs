@@ -601,11 +601,10 @@ define_class!(
             false
         }
 
-        /// The app doesn't relaunch itself after Quit and Install.
-        #[unsafe(method(updaterShouldRelaunchApplication:))]
-        fn relaunch(&self, _updater: &AnyObject) -> bool {
-            false
-        }
+        // No `updaterShouldRelaunchApplication:`: Sparkle reads a NO there
+        // as "don't install" and ends the session without quitting
+        // (`SPUInstallerDriver`'s `mayUpdateAndRestart`), so Quit and
+        // Install did nothing. Sparkle relaunches the app after it.
 
         #[unsafe(method(updater:didFindValidUpdate:))]
         fn found(&self, _updater: &AnyObject, item: &AnyObject) {

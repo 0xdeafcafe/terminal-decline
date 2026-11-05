@@ -696,8 +696,8 @@ module's `source` and `dogfood` parts).
 **Telling** (question 10, both kinds): when Sparkle has an update staged
 to install on quit (`willInstallUpdateOnQuit`), "Decline X will
 install when you quit", once per version; on the first launch after an
-update, "Updated to X" (a release's opens its release page; a build from
-source's lists the new commits). Kept in
+update, "Updated to X" with what changed, which a click shows in full
+(What's New, §12). Kept in
 `~/Library/Caches/terminal-decline/updates-seen`.
 
 **Landed** (30 Oct 2026): all of the above, with unit tests for
@@ -712,3 +712,62 @@ and say which files conflict). Fake-remote tests, one per case: behind,
 ahead, diverged and merging cleanly, diverged with a conflict (aborted,
 tree unchanged, the notification's text), uncommitted changes,
 untracked files, another branch.
+
+---
+
+## 12. What's New
+
+Alex, 5 Nov 2026: "show a change log in terminal decline which is shown
+after update, include in dogfooding too". After an update, release or
+dogfood, the app says what changed since the build that ran before,
+grouped as git-cliff groups the release notes (`cliff.toml`: Features,
+Fixes, Performance, Build and packaging, Internal changes; docs, tests,
+CI, chores and dependency bumps left out).
+
+- **Where the notes come from.** The bundle carries them:
+  `Contents/Resources/whats-new.md`, git-cliff's Markdown, copied in by
+  `bundle.sh` from the file `WHATS_NEW` names.
+  - *Releases:* the release job runs `git cliff --strip header` (every
+    version, the same template as the release notes Sparkle's feed links
+    to). The app shows the versions after the one it was updated from, up
+    to its own (`whats_new::Notes::between`, versions compared by number;
+    `## Unreleased` never counts). Nothing is fetched.
+  - *Dogfood builds:* `dogfood.sh` picks the start: the commit the app
+    last launched (`commit=` in `updates-seen`), else the installed
+    bundle's marker, used only if it is behind `HEAD` (`git merge-base
+    --is-ancestor`), so another branch or a rebuild of the same commit
+    gives none. It runs `git cliff --strip header <from>..<HEAD>` (from
+    PATH, else `/opt/homebrew/bin`) and puts `<!-- whats-new from=… to=…
+    -->` first. Picking the commit the app last *launched*, not the one
+    installed, means two installs before a restart still list both. The
+    app uses the bundle's notes when they start where its own record
+    does; otherwise (no git-cliff at build time, or another start) it
+    reads `git log --no-merges <from>..<commit>` in the checkout and
+    groups the subjects by cliff.toml's rules itself
+    (`whats_new::from_subjects`, at most 500 commits).
+- **Once.** At launch, `announce::launched` compares the build with the
+  one recorded in `updates-seen` and records it before anything is
+  shown, so the restart into a new build (term-restore's reload) tells
+  it once, and no later launch tells it again. The build it was updated
+  from is kept (`version_from=`, `commit_from=`) for the menu, until the
+  next update.
+- **Showing it.** The "Updated to Terminal Decline 0.6.0" / "Updated to
+  5bf5ad6cf" notification, as before, now says how many of each and the
+  first two changes ("3 features, 2 fixes and 1 performance change." then
+  "app: …" lines, "and 4 more"). Clicking it opens What's New; with no
+  notes, a release's still opens its release page. **Terminal Decline ›
+  What's New** (first in the app menu, while an updater runs) opens it
+  again any time: a tab of the window in front running `less -R` on a
+  page written to `~/Library/Caches/terminal-decline/whats-new.txt`, as
+  Edit config.toml opens an editor tab; `q` closes it. The page: "What's
+  New in Terminal Decline 0.6.0", "Changes since 0.5.0" (or "Built from
+  …; changes since …"), the groups with each change as "• scope: text",
+  a heading per version when a release update spans several, and the
+  release page or checkout at the end.
+- **Tests** (term-update): parsing git-cliff's output (sections with no
+  blank line between, the range line), grouping subjects as cliff.toml
+  does, picking a release's versions, the notification's lines, the
+  page, the show-once record across a restart, and the notes a bundle in
+  a temp dir gives; `all_subjects_between` on the fake remote.
+
+**Landed** (5 Nov 2026): all of the above.

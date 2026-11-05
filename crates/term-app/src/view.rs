@@ -1235,6 +1235,7 @@ impl WindowView {
                 foreground: crate::config::rgb_of(st.win.theme.foreground),
                 background: crate::config::rgb_of(st.win.theme.background),
                 divider: crate::config::rgb_of(st.win.divider),
+                accent: crate::config::rgb_of(st.win.theme.cursor),
                 opacity: st.win.theme.background_opacity,
             };
             for (id, p) in &st.panes {

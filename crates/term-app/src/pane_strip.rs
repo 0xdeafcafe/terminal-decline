@@ -3,7 +3,8 @@
 //! shows no title bar of its own (full screen), saying the pane's name or
 //! what it is doing. A band in the theme's colours (the background
 //! tinted towards the foreground, a hairline in the divider colour under
-//! it) with an `NSTextField` label, in a plain view, a subview of the
+//! it, and on the focused pane a rail in the cursor colour across its
+//! top) with an `NSTextField` label, in a plain view, a subview of the
 //! pane's view as the find bar is: the Metal path doesn't change. A click
 //! focuses the pane; a double-click renames it.
 
@@ -26,6 +27,8 @@ const TINT_FOCUSED: f32 = 0.09;
 const TINT: f32 = 0.04;
 /// How far the others' text is from the background to the foreground.
 const TEXT_FAINT: f32 = 0.5;
+/// The focused pane's rail across the top, points.
+const RAIL: f64 = 2.0;
 
 /// The colours a strip is drawn in, 0xRRGGBB, and the background's
 /// opacity (0–255, as the theme's).
@@ -34,6 +37,8 @@ pub struct Look {
     pub foreground: u32,
     pub background: u32,
     pub divider: u32,
+    /// The focused pane's rail: the theme's cursor colour.
+    pub accent: u32,
     pub opacity: u8,
 }
 
@@ -42,6 +47,7 @@ pub struct Ivars {
     label: Retained<NSTextField>,
     band: Retained<NSBox>,
     rule: Retained<NSBox>,
+    rail: Retained<NSBox>,
     /// What it was last drawn in, and whether focused.
     drawn: Cell<Option<(Look, bool)>>,
 }
@@ -99,16 +105,19 @@ impl PaneStrip {
         label.setLineBreakMode(NSLineBreakMode::ByTruncatingMiddle);
         let band = plain_box(mtm);
         let rule = plain_box(mtm);
+        let rail = plain_box(mtm);
         let this = Self::alloc(mtm).set_ivars(Ivars {
             pane: Weak::new(pane),
             label: label.clone(),
             band: band.clone(),
             rule: rule.clone(),
+            rail: rail.clone(),
             drawn: Cell::new(None),
         });
         let this: Retained<PaneStrip> = unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
         this.addSubview(&band);
         this.addSubview(&rule);
+        this.addSubview(&rail);
         this.addSubview(&label);
         this.setHidden(true);
         pane.addSubview(&this);
@@ -116,8 +125,9 @@ impl PaneStrip {
     }
 
     /// Show it at `top` points down the pane, `width` wide, saying `text`
-    /// in `look`'s colours: the focused pane's band more tinted and its
-    /// text in the foreground, the others' fainter.
+    /// in `look`'s colours: the focused pane's band more tinted, with the
+    /// accent rail across its top and its text in the foreground; the
+    /// others' fainter.
     pub fn show(&self, width: f64, top: f64, text: &str, focused: bool, look: Look) {
         self.setFrame(NSRect::new(NSPoint::new(0.0, top), NSSize::new(width, HEIGHT)));
         let iv = self.ivars();
@@ -125,10 +135,17 @@ impl PaneStrip {
             .setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(width, HEIGHT - 1.0)));
         iv.rule
             .setFrame(NSRect::new(NSPoint::new(0.0, HEIGHT - 1.0), NSSize::new(width, 1.0)));
+        iv.rail.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(width, RAIL)));
+        if iv.rail.isHidden() == focused {
+            iv.rail.setHidden(!focused);
+        }
+        // Centred between the rail and the hairline, focused or not, so
+        // the text doesn't move when focus does.
         let label = &iv.label;
-        let h = label.intrinsicContentSize().height.min(HEIGHT - 1.0);
+        let room = HEIGHT - 1.0 - RAIL;
+        let h = label.intrinsicContentSize().height.min(room);
         label.setFrame(NSRect::new(
-            NSPoint::new(INSET, ((HEIGHT - 1.0 - h) / 2.0).round()),
+            NSPoint::new(INSET, RAIL + ((room - h) / 2.0).round()),
             NSSize::new((width - 2.0 * INSET).max(0.0), h),
         ));
         if label.stringValue().to_string() != text {
@@ -140,6 +157,7 @@ impl PaneStrip {
             let alpha = look.opacity as f64 / 255.0;
             iv.band.setFillColor(&ns_colour(band, alpha));
             iv.rule.setFillColor(&ns_colour(rule, 1.0));
+            iv.rail.setFillColor(&ns_colour(look.accent, 1.0));
             label.setTextColor(Some(&ns_colour(ink, 1.0)));
         }
         if self.isHidden() {
@@ -226,6 +244,7 @@ mod tests {
             foreground: 0xFFFFFF,
             background: 0x000000,
             divider: 0x333333,
+            accent: 0x7fb4ca,
             opacity: 255,
         };
         let (band, rule, ink) = colours(look, true);

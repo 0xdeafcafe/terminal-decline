@@ -122,8 +122,11 @@ glyphs to the shared textures, as a second window at that size would.
   (`STRIP_HEIGHT`, 20 pt), on a band of the theme's background tinted
   towards its foreground (9% on the focused pane, 4% on the others,
   at the theme's background opacity) with a 1 pt hairline in the
-  divider colour under it; the focused pane's text in the theme's
-  foreground, the others' halfway to the background. Text is truncated
+  divider colour under it; the focused pane's strip has a 2 pt rail in
+  the theme's cursor colour across its top and its text in the theme's
+  foreground, the others' text halfway to the background (Alex picked
+  the rail from mockups over framed panes, 5 Nov 2026: it costs no
+  space and keeps the shared dividers). Text is truncated
   in the middle. The band, the hairline and an `NSTextField` label sit
   in a plain view, a subview of the pane view (as the find bar is): the
   Metal path doesn't change. (The first cut was the label alone, in the

@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793853866649,
+  "lastUpdate": 1793940142309,
   "repoUrl": "https://github.com/0xdeafcafe/terminal-decline",
   "entries": {
     "Scrollback bytes per line": [
@@ -440,6 +440,68 @@ window.BENCHMARK_DATA = {
           "url": "https://github.com/0xdeafcafe/terminal-decline/commit/394c9c9a20d04261bfee6e3e313c160fa014fe21"
         },
         "date": 1793853865429,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "scrollback CJK",
+            "value": 72,
+            "unit": "bytes/line"
+          },
+          {
+            "name": "scrollback compiler error",
+            "value": 67,
+            "unit": "bytes/line"
+          },
+          {
+            "name": "scrollback emoji-heavy",
+            "value": 81,
+            "unit": "bytes/line"
+          },
+          {
+            "name": "scrollback full-width background",
+            "value": 26,
+            "unit": "bytes/line"
+          },
+          {
+            "name": "scrollback gradient 160 cells",
+            "value": 2020,
+            "unit": "bytes/line"
+          },
+          {
+            "name": "scrollback ls --color",
+            "value": 61,
+            "unit": "bytes/line"
+          },
+          {
+            "name": "scrollback placeholder image row",
+            "value": 56,
+            "unit": "bytes/line"
+          },
+          {
+            "name": "scrollback plain 40 chars",
+            "value": 46,
+            "unit": "bytes/line"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Alexander Forbes-Reed",
+            "username": "0xdeafcafe",
+            "email": "git@alex.forbes.red"
+          },
+          "committer": {
+            "name": "Alexander Forbes-Reed",
+            "username": "0xdeafcafe",
+            "email": "git@alex.forbes.red"
+          },
+          "id": "a4086db1155e9f82785501269214d3fdbadf2f73",
+          "message": "docs(update): design What's New (updater.md §12)",
+          "timestamp": "2026-11-05T12:13:04Z",
+          "url": "https://github.com/0xdeafcafe/terminal-decline/commit/a4086db1155e9f82785501269214d3fdbadf2f73"
+        },
+        "date": 1793940140674,
         "tool": "customSmallerIsBetter",
         "benches": [
           {

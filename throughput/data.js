@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793853869552,
+  "lastUpdate": 1793940146061,
   "repoUrl": "https://github.com/0xdeafcafe/terminal-decline",
   "entries": {
     "Throughput": [
@@ -1315,6 +1315,188 @@ window.BENCHMARK_DATA = {
           {
             "name": "typing/echo+report",
             "value": 1695159,
+            "unit": "elem/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Alexander Forbes-Reed",
+            "username": "0xdeafcafe",
+            "email": "git@alex.forbes.red"
+          },
+          "committer": {
+            "name": "Alexander Forbes-Reed",
+            "username": "0xdeafcafe",
+            "email": "git@alex.forbes.red"
+          },
+          "id": "a4086db1155e9f82785501269214d3fdbadf2f73",
+          "message": "docs(update): design What's New (updater.md §12)",
+          "timestamp": "2026-11-05T12:13:04Z",
+          "url": "https://github.com/0xdeafcafe/terminal-decline/commit/a4086db1155e9f82785501269214d3fdbadf2f73"
+        },
+        "date": 1793940144769,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "parse/clusters",
+            "value": 93.13,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse/coloured",
+            "value": 206.59,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse/plain",
+            "value": 626.84,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse/seq",
+            "value": 134.06,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse/tui",
+            "value": 345.74,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse/unicode",
+            "value": 122.68,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse_1k/clusters",
+            "value": 91.95,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse_1k/coloured",
+            "value": 221.26,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse_1k/plain",
+            "value": 593.31,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse_1k/seq",
+            "value": 190.15,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse_1k/tui",
+            "value": 343.52,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse_1k/unicode",
+            "value": 126.57,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "history decode/background",
+            "value": 8898937,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history decode/cjk",
+            "value": 5135631,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history decode/emoji",
+            "value": 3897168,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history decode/gradient",
+            "value": 511048,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history decode/ls",
+            "value": 5867468,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history decode/plain",
+            "value": 8186015,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/background",
+            "value": 4128411,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/cjk",
+            "value": 7144423,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/emoji",
+            "value": 8820603,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/gradient",
+            "value": 288317,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/keyed/background",
+            "value": 6037396,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/keyed/cjk",
+            "value": 6906045,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/keyed/emoji",
+            "value": 8618788,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/keyed/gradient",
+            "value": 337597,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/keyed/ls",
+            "value": 11757527,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/keyed/plain",
+            "value": 22363766,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/ls",
+            "value": 9717717,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/plain",
+            "value": 16359405,
+            "unit": "elem/s"
+          },
+          {
+            "name": "typing/echo",
+            "value": 18971902,
+            "unit": "elem/s"
+          },
+          {
+            "name": "typing/echo+report",
+            "value": 1984357,
             "unit": "elem/s"
           }
         ]

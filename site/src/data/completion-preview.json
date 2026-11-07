@@ -1,0 +1,41 @@
+{
+  "source": "docs/img/screenshot-autocomplete.png",
+  "sha256": "eb698dc994d6d4129f2814345f562ec10159c13dc4e27434a47ccd3d484051d4",
+  "note": "Transcribed completion list from the real screenshot, retaining its visible truncation. Window chrome and responsive layout are reconstructed.",
+  "command": "git fetch -",
+  "selected": "--depth",
+  "rows": [
+    {
+      "flag": "--all",
+      "description": "Fetch all remotes, except for the ones that have\u2026"
+    },
+    {
+      "flag": "--no-all",
+      "description": "Fetch all remotes, except for the ones that have\u2026"
+    },
+    {
+      "flag": "-a",
+      "description": "Append ref names and object names of fetched refs\u2026"
+    },
+    {
+      "flag": "--append",
+      "description": "Append ref names and object names of fetched refs\u2026"
+    },
+    {
+      "flag": "--atomic",
+      "description": "Use an atomic transaction to update local refs"
+    },
+    {
+      "flag": "--depth",
+      "description": "Limit fetching to the specified number of commits\u2026"
+    },
+    {
+      "flag": "--deepen",
+      "description": "Similar to --depth, except it specifies the number\u2026"
+    },
+    {
+      "flag": "--shallow-since",
+      "description": "Deepen or shorten the history of a shallow\u2026"
+    }
+  ]
+}

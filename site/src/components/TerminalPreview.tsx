@@ -1,14 +1,11 @@
+import TerminalWindow from './TerminalWindow';
 import screen from '../data/terminal-preview.json';
 
 /** Real ctl cells, grouped into equal-style runs. No terminal emulator shipped. */
 export default function TerminalPreview() {
   return (
     <figure className="terminal-preview">
-      <div className="terminal-window">
-        <div className="terminal-titlebar" aria-hidden="true">
-          <span className="window-controls"><i /><i /><i /></span>
-          <span>Terminal Decline</span>
-        </div>
+      <TerminalWindow>
       <pre className="terminal-screen" aria-label="Comparison recorded on 2 November 2026">
         {screen.rows.map((row, y) => (
           <span className="terminal-row" key={y}>
@@ -19,7 +16,7 @@ export default function TerminalPreview() {
           </span>
         ))}
       </pre>
-      </div>
+      </TerminalWindow>
       <figcaption className="small muted"><a href="#measured">Benchmark details</a></figcaption>
     </figure>
   );

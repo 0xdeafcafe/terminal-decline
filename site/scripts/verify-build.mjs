@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { readFile, readdir, stat } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
@@ -34,3 +35,8 @@ for (const terminal of data.terminals) {
   assert(capture.text.includes(`${terminal.idle} MB`) && capture.text.includes(`${terminal.cat.toFixed(2)} s`), `Stale capture for ${terminal.name}`);
 }
 console.log('Static pages, local links, CNAME, social card and captured benchmark values verified. No framework runtime shipped.');
+
+const completion = JSON.parse(await readFile(path.join(site, 'src/data/completion-preview.json'), 'utf8'));
+assert.equal(createHash('sha256').update(await readFile(path.join(site, '..', completion.source))).digest('hex'), completion.sha256, 'Completion source changed; review the text transcription.');
+assert(!index.includes('screenshot-autocomplete'), 'Terminal screenshots must not be shipped.');
+assert(!(await readdir(path.join(dist, 'images'))).some(name => name.startsWith('screenshot-')), 'Obsolete terminal screenshot in build.');

@@ -85,18 +85,13 @@ p code{padding:.05em .3em;background:var(--code-bg)}
 .top nav a{text-decoration:none}
 .top nav a:hover{text-decoration:underline}
 
-/* opening: headline left, the Slope at bottom right resting on the next band */
-.open{display:grid;grid-template-columns:minmax(0,7fr) minmax(0,5fr);column-gap:clamp(24px,4vw,72px);align-items:end;padding-top:clamp(24px,5vh,72px)}
-.open .text{padding-bottom:clamp(40px,5vw,80px)}
-.open .lead{margin-top:1.5rem;max-width:30em}
-.open .small{margin-top:1rem}
-.open .links{margin-top:2.25rem;display:flex;flex-wrap:wrap;gap:1.25rem 2.5rem;font-size:1.111rem;font-weight:500}
-.open .right{display:grid;gap:clamp(24px,3vw,40px);align-self:end;justify-items:end}
-.open .groups{display:grid;gap:24px;width:100%}
-.open .groups.chart{grid-template-columns:minmax(0,1fr)}
-.open .slope{width:100%;max-width:220px;color:var(--mark)}
-h1 code{font-size:.82em}
-.open .slope svg{display:block;width:100%;height:auto}
+/* A compact product introduction beside the recorded comparison. */
+.open{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:32px clamp(32px,5vw,80px);align-items:start;padding-block:48px 56px}
+.open h1{font-weight:800;font-size:clamp(3.3rem,5.5vw,5.4rem);line-height:1.02;letter-spacing:-.045em}
+.open .text{padding-top:12px}
+.open .lead{margin-top:24px;max-width:24em}
+.hero-features{margin-top:24px;line-height:1.9;font-size:18px}
+.hero-features a{text-decoration-thickness:1px}
 
 /* bands */
 .band{padding-block:clamp(56px,9vw,136px)}
@@ -114,18 +109,6 @@ h1 code{font-size:.82em}
 .section-head .copy{display:grid;gap:1rem}
 .section-head .copy > :first-child{margin-top:.4em}
 .after-head{margin-top:clamp(40px,5vw,80px)}
-
-/* the real screenshot: whole on wide screens, cropped to the list on narrow ones */
-.shot{margin-top:clamp(40px,5vw,80px)}
-.shot img{width:100%;max-width:1800px}
-.shot .crop{display:none}
-.shot figcaption{margin-top:1rem}
-@media (max-width:720px){
-  .shot .whole{display:none}
-  .shot .crop{display:block;position:relative;overflow:hidden;aspect-ratio:1400/420;width:100%}
-  /* crop of docs/img/screenshot-autocomplete.png: x 110..1510, y 745..1165 of 2058x1574 */
-  .shot .crop img{position:absolute;max-width:none;width:calc(100% * 2058 / 1400);left:calc(-100% * 110 / 1400);top:calc(-100% * 745 / 1400)}
-}
 
 /* pins */
 .pins{display:grid;grid-template-columns:minmax(0,7fr) minmax(0,5fr);gap:2.5rem clamp(24px,4vw,72px);align-items:end}
@@ -161,15 +144,8 @@ h1 code{font-size:.82em}
 .foot .mark{width:120px;color:var(--ink)}
 
 @media (max-width:900px){
-  .open,.section-head,.pins,.two,.chart{grid-template-columns:minmax(0,1fr)}
-  .open{row-gap:0}
-  .open .text,.open .right{display:contents}
-  .open .groups{order:1;margin-top:1.5rem;gap:8px}
-  .open .links{order:2;margin-top:1.75rem;gap:.5rem 1.5rem}
-  .open .slope{order:3;margin-top:2rem}
-  .open .lead{margin-top:1rem}
+  .section-head,.pins,.two,.chart{grid-template-columns:minmax(0,1fr)}
   .ghost-b,.corner.br,.ghost-wrap{display:none}
-  .open .slope{max-width:min(50vw,240px);justify-self:end}
   .pin-row{grid-template-columns:repeat(3,minmax(0,1fr))}
 }
 @media (max-width:520px){
@@ -182,17 +158,8 @@ h1 code{font-size:.82em}
   *{transition:none !important;animation:none !important;scroll-behavior:auto !important}
 }
 
-/* Selected Long rest: heavier display type and a real terminal cell preview. */
-h1{font-weight:800;font-size:clamp(3.5rem,7.7vw,7rem);line-height:.98;letter-spacing:-.045em}
-.open{grid-template-columns:minmax(0,1fr) minmax(0,1fr);padding-top:24px;column-gap:clamp(32px,5vw,80px)}
-.open h1 span{display:block}
-.open .right{width:100%;gap:24px}
-.open .text{padding-bottom:clamp(48px,5vw,80px)}
-.open .lead{max-width:27em}
-.open .ghost-wrap .ghost{height:4.8em}
-.open .slope{max-width:190px}
 .terminal-preview{width:100%;min-width:0}
-.terminal-screen{font:400 clamp(15px,1.28vw,19px)/1.55 Menlo,"SF Mono",monospace;font-variant-ligatures:none;letter-spacing:0;white-space:pre;color:#d8dee9;background:#16181c;padding:28px;max-width:none;width:100%;overflow:auto;tab-size:4}
+.terminal-screen{font:400 15px/1.5 Menlo,"SF Mono",monospace;font-variant-ligatures:none;letter-spacing:0;white-space:pre;color:#d8dee9;background:#16181c;padding:20px 24px;max-width:none;width:100%;overflow:auto;tab-size:4}
 .terminal-screen ::selection{background:#2e3a4f;color:#d8dee9}
 .terminal-preview figcaption{margin-top:12px;max-width:36em}
 .skip-link{position:fixed;top:12px;left:12px;z-index:5;padding:12px 16px;background:var(--ground);color:var(--ink);transform:translateY(-180%)}
@@ -200,22 +167,12 @@ h1{font-weight:800;font-size:clamp(3.5rem,7.7vw,7rem);line-height:.98;letter-spa
 .missing-page{min-height:65vh;display:flex;flex-direction:column;justify-content:center;gap:24px;padding-block:64px}
 @media(max-width:1100px) and (min-width:901px){
   .terminal-screen{font-size:14px;padding:20px}
-  .open{column-gap:32px}
 }
 @media(max-width:900px){
-  .open{grid-template-columns:minmax(0,1fr);padding-top:24px}
-  .open h1{font-size:clamp(2.55rem,8vw,4rem)}
-  .open h1 span{display:inline}
-  .open .terminal-preview{order:1;margin-top:24px;max-width:600px}
   .terminal-screen{font-size:clamp(13px,2.6vw,19px);padding:20px}
-  .open .links{margin-top:24px}
-  .open .slope{margin-top:24px}
-  .open .lead{font-size:18px;max-width:34em}
-  .open .small{margin-top:12px}
 }
 @media(max-width:400px){
   .terminal-screen{font-size:13px;padding:16px}
-  .open .lead{font-size:17px}
   .top{padding-block:24px}
 }
 
@@ -261,4 +218,34 @@ h1{font-weight:800;font-size:clamp(3.5rem,7.7vw,7rem);line-height:.98;letter-spa
   .header-install-line code{font-size:13px}
   .copy-button{justify-self:end}
 }
-@media(min-width:901px){.open .text{align-self:center;padding-bottom:0}}
+
+/* Only content is selectable inside the previews. Chrome stays out of copied text. */
+.terminal-window,.terminal-titlebar,.terminal-prompt,.terminal-cursor,.completion-marker,.completion-hint{-webkit-user-select:none;user-select:none}
+.terminal-screen,.completion-command code,.completion-list code,.completion-description,.header-install-line code{-webkit-user-select:text;user-select:text}
+.terminal-window ::selection{background:#2e3a4f;color:#d8dee9}
+.completion-preview{max-width:1000px;margin-top:40px}
+.completion-screen{padding:24px;color:#d8dee9;font:15px/1.6 Menlo,"SF Mono",monospace}
+.completion-command{max-width:none;margin-bottom:16px;white-space:pre-wrap}
+.completion-command code,.completion-list code{font:inherit;background:none;padding:0}
+.terminal-prompt{color:#b5bd68}
+.terminal-cursor{display:inline-block;width:.6em;height:1.15em;vertical-align:-.15em;background:#d8dee9}
+.completion-list{list-style:none;border:1px solid #666;padding:8px 0}
+.completion-list li{display:grid;grid-template-columns:1ch 17ch minmax(0,1fr);gap:8px;padding:5px 12px}
+.completion-list .selected{background:#2e3a4f}
+.completion-description{overflow-wrap:anywhere}
+.completion-hint{text-align:right;padding-top:8px}
+@media(max-width:900px){
+  .open{grid-template-columns:1fr;padding-block:24px 40px}
+  .open .text{display:block;padding:0}
+  .open h1{font-size:clamp(3rem,7vw,4rem)}
+  .open .lead{font-size:18px;margin-top:16px}
+  .hero-features{font-size:16px;margin-top:16px}
+  .open .terminal-preview{max-width:600px}
+  .terminal-screen{font-size:14px;padding:20px}
+}
+@media(max-width:600px){
+  .completion-screen{padding:16px;font-size:14px}
+  .completion-list li{grid-template-columns:1ch minmax(0,1fr);padding:8px}
+  .completion-description{grid-column:2;font-size:14px}
+}
+@media(max-width:400px){.terminal-screen{font-size:13px;padding:16px}}

@@ -87,3 +87,12 @@ cut from about 796 words to 201, including the collapsed benchmark method.
 Feature sections have one short explanation. Provenance stays in design
 notes; measurement conditions and the earlier loss remain accessible below
 the charts. Do not add narrated captions, forced asides or redundant CTAs.
+
+## 7 November: compact hero and text previews
+
+Alex rejected the number-led hero and its unused space after comparing it
+with Rush and Sounding. Lead with “A terminal for macOS.”, then the measured
+footprint and cat time. Keep the install command visible in the header.
+Render terminal views as coloured HTML text, with selectable content and
+unselectable window furniture. Preserve real capture/transcription sources
+in DESIGN.md. Pin artwork remains imagery.

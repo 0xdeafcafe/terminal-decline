@@ -6,19 +6,20 @@ reviewed concepts remain in `concepts/`; the production source is `src/`.
 
 ## Changes from the chosen concept
 
-The hero uses SF Pro at weight 800, two lines on desktop and one when it
-fits on a phone. It keeps the white/spruce/mint palette, flat bands, native
-scrolling and the exact still Slope geometry. The system selects light or
-dark. The comparison remains in Decline's actual default dark palette in
-both modes, as product evidence.
+The hero says “A terminal for macOS.” first, with the measured 26 MB idle
+footprint and 0.58 s cat time beneath. Alex rejected the number-led title
+and the empty space above it. The revision was compared visually with the
+current Rush worktree preview (localhost:8768) and sounding.forbes.red.
+The borrowed principle is a direct product description and a visible next
+action. Their bottle scene, colours and copy are not reused.
 
-The title is 3.5 to 7rem on desktop and 2.55 to 4rem below 900px. Its line
-height is .98 and tracking is -.045em. Other type and spacing retain the
-chosen concept's tokens. The terminal uses Menlo, 13 to 19px with a 1.55
-line height, `#16181c` background, `#d8dee9` foreground and ANSI green
-`#b5bd68` for Decline. These come from `Theme::default` and the captured
-cells, not the website's brand palette. The 13px phone specimen matches
-the app's default font size; surrounding prose remains at least 16px.
+The desktop hero starts 48px below the header, aligns its two columns at
+the top, and ends 56px after the preview. There is no viewport-height rule,
+spacer above the terminal, or oversized Slope below it. Weight 800 remains;
+the title is 3.3–5.4rem on desktop and 3–4rem on smaller screens. The
+white/spruce/mint palette and system theme remain. The terminal comparison
+uses Menlo 15px on desktop and 13–14px on phones, `#16181c` background,
+`#d8dee9` foreground and `#b5bd68` green from the captured cells.
 
 Alex subsequently asked for more terminal chrome and installation
 instructions in the header. The preview now has an HTML Mac-style title
@@ -46,7 +47,8 @@ and does not execute benchmarks on the visitor's machine. The recorded
 measurement date is visible inside it. The terminal preview needs no
 JavaScript. The only browser script is the roughly 1 KB clipboard handler.
 
-The subdued captured-help background remains decorative and aria-hidden.
+The hero’s captured-help decoration was removed with its empty spacer.
+The remaining install corner is decorative and aria-hidden.
 Nothing runs or blinks on scroll. Reduced motion is respected by the CSS.
 The no-texture and near-black checklist exceptions apply only to the
 approved background and this actual terminal evidence, respectively.
@@ -56,8 +58,8 @@ approved background and this actual terminal evidence, respectively.
 `src/data/comparison.json` transcribes the README's 2 November table.
 `comparison-terminal.py` is a display program, not a benchmark runner. It
 prints those values and proportional character bars to a real Decline
-session. The website caption says these are recorded results displayed in
-Decline. The 30 October results remain separate in the method section,
+session. The date is printed inside the preview; its caption links to benchmark
+details. The 30 October results remain separate in the method section,
 including Ghostty's faster cat wall time and the input-latency limitation.
 
 The 7 November capture used the installed app, no user config, a temporary
@@ -95,12 +97,29 @@ page has only the expected clipboard handler. No React runtime ships.
 Astro's [React integration](https://docs.astro.build/en/guides/integrations-guide/react/)
 provides the build-time rendering.
 
-Seven original repo PNGs are converted losslessly to WebP at build time,
-with a single shared URL for repeated uses. The full original autocomplete
-PNG is also retained as a source asset. Image dimensions are declared and
-below-fold images load lazily. No font files, trackers or remote resources.
-The full completion screenshot and its mobile CSS crop retain the chosen
-concept's framing; the caption describes the crop.
+All terminal views are HTML text. Six pin-artwork PNGs are converted
+losslessly to WebP at build time. No terminal screenshot is shipped; the
+asset generator removes the two obsolete generated autocomplete images.
+The original evidence stays untouched in docs/img. No font files, trackers
+or remote resources are used.
+
+The completion preview transcribes the eight visible rows of
+`docs/img/screenshot-autocomplete.png`, including the screenshot’s ellipses,
+into `src/data/completion-preview.json`. Its SHA-256 is checked by verify.
+This is a transcription of the app’s completion overlay, not a ctl screen
+capture: that overlay is outside the core terminal cells. The prompt,
+selected --depth row and footer hint come from the same screenshot. Native
+window furniture is reconstructed by the shared TerminalWindow component.
+Description text uses the app’s normal foreground instead of its dim grey
+for legibility; the selected background is the native #2e3a4f. On phones,
+descriptions move under their flags instead of shrinking or being cropped.
+The screenshot’s folder listing and development status line are omitted.
+
+Selection is opt-in within these previews: command text, flags, descriptions
+and comparison output use user-select:text. Chrome, cursor, prompt marker
+and footer hint use user-select:none. Surrounding page text and install
+commands retain ordinary selection. No terminal emulator or framework
+runtime runs in the browser. The list is a static example, not a listbox.
 
 The social image is generated as a 1200×630 PNG from explicit SVG typography
 and the actual Slope path. It names the measurement date and hardware.
@@ -123,11 +142,18 @@ permission-denied text-selection fallback.
 
 Captures and metrics are under `$TMPDIR/decline-site-build/review/`.
 Some runs exited 2 after writing their PNG and metrics because Chrome's
-teardown watchdog expired; this is recorded in their logs. The completion
-image is deliberately cropped on phones. Its crop container fits the
-viewport and clips the oversized image; it is not page overflow. Capture
+teardown watchdog expired; this is recorded in their logs. Completion text reflows on phones; there is no screenshot crop. Capture
 copies load images eagerly so headless screenshots include below-fold
 images; production keeps lazy loading. No Safari or screen-reader run.
+
+The compact revision was checked at 1440, 768 and 390px in both themes.
+The desktop hero ends at y=634; the phone comparison ends at y=776.
+There was no page or comparison overflow. Browser-computed selection is
+none on chrome and text on output and completion flags. Six of the eight
+captures exited 2 at teardown after writing valid metrics and PNGs; two
+exited 0. All six first-view captures were inspected. Completion was also
+inspected separately because headless Chrome produced blank images after
+programmatic scrolling. No Safari or screen-reader test is claimed.
 
 The original 100-item cross-review is in
 `concepts/long-rest/SLOP-REVIEW.md`. Its score is historical, not a claim

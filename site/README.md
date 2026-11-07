@@ -2,9 +2,10 @@
 
 Alex selected Long rest. The Astro implementation uses TSX components
 rendered at build time. The only browser script copies the visible install
-command; no framework runtime ships. The hero has a heavier
-title and renders a real captured Decline comparison screen as selectable
-HTML. See DESIGN.md for evidence and validation, BRIEF.md for the claims,
+command; no framework runtime ships. The hero names the product first and renders a real captured Decline
+comparison screen as selectable HTML. Completion rows are transcribed from
+the original screenshot and reflow on phones. All terminal views are text;
+window furniture is excluded from selection. See DESIGN.md for evidence and validation, BRIEF.md for the claims,
 and ANTI-SLOP.md for the design checklist.
 
 ## Local work

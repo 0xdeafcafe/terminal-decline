@@ -8,7 +8,11 @@ on:
     # `ci/**`: a branch to try a fix on the runners without opening a PR.
     # `rush/**`: agents' branches, checked here instead of on the Mac.
     branches: [main, "ci/**", "rush/**"]
+    paths-ignore:
+      - "site/**"
   pull_request:
+    paths-ignore:
+      - "site/**"
   workflow_dispatch:
 
 permissions:

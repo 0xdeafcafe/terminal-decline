@@ -1,0 +1,231 @@
+# Long rest: anti-slop review
+
+Cross-review by Claude Sonnet 5.5 (`claude-sonnet-5-5`) of a concept originally written by Claude Fable 5.1 (`claude-fable-5-1`), 7 November 2026. Model names verified from `rush session list --json`. The concept was reviewed by a different model from its author, as required. All 100 items in `decline-site-review/checklist.json` are covered below.
+
+**Before: 87 pass, 13 fail. After: 99 pass, 1 fail.** The remaining fail is C100: no 404 page or social card, deferred to the Astro build. It stays a fail.
+
+## Screenshots
+
+- Before: /Users/afr/.config/rush/tmp/terminal-decline-96189d59/ee086a9a/decline-site-review/long-rest/before/ (desktop-light.png, desktop-dark.png, tablet-*.png, mobile-*.png, full-light.png, full-dark.png)
+- After: /Users/afr/.config/rush/tmp/terminal-decline-96189d59/ee086a9a/decline-site-review/long-rest/after/ (same names)
+
+## Key fixes
+
+- Opening reworked to lead with the measurement: '26 MB at idle.', a short lede (100 MB through `cat` in 0.58 s), one line of conditions with a method link, and the two bars (idle memory, `cat`) beside the whole Slope. Pins, completion and ctl come after the numbers. On phones the charts come before the links and the Slope, so both charts fit at 390x844.
+- Background applied from Alex's 'both' decision: two excerpts of real `ctl --help` output (in the first view's top right, and under the measurements heading) and one `┘` corner at the foot of the install band. Still, faint, aria-hidden, pointer-events and selection off, `overflow:hidden` so lines clip to the margin, hidden below 900 px.
+- ctl example corrected: `--text "make test" --key enter`, not a trailing backslash-n.
+- Input latency wording, the bash/fish sentence, the Warp two-window caveat, provenance in public copy, synonym cycling and the Homebrew line were fixed in the first pass and still hold.
+- Spruce measurement band: chart sub-labels and the lead bars were unreadable (moss and spruce on spruce); fixed with band tokens.
+- Lead chart rows were inheriting the lede's max-width and size; the class is now `best`.
+
+## Validation limits
+
+- Central capture.py uses headless Chrome on one machine, with `--force-dark-mode` for dark. Dark uses the browser flag, not a real OS appearance switch. The 390 px mobile is the real iframe.
+- Contrast ratios are computed from the hex values, not measured on pixels. No automated accessibility checker, screen reader, Safari or Firefox run.
+- A tall custom iframe capture of the mobile and tablet pages was used for the lower sections, since capture.py's mobile and tablet shots are viewport height only. Those files are in the scratch folder, not the repo.
+- Central capture.py ran to exit 0 on all eight variants in the final run. Earlier runs on this page timed out (exit 124) on some variants but still wrote files; those were discarded and the final files were all rewritten from the final source (09:34).
+- Decorative captured text is intentionally below 4.5:1; this relies on Alex's authorised background exception and on its being aria-hidden and never under meaningful text.
+- The page cannot be checked for how SF Pro looks on non-Mac systems.
+
+## Items
+
+- **C001** Type: No unchosen default fonts: Inter, Geist, Roboto, Arial, Open Sans, Lato or the system stack used only because they were the default.
+  - Before pass, after pass. SF Pro via `-apple-system` is the brand's chosen face (docs/brand/README.md), documented brand exception. No serif, no mono at headline size.
+- **C002** Type: No "tasteful free" fonts used by reflex either: Space Grotesk (the model's favourite once Inter is banned), Instrument Serif, Fraunces, DM Sans, Cabinet Grotesk, Rajdhani, Share Tech Mono.
+  - Before pass, after pass. SF Pro via `-apple-system` is the brand's chosen face (docs/brand/README.md), documented brand exception. No serif, no mono at headline size.
+- **C003** Type: No Instrument Serif (or any serif) headline paired with a mono caption, the 2026 "tasteful AI" default.
+  - Before pass, after pass. SF Pro via `-apple-system` is the brand's chosen face (docs/brand/README.md), documented brand exception. No serif, no mono at headline size.
+- **C004** Type: No serif headline with one italic, accent-coloured word ("Software that *feels* alive").
+  - Before pass, after pass. SF Pro via `-apple-system` is the brand's chosen face (docs/brand/README.md), documented brand exception. No serif, no mono at headline size.
+- **C005** Type: No small uppercase, tracked eyebrow or mono caption above every heading ("01 / GET INTO IT", "AN INDEPENDENT APP", "FEATURES").
+  - Before pass, after pass. No uppercase or tracked labels anywhere; headings are plain sentence case.
+- **C006** Type: No all-caps, wide-tracked, mono section labels used as the page's chrome (about 42% of builder-made pages).
+  - Before pass, after pass. No uppercase or tracked labels anywhere; headings are plain sentence case.
+- **C007** Type: No monospace face at H1 size (JetBrains Mono, Geist Mono, IBM Plex Mono) as the only way to say "developer".
+  - Before pass, after pass. SF Pro via `-apple-system` is the brand's chosen face (docs/brand/README.md), documented brand exception. No serif, no mono at headline size.
+- **C008** Type: Not lowercase-everything as an affectation: headings and buttons in plain sentence case unless the brand voice truly is lowercase.
+  - Before pass, after pass. Headings sentence case; only the wordmark is lowercase, which is the brand's.
+- **C009** Type: No very light weights (200 to 300) on grey text; weights limited to a few (for example 400, 500, 600).
+  - Before pass, after pass. Weights 400 and 500 only.
+- **C010** Type: One deliberate type scale with real contrast: 5 or 6 sizes at most, body at least 16 px, line height about 1.6 for body, tight tracking only on big display sizes.
+  - Before pass, after pass. Six sizes (16 small, 18 body, ~21 lead, 24 h3, 32 to 58 h2, 42 to 99 h1), body 18 px, line height 1.55.
+- **C011** Type: Prose measure no wider than about 65ch, and no full-container-width paragraphs.
+  - Before pass, after pass. Paragraphs capped at 34em (about 65 characters).
+- **C012** Type: A font declared in CSS must actually load (no silent fallback to system sans).
+  - Before pass, after pass. System SF Pro is the declared brand font and does load on macOS; off-Mac fallback is documented in DESIGN.md. Brand exception.
+- **C013** Type: No gradient text (`bg-clip-text text-transparent`) on "the one word that matters", and no one-word accent colour in the headline.
+  - Before pass, after pass. No gradient text.
+- **C014** Type: No Title Case On Every Heading, button and bullet.
+  - Before pass, after pass. Headings sentence case; only the wordmark is lowercase, which is the brand's.
+- **C015** Type: No em-dash-heavy copy, and no decorative middle dots or `//` as separators in headers ("Home // Work", "A · B · C" meta strings).
+  - Before pass, after pass. Scan for em dash and middle dot in page copy: none.
+- **C016** Colour: No purple, violet, indigo or blue gradients, and no Tailwind `indigo-*`, `violet-*`, `#6366f1`, or `--primary` hue 255 to 280.
+  - Before pass, after pass. No page gradients. Violet/indigo in the htop and Claude pins are the brand's own generated artwork (docs/brand/README.md palette). Brand exception.
+- **C017** Colour: No "tasteful default" cluster: warm cream or parchment ground (`#faf8f5`, `#f4f1ea`, `bg-stone-50`) plus serif plus terracotta (`#d97757` and neighbours), sage or forest green. Any two together is a strong signal.
+  - Before pass, after pass. White ground, sans, no terracotta or sage; cream not used.
+- **C018** Colour: No near-black ground with a single acid-green, vermilion or neon accent as the "dev tool" look (Linear-style `#08090a` canvas with `#23252a` hairlines).
+  - Before pass, after pass. Dark ground is real spruce #092D2B with a deeper spruce band, mint accent. Not near-black with neon (brand colours, documented).
+- **C019** Colour: No glowing blob, aurora, mesh gradient or radial bloom behind the hero or behind the product frame, and no coloured `shadow-[0_0_*]` glows.
+  - Before pass, after pass. No glow, blob or shadow anywhere.
+- **C020** Colour: No untouched shadcn palette: `components.json` not left on `baseColor: "slate"` with unedited CSS variables, no `rounded-lg border bg-card shadow-sm` on everything, no slate or zinc greys by default.
+  - Before pass, after pass. No shadcn; every variable is a recorded token.
+- **C021** Colour: One dominant colour, one accent (the label red or yellow) and one neutral. No palette-cycling cards (red, blue, green, orange), and no emerald or teal fallback.
+  - Before pass, after pass. Spruce, mint and one spruce-tinted neutral. The multicolour pins are artwork samples, labelled.
+- **C022** Colour: No permanent dark mode by reflex. Follow the system, with a real light design.
+  - Before pass, after pass. Follows prefers-color-scheme with a designed light page; both captured.
+- **C023** Colour: Grey tints chosen to match the palette, not default grey (also tint shadows, not pure black or grey).
+  - Before pass, after pass. Greys are spruce tints (#A3B8AF, #3A6A60), no default grey.
+- **C024** Colour: Contrast of at least 4.5:1 everywhere, especially muted text on dark grounds.
+  - Before pass, after pass. Computed ratios: spruce on white 16.9, moss on white 7.9, mint on spruce 10.4, moss on mint about 5.9. A defect found during this review (chart sub-labels and lead bars were moss/spruce on the spruce measurement band) was fixed with band-specific tokens before the final capture. The captured background text is decorative, aria-hidden, 10% opacity and deliberately below 4.5:1, an explicit exception authorised by Alex; no meaningful text sits over it.
+- **C025** Colour: Not a flat, empty ground: if a texture is used it has a reason (see Layout).
+  - Before pass, after pass. The ground is flat. The only texture is real `ctl --help` text from the installed build and one box-drawing corner, which Alex authorised as a brand and background exception. Both are in-flow beside or below content, never under it.
+- **C026** Layout and components: No pill or badge above the hero headline ("✨ New", "AI-powered", "v1.0 is here", "Not on the App Store"), and no pulsing or blinking status dot in a corner.
+  - Before pass, after pass. No pill or badge above the headline.
+- **C027** Layout and components: Not a centred hero with a subhead and two buttons, plus a logo strip (about half of builder-made pages centre everything).
+  - Before pass, after pass. Left-aligned headline with the Slope at bottom right, links as text. Not centred, no logo strip.
+- **C028** Layout and components: Not the stock section order: hero, logos, three features, stats, testimonial, pricing, FAQ, CTA band, four-column footer. Order follows the story, not the template.
+  - Before pass, after pass. Order follows the story: completion, pins, measurements, agents, install.
+- **C029** Layout and components: No row of three (or four, or six) identical icon-topped feature cards, and no bento grid of uneven icon boxes under a "FEATURES" label.
+  - Before pass, after pass. No feature cards. The pin row is three real generated pins, not icon cards.
+- **C030** Layout and components: No icon inside a rounded square tile, no Lucide-only icon set, and no sparkle, lightning bolt or brain icon to signal "AI".
+  - Before pass, after pass. No icon tiles, emoji or check lists.
+- **C031** Layout and components: No emoji as icons, bullets or sidebar items (rocket, bolt, lock, check, sparkles).
+  - Before pass, after pass. No icon tiles, emoji or check lists.
+- **C032** Layout and components: No check-mark list under the hero buttons ("No credit card, free forever, cancel any time") and no check-mark feature lists in cards.
+  - Before pass, after pass. No icon tiles, emoji or check lists.
+- **C033** Layout and components: No "1 · 2 · 3" numbered steps, no decorative "01 / 02 / 03" section numbering, no stats row, and no A/B/C lettered lists.
+  - Before pass, after pass. No numbered steps or stats row; the bars are a dated measurement chart with conditions.
+- **C034** Layout and components: No stat banner with unsourced round numbers ("10M+", "99.9% uptime", "500x faster", "24/7") and no count-up animation.
+  - Before pass, after pass. Every number is from the README's 2 November table, with conditions beside it.
+- **C035** Layout and components: No card around every block of content, no nested cards, and no coloured left or top border strip (3 to 4 px) on cards. Group with whitespace, proximity and type instead.
+  - Before pass, after pass. No cards. Bands, code blocks and inline code only; no coloured border strips.
+- **C036** Layout and components: No glassmorphism or backdrop-blur sticky nav by reflex, and not the same `rounded-2xl`, `shadow-lg`, `p-6` on everything.
+  - Before pass, after pass. No blur, glass, glow or gradient hairline; the nav is a plain row, not sticky.
+- **C037** Layout and components: No "glowing" or gradient hairline borders (1 px light border with a gradient or a top radial glow on cards).
+  - Before pass, after pass. No blur, glass, glow or gradient hairline; the nav is a plain row, not sticky.
+- **C038** Layout and components: No fake window chrome: traffic-light dots (red, yellow, green), a fake title bar, a fake URL bar or a vertical rotated label.
+  - Before pass, after pass. The traffic lights are inside the real screenshot (brand exception); nothing is drawn around it.
+- **C039** Layout and components: No grid or dot-pattern background, noise or grain overlay, or "blueprint" crosshair marks used as a default finish. If texture exists it is part of the identity (the label, the paper), not an overlay.
+  - Before pass, after pass. No grid, dots, noise or crosshairs. One Menlo `┘` corner (8% opacity, hidden below 900 px) and two short captured-text excerpts; not repeated, not a frame. Authorised exception.
+- **C040** Layout and components: No marquee or infinite-scroll strip of logos, tags or quotes, and no "Trusted by" row of logos that are not real.
+  - Before pass, after pass. No grid or dot texture, marquee, testimonials or pricing.
+- **C041** Layout and components: No testimonial carousel, and no testimonials with placeholder avatars, "Jane Doe" names or round-number praise.
+  - Before pass, after pass. No grid or dot texture, marquee, testimonials or pricing.
+- **C042** Layout and components: No three-tier pricing with a ringed "Popular" middle card, unless there really is pricing (rush may have none).
+  - Before pass, after pass. No grid or dot texture, marquee, testimonials or pricing.
+- **C043** Layout and components: No giant footer link grid duplicating the nav, with the same links in every column.
+  - Before pass, after pass. Footer is a wordmark and one licence line.
+- **C044** Layout and components: No decorative captions ("A GOOD CONNECTION.", "Design preview"), badges, page counts or extra stats nobody asked for.
+  - Before pass, after pass. No decorative captions; captions state what an image is.
+- **C045** Layout and components: Consistency: one corner radius (2 or 3 radii in total, and not `rounded-2xl` or `rounded-3xl` or `9999px` pills everywhere), one shadow rule, one spacing scale (8 pt), and no uniform section padding that makes every section the same weight.
+  - Before pass, after pass. Radius 0 except 4 px chart-bar data ends; documented.
+- **C046** Layout and components: Section rhythm varies: not every section the same heading, subhead, then grid structure.
+  - Before pass, after pass. Bands differ: split headline, whole screenshot, pin composition, chart, code pair, install.
+- **C047** Layout and components: No full-width content stretched to a wide container (centred `max-w-7xl` 12-column grid with everything the same width); use a narrower measure and let some things break the grid.
+  - Before pass, after pass. Page wrap 1560 px with asymmetric 7/5 splits; the screenshot breaks out to 1800 px.
+- **C048** Layout and components: Focus states are visible, alt text exists, favicon, title and meta description are real and differ per page.
+  - Before pass, after pass. Visible 3 px focus outline, real alt text on each image, favicon, title and description present (single page).
+- **C049** Layout and components: Nothing overflows or overlaps: text fits its buttons and containers at every width, edges align, icons and arrows are optically centred.
+  - Before fail, after pass. Before (original 1440x900): the Slope was cut off at the bottom of the first view, and the oversized headline filled it. After: headline, both bars and the whole Slope fit; the mobile first view at 390x844 shows both charts. Fixed a lead-row max-width leak (`.open .lead` was matching the chart's lead row) and the install command's sideways scroll.
+- **C050** Dev-tool pages: No terminal-window mockup with traffic-light dots wrapped around invented output. Real rush screens, real captured text, or no mock at all.
+  - Before pass, after pass. Only a real screenshot, no mock window.
+- **C051** Dev-tool pages: No fake or "perfect" demo output: round numbers, tidy timings, a `$` prompt in front of a command the tool does not take, or commands that were not run.
+  - Before fail, after pass. Before: the agents block showed `ctl send sh --text "make test\n"`. Opus verified on the installed build (a4086db) that this sends a literal backslash and n, not Enter. After: `terminal-decline ctl send sh --text "make test" --key enter`. The captured help excerpt that says `\n is Enter` is not used. README untouched.
+- **C052** Dev-tool pages: No typewriter animation typing the terminal output or the headline letter by letter.
+  - Before pass, after pass. No animation.
+- **C053** Dev-tool pages: No hero install line styled as a pill with a copy button and a `npx` or `curl | sh` that is not the real install route.
+  - Before fail, after pass. Before: the Homebrew line scrolled sideways at 390 px. After: it wraps on mobile and is sized to sit nearly on one line on desktop. It is the README's real route, no copy pill.
+- **C054** Dev-tool pages: No GitHub stars badge, "Open source" badge, or version pill used as decoration, and nothing that implies stats we do not have.
+  - Before pass, after pass. No badges, stars or keycaps.
+- **C055** Dev-tool pages: No row of `kbd` keycap chips as decoration ("⌘K", "Ctrl+Enter") unless each is a real rush key shown in context.
+  - Before pass, after pass. No badges, stars or keycaps.
+- **C056** Dev-tool pages: No "Built for developers", "Built for teams", "Built for speed" or "The AI-powered X for modern Y" mad-lib headline. Say what rush does for whom, in plain words.
+  - Before pass, after pass. The headline names the thing.
+- **C057** Dev-tool pages: No "Linear clone" look: near-black canvas, hairline borders, radial glow over a dashboard frame, gradient headline word, glass cards.
+  - Before pass, after pass. Spruce bands, no hairline cards, no glow or dashboard frame.
+- **C058** Dev-tool pages: No abstract "dashboard" or 3D blob as the hero image in place of the actual product.
+  - Before fail, after pass. Before: the first view was a large headline and a Slope, no product evidence. After: the first view shows the measured idle memory and `cat` bars for Decline, Ghostty and kitty with their conditions, and the whole Slope.
+- **C059** Dev-tool pages: No product name in lowercase mono with a blinking cursor as the logo as the only identity.
+  - Before pass, after pass. The identity is the outlined wordmark with the Slope, not a mono cursor.
+- **C060** Dev-tool pages: No generic "Get started" or "Learn more" CTA, and no "→" arrow glued to every link and button; labels say the exact action ("Install rush", "Read the config docs").
+  - Before pass, after pass. Labels say the action: 'Install with Homebrew', 'Read the source on GitHub'. No arrows.
+- **C061** Dev-tool pages: No Aceternity or Magic UI stock effects (spotlight, beams, meteors, shimmer buttons, animated borders) on a page that is not about them.
+  - Before pass, after pass. None.
+- **C062** Dev-tool pages: No privacy or "runs locally" reassurance that was not asked for or cannot be backed by a link to the code.
+  - Before pass, after pass. No privacy reassurance. The ctl security lines are about what the socket allows and link to the design notes.
+- **C063** Dev-tool pages: No leftover artefacts: "Vite + React" titles, default platform subdomains, builder badges, stale model names, an old footer year, section-label HTML comments, `Hero`/`Testimonials` class names, old product names in copy.
+  - Before fail, after pass. Before: caption said 'development build' and the status line was 'not a measurement'; commit hashes, term-icon and file paths in public copy. After: removed from the page, kept in DESIGN.md and the README link.
+- **C064** Dev-tool pages: The page names its actual agents, keys, files and commands (real names from the Rust port) rather than category words ("workflow", "agents", "automation").
+  - Before pass, after pass. Names real commands, flags, files and settings: decline pin rush --dock, ctl spawn/wait-for/screen/screenshot/kill, agent_api, completion_as_you_type.
+- **C065** Motion: No fade-and-slide-up on every section (`data-aos="fade-up"`, identical staggered reveals), and no motion library reveals as the only motion.
+  - Before pass, after pass. No motion, hover lift, scroll effects or loading text.
+- **C066** Motion: No `whileHover={{ scale: 1.05 }}` or lift-with-shadow on every card, especially cards that are not clickable.
+  - Before pass, after pass. No motion, hover lift, scroll effects or loading text.
+- **C067** Motion: No bounce or spring easing for its own sake, no count-up numbers, no auto-typing headlines, no glowing blob that follows the cursor.
+  - Before pass, after pass. No motion, hover lift, scroll effects or loading text.
+- **C068** Motion: Motion must mean something: a row floating up, a chirp landing, the bottle. Two or three animation types at most, used consistently.
+  - Before pass, after pass. No motion, hover lift, scroll effects or loading text.
+- **C069** Motion: No scroll-jacking, parallax or carousels, and nothing that alters native scroll speed.
+  - Before pass, after pass. No motion, hover lift, scroll effects or loading text.
+- **C070** Motion: No animation that restarts when the cursor moves, and `prefers-reduced-motion` is honoured.
+  - Before pass, after pass. Nothing animates; the reduced-motion rule also removes transitions.
+- **C071** Motion: Most interactions 150 to 300 ms; none over about 500 ms that feel like lag.
+  - Before pass, after pass. No motion, hover lift, scroll effects or loading text.
+- **C072** Motion: No pointless hover effects, and no buttons that look clickable but go nowhere.
+  - Before pass, after pass. No motion, hover lift, scroll effects or loading text.
+- **C073** Motion: No loading text that narrates the build ("Initialising workspace...") in place of a real state.
+  - Before pass, after pass. No motion, hover lift, scroll effects or loading text.
+- **C074** Copy: No adjective-stacked subtitles, "Elevate your...", "Supercharge", "Unleash", "Transform your", "Unlock the power of", "X, reimagined", "Say goodbye to X", or vague SaaS wording ("seamless", "powerful", "robust", "streamline", "cutting-edge", "effortless", "in just a few clicks").
+  - Before pass, after pass. No SaaS wording.
+- **C075** Copy: No "No X. No Y. Just Z." negation list, and no "Less X, more Y" or "Forget X. Focus on Y.".
+  - Before pass, after pass. No negation lists.
+- **C076** Copy: No "It's not X, it's Y" or "Not because X. Because Y." contrast reveal.
+  - Before fail, after pass. Before: 'drawn by the terminal itself ... not in a floating panel'. After: 'The terminal draws the list itself, in your font and theme.'
+- **C077** Copy: No fragment drumbeat or tricolon headline ("Fast. Simple. Done.", "Build. Ship. Scale.", "Fast, secure and scalable"), and not three of anything by reflex.
+  - Before pass, after pass. No tricolon headline, rhetorical question or aphorism.
+- **C078** Copy: No rhetorical question then answer ("The result? Calm."), colon reveal ("The best part: ...") or "Here's the thing" setup.
+  - Before pass, after pass. No tricolon headline, rhetorical question or aphorism.
+- **C079** Copy: No wisdom-shaped aphorisms ("Speed is a feature.") or performed cleverness ("Spreadsheets with a pulse.").
+  - Before pass, after pass. No tricolon headline, rhetorical question or aphorism.
+- **C080** Copy: No slogan on every section (one wink per section at most) and no tidy closer ("The future of X starts now.").
+  - Before pass, after pass. One dry aside (an ordinary afternoon); no slogan, the old tagline is absent.
+- **C081** Copy: Headline says the result or the thing, not the technology, and could not sit unchanged on a competitor's site.
+  - Before fail, after pass. Before: a four-sentence H1 that led with the category, then a completion headline. After: '26 MB at idle.', a measured result with its conditions beside it.
+- **C082** Copy: No header, eyebrow, H1, description and footer all saying the same thing.
+  - Before pass, after pass. Title, H1, description and footer say different things.
+- **C083** Copy: No bold label on every bullet ("**Seamless integration:** ...") and no parallel bullet openers ("Ensures... Provides... Enables...").
+  - Before pass, after pass. No bullets with bold labels.
+- **C084** Copy: No synonym cycling: one name for one thing (agent, session, card) everywhere.
+  - Before fail, after pass. Before: 'terminal', 'session' and 'Decline terminal' were used for one thing in the agents band. After: 'terminal' throughout, 'pin' for Dock apps.
+- **C085** Copy: No invented labels or false ranges ("from solo devs to enterprises"), no weasel sources ("trusted by industry leaders", "join thousands of developers"), no round-number claims.
+  - Before fail, after pass. Before: 'Input latency has not been measured' was broader than true (DESIGN.md measures in-app latency; no head-to-head exists), the bash/fish sentence was unsourced, and Warp's 3.6 s lacked its two-window caveat. After: 'None of these runs compared input latency between terminals', the shell sentence says only that matches come from zsh, and Warp is marked as running two windows.
+- **C086** Copy: No generic FAQ filler or an FAQ with no answers. Answer only real questions.
+  - Before pass, after pass. No FAQ.
+- **C087** Copy: No narrated UI labels ("Choose a...") where a plain heading works, and no internal or backend terms leaking into user copy.
+  - Before fail, after pass. Before: term-icon, docs paths, commit hashes and 'development build' in public copy; provenance repeated under the screenshot and pins. After: one short caption each, doc links labelled in plain words, hashes left to the README.
+- **C088** Copy: Specific, product-true sentences in the owner's voice: British English, short, uneven in length.
+  - Before pass, after pass. British spelling, short and uneven sentences, one aside.
+- **C089** Copy: Real product evidence: real rush screens (as screenshots or as real text), not mock UI.
+  - Before pass, after pass. Real screenshot and real generated pins; commands labelled as examples.
+- **C090** Copy: Sentence and section rhythm is not uniform: some long, some short, some sections plainly larger than others.
+  - Before pass, after pass. Sections vary in size and structure.
+- **C091** Craft: Squint test: blur the page. It must not read as "dark hero, glow, one centred button, three cards".
+  - Before fail, after pass. Before: a 450 px headline and a cut-off Slope. After: headline, two bars and the Slope in the first view; the page reads as flat bands with a chart, not dark hero, glow and cards.
+- **C092** Craft: Side-by-side test: a stranger could tell it apart from a page generated by v0, Lovable, Bolt or Claude with a one-line prompt.
+  - Before pass, after pass. Slope-as-structure, a dated three-terminal chart and real pins would not come out of a one-line prompt, and the page makes no sense under another product's name.
+- **C093** Craft: Swap-the-logo test: replace "rush" with another dev tool's name and the page must stop making sense.
+  - Before pass, after pass. Slope-as-structure, a dated three-terminal chart and real pins would not come out of a one-line prompt, and the page makes no sense under another product's name.
+- **C094** Craft: Every colour, font, radius, shadow and easing is a recorded token in `DESIGN.md`, with the reason. Nothing is "whatever the model picked".
+  - Before pass, after pass. DESIGN.md records every colour, the type sizes, the 4 px bar radius and the background tokens (10% opacity captured text, 8% corner, Menlo).
+- **C095** Craft: Design came from a reference or mockup (the bottle, the label, a real terminal capture) first, and was then built. Not prompted from a blank page.
+  - Before pass, after pass. Built from the brand artwork and real screenshot, per DESIGN.md.
+- **C096** Craft: Screenshot-and-compare loop done: built page checked against the intended design at mobile, tablet and desktop, differences fixed.
+  - Before fail, after pass. Before: only the central before capture. After: desktop, tablet and 390 px iframe, light and dark, plus full page, all exit 0 and inspected; a compare loop caught the lead-row bug, the invisible lead bars on the spruce band, the clipped corner glyph and the mobile first view. Extra tall captures were used for the bottom of the page.
+- **C097** Craft: No page drift: font, colour, radius, nav and footer identical across every page unless deliberately changed.
+  - Before pass, after pass. Single page; nothing to drift.
+- **C098** Craft: The scanner pass: grep the output for `rounded-2xl`, `rounded-3xl`, `backdrop-blur`, `bg-clip-text`, `indigo-`, `violet-`, `shadow-lg`, `data-aos`, `whileHover`, `from-purple`, `#6366f1`, `lucide`, and explain each hit.
+  - Before pass, after pass. Scan for rounded-2xl, backdrop-blur, bg-clip-text, indigo-, violet-, shadow-lg, data-aos, whileHover, lucide, from-purple, #6366f1: no hits.
+- **C099** Craft: Imperfect on purpose in a few places: something hand-set (a custom rule, a drawn mark, an odd crop) that a template would not do.
+  - Before pass, after pass. The Slope's level rest is fused into the band below; the chart bars have flat starts and rounded ends.
+- **C100** Craft: Finish line done: favicon, social card, 404 page, per-page title and description, working links, real alt text, no placeholder content.
+  - Before fail, after fail. Favicon, title, description, working links and alt text exist, but there is no 404 page and no social card. Both deferred to the Astro build, so this item fails before and after.

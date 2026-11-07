@@ -1,0 +1,49 @@
+---
+import Wordmark from '../components/Wordmark';
+import '../styles/site.css';
+interface Props { title: string; description: string; noindex?: boolean }
+const { title, description, noindex = false } = Astro.props;
+const canonical = new URL(Astro.url.pathname, Astro.site);
+---
+<!doctype html>
+<html lang="en-GB">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    {noindex && <meta name="robots" content="noindex" />}
+    <link rel="canonical" href={canonical} />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:url" content={canonical} />
+    <meta property="og:image" content="https://decline.forbes.red/images/social.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="Terminal Decline. 26 MB at idle. Measured 2 November 2026 on an M1 Max." />
+    <meta name="twitter:card" content="summary_large_image" />
+  </head>
+  <body>
+    <a class="skip-link" href="#content">Skip to content</a>
+    <header class="wrap top">
+      <a href="/" aria-label="Terminal Decline, home"><Wordmark /></a>
+      <nav aria-label="Page">
+        <details class="header-install">
+          <summary>How to install</summary>
+          <div class="install-menu">
+            <p>With <a href="https://brew.sh">Homebrew</a>:</p>
+            <pre>brew install --cask <span class="command-arg">0xdeafcafe/tap/terminal-decline</span></pre>
+            <p class="small muted">Apple Silicon. macOS 14 Sonoma or later.</p>
+            <a href="/#install">Install from source and other details</a>
+          </div>
+        </details>
+        <a href="https://github.com/0xdeafcafe/terminal-decline">Source</a>
+      </nav>
+    </header>
+    <main id="content"><slot /></main>
+    <footer class="wrap foot"><Wordmark /><p class="small muted">Terminal Decline is MIT licensed, by Alex Forbes-Reed.</p></footer>
+  </body>
+</html>

@@ -1,0 +1,12 @@
+{
+  "date": "2 November 2026",
+  "machine": "Apple M1 Max",
+  "system": "macOS 27.0",
+  "runs": 5,
+  "source": "https://github.com/0xdeafcafe/terminal-decline#benchmarks",
+  "terminals": [
+    {"name": "Decline", "idle": 26, "tabs": 47, "scrollback": 19, "cat": 0.58, "cpu": 0.66, "idleCpu": 0.02},
+    {"name": "Ghostty", "idle": 60, "tabs": 87, "scrollback": 56, "cat": 0.66, "cpu": 2.04, "idleCpu": 0.03},
+    {"name": "kitty", "idle": 99, "tabs": 104, "scrollback": 130, "cat": 1.05, "cpu": 1.63, "idleCpu": 0.12}
+  ]
+}

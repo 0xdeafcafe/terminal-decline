@@ -1,0 +1,241 @@
+
+/* Long rest. Tokens and their reasons are in DESIGN.md beside this file. */
+:root{
+  --spruce:#092D2B;      /* brand ink */
+  --mint:#B9E5CC;        /* brand mint */
+  --white:#FFFFFF;       /* light ground, chosen over brand paper for the web */
+  --deep:#051A17;        /* brand dark icon body bottom */
+  --moss:#245950;        /* brand icon body top: secondary ink on white */
+  --bar-neutral:#A3B8AF; /* spruce-tinted grey, light-mode comparison bars */
+
+  --ground:var(--white);
+  --ink:var(--spruce);
+  --ink-2:var(--moss);
+  --field:var(--spruce);
+  --field-ink:var(--white);
+  --field-ink-2:var(--mint);
+  --mark:var(--spruce);
+  --code-bg:#EEF4F0;     /* mint at ~25% over white */
+  --code-bg-field:#143B34;/* brand dark icon body top */
+  --rule:#D5E2DB;        /* mint at ~55% over white */
+  --bar-rest:var(--bar-neutral);
+  --bar-lead:var(--spruce);
+  --focus:var(--spruce);
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --ground:var(--spruce);
+    --ink:#F2F7F4;        /* near-white, mint-tinted */
+    --ink-2:var(--mint);
+    --field:var(--deep);
+    --field-ink:#F2F7F4;
+    --field-ink-2:var(--mint);
+    --mark:var(--mint);
+    --code-bg:#143B34;
+    --code-bg-field:#0E2B27;
+    --rule:#245950;
+    --bar-rest:#3A6A60;
+    --bar-lead:var(--mint);
+    --focus:var(--mint);
+  }
+}
+
+*{box-sizing:border-box;margin:0;padding:0}
+html{-webkit-text-size-adjust:100%}
+body{
+  font-family:-apple-system,"SF Pro Text","SF Pro Display",system-ui,"Helvetica Neue",Helvetica,sans-serif;
+  font-size:18px;line-height:1.55;font-weight:400;
+  color:var(--ink);background:var(--ground);
+  -webkit-font-smoothing:antialiased;
+}
+a{color:inherit;text-decoration:underline;text-decoration-thickness:1.5px;text-underline-offset:.18em;text-decoration-color:var(--ink-2)}
+a:hover{text-decoration-color:currentColor}
+a:focus-visible,summary:focus-visible{outline:3px solid var(--focus);outline-offset:4px}
+img{display:block;max-width:100%;height:auto}
+p{max-width:34em}
+h1,h2,h3{font-weight:500;line-height:1.05;letter-spacing:-.015em;text-wrap:balance}
+h1{font-size:clamp(2.6rem,6vw,5.2rem);line-height:1.02;letter-spacing:-.03em;max-width:10em}
+h2{font-size:clamp(2rem,4.2vw,3.6rem);max-width:14em}
+h3{font-size:1.333rem;letter-spacing:0;line-height:1.3}
+.lead{font-size:clamp(1.15rem,1.6vw,1.333rem);line-height:1.45}
+.small{font-size:.889rem;line-height:1.5}
+code,pre,kbd{font-family:"SF Mono",ui-monospace,Menlo,monospace;font-size:.889em}
+pre{line-height:1.6;white-space:pre;overflow-x:auto;padding:1rem 1.25rem;background:var(--code-bg);font-size:.889rem;max-width:44em}
+p code{padding:.05em .3em;background:var(--code-bg)}
+.field p code,.field pre{background:var(--code-bg-field)}
+
+.wrap{padding-inline:clamp(20px,5vw,96px);max-width:1560px;margin-inline:auto}
+
+
+/* background: real captured text from `terminal-decline ctl --help` (7 Nov 2026) and two box-drawing corners.
+   Decorative, still, in-flow beside or below content, never under it. Tokens in DESIGN.md. */
+.ghost{font:14px/1.6 Menlo,"SF Mono",monospace;white-space:pre;overflow:hidden;background:none;padding:0;max-width:none;width:100%;height:9.6em;color:var(--ink);opacity:.1;pointer-events:none;user-select:none;-webkit-user-select:none}
+.field .ghost{color:var(--field-ink);opacity:.1}
+.ghost-wrap{position:relative;width:calc(100% + clamp(20px,5vw,96px));margin-right:calc(-1 * clamp(20px,5vw,96px));overflow:hidden;pointer-events:none;user-select:none}
+.ghost-wrap .ghost{height:9.6em}
+.ghost-b{margin-top:2.5rem;height:9.6em;max-width:44em}
+.corner{font:400 200px/1 Menlo,"SF Mono",monospace;color:var(--ink-2);opacity:.08;pointer-events:none;user-select:none;-webkit-user-select:none}
+.install{position:relative;overflow:hidden}
+.corner.br{position:absolute;left:clamp(20px,5vw,96px);bottom:-30px}
+
+/* top row */
+.top{display:flex;align-items:center;justify-content:space-between;padding-block:28px;gap:24px}
+.top .mark{display:block;width:clamp(132px,12vw,180px);color:var(--ink)}
+.top nav{display:flex;gap:28px;font-weight:500}
+.top nav a{text-decoration:none}
+.top nav a:hover{text-decoration:underline}
+
+/* opening: headline left, the Slope at bottom right resting on the next band */
+.open{display:grid;grid-template-columns:minmax(0,7fr) minmax(0,5fr);column-gap:clamp(24px,4vw,72px);align-items:end;padding-top:clamp(24px,5vh,72px)}
+.open .text{padding-bottom:clamp(40px,5vw,80px)}
+.open .lead{margin-top:1.5rem;max-width:30em}
+.open .small{margin-top:1rem}
+.open .links{margin-top:2.25rem;display:flex;flex-wrap:wrap;gap:1.25rem 2.5rem;font-size:1.111rem;font-weight:500}
+.open .right{display:grid;gap:clamp(24px,3vw,40px);align-self:end;justify-items:end}
+.open .groups{display:grid;gap:24px;width:100%}
+.open .groups.chart{grid-template-columns:minmax(0,1fr)}
+.open .slope{width:100%;max-width:220px;color:var(--mark)}
+h1 code{font-size:.82em}
+.open .slope svg{display:block;width:100%;height:auto}
+
+/* bands */
+.band{padding-block:clamp(56px,9vw,136px)}
+.field{background:var(--field);color:var(--field-ink)}
+.field a{text-decoration-color:var(--field-ink-2)}
+.field .muted{color:var(--field-ink-2)}
+.field{--bar-lead:var(--mint);--bar-rest:#3A6A60;--rule:#245950}
+.field .group h3 span{color:var(--field-ink-2)}
+.mintband{background:var(--mint);color:var(--spruce)}
+.mintband a{text-decoration-color:var(--moss)}
+.mintband .muted{color:var(--moss)}
+.mintband p code,.mintband pre{background:#D8F0E3}
+.muted{color:var(--ink-2)}
+.section-head{display:grid;grid-template-columns:minmax(0,7fr) minmax(0,5fr);gap:1.5rem clamp(24px,4vw,72px);align-items:start}
+.section-head .copy{display:grid;gap:1rem}
+.section-head .copy > :first-child{margin-top:.4em}
+.after-head{margin-top:clamp(40px,5vw,80px)}
+
+/* the real screenshot: whole on wide screens, cropped to the list on narrow ones */
+.shot{margin-top:clamp(40px,5vw,80px)}
+.shot img{width:100%;max-width:1800px}
+.shot .crop{display:none}
+.shot figcaption{margin-top:1rem}
+@media (max-width:720px){
+  .shot .whole{display:none}
+  .shot .crop{display:block;position:relative;overflow:hidden;aspect-ratio:1400/420;width:100%}
+  /* crop of docs/img/screenshot-autocomplete.png: x 110..1510, y 745..1165 of 2058x1574 */
+  .shot .crop img{position:absolute;max-width:none;width:calc(100% * 2058 / 1400);left:calc(-100% * 110 / 1400);top:calc(-100% * 745 / 1400)}
+}
+
+/* pins */
+.pins{display:grid;grid-template-columns:minmax(0,7fr) minmax(0,5fr);gap:2.5rem clamp(24px,4vw,72px);align-items:end}
+.pin-big{display:flex;align-items:flex-end;gap:clamp(20px,3vw,48px)}
+.pin-big .r{width:clamp(180px,24vw,336px)}
+.pin-sizes{display:flex;flex-direction:column;gap:14px;align-items:flex-start;padding-bottom:10px}
+.pin-sizes div{display:flex;align-items:center;gap:10px}
+.pin-sizes img{width:32px}
+.pin-sizes img.s16{width:16px}
+.pin-row{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:clamp(16px,2.5vw,40px);align-items:end}
+.pin-row figure{display:grid;gap:.5rem;justify-items:start}
+.pin-row img{width:100%;max-width:128px}
+.cmd{display:grid;gap:.5rem}
+
+/* benchmark chart: direct labels on every bar, one lead colour, one neutral */
+.chart{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:clamp(32px,4vw,64px) clamp(32px,5vw,96px)}
+.group h3{margin-bottom:.9rem;padding-bottom:.5rem;border-bottom:1px solid var(--rule)}
+.group h3 span{font-weight:400;color:var(--ink-2)}
+.row{display:grid;grid-template-columns:5.5em minmax(0,1fr) 4.5em;align-items:center;gap:12px;padding-block:5px}
+.row b{font-weight:500}
+.row .bar{height:16px;background:var(--bar-rest);border-radius:0 4px 4px 0}
+.row.best .bar{background:var(--bar-lead)}
+.row .v{text-align:right;font-variant-numeric:tabular-nums}
+.row.best .v{font-weight:500}
+
+/* agents */
+.two{display:grid;grid-template-columns:minmax(0,5fr) minmax(0,7fr);gap:2rem clamp(24px,4vw,72px);align-items:start}
+
+/* install */
+.install .big{font-size:clamp(.9rem,1.6vw,1.25rem);max-width:none;display:inline-block;white-space:pre-wrap;overflow-wrap:anywhere}
+.links-list{list-style:none;display:grid;gap:.5rem;margin-top:1.5rem}
+.foot{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:1rem 2rem;padding-block:40px 48px}
+.foot .mark{width:120px;color:var(--ink)}
+
+@media (max-width:900px){
+  .open,.section-head,.pins,.two,.chart{grid-template-columns:minmax(0,1fr)}
+  .open{row-gap:0}
+  .open .text,.open .right{display:contents}
+  .open .groups{order:1;margin-top:1.5rem;gap:8px}
+  .open .links{order:2;margin-top:1.75rem;gap:.5rem 1.5rem}
+  .open .slope{order:3;margin-top:2rem}
+  .open .lead{margin-top:1rem}
+  .ghost-b,.corner.br,.ghost-wrap{display:none}
+  .open .slope{max-width:min(50vw,240px);justify-self:end}
+  .pin-row{grid-template-columns:repeat(3,minmax(0,1fr))}
+}
+@media (max-width:520px){
+  body{font-size:17px}
+  .top nav{gap:18px}
+  .pin-big{flex-direction:column;align-items:flex-start}
+  .pin-row{gap:12px}
+}
+@media (prefers-reduced-motion: reduce){
+  *{transition:none !important;animation:none !important;scroll-behavior:auto !important}
+}
+
+/* Selected Long rest: heavier display type and a real terminal cell preview. */
+h1{font-weight:800;font-size:clamp(3.5rem,7.7vw,7rem);line-height:.98;letter-spacing:-.045em}
+.open{grid-template-columns:minmax(0,1fr) minmax(0,1fr);padding-top:24px;column-gap:clamp(32px,5vw,80px)}
+.open h1 span{display:block}
+.open .right{width:100%;gap:24px}
+.open .text{padding-bottom:clamp(48px,5vw,80px)}
+.open .lead{max-width:27em}
+.open .ghost-wrap .ghost{height:4.8em}
+.open .slope{max-width:190px}
+.terminal-preview{width:100%;min-width:0}
+.terminal-screen{font:400 clamp(15px,1.28vw,19px)/1.55 Menlo,"SF Mono",monospace;font-variant-ligatures:none;letter-spacing:0;white-space:pre;color:#d8dee9;background:#16181c;padding:28px;max-width:none;width:100%;overflow:auto;tab-size:4}
+.terminal-screen ::selection{background:#2e3a4f;color:#d8dee9}
+.terminal-preview figcaption{margin-top:12px;max-width:36em}
+.skip-link{position:fixed;top:12px;left:12px;z-index:5;padding:12px 16px;background:var(--ground);color:var(--ink);transform:translateY(-180%)}
+.skip-link:focus{transform:translateY(0)}
+.missing-page{min-height:65vh;display:flex;flex-direction:column;justify-content:center;gap:24px;padding-block:64px}
+@media(max-width:1100px) and (min-width:901px){
+  .terminal-screen{font-size:14px;padding:20px}
+  .open{column-gap:32px}
+}
+@media(max-width:900px){
+  .open{grid-template-columns:minmax(0,1fr);padding-top:24px}
+  .open h1{font-size:clamp(2.55rem,8vw,4rem)}
+  .open h1 span{display:inline}
+  .open .terminal-preview{order:1;margin-top:24px;max-width:600px}
+  .terminal-screen{font-size:clamp(13px,2.6vw,19px);padding:20px}
+  .open .links{margin-top:24px}
+  .open .slope{margin-top:24px}
+  .open .lead{font-size:18px;max-width:34em}
+  .open .small{margin-top:12px}
+}
+@media(max-width:400px){
+  .terminal-screen{font-size:13px;padding:16px}
+  .open .lead{font-size:17px}
+  .top{padding-block:24px}
+}
+
+/* Alex requested visible install instructions in the header and window chrome. */
+.top{position:relative;z-index:2}
+.top nav{align-items:center}
+.header-install summary{cursor:pointer;list-style:none;white-space:nowrap}
+.header-install summary::-webkit-details-marker{display:none}
+.header-install summary:hover,.header-install[open] summary{text-decoration:underline;text-underline-offset:.18em}
+.install-menu{position:absolute;right:clamp(20px,5vw,96px);top:calc(100% - 8px);width:min(560px,calc(100% - 40px));padding:24px;background:var(--ground);color:var(--ink);border:1px solid var(--rule);box-shadow:0 12px 32px #092d2b1c;font-weight:400;display:grid;gap:16px}
+.top nav .install-menu a{text-decoration:underline}
+.install-menu pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:16px;padding:16px;line-height:1.55}
+.terminal-window{border:1px solid #3b3d42;border-radius:12px;overflow:hidden;background:#16181c;box-shadow:0 16px 40px #092d2b24}
+.terminal-titlebar{position:relative;display:flex;justify-content:center;align-items:center;min-height:40px;padding:8px 76px;color:#d8dee9;background:#25272c;border-bottom:1px solid #33363c;font:500 13px/1.4 -apple-system,system-ui,sans-serif}
+.window-controls{position:absolute;left:14px;top:14px;display:flex;gap:8px}
+.window-controls i{width:12px;height:12px;border-radius:50%;background:#ff5f57}
+.window-controls i:nth-child(2){background:#febc2e}
+.window-controls i:nth-child(3){background:#28c840}
+@media(prefers-color-scheme:dark){.terminal-window{box-shadow:0 16px 40px #051a174d}}
+@media(max-width:520px){.top{gap:12px}.top .mark{width:120px}.top nav{gap:16px}.install-menu{right:20px;padding:20px}}
+@media(max-width:359px){.top{flex-wrap:wrap;row-gap:16px}.top nav{width:100%;justify-content:space-between}}
+.install-menu pre{padding:0;background:none;overflow-wrap:normal}
+.install-menu .command-arg{white-space:nowrap}

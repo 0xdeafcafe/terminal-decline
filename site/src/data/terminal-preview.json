@@ -1,0 +1,90 @@
+{
+  "captured": "2026-11-07",
+  "cols": 38,
+  "background": "#16181c",
+  "foreground": "#d8dee9",
+  "rows": [
+    [
+      {
+        "color": "#d8dee9",
+        "bold": true,
+        "text": "2 November 2026"
+      }
+    ],
+    [
+      {
+        "color": "#d8dee9",
+        "bold": false,
+        "text": "M1 Max, medians of 5 runs"
+      }
+    ],
+    [],
+    [
+      {
+        "color": "#d8dee9",
+        "bold": true,
+        "text": "Idle memory"
+      }
+    ],
+    [
+      {
+        "color": "#b5bd68",
+        "bold": false,
+        "text": "Decline  ━━━━             26 MB"
+      }
+    ],
+    [
+      {
+        "color": "#d8dee9",
+        "bold": false,
+        "text": "Ghostty  ━━━━━━━━         60 MB"
+      }
+    ],
+    [
+      {
+        "color": "#d8dee9",
+        "bold": false,
+        "text": "kitty    ━━━━━━━━━━━━━━   99 MB"
+      }
+    ],
+    [],
+    [
+      {
+        "color": "#d8dee9",
+        "bold": true,
+        "text": "cat 100 MB"
+      }
+    ],
+    [
+      {
+        "color": "#b5bd68",
+        "bold": false,
+        "text": "Decline  ━━━━━━━━       0.58 s"
+      }
+    ],
+    [
+      {
+        "color": "#d8dee9",
+        "bold": false,
+        "text": "Ghostty  ━━━━━━━━━      0.66 s"
+      }
+    ],
+    [
+      {
+        "color": "#d8dee9",
+        "bold": false,
+        "text": "kitty    ━━━━━━━━━━━━━━ 1.05 s"
+      }
+    ],
+    [],
+    [
+      {
+        "color": "#d8dee9",
+        "bold": false,
+        "text": "Lower is better."
+      }
+    ]
+  ],
+  "text": "2 November 2026\nM1 Max, medians of 5 runs\n\nIdle memory\nDecline  ━━━━             26 MB\nGhostty  ━━━━━━━━         60 MB\nkitty    ━━━━━━━━━━━━━━   99 MB\n\ncat 100 MB\nDecline  ━━━━━━━━       0.58 s\nGhostty  ━━━━━━━━━      0.66 s\nkitty    ━━━━━━━━━━━━━━ 1.05 s\n\nLower is better.",
+  "sourceSha256": "efdb3b45308be5ae759173473d1c12133395d02ab1b0917e914deff9f1163c42"
+}

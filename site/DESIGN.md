@@ -28,15 +28,23 @@ controls are aria-hidden and do not pretend to operate a native window.
 This is an explicit exception to the original no-chrome rule. There is
 no prompt, typing animation or invented benchmark run.
 
-The header uses a native details/summary disclosure, labelled How to
-install, containing the Homebrew command, macOS and hardware requirements,
-and a link to the source instructions. It works without JavaScript.
+The header shows the full Homebrew command directly, with a Copy button.
+Alex rejected the earlier disclosure because it hid the command. The
+button uses the browser clipboard API, reports success, and selects the
+command for manual copying if permission is denied. No install pill or
+copy icon. Requirements and source installation are linked below.
+
+Alex also rejected the verbose copy. Prose and headings were reduced from
+about 796 words to 201, including the collapsed method notes. Feature
+sections have one sentence; screenshot narration, forced asides and
+repeated CTAs were removed. The measurement conditions and 30 October
+loss are retained under Method and earlier results.
 
 The preview is selectable browser text: real terminal cells
 rendered as HTML at build time. It is not a running Rust terminal emulator
 and does not execute benchmarks on the visitor's machine. The recorded
-measurement date is visible inside and beside it. No client JavaScript is
-needed, including framework runtime code.
+measurement date is visible inside it. The terminal preview needs no
+JavaScript. The only browser script is the roughly 1 KB clipboard handler.
 
 The subdued captured-help background remains decorative and aria-hidden.
 Nothing runs or blinks on scroll. Reduced motion is respected by the CSS.
@@ -80,10 +88,10 @@ and writes only the grouped JSON to this repo. It never runs a Rust build.
 
 Astro with `@astrojs/react`; TSX components have no client hydration
 directives. Astro 7 emits an unreferenced React renderer chunk even in
-this mode. `finalize-build.mjs` verifies that no page includes a script or
-hydrated island, then removes unreferenced runtime files. The subsequent
-verification rejects any remaining JavaScript asset. The built site has
-no script tags or JavaScript assets.
+this mode. `finalize-build.mjs` rejects hydrated islands and any script
+other than the inline clipboard handler, then removes unreferenced runtime
+files. Verification rejects external JavaScript assets and checks that each
+page has only the expected clipboard handler. No React runtime ships.
 Astro's [React integration](https://docs.astro.build/en/guides/integrations-guide/react/)
 provides the build-time rendering.
 
@@ -103,24 +111,28 @@ SVG favicon complete the concept's formerly deferred C100 items.
 ## Validation
 
 `npm run check`, `npm run build`, and `npm run verify` pass. The verification
-checks local assets and links, absence of client scripts/islands, CNAME,
+checks local assets and links, absence of framework scripts/islands, CNAME,
 404 metadata and agreement between README figures and the captured text.
 
-Direct headless Chrome captures at 1440×900, 768×1024 and a real 390×844
-iframe passed in both themes, with reduced motion forced. All eight
-captures exited 0. No page overflow, terminal horizontal scrolling,
-broken internal anchors or duplicate H1s. The terminal ends at y703 on
-desktop and y663 on a phone. The header disclosure was activated in the browser at 390px and 1440px;
-its contents stayed inside the viewport and its summary had a visible
-focus outline. The full cask argument is kept on one line. Parent inspected desktop and phone light/dark,
-and the full light page. Captures and metrics are under
-`$TMPDIR/decline-site-build/review/`, outside Git.
+Direct headless Chrome captures cover 1440×900, 768×1024 and a real
+390×844 iframe in both themes with reduced motion forced. The install
+command and Copy control were also checked at 320px. Browser checks
+intercepted clipboard writes (without touching the system clipboard) and
+verified the exact command, success feedback, focus outline and the
+permission-denied text-selection fallback.
 
-The full-height captures are for composition; their larger viewport changes
-viewport-relative sizing. No Safari, physical phone or screen-reader run.
-The original 100-item cross-review is in `concepts/long-rest/SLOP-REVIEW.md`.
-The new title and terminal are reviewed against its typography, genuine
-output, foreground contrast, no fake chrome, motion and overflow items.
+Captures and metrics are under `$TMPDIR/decline-site-build/review/`.
+Some runs exited 2 after writing their PNG and metrics because Chrome's
+teardown watchdog expired; this is recorded in their logs. The completion
+image is deliberately cropped on phones. Its crop container fits the
+viewport and clips the oversized image; it is not page overflow. Capture
+copies load images eagerly so headless screenshots include below-fold
+images; production keeps lazy loading. No Safari or screen-reader run.
+
+The original 100-item cross-review is in
+`concepts/long-rest/SLOP-REVIEW.md`. Its score is historical, not a claim
+that it prevented the later copy problem. Alex's rejection prompted this
+shorter copy and the directly visible header command.
 
 ## Publication
 

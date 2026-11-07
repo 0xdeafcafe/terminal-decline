@@ -20,7 +20,7 @@ export default function TerminalPreview() {
         ))}
       </pre>
       </div>
-      <figcaption className="small muted">The recorded results, displayed in Decline. <a href="#measured">Test conditions</a>.</figcaption>
+      <figcaption className="small muted"><a href="#measured">Benchmark details</a></figcaption>
     </figure>
   );
 }

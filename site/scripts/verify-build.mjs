@@ -9,7 +9,10 @@ assert(!(await readdir(dist, { recursive: true })).some(name => /\.(?:m?js|js\.m
 const index = await readFile(path.join(dist, 'index.html'), 'utf8');
 const missing = await readFile(path.join(dist, '404.html'), 'utf8');
 for (const html of [index, missing]) {
-  assert(!/<script\b|<astro-island\b/i.test(html), 'The static site must ship no JavaScript.');
+  assert(!/<astro-island\b/i.test(html), 'Framework islands must not ship.');
+  const scripts = [...html.matchAll(/<script\b([^>]*)>/gi)];
+  assert.equal(scripts.length, 1, 'Expected one clipboard handler.');
+  assert(/data-install-copy\b/.test(scripts[0][1]) && !/\bsrc=/.test(scripts[0][1]), 'Unexpected browser script.');
   for (const match of html.matchAll(/(?:src|href)="(\/(?!\/)[^"?#]*)(?:[?#][^"]*)?"/g)) {
     const target = match[1].endsWith('/') ? `${match[1]}index.html` : match[1];
     assert((await stat(path.join(dist, target))).isFile(), `Missing asset or page: ${target}`);
@@ -30,4 +33,4 @@ for (const terminal of data.terminals) {
   assert.deepEqual(values.slice(0, 6), [`${terminal.idle} MB`, `${terminal.scrollback} MB`, `${terminal.tabs} MB`, `${terminal.cat.toFixed(2)} s`, `${terminal.cpu.toFixed(2)} s`, `${terminal.idleCpu.toFixed(2)}%`], `Stale comparison for ${terminal.name}`);
   assert(capture.text.includes(`${terminal.idle} MB`) && capture.text.includes(`${terminal.cat.toFixed(2)} s`), `Stale capture for ${terminal.name}`);
 }
-console.log('Static pages, local links, CNAME, social card and captured benchmark values verified. No JavaScript shipped.');
+console.log('Static pages, local links, CNAME, social card and captured benchmark values verified. No framework runtime shipped.');

@@ -30,20 +30,42 @@ const canonical = new URL(Astro.url.pathname, Astro.site);
     <a class="skip-link" href="#content">Skip to content</a>
     <header class="wrap top">
       <a href="/" aria-label="Terminal Decline, home"><Wordmark /></a>
+      <div class="header-install-line">
+        <code id="install-command">brew install --cask <span>0xdeafcafe/tap/terminal-decline</span></code>
+        <button id="copy-install" class="copy-button" type="button" aria-label="Copy install command">Copy</button>
+        <span id="copy-status" class="sr-only" role="status"></span>
+      </div>
       <nav aria-label="Page">
-        <details class="header-install">
-          <summary>How to install</summary>
-          <div class="install-menu">
-            <p>With <a href="https://brew.sh">Homebrew</a>:</p>
-            <pre>brew install --cask <span class="command-arg">0xdeafcafe/tap/terminal-decline</span></pre>
-            <p class="small muted">Apple Silicon. macOS 14 Sonoma or later.</p>
-            <a href="/#install">Install from source and other details</a>
-          </div>
-        </details>
+        <a href="/#install">How to install</a>
         <a href="https://github.com/0xdeafcafe/terminal-decline">Source</a>
       </nav>
     </header>
     <main id="content"><slot /></main>
-    <footer class="wrap foot"><Wordmark /><p class="small muted">Terminal Decline is MIT licensed, by Alex Forbes-Reed.</p></footer>
+    <footer class="wrap foot"><Wordmark /><p class="small muted">Alex Forbes-Reed. MIT licence.</p></footer>
+    <script is:inline data-install-copy>
+      (() => {
+        const button = document.getElementById('copy-install');
+        const command = document.getElementById('install-command');
+        const status = document.getElementById('copy-status');
+        let reset;
+        button.addEventListener('click', async () => {
+          clearTimeout(reset);
+          try {
+            await navigator.clipboard.writeText(command.textContent.trim());
+            button.textContent = 'Copied';
+            status.textContent = 'Install command copied.';
+          } catch {
+            button.textContent = 'Copy';
+            const range = document.createRange();
+            range.selectNodeContents(command);
+            const selection = window.getSelection();
+            selection.removeAllRanges();
+            selection.addRange(range);
+            status.textContent = 'Command selected. Press Command+C or Control+C to copy.';
+          }
+          reset = setTimeout(() => { button.textContent = 'Copy'; }, 2000);
+        });
+      })();
+    </script>
   </body>
 </html>

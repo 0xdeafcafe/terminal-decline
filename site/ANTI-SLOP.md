@@ -138,7 +138,7 @@ Alex explicitly selected both subtle terminal-text and terminal-glyph background
 
 ## Requested terminal chrome
 
-After choosing Long rest on 7 November, Alex explicitly asked for more chrome around the terminal comparison. The production preview therefore has a Mac-style title bar, decorative window controls, a 12px frame radius and a restrained shadow. This is a deliberate exception to C038 and the relevant radius/shadow defaults, limited to this product preview. Its contents remain genuine captured terminal output; the controls are aria-hidden, not pretend working buttons. The header uses a native disclosure for the requested installation instructions.
+After choosing Long rest on 7 November, Alex explicitly asked for more chrome around the terminal comparison. The production preview therefore has a Mac-style title bar, decorative window controls, a 12px frame radius and a restrained shadow. This is a deliberate exception to C038 and the relevant radius/shadow defaults, limited to this product preview. Its contents remain genuine captured terminal output; the controls are aria-hidden, not pretend working buttons. Alex subsequently required the install command to be visible and copyable in the header. It is now plain text with a Copy action, not hidden behind a disclosure or styled as a pill.
 
 ## Applying the inherited checklist
 

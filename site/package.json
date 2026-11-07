@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "npm run assets && astro dev --host 127.0.0.1",
     "assets": "node scripts/prepare-assets.mjs",
-    "check": "astro check",
+    "check": "astro check && tsc --noEmit",
     "build": "npm run assets && astro build && node scripts/finalize-build.mjs",
     "preview": "astro preview --host 127.0.0.1",
     "verify": "node scripts/verify-build.mjs"

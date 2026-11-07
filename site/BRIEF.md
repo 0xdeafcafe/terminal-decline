@@ -78,6 +78,12 @@ for the capture procedure and the distinction between displaying recorded
 results and running a benchmark. The original concepts remain unchanged.
 
 Alex then requested installation instructions in the header and more
-window chrome around the terminal. The production header has a native
-How to install disclosure. The terminal frame is the explicit C038
+window chrome around the terminal. The production header shows the Homebrew command directly, with a Copy
+button. Alex rejected the earlier disclosure because the command was hidden. The terminal frame is the explicit C038
 exception documented in ANTI-SLOP.md; its data remains a real capture.
+
+After Alex rejected the verbose copy, production prose and headings were
+cut from about 796 words to 201, including the collapsed benchmark method.
+Feature sections have one short explanation. Provenance stays in design
+notes; measurement conditions and the earlier loss remain accessible below
+the charts. Do not add narrated captions, forced asides or redundant CTAs.

@@ -1,7 +1,8 @@
 # Terminal Decline website
 
 Alex selected Long rest. The Astro implementation uses TSX components
-rendered at build time, with no client JavaScript. The hero has a heavier
+rendered at build time. The only browser script copies the visible install
+command; no framework runtime ships. The hero has a heavier
 title and renders a real captured Decline comparison screen as selectable
 HTML. See DESIGN.md for evidence and validation, BRIEF.md for the claims,
 and ANTI-SLOP.md for the design checklist.

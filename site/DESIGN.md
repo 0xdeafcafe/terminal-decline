@@ -18,7 +18,7 @@ the top, and ends 56px after the preview. There is no viewport-height rule,
 spacer above the terminal, or oversized Slope below it. Weight 800 remains;
 the title is 3.3–5.4rem on desktop and 3–4rem on smaller screens. The
 white/spruce/mint palette and system theme remain. The terminal comparison
-uses Menlo 15px on desktop and 13–14px on phones, `#16181c` background,
+uses Menlo 13px with a 1.3 line height at every width, `#16181c` background,
 `#d8dee9` foreground and `#b5bd68` green from the captured cells.
 
 Alex subsequently asked for more terminal chrome and installation
@@ -173,3 +173,11 @@ set GitHub Pages to `build_type=workflow` using `gh api` and set the custom
 domain to `decline.forbes.red`. Alex adds the DNS CNAME `decline` pointing
 to `0xdeafcafe.github.io`. No Pages settings, DNS or remote branch has been
 changed while preparing this build.
+
+## Terminal density
+
+Alex asked for smaller terminal type and less line spacing. Both previews
+now use Menlo 13px at 1.3 line height (16.9px), with 16px vertical padding.
+Completion rows have 2px vertical padding on desktop, 5px on phones and
+a 2px gap between each flag and its wrapped description. The title bar is
+34px high with 12px type. Page prose and headings are unchanged.

@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Decline: round two</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#e8efeb;color:#092d2b;font:16px/1.45 -apple-system,system-ui,sans-serif}header{padding:24px 28px;display:flex;gap:24px;align-items:center;flex-wrap:wrap;border-bottom:1px solid #b8c9bf}h1{font-size:24px;line-height:1.1;margin:0}header p{margin:6px 0 0}a{color:inherit;text-underline-offset:3px}nav{margin-left:auto;display:flex;gap:16px;align-items:center;flex-wrap:wrap}select{font:inherit;border:1px solid #8aa598;background:white;color:#092d2b;padding:6px}main{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:20px;padding:24px 28px}section{min-width:0}h2{font-size:20px;margin:0 0 8px}section p{min-height:3em;margin:0 0 16px}figure{position:relative;margin:0;background:white;overflow:hidden;border:1px solid #9ab4a6}iframe{border:0;position:absolute;left:0;top:0;transform-origin:0 0;background:white}footer{padding:0 28px 24px}button{font:inherit;padding:6px 12px;cursor:pointer}label{display:flex;align-items:center;gap:8px}@media(max-width:850px){main{grid-template-columns:1fr}section p{min-height:0}nav{margin-left:0}figure{max-width:720px}}
+</style>
+<header><div><h1>Decline: round two</h1><p>Three compositions using the same product evidence.</p></div><nav><label>Size <select id="size"><option value="desktop">Desktop</option><option value="phone">Phone</option></select></label><label>Theme <select id="theme"><option value="light">Light</option><option value="dark">Dark</option></select></label><button id="reset" type="button">Back to the top</button><a href="http://127.0.0.1:4389/">Current site</a></nav></header>
+<main>
+<section><h2><a href="slope/index.html" target="_blank">Slope</a></h2><p>The brand mark shapes the page.</p><figure><iframe title="Slope concept" src="slope/index.html"></iframe></figure></section>
+<section><h2><a href="space/index.html" target="_blank">Space</a></h2><p>The memory comparison becomes the main graphic.</p><figure><iframe title="Space concept" src="space/index.html"></iframe></figure></section>
+<section><h2><a href="screen/index.html" target="_blank">Screen</a></h2><p>The terminal surface leads the composition.</p><figure><iframe title="Screen concept" src="screen/index.html"></iframe></figure></section>
+</main><footer>Scroll inside each preview. Open its title for the full page. These are local concepts, not changes to the published site.</footer>
+<script>
+const frames=[...document.querySelectorAll('iframe')];
+function layout(){const phone=document.querySelector('#size').value==='phone';const width=phone?390:1440,height=phone?844:900;for(const frame of frames){const scale=frame.parentElement.clientWidth/width;frame.style.width=width+'px';frame.style.height=height+'px';frame.style.transform=`scale(${scale})`;frame.style.colorScheme=document.querySelector('#theme').value;frame.parentElement.style.height=height*scale+'px';}}
+new ResizeObserver(layout).observe(document.querySelector('main'));
+for(const el of document.querySelectorAll('select'))el.addEventListener('change',layout);
+document.querySelector('#reset').addEventListener('click',()=>frames.forEach(frame=>frame.contentWindow.scrollTo(0,0)));layout();
+</script>
+</html>

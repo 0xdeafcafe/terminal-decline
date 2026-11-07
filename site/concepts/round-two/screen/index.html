@@ -1,0 +1,285 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Terminal Decline: a terminal for macOS</title>
+<meta name="description" content="Terminal Decline is a native terminal for macOS. 26 MB idle and 0.58 s to cat 100 MB on an M1 Max, 2 November 2026.">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxMDI0IiBoZWlnaHQ9IjEwMjQiIHZpZXdCb3g9IjAgMCAxMDI0IDEwMjQiIHJvbGU9ImltZyIgYXJpYS1sYWJlbGxlZGJ5PSJ0aXRsZSBkZXNjIj4KPHRpdGxlIGlkPSJ0aXRsZSI+ZGVjbGluZSDigJQgU2xvcGU8L3RpdGxlPjxkZXNjIGlkPSJkZXNjIj5TbG9wZSBkcm9wcywgdGhlbiByZXN0cyBvbiBhIHRlcm1pbmFsIGJhc2VsaW5lLiBMYXllcmVkIGFwcCBpY29uIGFydHdvcmsuPC9kZXNjPgo8ZGVmcz48bGluZWFyR3JhZGllbnQgaWQ9ImJvZHkiIHgxPSIwIiB5MT0iMCIgeDI9Ii43IiB5Mj0iMSI+PHN0b3Agc3RvcC1jb2xvcj0iIzI0NTk1MCIvPjxzdG9wIG9mZnNldD0iMSIgc3RvcC1jb2xvcj0iIzA5MkQyQiIvPjwvbGluZWFyR3JhZGllbnQ+PGxpbmVhckdyYWRpZW50IGlkPSJpbmsiIHgxPSIwIiB5MT0iMCIgeDI9Ii4zIiB5Mj0iMSI+PHN0b3Agc3RvcC1jb2xvcj0iI0ZGRkZGRiIvPjxzdG9wIG9mZnNldD0iMSIgc3RvcC1jb2xvcj0iI0I5RTVDQyIvPjwvbGluZWFyR3JhZGllbnQ+PHJhZGlhbEdyYWRpZW50IGlkPSJsaWdodCIgY3g9Ii4yNSIgY3k9IjAiIHI9IjEiPjxzdG9wIHN0b3AtY29sb3I9IiNGRkZGRkYiIHN0b3Atb3BhY2l0eT0iLjE2Ii8+PHN0b3Agb2Zmc2V0PSIxIiBzdG9wLWNvbG9yPSIjRkZGRkZGIiBzdG9wLW9wYWNpdHk9IjAiLz48L3JhZGlhbEdyYWRpZW50PjxsaW5lYXJHcmFkaWVudCBpZD0icmltIiB4Mj0iLjMiIHkyPSIxIj48c3RvcCBzdG9wLWNvbG9yPSIjRkZGRkZGIiBzdG9wLW9wYWNpdHk9Ii41NSIvPjxzdG9wIG9mZnNldD0iLjUiIHN0b3AtY29sb3I9IiNGRkZGRkYiIHN0b3Atb3BhY2l0eT0iLjA2Ii8+PHN0b3Agb2Zmc2V0PSIxIiBzdG9wLWNvbG9yPSIjRkZGRkZGIiBzdG9wLW9wYWNpdHk9Ii4yMiIvPjwvbGluZWFyR3JhZGllbnQ+PC9kZWZzPgo8ZyBpZD0iMDEtYm9keSI+PHJlY3QgeD0iMTAwIiB5PSIxMDAiIHdpZHRoPSI4MjQiIGhlaWdodD0iODI0IiByeD0iMTg1IiBmaWxsPSJ1cmwoI2JvZHkpIi8+PC9nPgo8ZyBpZD0iMDItcHJldmlldy1kZXB0aCIgdHJhbnNmb3JtPSJ0cmFuc2xhdGUoMCAxNCkiIG9wYWNpdHk9Ii4yMiI+PHBhdGggZD0iTTI5NCA0MDAgTDQ4NCA2MTAgUTQ5NyA2MjQgNTE2IDYyNCBINzM4IiBmaWxsPSJub25lIiBzdHJva2U9IiMwMDAwMDAiIHN0cm9rZS13aWR0aD0iOTIiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIvPjwvZz4KPGcgaWQ9IjAzLW1hcmsiPjxwYXRoIGQ9Ik0yOTQgNDAwIEw0ODQgNjEwIFE0OTcgNjI0IDUxNiA2MjQgSDczOCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSJ1cmwoI2luaykiIHN0cm9rZS13aWR0aD0iOTIiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIvPjwvZz4KPGcgaWQ9IjA0LXByZXZpZXctbGlnaHQiPjxyZWN0IHg9IjEwMyIgeT0iMTAzIiB3aWR0aD0iODE4IiBoZWlnaHQ9IjgxOCIgcng9IjE4MiIgZmlsbD0idXJsKCNsaWdodCkiIHN0cm9rZT0idXJsKCNyaW0pIiBzdHJva2Utd2lkdGg9IjYiLz48L2c+Cjwvc3ZnPg==">
+<style>
+:root{
+  --spruce:#092D2B; --mint:#B9E5CC; --deep:#051A17;
+  --ground:#FFFFFF; --ink:#092D2B; --muted:#4B6762; --rule:#CFE0D8; --wash:#EEF6F1;
+  --plate:#092D2B; --plate-ink:#B9E5CC; --plate-muted:#9CC4B3;
+  --bar:#092D2B; --bar-best:#B9E5CC; --bar-best-edge:#092D2B;
+  --link:#0B5F52;
+  --t-bg:#16181c; --t-fg:#d8dee9; --t-dim:#9aa5b1; --t-green:#b5bd68; --t-blue:#81a2be; --t-yellow:#f0c674; --t-sel:#2b3b4d;
+  --sans:-apple-system,BlinkMacSystemFont,"SF Pro Text","SF Pro Display","Helvetica Neue",system-ui,sans-serif;
+  --mono:Menlo,ui-monospace,"SF Mono",Monaco,monospace;
+}
+@media (prefers-color-scheme:dark){:root{
+  --ground:#051A17; --ink:#E4F0E9; --muted:#9DBBB0; --rule:#1E4741; --wash:#0A2723;
+  --plate:#092D2B; --bar:#4F7D72; --bar-best:#B9E5CC; --bar-best-edge:#B9E5CC; --link:#B9E5CC;
+}}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%;scroll-behavior:auto}
+body{margin:0;background:var(--ground);color:var(--ink);font:400 17px/1.6 var(--sans);-webkit-font-smoothing:antialiased}
+a{color:var(--link);text-underline-offset:.18em}
+a:focus-visible,button:focus-visible,summary:focus-visible{outline:2px solid currentColor;outline-offset:3px;border-radius:3px}
+.wrap{max-width:1280px;margin:0 auto;padding:0 24px}
+.ui{-webkit-user-select:none;user-select:none}
+code,pre,.term{font-family:var(--mono)}
+.sel{-webkit-user-select:text;user-select:text}
+
+/* plate: spruce above, ground below, the window straddles the step */
+.plate{background:linear-gradient(var(--plate) 0 calc(100% - 128px),var(--ground) 0);color:var(--plate-ink);padding-bottom:24px}
+header.top{display:flex;align-items:center;justify-content:space-between;gap:16px 32px;flex-wrap:wrap;padding-top:16px;padding-bottom:12px}
+.mark{display:block;height:24px;width:auto;color:var(--mint)}
+.install{display:flex;align-items:stretch;min-width:0;max-width:100%;border:1px solid rgba(185,229,204,.4);border-radius:6px;background:rgba(0,0,0,.18)}
+.install code{font-size:13px;line-height:1.3;padding:8px 12px;color:#EAF7EF;overflow-wrap:anywhere;min-width:0;align-self:center}
+.install button{font:600 15px/1 var(--sans);color:var(--spruce);background:var(--mint);border:0;border-radius:0 5px 5px 0;padding:0 16px;min-height:36px;min-width:72px;cursor:pointer}
+.install button:hover{background:#D6F0E1}
+.install button:focus-visible{outline-color:var(--mint)}
+h1{margin:20px 0 0;font:800 clamp(46px,8.4vw,112px)/.98 var(--sans);letter-spacing:-.045em;color:var(--mint)}
+.lead{margin:14px 0 0;font:600 clamp(22px,2.7vw,32px)/1.25 var(--sans);letter-spacing:-.02em;color:#EAF7EF}
+.lead-sub{margin:6px 0 0;color:var(--plate-muted);max-width:60ch}
+.lead-sub .alt{color:var(--plate-muted)}
+
+/* the window */
+.win{margin-top:24px;background:var(--t-bg);border:1px solid rgba(185,229,204,.28);border-radius:10px;overflow:hidden;box-shadow:0 14px 28px -18px rgba(5,26,23,.55)}
+.bar{display:flex;align-items:center;gap:12px;background:#2a2d33;color:#c9ced6;padding:0 12px;height:30px;font:400 13px/1 var(--sans)}
+.lights{display:flex;gap:8px}.lights i{width:12px;height:12px;border-radius:50%;background:#5b6068;display:block}
+.bar .title{flex:1;text-align:center;margin-right:52px}
+.tabs{display:flex;background:#202329;border-top:1px solid #15171b;border-bottom:1px solid #15171b;overflow:hidden}
+.tabs a{flex:1 1 0;min-width:0;text-align:center;padding:7px 8px;font:400 13px/1.2 var(--sans);color:#aab1bb;text-decoration:none;border-right:1px solid #15171b;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tabs a:last-child{border-right:0}
+.tabs a:hover{background:#2a2d33;color:#fff}
+.tabs a:focus-visible{outline-offset:-3px}
+.panes{display:grid;grid-template-columns:minmax(0,max-content) minmax(0,1fr);color:var(--t-fg);font:400 13px/1.3 var(--mono)}
+.pane{padding:14px 16px;min-width:0}
+.pane+.pane,.right{border-left:1px solid #343840}
+.right{display:grid;grid-template-rows:auto 1fr;min-width:0}
+.right .pane+.pane{border-left:0;border-top:1px solid #343840}
+.term{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font:400 13px/1.3 var(--mono)}
+.term b{font-weight:700}
+.g{color:var(--t-green)}.bl{color:var(--t-blue)}.y{color:var(--t-yellow)}.d{color:var(--t-dim)}
+.cmp{display:grid;grid-template-columns:max-content 1fr;column-gap:2ch;margin:6px 0 0}
+.cmp>span{padding:0}.cmp .sel-row{background:var(--t-sel)}
+.cmp .row{display:contents}
+.cmp .row>*{white-space:pre-wrap;overflow-wrap:anywhere}
+.cmp .row.on>*{background:var(--t-sel);color:#fff}
+.line{display:block}
+
+/* sections */
+section{padding:48px 0 0}
+#pins{padding-top:88px}
+#agents{padding-top:72px}
+#install{padding-top:104px}
+h2{margin:0;font:800 clamp(30px,4.2vw,48px)/1.05 var(--sans);letter-spacing:-.03em}
+.prose{max-width:60ch;margin:12px 0 0}
+.prose+.prose{margin-top:8px}
+
+/* numbers */
+.nums-head{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:8px 48px;align-items:end}
+.nums-head p{margin:0;color:var(--muted);max-width:44ch}
+table{border-collapse:collapse;width:100%;max-width:960px;margin-top:24px;font-size:17px;font-variant-numeric:tabular-nums}
+caption{text-align:left;font-size:15px;line-height:1.5;color:var(--muted);padding-bottom:8px}
+th,td{text-align:left;padding:10px 12px 10px 0;border-top:1px solid var(--rule);vertical-align:top}
+thead th{border-top:0;font-weight:600}
+tbody th{font-weight:400;color:var(--muted);width:24%}
+td{position:relative}
+.n{font-weight:600;display:block}
+.u{font-weight:400;color:var(--muted)}
+.b{display:block;height:6px;border-radius:3px;background:var(--bar);margin-top:6px;max-width:100%}
+td.best .b{background:var(--bar-best);box-shadow:inset 0 0 0 1px var(--bar-best-edge)}
+td.best .n{font-weight:800}
+.notes{margin:20px 0 0;display:grid;gap:8px;max-width:65ch;font-size:15px;line-height:1.5}
+.notes p{margin:0}
+.notes .muted{color:var(--muted)}
+
+/* pins and agents */
+.duo{display:grid;grid-template-columns:minmax(0,5fr) minmax(0,7fr);gap:48px;margin-top:0}
+.pinrow{display:flex;align-items:flex-end;gap:16px;margin-top:24px;flex-wrap:wrap}
+.pinrow figure{margin:0}
+.pinrow img{display:block;width:112px;height:112px}
+.pinrow img.sm{width:32px;height:32px}.pinrow img.xs{width:16px;height:16px}
+.pinrow figcaption{font-size:15px;color:var(--muted);margin-top:4px}
+.cmdline{display:inline-block;margin:20px 0 0;padding:8px 12px;background:var(--wash);border-radius:6px;font:400 13px/1.3 var(--mono);max-width:100%;overflow-wrap:anywhere}
+.small{font-size:15px;color:var(--muted)}
+.agent-term{margin-top:20px;border-radius:6px;background:var(--t-bg);color:var(--t-fg);padding:14px 16px}
+.also{margin-top:20px}
+.comp-term{margin-top:20px;border-radius:6px;background:var(--t-bg);color:var(--t-fg);padding:14px 16px;font:400 13px/1.3 var(--mono)}
+@media (max-width:560px){.comp-term .cmp{grid-template-columns:minmax(0,1fr)}.comp-term .cmp .row>.d{padding-left:2ch;margin-bottom:2px}}
+
+/* install */
+.closing{display:grid;grid-template-columns:auto minmax(0,1fr);gap:40px;align-items:center;padding-bottom:56px}
+.slope{display:block;width:min(34vw,340px);height:auto;color:var(--spruce)}
+@media (prefers-color-scheme:dark){.slope{color:var(--mint)}}
+.closing .cmdline{margin-top:16px}
+.links{display:flex;gap:8px 24px;flex-wrap:wrap;margin:16px 0 0;padding:0;list-style:none}
+footer{border-top:1px solid var(--rule);padding:16px 0 28px;color:var(--muted);font-size:15px}
+
+@media (max-width:860px){
+  .panes{grid-template-columns:minmax(0,1fr)}
+  .pane+.pane,.right{border-left:0;border-top:1px solid #343840}
+  .duo,.nums-head,.closing{grid-template-columns:minmax(0,1fr)}
+  .closing{gap:24px}.slope{width:180px}
+  .plate{background:linear-gradient(var(--plate) 0 calc(100% - 64px),var(--ground) 0)}
+  .win .right{display:none}
+}
+.narrow{display:none}
+@media (max-width:860px){.narrow{display:block}}
+@media (min-width:861px){.flip>div:first-child{order:2}}
+@media (max-width:560px){
+  .wrap{padding:0 16px}
+  th,td{padding-right:8px}
+  table{font-size:15px}
+  tbody th{width:27%}
+  .bar .title{margin-right:0;text-align:right}
+  .tabs a{padding:7px 4px}
+  .install button{min-width:64px}
+}
+@media (prefers-reduced-motion:no-preference){
+  .install button,.tabs a{transition:background-color .15s ease}
+}
+</style>
+</head>
+<body>
+<div class="plate">
+ <div class="wrap">
+  <header class="top">
+   <a href="#top" aria-label="decline" class="ui" style="color:inherit"><svg class="mark" xmlns="http://www.w3.org/2000/svg" viewBox="56 84 588 112" role="img" aria-label="decline"><g transform="translate(-10 4) scale(.28)"><path d="M294 400 L484 610 Q497 624 516 624 H738" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></g><path d="M280.737 180.276Q272.509 180.276 266.421 176.173Q260.334 172.070 257.001 164.516Q253.667 156.962 253.667 146.646L253.667 146.585Q253.667 136.259 257.026 128.730Q260.384 121.201 266.446 117.109Q272.509 113.018 280.609 113.018Q285.218 113.018 289.136 114.497Q293.054 115.977 296.096 118.727Q299.139 121.477 301.039 125.280L301.331 125.280L301.331 90.222L314.699 90.222L314.699 179.000L301.331 179.000L301.331 168.025L301.039 168.025Q299.150 171.846 296.158 174.567Q293.165 177.289 289.287 178.782Q285.408 180.276 280.737 180.276ZM284.262 168.816Q289.292 168.816 293.160 166.077Q297.028 163.338 299.205 158.347Q301.382 153.355 301.382 146.658L301.382 146.596Q301.382 139.888 299.174 134.922Q296.966 129.955 293.129 127.216Q289.292 124.478 284.262 124.478Q279.041 124.478 275.229 127.167Q271.418 129.855 269.361 134.796Q267.303 139.737 267.303 146.585L267.303 146.646Q267.303 153.483 269.355 158.475Q271.406 163.466 275.224 166.141Q279.041 168.816 284.262 168.816Z" fill="currentColor"/><path d="M355.929 180.276Q346.423 180.276 339.567 176.181Q332.710 172.087 329.037 164.572Q325.364 157.056 325.364 146.848L325.364 146.787Q325.364 136.667 329.057 129.063Q332.750 121.458 339.452 117.238Q346.154 113.018 355.229 113.018Q364.303 113.018 370.881 117.076Q377.458 121.134 381.005 128.462Q384.552 135.789 384.552 145.522L384.552 150.046L331.991 150.046L331.991 140.596L378.088 140.596L371.534 149.386L371.534 144.237Q371.534 137.402 369.458 132.891Q367.382 128.381 363.726 126.159Q360.071 123.937 355.303 123.937Q350.535 123.937 346.779 126.259Q343.023 128.582 340.871 133.117Q338.719 137.653 338.719 144.237L338.719 149.408Q338.719 155.690 340.851 160.151Q342.984 164.611 346.913 166.984Q350.842 169.357 356.220 169.357Q360.145 169.357 363.163 168.155Q366.182 166.953 368.172 164.935Q370.162 162.916 370.972 160.476L371.133 159.989L383.843 159.989L383.708 160.638Q382.920 164.463 380.714 167.993Q378.508 171.523 374.944 174.307Q371.381 177.091 366.602 178.683Q361.823 180.276 355.929 180.276Z" fill="currentColor"/><path d="M422.591 180.276Q413.186 180.276 406.280 176.156Q399.373 172.036 395.625 164.471Q391.876 156.906 391.876 146.585L391.876 146.523Q391.876 136.264 395.675 128.735Q399.473 121.206 406.349 117.112Q413.226 113.018 422.457 113.018Q430.805 113.018 436.848 116.215Q442.890 119.413 446.340 124.628Q449.790 129.843 450.343 135.928L450.393 136.397L437.644 136.397L437.532 135.883Q436.499 131.117 432.784 127.651Q429.070 124.185 422.547 124.185Q417.427 124.185 413.593 126.927Q409.759 129.669 407.636 134.697Q405.512 139.726 405.512 146.636L405.512 146.697Q405.512 153.770 407.655 158.778Q409.799 163.787 413.658 166.448Q417.517 169.109 422.647 169.109Q428.802 169.109 432.600 165.874Q436.398 162.640 437.582 157.411L437.694 156.897L450.493 156.897L450.442 157.316Q449.740 163.813 446.084 169.009Q442.428 174.204 436.427 177.240Q430.426 180.276 422.591 180.276Z" fill="currentColor"/><path d="M460.406 179.000L460.406 90.222L473.773 90.222L473.773 179.000Z" fill="currentColor"/><path d="M487.926 179.000L487.926 114.294L501.294 114.294L501.294 179.000ZM494.610 104.335Q491.379 104.335 489.111 102.072Q486.843 99.810 486.843 96.658Q486.843 93.444 489.111 91.213Q491.379 88.982 494.610 88.982Q497.891 88.982 500.134 91.213Q502.376 93.444 502.376 96.658Q502.376 99.810 500.134 102.072Q497.891 104.335 494.610 104.335Z" fill="currentColor"/><path d="M514.939 179.000L514.939 114.294L528.305 114.294L528.305 124.042L528.597 124.042Q531.169 119.111 536.136 116.064Q541.103 113.018 548.442 113.018Q559.086 113.018 564.946 119.459Q570.805 125.900 570.805 137.088L570.805 179.000L557.438 179.000L557.438 139.661Q557.438 132.344 554.008 128.411Q550.579 124.478 543.681 124.478Q539.019 124.478 535.560 126.571Q532.101 128.664 530.203 132.432Q528.305 136.199 528.305 141.257L528.305 179.000Z" fill="currentColor"/><path d="M611.275 180.276Q601.770 180.276 594.913 176.181Q588.057 172.087 584.384 164.572Q580.711 157.056 580.711 146.848L580.711 146.787Q580.711 136.667 584.403 129.063Q588.096 121.458 594.798 117.238Q601.501 113.018 610.575 113.018Q619.650 113.018 626.227 117.076Q632.805 121.134 636.352 128.462Q639.899 135.789 639.899 145.522L639.899 150.046L587.338 150.046L587.338 140.596L633.434 140.596L626.881 149.386L626.881 144.237Q626.881 137.402 624.805 132.891Q622.728 128.381 619.073 126.159Q615.417 123.937 610.649 123.937Q605.881 123.937 602.126 126.259Q598.370 128.582 596.218 133.117Q594.066 137.653 594.066 144.237L594.066 149.408Q594.066 155.690 596.198 160.151Q598.330 164.611 602.260 166.984Q606.189 169.357 611.567 169.357Q615.492 169.357 618.510 168.155Q621.529 166.953 623.518 164.935Q625.508 162.916 626.319 160.476L626.480 159.989L639.190 159.989L639.055 160.638Q638.267 164.463 636.061 167.993Q633.854 171.523 630.291 174.307Q626.727 177.091 621.949 178.683Q617.170 180.276 611.275 180.276Z" fill="currentColor"/></svg></a>
+   <div class="install" id="install-top">
+    <code class="sel" id="brew">brew install --cask 0xdeafcafe/tap/terminal-decline</code>
+    <button type="button" class="ui" id="copy" aria-label="Copy the install command">Copy</button>
+   </div>
+  </header>
+  <main id="top">
+   <h1>A terminal for macOS.</h1>
+   <p class="lead">26 MB idle. 0.58 s to <code>cat</code> 100 MB.</p>
+   <p class="lead-sub">Measured against Ghostty and kitty on an M1 Max, 2 November 2026, medians of five runs.</p>
+
+   <div class="win" role="group" aria-label="Terminal Decline window">
+    <div class="bar ui" aria-hidden="true"><span class="lights"><i></i><i></i><i></i></span><span class="title">Terminal Decline</span></div>
+    <nav class="tabs ui" aria-label="Sections"><a href="#numbers">Footprint</a><a href="#pins">Pins</a><a href="#agents">Agents</a><a href="#install">Install</a></nav>
+    <div class="panes">
+     <div class="pane">
+<pre class="term sel"><b>2 November 2026</b>
+M1 Max, medians of 5 runs
+
+<b>Idle memory</b>
+<span style="color:#b5bd68">Decline  ━━━━             26 MB</span>
+Ghostty  ━━━━━━━━         60 MB
+kitty    ━━━━━━━━━━━━━━   99 MB
+
+<b>cat 100 MB</b>
+<span style="color:#b5bd68">Decline  ━━━━━━━━       0.58 s</span>
+Ghostty  ━━━━━━━━━      0.66 s
+kitty    ━━━━━━━━━━━━━━ 1.05 s
+
+Lower is better.</pre>
+     </div>
+     <div class="right">
+      <div class="pane" aria-label="Commands">
+<pre class="term sel"><span class="line"><span class="g">decline</span> pin rush <span class="bl">--dock</span></span><span class="line"><span class="g">decline</span> ctl spawn <span class="bl">--name</span> sh <span class="bl">--shell</span></span><span class="line"><span class="g">decline</span> ctl send sh <span class="bl">--text</span> <span class="y">"make test"</span> <span class="bl">--key</span> enter</span><span class="line"><span class="g">decline</span> ctl screen sh <span class="bl">--json</span></span></pre>
+      </div>
+      <div class="pane" aria-label="Tab completion">
+<div class="term sel"><span class="line">git fetch -</span><div class="cmp"><span class="row"><span class="bl">--all</span><span class="d">Fetch all remotes, except for the ones that have…</span></span><span class="row"><span class="bl">--no-all</span><span class="d">Fetch all remotes, except for the ones that have…</span></span><span class="row"><span class="bl">-a</span><span class="d">Append ref names and object names of fetched refs…</span></span><span class="row"><span class="bl">--append</span><span class="d">Append ref names and object names of fetched refs…</span></span><span class="row"><span class="bl">--atomic</span><span class="d">Use an atomic transaction to update local refs</span></span><span class="row on"><span class="bl">--depth</span><span class="d">Limit fetching to the specified number of commits…</span></span><span class="row"><span class="bl">--deepen</span><span class="d">Similar to --depth, except it specifies the number…</span></span><span class="row"><span class="bl">--shallow-since</span><span class="d">Deepen or shorten the history of a shallow…</span></span></div></div>
+      </div>
+     </div>
+    </div>
+   </div>
+  </main>
+ </div>
+</div>
+
+<div class="wrap">
+ <section id="numbers" aria-labelledby="h-num">
+  <div class="nums-head">
+   <h2 id="h-num">Against Ghostty and kitty</h2>
+   <p>2 November 2026. M1 Max, macOS 27.0. Medians of five runs. Lower is better.</p>
+  </div>
+  <table><caption>Bars are relative within each row.</caption><thead><tr><th scope="col">Measure</th><th scope="col">Decline</th><th scope="col">Ghostty</th><th scope="col">kitty</th></tr></thead><tbody><tr><th scope="row">Idle memory</th><td class="best"><span class="n">26<span class="u"> MB</span></span><span class="b" style="width:26.3%" aria-hidden="true"></span></td><td><span class="n">60<span class="u"> MB</span></span><span class="b" style="width:60.6%" aria-hidden="true"></span></td><td><span class="n">99<span class="u"> MB</span></span><span class="b" style="width:100.0%" aria-hidden="true"></span></td></tr><tr><th scope="row">Four tabs</th><td class="best"><span class="n">47<span class="u"> MB</span></span><span class="b" style="width:45.2%" aria-hidden="true"></span></td><td><span class="n">87<span class="u"> MB</span></span><span class="b" style="width:83.7%" aria-hidden="true"></span></td><td><span class="n">104<span class="u"> MB</span></span><span class="b" style="width:100.0%" aria-hidden="true"></span></td></tr><tr><th scope="row">After 10k lines</th><td class="best"><span class="n">19<span class="u"> MB</span></span><span class="b" style="width:14.6%" aria-hidden="true"></span></td><td><span class="n">56<span class="u"> MB</span></span><span class="b" style="width:43.1%" aria-hidden="true"></span></td><td><span class="n">130<span class="u"> MB</span></span><span class="b" style="width:100.0%" aria-hidden="true"></span></td></tr><tr><th scope="row"><code>cat</code> 100 MB</th><td class="best"><span class="n">0.58<span class="u"> s</span></span><span class="b" style="width:55.2%" aria-hidden="true"></span></td><td><span class="n">0.66<span class="u"> s</span></span><span class="b" style="width:62.9%" aria-hidden="true"></span></td><td><span class="n">1.05<span class="u"> s</span></span><span class="b" style="width:100.0%" aria-hidden="true"></span></td></tr><tr><th scope="row">CPU for <code>cat</code></th><td class="best"><span class="n">0.66<span class="u"> s</span></span><span class="b" style="width:32.4%" aria-hidden="true"></span></td><td><span class="n">2.04<span class="u"> s</span></span><span class="b" style="width:100.0%" aria-hidden="true"></span></td><td><span class="n">1.63<span class="u"> s</span></span><span class="b" style="width:79.9%" aria-hidden="true"></span></td></tr><tr><th scope="row">Idle CPU</th><td class="best"><span class="n">0.02<span class="u">%</span></span><span class="b" style="width:16.7%" aria-hidden="true"></span></td><td><span class="n">0.03<span class="u">%</span></span><span class="b" style="width:25.0%" aria-hidden="true"></span></td><td><span class="n">0.12<span class="u">%</span></span><span class="b" style="width:100.0%" aria-hidden="true"></span></td></tr></tbody></table>
+  <div class="notes">
+   <p class="muted">Memory is physical footprint across all processes. CPU for <code>cat</code> includes WindowServer.</p>
+   <p>Menlo 13, 100×30 cells, 10k lines of scrollback. One window. Runs interleaved at system load 3–6. Ghostty 1.4.0, kitty 0.49.2. <a href="https://github.com/0xdeafcafe/terminal-decline#benchmarks">Builds, script and full results</a>.</p>
+   <p>On 30 October, Ghostty finished the <code>cat</code> in 0.53 s against Decline’s 0.61 s. Neither run compared input latency. <a href="https://github.com/0xdeafcafe/terminal-decline/blob/main/docs/comparison-2026-10-30.md">30 October results</a>.</p>
+  </div>
+ </section>
+
+ <section id="pins" aria-labelledby="h-pin">
+  <div class="duo">
+   <div>
+    <h2 id="h-pin">Pin a command to the Dock</h2>
+    <p class="prose">A pin gives a command its own Mac app, with its own icon, windows and settings. It uses the program’s own icon when there is one, otherwise it draws one.</p>
+    <code class="cmdline sel">decline pin rush --dock</code>
+    <p class="small prose">Needs <a href="https://github.com/0xdeafcafe/rush">rush</a> installed. <a href="https://github.com/0xdeafcafe/terminal-decline#pin-a-program-to-the-dock">Pin options</a>.</p>
+   </div>
+   <div>
+    <div class="pinrow">
+<figure><img src="data:image/webp;base64,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" width="256" height="256" alt="Generated rush pin" decoding="async"><figcaption>rush</figcaption></figure>
+<figure><img src="data:image/webp;base64,UklGRhQKAABXRUJQVlA4WAoAAAAQAAAA/wAA/wAAQUxQSL8CAAABkCQAkGE7Nfg3UOwsbdu2jZXt5PvfwFrFuIJt2/g2Xj8M6gDVU5VVJiImAEL//+dp0qgdOdde/GmLexjAbqz5x+NL2ZuH2kFlTct5FEUWqruZE8zAMedXtCArG0tnGkHSKbMSGfrrdGpQ9K+II1Ojxb2DoGuZg4xNFHXSXdKpDmRu21Fba2PeIYNfjdCXlecii510S1Pd7iGbb3XW0thaZHTVSA2tiiGr1VLt7PSQ2d52zRzykd3+Hq3s9JHh/naNrPKQ5d4SbYyNIdPVSE10rUW2V3bSgnUPGX/T0kEusv6MBsa4vHOGk0t6i8x/YVM7iew/RKxLB/9a02iVoQDzSfVzJBDvSakMRVhIqFNMBiqZTjoK8QQZ868UvhtU5qAYp1Ipl0MREatJDnUmjckoyNE0siSRTuO+JK6TsJUk2i0Kw1GUAyhskcVaCtmyyKRwWRZnKTyVxR0KP2XxkUKzLOopxGQRoeDKwqGAwgz9F/ov9F/ov9B/of9C//3DcWThUIjIQlGol0UDhU+y+ErhriweUDgri/MUMmWRRWGdLDZQGCCLQRTsDklEbApwQxK3gGS6JDJojJbEOBpmnRzqTRpQJIdiIDpVDtOpGN+l8MOgAselcBLIJisZqBQ6UCCDQiDcMy6BeC9KkC+BAiCd2sK/1jRacJB/h4G4/YJ7L21qMCzBO2c40D/NuzOgQesG525aOoC0v3yr7AR6HBHhmhoJulzs8sxbAvrc5nPM3w463eXzy98Net3mcsvbDrpdHOGVWgL6HVHJqcqRoONON/l0sxPo2Trt8Mg5Y4G2h7/g0MvhoHP7UCt3Wg/boPm0gjhn4gVpEIC9ChVXVGEvCMiUEz848uNkCgSoMa24nhf1xdMNCFpzbPqtDh5EbmWMMyGg7UEbss4/+NKonCByVOPXB+ezNgyyIfT/f54CAFZQOCAuBwAAcDMAnQEqAAEAAT5tNJZHpCiiISoQ2TEQDYlnbvKe+bpz92VX5e4p1eBZtveevfPvxfnDvEu7ZflaVNmrdvftF7Hf6ml6smFuWwty2FuP8m2xve4TWrTC6tsfouSbxYBNgLykB2ZYCJWpIobn1u27UqMsEFWIpLIewUx1Fv4JQFbQyttvHj6Db30PLY6mz+ZIDb4+v6ROggf+LVIF2RUCRO0GAYrY+fNkZQuPWTZjQo0970AarGJSqMsOErYpyP20ScFnAvGW3ifSyyPX8oetZuWz86aseyNLmXs60tR0njhGHNzdbG0uYaGlLy+Ah2hMEPtn30/45ktTSYm5CAYItcM7krPdPRzjkwsbbwYGvP8HkbPUanOXQfbgyV+0TSwOjVankhalyawEhRHKnM1tU+herxncCNmj+f+/bcbEHPvgfUhohcuXGhor0pmz0WkGFgtdOzz4HvUmzBp7UIVYNsxr4BglurNfPddvSTsSMjiCTXufAW2V8MG78ZgM4ELUdem6++92H2hqVbT5JVtPklKb8157JsbpIONayYLDtXiFpgYwAP78rRAAAAB1/SMcA5wLiEXGbNt49R4eDcu2m1rEQGrzAdbo4dsKXKv/yctH1syofh0kuUXAIQMH+mq6rBu2Eef3bAPLsQwRMO17ZZ24cFuK004nHC0eSepByDQL5Zo/fwyp9vGU6+xB5e50KJ6zt2WTeZrLxBEFD8Zm6mSnau4HH872mB4/1tpgF96F/T2Rj9trtzXWNuarRuLcgYZAI0ZIWvPtBKGDgG7zBB+H2U/5oUI6ng9vzLO4Hwk1DPBUBWa67qCJMLq80fv6eVxMCzx/O4MielL0RXLA238avJo7IstXrLPAAne3Sc4fRV0tTF4JFEtAth+8PAIGYDD1JWp3n4Rq+pdL9gJK3mDmIN0tNCBlIRbUS7QsExuZkeHRnsz3nNT2Y3UzTF7jJGTIn4B/gnWnvwVhBFVwHwI7Ziei6QYyamyoKxV29tEzCPugtPB67dIlLLh1XodXxnXvbdkrtPGZd+e6gqVsXsalHnTiUTQ1bcnNSCkIl9UDmNmTXCU811vgoezV1Gvpx5fzl0IBTPmef/Du5hA+I6N+Gjl4cEiP1ireY6Sz2XJ2mxUNn/xTdD6nqBrCkMtfkW62TCfRX8hjGINLUthy9bA2iz6O6Bu2fjdwTCwJYMnZHntthEvIIvFdjOWh6rrQUkGeAto3YLVxTBewHzv7c+Lc0rcER+x2Rhp6TYbSbqpzq1ZhNJNzv70cPsXPSeie16ebzCEi8Vk1Ru8wV7cne5Go9xEHjTLQLG1lvle75EOavUCMO0xc8mouJ9UKAf8eAYLDys7zIbK8TaTH+PX+ahGCTxGKgpFT9EtHqY8H5QBaW8MP7aDWmChEjslDYc2v4+Q9RVfFeZ53NacNbjHOEPHFIP5M3vNqopKUTIKRKa3yPX87B4Z/x2VRls0c2eyl6ZV9bTFK+2ZSAPJJUTyVP98JtMu7EfiEJ8nJRW7nVzp/JfWwbNgTWa4llcjNDa77n3pVyLh0lHwe56giS3XR9/mBdsRquD89pAaXfmmqb3zFRVjlpQzS+O8RdzQlVvY6CMo5zKmerfqC1zmvnynviWwNPkSLSOo7YECm12XtYZDe2t/ogTRR95hBV20LRXQvX72YC4i+hlP2jRHaAi+p3WaiEKc76mRj1+4k9ya8wvaOHmDC3ujpbucq0YEuBoCmpSnO5hC3Usu/kCsSefzrxhLva4ljkotOU4HIyBbNw5sMO08C9IcYk0CEEuoufrcDbTGNXF/6dzzM40lWe2niu0lmulK0RDhlUIIJtcPzl6J0kV7dm2ud5KYaqd6MdCHyP2G5V8xHlDOrhnCzEpsdaDgwEzi0G45KRg0KjY92Z5NU5WGlMXyG2JztP6hDSS1MiV5v8yBVLq6u5DUW2RuMp8MZqGbTPkQgyUbgBQTQD/ULuSin1NseN68NcVKbLF0T+td1/XIP/DnTjTlzHvU29tpVrvNgW3YaI4/CnKXEOUmmfZtu5H2RvQ/VOKBYllTTNjrksKFpTd2PyFdFVSSTj70EEQ9v6MLMhUe6xvvKg/UUXCVjuMZ5WxY87Wgn034ZaAYXZQzgZnJRD/RN1tjhRZQZ3RRCndLCRwRz7Lg7Y06FTdZqfJ5NRq63zps/HdI34MoD/p6MaNWfFapFscxjj3WnWAZyHgrM3bay4wo+YuHiTSL9CSfzTeado3aVCUzPCeKDWdjAMfaw6VHf6AmyZUH1CPSZfJ4CmIgehv3Y8u1Cg7alRfaOK/KM4AUxPElCX+4hgJum1sByeBlGlh4PH/JVeqJDmzCo3oRgApdL834giGFzCmaw3HFktDTivXW/TFy9MlY21cIpcGvmwck29tQDnN4aFV+cr3BlH+T5vc2UZ28jpxCBSZD44RAY4Fhc/WuuBAiFwAAAAAAAAAA=" width="256" height="256" alt="Generated htop pin" decoding="async"><figcaption>htop</figcaption></figure>
+<figure><img src="data:image/webp;base64,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" width="256" height="256" alt="Generated Claude pin" decoding="async"><figcaption>Claude</figcaption></figure>
+<figure><img src="data:image/webp;base64,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" width="256" height="256" alt="Generated Logs pin" decoding="async"><figcaption>Logs</figcaption></figure>
+<figure><img class="sm" src="data:image/png;base64,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" width="32" height="32" alt="Rush pin at 32 pixels"><figcaption>32 px</figcaption></figure>
+<figure><img class="xs" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAAXNSR0IArs4c6QAAAHhlWElmTU0AKgAAAAgABAEaAAUAAAABAAAAPgEbAAUAAAABAAAARgEoAAMAAAABAAIAAIdpAAQAAAABAAAATgAAAAAAAABIAAAAAQAAAEgAAAABAAOgAQADAAAAAQABAACgAgAEAAAAAQAAABCgAwAEAAAAAQAAABAAAAAAB9pFxQAAAAlwSFlzAAALEwAACxMBAJqcGAAAAmxJREFUOBGtk8trU1EQxr/7CE0bsS4EaYNYX0TQ+BeIi6pIF3YnorjyQVu1IgZU1F0XihXBhYqCLhS6s6Ig7aIEseDCQi2BaEGysKKI0Nj2Jk1zz8uZia261sBJcs6c+e5vvpkL/OPH+zP/wOVc13w0t9No68NyxEIb57TWztJ/31nju3Bq4vHQ2HLeisCu/uMPy1F0DNbByTJwhtKMaSxr6Zz3Fi3J5IPp4Zc9LCICe3Nn9n/9/m1ULlAy6CLkh0Q4ic6s/S1IIGhNpfYUn43kQ1aJKlHWkLJHSUyQ3bQF106dhbIKc9UIT148x8j4uBA5ImLR+Uo1S7fzPguYOPatVtA6hjEKgXMImxM4fCGHR8NPcb7nJMIgEHxO5tLImIBzhSA2mgqnnaA6KBJZNEtYs7oVqVUtmKtF0HVFiRqOxB1ZKrTLAjqOKdYIsogmTEP6J44exLbtGQzeugOl4l8mcgkOfpAQ/6SEJaXIo4bbRnEpGrPRD1waGMTE5CQ6Nq9fSbZUAj/M6jozQwTYdatJWXOrHBYWF1D4ME2dsBgaGkZb+zo0sQdyx9A5EUAsaHjAT7WkyoENbe3YuDaNGzfvwiiNUukTrg/clpi0lA1kWr8xQkLgOc+Ku0SiyKiLfX040t0t2OINY3MSETAt3/U9T2ZVuhB6mKoRBXdiZuYzDvWfxpWr55Demka1UqUh5pHWGBt9heLUe6FJJpIF9mBllDv27b5XXaz1cpu4lKZEiOyODIIwEF/4bLr4EeXZMlLNzfe/vH3X+5cAbzJdnZ31ep1eJsdTw0dEzKS0ZOtMsilZKL1+k5fg//j6CWziqhGvP8gdAAAAAElFTkSuQmCC" width="16" height="16" alt="Rush pin at 16 pixels"><figcaption>16 px</figcaption></figure>
+
+    </div>
+    <p class="small prose">Generated pin icons, not the installed rush icon.</p>
+   </div>
+  </div>
+ </section>
+
+ <section id="agents" aria-labelledby="h-ctl">
+  <div class="duo flip">
+   <div>
+    <h2 id="h-ctl">Terminals for agents</h2>
+    <p class="prose">Run programs in headless terminals. Type into them, wait on them and read the screen back as text or JSON, with cells, colours and cursor.</p>
+    <p class="small prose"><a href="https://github.com/0xdeafcafe/terminal-decline/blob/main/docs/design/agent-api.md">ctl reference</a></p>
+   </div>
+   <div>
+<pre class="term sel agent-term"><span class="line"><span class="g">decline</span> ctl spawn <span class="bl">--name</span> sh <span class="bl">--shell</span></span><span class="line"><span class="g">decline</span> ctl send sh <span class="bl">--text</span> <span class="y">"make test"</span> <span class="bl">--key</span> enter</span><span class="line"><span class="g">decline</span> ctl wait-for sh <span class="bl">--command</span> <span class="bl">--timeout</span> 600000</span><span class="line"><span class="g">decline</span> ctl screen sh <span class="bl">--json</span></span><span class="line"><span class="g">decline</span> ctl kill sh</span></pre>
+   </div>
+  </div>
+  <p class="prose also">Tab completion explains flags and subcommands from man pages and <code>--help</code>. Completion as you type, output colouring and copy on select are opt-in.</p>
+  <div class="comp-term sel narrow" role="group" aria-label="git fetch completions, transcribed from a screenshot of Decline"><span class="line">git fetch -</span><div class="cmp"><span class="row"><span class="bl">--all</span><span class="d">Fetch all remotes, except for the ones that have…</span></span><span class="row"><span class="bl">--no-all</span><span class="d">Fetch all remotes, except for the ones that have…</span></span><span class="row"><span class="bl">-a</span><span class="d">Append ref names and object names of fetched refs…</span></span><span class="row"><span class="bl">--append</span><span class="d">Append ref names and object names of fetched refs…</span></span><span class="row"><span class="bl">--atomic</span><span class="d">Use an atomic transaction to update local refs</span></span><span class="row on"><span class="bl">--depth</span><span class="d">Limit fetching to the specified number of commits…</span></span><span class="row"><span class="bl">--deepen</span><span class="d">Similar to --depth, except it specifies the number…</span></span><span class="row"><span class="bl">--shallow-since</span><span class="d">Deepen or shorten the history of a shallow…</span></span></div></div>
+ </section>
+
+ <section id="install" aria-labelledby="h-inst" class="closing">
+  <svg class="slope" xmlns="http://www.w3.org/2000/svg" viewBox="248 354 536 316" role="img" aria-label="The Slope: a line drops, then rests level"><path d="M294 400 L484 610 Q497 624 516 624 H738" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></svg>
+  <div>
+   <h2 id="h-inst">Install</h2>
+   <p class="prose">Releases are for Apple Silicon and need macOS 14 Sonoma or later.</p>
+   <code class="cmdline sel">brew install --cask 0xdeafcafe/tap/terminal-decline</code>
+   <p class="small prose">Installs Terminal Decline.app and the command as <code>terminal-decline</code> and <code>decline</code>.</p>
+   <ul class="links">
+    <li><a href="https://github.com/0xdeafcafe/terminal-decline#install">Build from source</a></li>
+    <li><a href="https://github.com/0xdeafcafe/terminal-decline/blob/main/DESIGN.md">Technical notes</a></li>
+    <li><a href="https://github.com/0xdeafcafe/terminal-decline/blob/main/CHANGELOG.md">Changelog</a></li>
+   </ul>
+  </div>
+ </section>
+</div>
+<footer><div class="wrap">MIT licence. <a href="https://github.com/0xdeafcafe/terminal-decline">Source on GitHub</a></div></footer>
+
+<script>
+(function(){
+  var b=document.getElementById('copy'),c=document.getElementById('brew');
+  if(!b||!c)return;
+  var t;
+  function done(ok){b.textContent=ok?'Copied':'Press ⌘C';clearTimeout(t);t=setTimeout(function(){b.textContent='Copy'},1800)}
+  b.addEventListener('click',function(){
+    var s=c.textContent.trim();
+    function fallback(){
+      var r=document.createRange();r.selectNodeContents(c);
+      var sel=getSelection();sel.removeAllRanges();sel.addRange(r);
+      var ok=false;try{ok=document.execCommand('copy')}catch(e){}
+      done(ok)
+    }
+    if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(s).then(function(){done(true)},fallback)}else{fallback()}
+  });
+})();
+</script>
+</body>
+</html>

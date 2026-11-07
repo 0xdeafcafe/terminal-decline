@@ -1,12 +1,13 @@
 # Terminal Decline website
 
-Alex selected Long rest. The Astro implementation uses TSX components
-rendered at build time. The only browser script copies the visible install
-command; no framework runtime ships. The hero names the product first and renders a real captured Decline
-comparison screen as selectable HTML. Completion rows are transcribed from
-the original screenshot and reflow on phones. All terminal views are text;
-window furniture is excluded from selection. See DESIGN.md for evidence and validation, BRIEF.md for the claims,
-and ANTI-SLOP.md for the design checklist.
+Alex selected Screen from round two. The Astro implementation uses TSX
+components rendered at build time. The only browser script copies the
+visible install command; no framework runtime ships. The headline is
+“A peppy terminal for macOS.” All terminal evidence is coloured HTML text,
+with a single comparison pane on phones and split panes on desktop.
+
+See DESIGN.md for provenance and validation, BRIEF.md for product claims,
+and concepts/round-two/screen for the selected concept and cross-review.
 
 ## Local work
 
@@ -21,7 +22,8 @@ npm run preview
 ```
 
 Run these inside `site/`. `npm run dev` starts the development server.
-Build assets are generated losslessly from the original images in the repo.
+Pin assets are generated from the original repo images, resized where
+appropriate and encoded as lossless WebP.
 Neither generated images nor `dist/` are committed. `public/CNAME` is
 `decline.forbes.red`.
 

@@ -2,13 +2,13 @@ import TerminalPreview from './TerminalPreview';
 
 export default function Hero() {
   return (
-    <section className="wrap open" aria-labelledby="h-open">
-      <div className="text">
-        <h1 id="h-open">A terminal<br />for macOS.</h1>
-        <p className="lead">26 MB at idle. 100 MB through <code>cat</code> in 0.58 s.</p>
-        <p className="hero-features"><a href="#h-pin">Pin commands to the Dock.</a><br /><a href="#h-ctl">Give agents their own terminals.</a></p>
+    <section className="plate hero" aria-labelledby="h-open">
+      <div className="wrap">
+        <h1 id="h-open">A peppy terminal for macOS.</h1>
+        <p className="lead">26 MB idle. 0.58 s to <code>cat</code> 100 MB.</p>
+        <p className="lead-sub">Measured against Ghostty and kitty on an M1 Max, 2 November 2026, medians of five runs.</p>
+        <TerminalPreview />
       </div>
-      <TerminalPreview />
     </section>
   );
 }

@@ -1,27 +1,26 @@
+import { pinCommand } from '../data/commands';
+
+const pins = [
+  { name: 'rush', file: 'rush', size: 256 }, { name: 'htop', file: 'htop', size: 256 },
+  { name: 'Claude', file: 'claude', size: 256 }, { name: 'Logs', file: 'logs', size: 256 },
+  { name: '32 px', file: 'rush-32', size: 32 }, { name: '16 px', file: 'rush-16', size: 16 },
+];
 export default function Pins() {
   return (
-    <section className="band mintband" aria-labelledby="h-pin">
-      <div className="wrap pins">
+    <section id="pins" aria-labelledby="h-pin">
+      <div className="duo">
         <div>
-          <h2 id="h-pin">Pin a command to the Dock.</h2>
-          <p className="after-head">Open rush in its own window, with its own settings.</p>
-          <pre className="pin-command">decline pin rush --dock</pre>
-          <p className="small muted">Requires <a href="https://github.com/0xdeafcafe/rush">rush</a>. <a href="https://github.com/0xdeafcafe/terminal-decline#pin-a-program-to-the-dock">Pin options</a>.</p>
+          <h2 id="h-pin">Pin a command to the Dock</h2>
+          <p className="prose">A pin gives a command its own Mac app, with its own icon, windows and settings. It uses the program’s own icon when there is one, otherwise it draws one.</p>
+          <code className="cmdline sel">{pinCommand}</code>
+          <p className="small prose">Needs <a href="https://github.com/0xdeafcafe/rush">rush</a> installed. <a href="https://github.com/0xdeafcafe/terminal-decline#pin-a-program-to-the-dock">Pin options</a>.</p>
         </div>
         <div>
-          <div className="pin-big">
-            <img className="r" src="/images/rush.webp" width={512} height={512} alt="Generated Rush pin: an R above the Slope" loading="lazy" decoding="async" />
-            <div className="pin-sizes small">
-              <div><img src="/images/rush-32.webp" width={32} height={32} alt="Rush pin at 32 pixels" loading="lazy" decoding="async" /><span>32 px</span></div>
-              <div><img className="s16" src="/images/rush-16.webp" width={16} height={16} alt="Rush pin at 16 pixels" loading="lazy" decoding="async" /><span>16 px</span></div>
-            </div>
-          </div>
-          <div className="pin-row pin-samples">
-            <figure><img src="/images/htop.webp" width={512} height={512} alt="Generated htop pin" loading="lazy" decoding="async" /><figcaption className="small">htop</figcaption></figure>
-            <figure><img src="/images/claude.webp" width={512} height={512} alt="Generated Claude pin" loading="lazy" decoding="async" /><figcaption className="small">Claude</figcaption></figure>
-            <figure><img src="/images/logs.webp" width={512} height={512} alt="Generated Logs pin" loading="lazy" decoding="async" /><figcaption className="small">Logs</figcaption></figure>
-          </div>
-          <p className="small muted pin-caption">Generated pin icons.</p>
+          <div className="pinrow">{pins.map(pin => <figure key={pin.file}>
+            <img src={`/images/${pin.file}.webp`} width={pin.size} height={pin.size} className={pin.size === 32 ? 'sm' : pin.size === 16 ? 'xs' : undefined} alt={pin.size < 100 ? `Rush pin at ${pin.size} pixels` : `Generated ${pin.name} pin`} loading="lazy" decoding="async" />
+            <figcaption>{pin.name}</figcaption>
+          </figure>)}</div>
+          <p className="small prose">Generated pin icons, not the installed rush icon.</p>
         </div>
       </div>
     </section>

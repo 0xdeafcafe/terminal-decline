@@ -96,3 +96,12 @@ footprint and cat time. Keep the install command visible in the header.
 Render terminal views as coloured HTML text, with selectable content and
 unselectable window furniture. Preserve real capture/transcription sources
 in DESIGN.md. Pin artwork remains imagery.
+
+## Selected round-two implementation
+
+Alex chose Screen (1c), then explicitly changed the headline to
+“A peppy terminal for macOS.” Keep Screen’s wide window and page-navigation
+tabs, its compact single-pane phone opening and the visible install command.
+All terminal evidence stays coloured HTML at 13px/1.3, selectable separately
+from chrome. The selected source and cross-review are in
+concepts/round-two/screen. New publication requires approval.

@@ -34,7 +34,7 @@ and the list and colours are tested as below (§12). bash and fish get
 | Grey text after the cursor | Kept: the top choice shows grey after the cursor, Right arrow at the end of the line takes it |
 | History order | Yes: commands ordered by how often they appear in the shell's history file |
 | On by default | On for everyone (every setting in §10 defaults to true), except the list opening as you type (`completion_as_you_type`) and Enter putting a choice in (`completion_enter_puts_in`), both opt-in since 1 Nov 2026 at Alex's ask: by default the list shows zsh's matches on Tab, described from man pages where zsh gave no description |
-| Enter with the list open | Runs the line as typed. With `completion_enter_puts_in` (off by default, since Enter is the shell's), a keyboard choice lets Enter insert instead. The pending 8 November revision stops hover from changing Enter and highlights the first choice when Tab or Show Completions opens the list (§9) |
+| Enter with the list open | Runs the line as typed. With `completion_enter_puts_in` (off by default, since Enter is the shell's), a keyboard choice lets Enter insert instead. The 8 November revision stops hover from changing Enter and highlights the first choice when Tab or Show Completions opens the list (§9) |
 
 The find bar stays the only AppKit UI of our own; the list is drawn like
 the cursor and the selection, so it costs no view, layer or backing
@@ -874,7 +874,7 @@ Measured 1 Nov 2026 (load 5–8, 17 during the latency run):
 Not yet: the `[keybind]` actions for the list's keys,
 bash and fish. The frame and latency benchmarks are still to run.
 
-## Dropdown interaction revision (8 November 2026, pending CI)
+## Dropdown interaction revision (8 November 2026)
 
 Alex found the completion keys confusing and the list visually noisy.
 The revision gives deliberately opened lists visible keyboard focus,
@@ -889,5 +889,5 @@ ordinary words. Full suggestion names remain intact for insertion.
 Regression tests cover boundary navigation, Enter defaults and opt-in,
 mouse interference, narrow panes, stable width while scrolling and empty
 shell matches. Existing tests cover filtering, folder continuation and
-passive-list history behaviour. Local formatting is checked; compilation
-and tests must run on GitHub under the repository's CI-only rule.
+passive-list history behaviour. Compilation and tests run on GitHub
+under the repository's CI-only rule.

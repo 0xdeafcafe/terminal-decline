@@ -1,8 +1,9 @@
 //! What the renderer draws around the commands already run
 //! (docs/design/command-marks.md): their command lines coloured as they
-//! were while typed, a faint line above each prompt, a worked/failed
-//! mark with the time taken at the right of each finished command's
-//! line, and (as settings) plain output coloured ([`super::output`]) and
+//! were while typed, a thin bar down the left edge of each command
+//! run (green when it worked, red when it failed, dim while it runs), a
+//! worked/failed mark with the time taken at the right of each finished
+//! command's line, and (as settings) plain output coloured ([`super::output`]) and
 //! `← cause` beside the line of a failed command's output that linetag's
 //! hand-weighted net reads as why it failed.
 //! All of it goes into the snapshot; the cells are never changed.
@@ -20,12 +21,12 @@ use std::sync::{Arc, LazyLock};
 use linetag::log::Log;
 use linetag::model::Tagger;
 
-use term_core::{Color, CommandMark, Content, Finished, Ink, Snapshot, Terminal, ViewCommand};
+use term_core::{Color, CommandMark, Content, Finished, Ink, RunBar, RunState, Snapshot, Terminal, ViewCommand};
 
 use super::{ink, lex, output};
 
 /// Which of it is on: `highlight_command_line` (past command lines),
-/// `command_marks` (the lines and marks), `colour_output` and
+/// `command_marks` (the bars and marks), `colour_output` and
 /// `mark_failure_cause`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub struct Settings {
@@ -70,7 +71,7 @@ pub struct Marks {
     /// known yet: the past lines are coloured again next frame.
     past_pending: bool,
     output: Vec<Ink>,
-    separators: Vec<u16>,
+    bars: Vec<RunBar>,
     marks: Vec<CommandMark>,
     lexed: HashMap<u32, Arc<lex::Line>>,
     rows: HashMap<u64, Vec<(Range<u16>, u8)>>,
@@ -82,7 +83,7 @@ pub struct Marks {
 }
 
 impl Marks {
-    /// Put this frame's colours, lines and marks into `snap`, after the
+    /// Put this frame's colours, bars and marks into `snap`, after the
     /// snapshot was taken, with the terminal still locked. `known` says
     /// whether a command runs something, as for the line being typed.
     pub fn update(&mut self, t: &Terminal, s: Settings, known: &dyn Fn(&str) -> Option<bool>, snap: &mut Snapshot) {
@@ -94,7 +95,7 @@ impl Marks {
         if self.key != Some(key) {
             self.key = Some(key);
             t.view_commands(&mut self.commands);
-            self.marks_and_lines(t, s);
+            self.marks_and_bars(t, s, snap.cursor.at);
             self.cause_marks(t, s);
             self.output_ink(t, s);
             self.past_ink(t, s, known);
@@ -107,7 +108,7 @@ impl Marks {
             // The renderer finds a row's colours by row.
             snap.ink.sort_by_key(|i| i.row);
         }
-        snap.separators.extend_from_slice(&self.separators);
+        snap.run_bars.extend_from_slice(&self.bars);
         snap.command_marks.extend(self.marks.iter().cloned());
     }
 
@@ -133,23 +134,19 @@ impl Marks {
         }
     }
 
-    /// The faint line above each prompt but the top row's and the pane's
-    /// first (under a restored or welcome line, it only underlined that),
-    /// and the mark at the right of each finished command's line where it
-    /// is blank.
-    fn marks_and_lines(&mut self, t: &Terminal, s: Settings) {
-        self.separators.clear();
+    /// The bar down the left edge of each command run in view
+    /// ([`run_bar`]), and the mark at the right of each finished
+    /// command's line where it is blank. `cursor` is the snapshot's, in
+    /// view rows.
+    fn marks_and_bars(&mut self, t: &Terminal, s: Settings, cursor: Option<(u16, u16)>) {
+        self.bars.clear();
         self.marks.clear();
         if !s.command_marks {
             return;
         }
         let cols = t.cols();
-        for c in &self.commands {
-            if let Some(r) = c.prompt_row.filter(|&r| r > 0 && !c.first)
-                && self.separators.last() != Some(&r)
-            {
-                self.separators.push(r);
-            }
+        for (i, c) in self.commands.iter().enumerate() {
+            self.bars.extend(run_bar(t, c, self.commands.get(i + 1), cursor));
             let (Some(f), Some((row, _))) = (c.finished, c.input) else {
                 continue;
             };
@@ -309,6 +306,52 @@ impl Marks {
     }
 }
 
+/// The bar of command run `c` (`next` is the run after it in view):
+/// from its prompt's row (the view's top when the prompt has scrolled
+/// above it) to the row before the next prompt; for the last run in
+/// view, to the last row of its output, or while it runs (or is still
+/// being typed) to the cursor's row, or the row above when the cursor
+/// stands at the start of a blank row. Only runs with a prompt mark are
+/// in `commands`: what's written before the shell's first prompt (the
+/// welcome or "restored from" line) gets no bar.
+fn run_bar(t: &Terminal, c: &ViewCommand, next: Option<&ViewCommand>, cursor: Option<(u16, u16)>) -> Option<RunBar> {
+    let lines = t.lines().min(u16::MAX as usize) as u16;
+    let start = c.prompt_row.unwrap_or(0);
+    let state = match c.finished {
+        Some(Finished { status: Some(0), .. }) => RunState::Worked,
+        Some(Finished { status: Some(_), .. }) => RunState::Failed,
+        Some(_) => RunState::Unknown,
+        None if c.id.is_some() => RunState::Running,
+        None => RunState::Unknown,
+    };
+    let end = match next.and_then(|n| n.prompt_row) {
+        Some(r) => r,
+        None => {
+            // The output's end is the cell after it: the row before when
+            // that's a row's first.
+            let output = c.output.map(|(_, (r, col))| if col == 0 { r.saturating_sub(1) } else { r });
+            let own = match cursor {
+                Some((r, col)) if c.finished.is_none() && r >= start && r < lines => {
+                    if col > 0 || !blank(t, r, 0) {
+                        Some(r)
+                    } else {
+                        r.checked_sub(1)
+                    }
+                }
+                _ => output,
+            };
+            let last = [Some(start), c.input.map(|(r, _)| r), own]
+                .into_iter()
+                .flatten()
+                .max()
+                .unwrap_or(start);
+            last.saturating_add(1)
+        }
+    }
+    .min(lines);
+    (start < end).then_some(RunBar { rows: start..end, state })
+}
+
 /// Whether view row `row` is blank from column `from` to its end: no
 /// text, colour or attributes, so a mark there hides nothing.
 fn blank(t: &Terminal, row: u16, from: usize) -> bool {
@@ -401,8 +444,11 @@ mod tests {
         t.advance(format!("\x1b]133;D;{status}\x07").as_bytes());
     }
 
-    fn frame(t: &Term, s: Settings) -> Snapshot {
+    /// The snapshot (for its cursor) and what `Marks` puts in it.
+    fn frame(t: &mut Term, s: Settings) -> Snapshot {
         let mut snap = Snapshot::default();
+        t.state.snapshot(&mut snap, |_| false);
+        snap.ink.clear();
         let mut m = Marks::default();
         m.update(&t.state, s, &|name| Some(name == "ls"), &mut snap);
         snap
@@ -422,7 +468,7 @@ mod tests {
         run(&mut t, "ls -l \"a\"", "ls -l \"a\"", "x\r\n", 0, 10);
         run(&mut t, "nope $X", "nope $X", "", 127, 10);
         t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07");
-        let snap = frame(&t, ON);
+        let snap = frame(&mut t, ON);
         // `$ ` takes columns 0 and 1.
         assert_eq!(inks(&snap, 0), [(2..4, 2), (5..7, 4), (8..11, 3)]);
         assert_eq!(inks(&snap, 2), [(2..6, 1), (7..9, 6)]);
@@ -430,7 +476,7 @@ mod tests {
             past_commands: false,
             ..ON
         };
-        assert!(frame(&t, off).ink.iter().all(|i| i.row != 0 && i.row != 2));
+        assert!(frame(&mut t, off).ink.iter().all(|i| i.row != 0 && i.row != 2));
     }
 
     #[test]
@@ -438,33 +484,115 @@ mod tests {
         let mut t = term();
         // The shell sent another text than the screen shows from `-`.
         run(&mut t, "ls -l -a", "ls -x \"q\"", "", 0, 10);
-        let snap = frame(&t, ON);
+        let snap = frame(&mut t, ON);
         // `ls` and the `-` they share; nothing after the first mismatch.
         assert_eq!(inks(&snap, 0), [(2..4, 2), (5..6, 4)]);
         // Coloured by the shell: kept.
         let mut t = term();
         run(&mut t, "\x1b[31mls\x1b[0m -l", "ls -l", "", 0, 10);
-        assert_eq!(inks(&frame(&t, ON), 0), [(5..7, 4)]);
+        assert_eq!(inks(&frame(&mut t, ON), 0), [(5..7, 4)]);
     }
 
     #[test]
-    fn separators_and_marks() {
+    fn marks_at_the_right() {
         let mut t = term();
         run(&mut t, "ls", "ls", "", 0, 1_200);
         run(&mut t, "false", "false", "", 2, 300);
         run(&mut t, "sleep 70", "sleep 70", "", 0, 70_000);
         t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07");
-        let snap = frame(&t, ON);
-        // Prompts on rows 0, 1, 2 and 3; not the top row.
-        assert_eq!(snap.separators, [1, 2, 3]);
+        let snap = frame(&mut t, ON);
         let marks: Vec<_> = snap.command_marks.iter().map(|m| (m.row, m.col, m.text.as_str(), m.ok)).collect();
         assert_eq!(marks, [(0, 23, "✓ 1.2s", true), (1, 26, "✗ 2", false), (2, 22, "✓ 1m10s", true)]);
         let off = Settings {
             command_marks: false,
             ..ON
         };
-        let snap = frame(&t, off);
-        assert!(snap.separators.is_empty() && snap.command_marks.is_empty());
+        let snap = frame(&mut t, off);
+        assert!(snap.run_bars.is_empty() && snap.command_marks.is_empty());
+    }
+
+    /// A command run with zsh's marks, as bytes: the prompt, the line,
+    /// C, its output and D with `status` (none: a D without one).
+    fn cmd(typed: &str, out: &str, status: Option<u32>) -> String {
+        let d = status.map(|s| format!(";{s}")).unwrap_or_default();
+        format!("\x1b]133;A\x07$ \x1b]133;B\x07{typed}\r\n\x1b]133;C\x07{out}\x1b]133;D{d}\x07")
+    }
+
+    const PROMPT: &str = "\x1b]133;A\x07$ \x1b]133;B\x07";
+
+    /// The bar down the left of each run: from its prompt to the last
+    /// row of its output, up to the next prompt, coloured by how it
+    /// ended.
+    #[test]
+    fn run_bars() {
+        use RunState::{Failed, Running, Unknown, Worked};
+        let ten: String = (0..10).map(|i| format!("{i}\r\n")).collect();
+        type Case = (&'static str, String, Vec<(Range<u16>, RunState)>);
+        let cases: Vec<Case> = vec![
+            // `$ ls`, `a`, then the prompt being typed (not run yet).
+            (
+                "worked",
+                cmd("ls", "a\r\n", Some(0)) + PROMPT,
+                vec![(0..2, Worked), (2..3, Unknown)],
+            ),
+            ("failed", cmd("false", "", Some(1)) + PROMPT, vec![(0..1, Failed), (1..2, Unknown)]),
+            // To the cursor's row, or the row above when it's at the
+            // start of a blank one.
+            ("running", format!("{PROMPT}sleep 9\r\n\x1b]133;C\x07x\r\n"), vec![(0..2, Running)]),
+            (
+                "running, writing",
+                format!("{PROMPT}cat\r\n\x1b]133;C\x07x\r\nhalf"),
+                vec![(0..3, Running)],
+            ),
+            (
+                "running, no output",
+                format!("{PROMPT}sleep 9\r\n\x1b]133;C\x07"),
+                vec![(0..1, Running)],
+            ),
+            // A D mark with no exit status.
+            ("unknown", cmd("ls", "a\r\n", None) + PROMPT, vec![(0..2, Unknown), (2..3, Unknown)]),
+            // What comes before the shell's first prompt has no prompt
+            // mark: no bar.
+            (
+                "first run",
+                "\x1b[2mrestored from Mon 2 Nov 13:24\x1b[0m\r\n".to_string() + &cmd("ls", "", Some(0)) + PROMPT,
+                vec![(1..2, Worked), (2..3, Unknown)],
+            ),
+            // Its prompt and first output rows scrolled off the top.
+            (
+                "partly out of view",
+                cmd("seq", &ten, Some(0)) + PROMPT,
+                vec![(0..7, Worked), (7..8, Unknown)],
+            ),
+            (
+                "back to back",
+                cmd("true", "", Some(0)) + &cmd("false", "", Some(1)) + &cmd("true", "", Some(0)) + PROMPT,
+                vec![(0..1, Worked), (1..2, Failed), (2..3, Worked), (3..4, Unknown)],
+            ),
+            // No shell integration: no marks, no bars.
+            ("no marks", "$ ls\r\na\r\n$ ".to_string(), vec![]),
+        ];
+        for (name, bytes, want) in cases {
+            let mut t = term();
+            t.advance(bytes.as_bytes());
+            let got: Vec<_> = frame(&mut t, ON).run_bars.iter().map(|b| (b.rows.clone(), b.state)).collect();
+            assert_eq!(got, want, "{name}");
+        }
+    }
+
+    /// Scrolled back into history, the bars follow the view; the run
+    /// below the view's bottom isn't drawn.
+    #[test]
+    fn run_bars_scrolled_back() {
+        let mut t = term();
+        let ten: String = (0..10).map(|i| format!("{i}\r\n")).collect();
+        t.advance((cmd("seq", &ten, Some(0)) + &cmd("false", "", Some(1)) + PROMPT).as_bytes());
+        // Rows 0 to 12: `$ seq`, ten rows, `$ false`, `$ `; the view
+        // shows 5 to 12. Back 4: rows 1 to 8, the first run's output,
+        // its prompt above the view and the next one below it.
+        t.state.scroll_view(4);
+        let got: Vec<_> = frame(&mut t, ON).run_bars.iter().map(|b| (b.rows.clone(), b.state)).collect();
+        assert_eq!(got, [(0..8, RunState::Worked)]);
     }
 
     #[test]
@@ -477,8 +605,8 @@ mod tests {
         run(&mut t, "cat log", "cat log", out, 0, 10);
         t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07");
         let on = Settings { failure_cause: true, ..ON };
-        let causes = |s| -> Vec<(u16, u16)> {
-            frame(&t, s)
+        let mut causes = |s| -> Vec<(u16, u16)> {
+            frame(&mut t, s)
                 .command_marks
                 .iter()
                 .filter(|m| m.text == CAUSE)
@@ -497,29 +625,16 @@ mod tests {
         assert_eq!(causes(alone), [(2, 52)]);
     }
 
-    /// Under a line written before the shell's first prompt (restored
-    /// from, the welcome line) there's no command to mark off: no line
-    /// there, only between commands.
-    #[test]
-    fn no_line_above_the_first_prompt() {
-        let mut t = term();
-        t.advance(b"\x1b[2mrestored from Mon 2 Nov 13:24\x1b[0m\r\n");
-        run(&mut t, "ls", "ls", "", 0, 10);
-        t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07");
-        // Prompts on rows 1 and 2: only the second is marked off.
-        assert_eq!(frame(&t, ON).separators, [2]);
-    }
-
     #[test]
     fn a_mark_only_over_blank_cells() {
         let mut t = term();
         // A right prompt where the mark would go.
         run(&mut t, "ls\x1b[26G[rp]", "ls", "", 0, 10);
-        assert!(frame(&t, ON).command_marks.is_empty());
+        assert!(frame(&mut t, ON).command_marks.is_empty());
         // Not finished: no mark.
         let mut t = term();
         t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07ls\r\n\x1b]133;C\x07");
-        assert!(frame(&t, ON).command_marks.is_empty());
+        assert!(frame(&mut t, ON).command_marks.is_empty());
     }
 
     #[test]
@@ -527,7 +642,7 @@ mod tests {
         let mut t = term();
         run(&mut t, "git log", "git log", "3f2a9c1 ok\r\n\x1b[31merror\x1b[0m 12%\r\n", 0, 10);
         t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07echo 1234567");
-        let snap = frame(&t, ON);
+        let snap = frame(&mut t, ON);
         assert_eq!(inks(&snap, 1), [(0..7, 3), (8..10, 2)]);
         // `error` is the program's red: left; `12%` coloured.
         assert_eq!(inks(&snap, 2), [(6..9, 6)]);
@@ -537,7 +652,7 @@ mod tests {
             colour_output: false,
             ..ON
         };
-        assert!(frame(&t, off).ink.iter().all(|i| i.row == 0));
+        assert!(frame(&mut t, off).ink.iter().all(|i| i.row == 0));
     }
 
     #[test]
@@ -546,7 +661,7 @@ mod tests {
         run(&mut t, "ls", "ls", "ok 12\r\n", 0, 2_000);
         t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07vim\r\n\x1b]133;C\x07\x1b[?1049h");
         t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07ls 12 ok\r\n");
-        let snap = frame(&t, ON);
-        assert!(snap.ink.is_empty() && snap.separators.is_empty() && snap.command_marks.is_empty());
+        let snap = frame(&mut t, ON);
+        assert!(snap.ink.is_empty() && snap.run_bars.is_empty() && snap.command_marks.is_empty());
     }
 }

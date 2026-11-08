@@ -166,6 +166,7 @@ fn main() {
         cursor_on: true,
         focused: true,
         preedit: None,
+        scale: 2.0,
     };
 
     for (name, cols, lines, coloured) in [

@@ -117,6 +117,27 @@ pub struct CommandMark {
     pub ok: bool,
 }
 
+/// How a command run ended, for its bar down the left edge: `Worked`
+/// (exit 0) green, `Failed` red, `Running` and `Unknown` (no exit
+/// status, or not run yet) dim.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum RunState {
+    Running,
+    Worked,
+    Failed,
+    #[default]
+    Unknown,
+}
+
+/// The bar down the left edge of a command run (command-marks design):
+/// the view rows from its prompt to the last row of its output, put in
+/// the snapshot by the app.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct RunBar {
+    pub rows: std::ops::Range<u16>,
+    pub state: RunState,
+}
+
 /// Each view row's pieces of stored lines, in order.
 struct ViewMap {
     pieces: Vec<(u16, Piece)>,

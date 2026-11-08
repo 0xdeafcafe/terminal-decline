@@ -31,6 +31,7 @@ pub use style_table::StyleStats;
 pub use term::SearchCount;
 pub use term::{
     Command, CommandMark, Cursor, CursorShape, DynamicColor, Finished, Keymap, LineReport, LinkValue, Modes, MouseMode, Notification,
-    Panel, PathAt, Point, Progress, Selection, SelectionKind, ShellEnv, ShellMatches, TOKEN_LEN, Term, Terminal, ViewCommand, ViewTop,
+    Panel, PathAt, Point, Progress, RunBar, RunState, Selection, SelectionKind, ShellEnv, ShellMatches, TOKEN_LEN, Term, Terminal,
+    ViewCommand, ViewTop,
 };
 pub use term::{Ghost, Highlight, HighlightKind, Ink, Popup, PopupItem, RowFlags, RowKey, ScreenId, SnapCursor, SnapRow, Snapshot};

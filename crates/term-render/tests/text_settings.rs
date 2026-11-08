@@ -68,6 +68,7 @@ fn draw(edit: impl FnOnce(&mut FontConfig), theme: &Theme, text: &str) -> (Pixel
         cursor_on: true,
         focused: true,
         preedit: None,
+        scale: 2.0,
     };
     renderer.prepare(&mut t.state, &input);
     let (width, height) = (4 * m.cell_width as usize, m.cell_height as usize);

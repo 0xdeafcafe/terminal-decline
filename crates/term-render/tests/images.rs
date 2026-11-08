@@ -134,6 +134,7 @@ impl Setup {
             cursor_on: true,
             focused: true,
             preedit: None,
+            scale: 2.0,
         };
         let mut pane = PaneRender::new();
         self.renderer.build_pane_with(&mut pane, &mut t.state, &input, inject);

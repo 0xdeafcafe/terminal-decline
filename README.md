@@ -180,7 +180,8 @@ terminal-decline fonts --mono  # the installed monospaced fonts (see docs/fonts.
   and subcommand does from its man page or `--help`; grey text after the
   cursor shows the rest of the first, Right takes it; Ctrl+Space opens
   the list at once, and it can open as you type (`completion_as_you_type`).
-- **Commands**: a faint line between commands with a ✓ or ✗ and how
+- **Commands**: a thin bar down the left of each command and its
+  output, green when it worked and red when it failed, a ✓ or ✗ and how
   long each took, the command line coloured as you type, plain output
   coloured if you like (`colour_output`), and `← cause` beside the line
   that says why a command failed (`mark_failure_cause`, read by a small

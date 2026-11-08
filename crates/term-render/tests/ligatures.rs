@@ -113,6 +113,7 @@ fn input<'a>(theme: &'a Theme, metrics: Metrics, preedit: Option<&'a str>) -> Fr
         cursor_on: true,
         focused: true,
         preedit,
+        scale: 2.0,
     }
 }
 
@@ -427,6 +428,7 @@ fn ligatures_draw_like_whole_glyphs_on_the_grid() {
         cursor_on: true,
         focused: true,
         preedit: None,
+        scale: 2.0,
     };
     renderer.prepare(&mut t.state, &input);
     let desc = unsafe {

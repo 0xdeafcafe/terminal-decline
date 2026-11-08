@@ -886,6 +886,9 @@ pub struct FrameInput<'a> {
     pub focused: bool,
     /// Text being composed by an input method, drawn at the cursor.
     pub preedit: Option<&'a str>,
+    /// Device pixels per point (the backing scale factor), for what is
+    /// sized in points rather than by the cells: the run bars.
+    pub scale: f64,
 }
 
 /// One frame's instances, and what building them keeps between frames
@@ -1306,6 +1309,7 @@ impl Frame {
             cursor_on,
             focused,
             preedit,
+            ..
         } = *input;
         let (cw, ch) = (m.cell_width as i32, m.cell_height as i32);
         let (px, py) = (padding.0 as i32, padding.1 as i32);
@@ -1479,22 +1483,17 @@ impl Frame {
                 }
             }
         }
-        for &line in &snap.failed {
-            over.push(failed_mark(line as usize, input));
+        // The bar down the left of each command run (command-marks
+        // design); a failed prompt's own mark only where no bar is.
+        for bar in &snap.run_bars {
+            if let Some(r) = run_bar(bar, snap.lines, input) {
+                over.push(r);
+            }
         }
-        // The faint line above each prompt (command-marks design).
-        // About a point high: a device pixel is half a point on a Retina
-        // screen, too thin to see on a dark theme.
-        let rule = theme.paint(slot::FOREGROUND).alpha(SEPARATOR_ALPHA);
-        let thick = (ch / 16).max(1) as u16;
-        for &line in snap.separators.iter().filter(|&&l| l < snap.lines) {
-            over.push(RectInstance::painted(
-                s16(px),
-                s16(row_y(line as usize)),
-                (cols as i32 * cw) as u16,
-                thick,
-                rule,
-            ));
+        for &line in &snap.failed {
+            if !snap.run_bars.iter().any(|b| b.rows.contains(&line)) {
+                over.push(failed_mark(line as usize, input));
+            }
         }
         kept.over = out.put(*over == kept.over_rects, Some(kept.over), over);
         std::mem::swap(over, &mut kept.over_rects);
@@ -1659,6 +1658,7 @@ impl Frame {
             cursor_on,
             focused,
             preedit,
+            ..
         } = *input;
         let ch = m.cell_height as i32;
         let (px, py) = (padding.0 as i32, padding.1 as i32);
@@ -1752,6 +1752,37 @@ pub(crate) fn failed_mark(line: usize, input: &FrameInput) -> RectInstance {
     let x = if pad > w { (pad - w) / 2 } else { 0 };
     let y = input.padding.1 as i32 + line as i32 * m.cell_height as i32;
     RectInstance::painted(s16(x as i32), s16(y), w as u16, m.cell_height as u16, input.theme.paint(1))
+}
+
+/// The bar down the left edge of a command run (command-marks design):
+/// [`RUN_BAR_WIDTH_PT`] wide in the middle of the left padding (at the
+/// grid's left edge when there is too little), from the top of its
+/// first row to the bottom of its last, clipped to the view's `lines`,
+/// a point short at each end so that runs back to back show apart. In
+/// the colours of the worked/failed mark: the theme's green (ANSI 2) or
+/// red (ANSI 1) at its alpha; while running or unknown, the foreground
+/// faded.
+pub(crate) fn run_bar(bar: &term_core::RunBar, lines: u16, input: &FrameInput) -> Option<RectInstance> {
+    use term_core::RunState;
+    let (start, end) = (bar.rows.start, bar.rows.end.min(lines));
+    if start >= end {
+        return None;
+    }
+    let m = input.metrics;
+    let ch = m.cell_height as i32;
+    let pad = input.padding.0 as i32;
+    let w = ((RUN_BAR_WIDTH_PT * input.scale).round() as i32).max(1);
+    let gap = ((RUN_BAR_GAP_PT * input.scale).round() as i32).min(ch / 4);
+    let x = if pad > w { (pad - w) / 2 } else { 0 };
+    let y = input.padding.1 as i32 + start as i32 * ch + gap;
+    let h = (end - start) as i32 * ch - 2 * gap;
+    let theme = input.theme;
+    let paint = match bar.state {
+        RunState::Worked => theme.paint(2).alpha(COMMAND_MARK_ALPHA),
+        RunState::Failed => theme.paint(1).alpha(COMMAND_MARK_ALPHA),
+        RunState::Running | RunState::Unknown => theme.paint(slot::FOREGROUND).alpha(RUN_BAR_DIM_ALPHA),
+    };
+    Some(RectInstance::painted(s16(x), s16(y), w as u16, h.max(1) as u16, paint))
 }
 
 /// A cursor other than a focused block: a bar, an underline or (when
@@ -1888,9 +1919,13 @@ fn draw_ghost(out: &mut Vec<GlyphInstance>, g: &Ghost, cols: usize, input: &Fram
 /// at this alpha, about half way to the background on any theme.
 const GHOST_ALPHA: u8 = 120;
 
-/// How strongly the line above each prompt shows: the foreground at
-/// this alpha.
-const SEPARATOR_ALPHA: u8 = 96;
+/// A run bar's width and the gap at each of its ends, in points.
+pub const RUN_BAR_WIDTH_PT: f64 = 2.0;
+const RUN_BAR_GAP_PT: f64 = 1.0;
+
+/// How strongly a run bar shows while its command runs or when how it
+/// ended isn't known: the foreground at this alpha.
+const RUN_BAR_DIM_ALPHA: u8 = 96;
 
 /// The worked/failed mark's alpha over its green or red.
 const COMMAND_MARK_ALPHA: u8 = 150;

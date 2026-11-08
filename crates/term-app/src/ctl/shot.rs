@@ -78,6 +78,7 @@ fn draw(h: &Headless, renderers: &mut HashMap<String, Renderer>) -> Result<(Imag
             cursor_on: true,
             focused: true,
             preedit: None,
+            scale: look.scale,
         };
         renderer.prepare(&mut t.state, &input);
         (

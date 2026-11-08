@@ -66,7 +66,7 @@ for the behaviour and regression coverage of the 8 November revision.
 | `term-dylib`  | Decline as `libterminal_decline.dylib`, with the entry points the launcher and pin stubs call |
 | `term-activity` | what a pane's shell is doing: OSC 133 activity, status titles, when to notify, prompts, the program running (no AppKit) |
 | `term-restore` | restarting into a new build: the saved window list, the pane tree it saves, each pane's history (no AppKit) |
-| `term-complete` | completion and colouring at the shell's prompt: the command line read into words and coloured, the list's choices, commands, folders, history, man pages and `--help`, past command lines, the marks between commands, and plain output coloured (no AppKit; docs/design/completion.md, docs/design/command-marks.md) |
+| `term-complete` | completion and colouring at the shell's prompt: the command line read into words and coloured, the list's choices, commands, folders, history, man pages and `--help`, past command lines, the bars down each command run and the worked/failed marks, and plain output coloured (no AppKit; docs/design/completion.md, docs/design/command-marks.md) |
 | `term-ctl`    | the agent API's protocol and `ctl` command line, its idle limit, screen read-back and keys (no AppKit; the server and its sessions live in term-app) |
 | `term-update` | the updater: whether it runs, what Sparkle is answered, updates from source (the checkout, git, the build, when to install), what's said after an update, the `update` setting (no AppKit; Sparkle.framework, its alerts and posting notifications live in term-app) |
 | `term-prefs`  | the preferences: settings schema, safe `config.toml` edits, the TUI (no platform code) |

@@ -11,8 +11,8 @@ mod shape_cache;
 pub mod transition;
 
 pub use frame::{
-    CURSOR_ON_SELECTION_CONTRAST, CURSOR_TEXT_CONTRAST, Frame, FrameInput, GlyphInstance, GlyphSlot, GlyphSource, RectInstance, RectSplit,
-    Rgba, SELECTED_TEXT_CONTRAST, SELECTION_CONTRAST, Theme, contrast, rgb,
+    CURSOR_ON_SELECTION_CONTRAST, CURSOR_TEXT_CONTRAST, Frame, FrameInput, GlyphInstance, GlyphSlot, GlyphSource, RUN_BAR_WIDTH_PT,
+    RectInstance, RectSplit, Rgba, SELECTED_TEXT_CONTRAST, SELECTION_CONTRAST, Theme, contrast, rgb,
 };
 pub use glyph_thread::GlyphWaker;
 pub use images::{ImageDraw, ImageInstance, Images};

@@ -847,6 +847,7 @@ fn build_frame(frame: &mut Frame, t: &mut Terminal) {
         // Unfocused: the hollow cursor is drawn the same way by both.
         focused: false,
         preedit: None,
+        scale: 2.0,
     };
     frame.build(t, &input, &mut FakeGlyphs);
     let mut live = Frame::default();

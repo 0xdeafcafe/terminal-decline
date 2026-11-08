@@ -96,6 +96,7 @@ fn render(renderer: &mut Renderer, text: &str, ambiguous: u8) -> (Pixels, Vec<Gl
         cursor_on: true,
         focused: true,
         preedit: None,
+        scale: 2.0,
     };
     renderer.prepare(&mut t.state, &input);
     let glyphs = renderer.pane.frame.glyphs.clone();

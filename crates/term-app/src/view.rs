@@ -1850,6 +1850,7 @@ impl WindowView {
                 cursor_on,
                 focused,
                 preedit: Some(p.marked.as_str()),
+                scale: win.scale,
             };
             // The find bar's search keeps up with output.
             let covered = rows_under_find_bar(win, p, titlebar);
@@ -1924,7 +1925,7 @@ impl WindowView {
                 if win.config.highlight_command_line {
                     crate::complete::ink::line_ink(&t.state, &known, &mut snap.ink);
                 }
-                // Past commands, the lines and marks between them, and
+                // Past commands, the bars and marks beside them, and
                 // plain output (docs/design/command-marks.md).
                 p.marks.update(&t.state, marks, &known, snap);
             }
@@ -1986,6 +1987,7 @@ impl WindowView {
                 cursor_on,
                 focused,
                 preedit: Some(p.marked.as_str()),
+                scale: win.scale,
             };
             let panic_now = p.panic_next.take().is_some();
             let build_start = latency::now();
@@ -3591,9 +3593,20 @@ fn present_timed(
     cmd.commit();
 }
 
+/// The padding around a pane's grid. With `command_marks` on, the left
+/// and right padding is at least [`RUN_BAR_ROOM_PT`], so the bar down
+/// each command run has room beside the text.
 pub(crate) fn padding_for(config: &Config, titlebar: f64, scale: f64) -> Padding {
-    layout::padding(config.padding, titlebar, scale)
+    let mut pad = layout::padding(config.padding, titlebar, scale);
+    if config.command_marks {
+        pad.x = pad.x.max((RUN_BAR_ROOM_PT * scale).round() as u32);
+    }
+    pad
 }
+
+/// The least side padding while command marks are on: a run bar and a
+/// point either side of it.
+pub(crate) const RUN_BAR_ROOM_PT: f64 = term_render::RUN_BAR_WIDTH_PT + 2.0;
 
 /// The padding inside a pane at `rect`: the title bar's inset on top of it
 /// only when it touches the window's top.

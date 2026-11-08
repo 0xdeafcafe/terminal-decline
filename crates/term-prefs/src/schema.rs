@@ -289,7 +289,7 @@ pub const SETTINGS: &[Setting] = &[
         "Padding",
         Appearance,
         number(0.0, 100.0, 1.0),
-        "Space around the text, in points",
+        "Space around the text, in points (at the sides at least 4 while Mark off commands is on, for its bars)",
     ),
     // Font
     setting(
@@ -728,7 +728,7 @@ pub const SETTINGS: &[Setting] = &[
         "Mark off commands",
         Completion,
         Editor::Toggle,
-        "A faint line above each prompt, and ✓ or ✗ with the time taken at the right of each finished command (needs shell integration)",
+        "A thin bar down the left of each command and its output, green if it worked, red if it failed, dim while it runs; ✓ or ✗ and the time taken at the right (needs shell integration)",
     ),
     setting(
         "colour_output",

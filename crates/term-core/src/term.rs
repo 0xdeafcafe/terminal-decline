@@ -32,7 +32,7 @@ mod shell_report;
 mod snapshot;
 mod watch;
 
-pub use commands::{CommandMark, Finished, ViewCommand};
+pub use commands::{CommandMark, Finished, RunBar, RunState, ViewCommand};
 pub use graphics::HeadRead;
 pub use panel::Panel;
 pub use replies::DynamicColor;

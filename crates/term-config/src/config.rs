@@ -365,9 +365,12 @@ pub struct Config {
     /// and redirects, reserved words. A zsh started with the integration
     /// reports its line for it; new shells only (§10).
     pub highlight_command_line: bool,
-    /// Mark off each command (docs/design/command-marks.md): a faint
-    /// line above each prompt, and a worked/failed mark with the time
-    /// taken at the right of each finished command's line.
+    /// Mark off each command (docs/design/command-marks.md): a thin bar
+    /// down the left of each command run, from its prompt to the end of
+    /// its output (green when it worked, red when it failed, dim while it
+    /// runs), and a worked/failed mark with the time taken at the right
+    /// of each finished command's line. While on, the side padding is at
+    /// least 4 points, to give the bar room.
     pub command_marks: bool,
     /// Colour plain command output: commit hashes, URLs, arrows, numbers
     /// and words like `error`, `warning` and `ok`, only where the

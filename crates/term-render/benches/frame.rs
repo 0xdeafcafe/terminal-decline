@@ -354,6 +354,7 @@ fn bench(c: &mut Criterion) {
         cursor_on: true,
         focused: true,
         preedit: None,
+        scale: 2.0,
     };
     let cases = [
         ("80x24 plain", 80, 24, Colours::Plain),
@@ -663,6 +664,7 @@ fn bench_ligatures(c: &mut Criterion) {
         cursor_on: true,
         focused: true,
         preedit: None,
+        scale: 2.0,
     };
     ligatures(c, &input);
     prompt(c, &input);
@@ -693,6 +695,7 @@ fn bench_images(c: &mut Criterion) {
         cursor_on: true,
         focused: true,
         preedit: None,
+        scale: 2.0,
     };
     let pool = ImagePool::new(32 << 20);
     let image = |w: u32, h: u32| {

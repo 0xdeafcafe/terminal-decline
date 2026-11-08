@@ -5,17 +5,19 @@ Status: **landed** (1 Nov 2026). Approved by Alex.
 ## What it looks like
 
 ```
-$ ls -l "a b"                                    ✓
-a b
-──────────────────────────────────────────────────  (faint line)
-$ cargo test                         ✗ 101 · 14s
-   Compiling …
-   error: test failed
-──────────────────────────────────────────────────
-$ sleep 70                                 ✓ 1m10s
-──────────────────────────────────────────────────
-$ █
+┃ $ ls -l "a b"                                    ✓    (green bar)
+┃ a b
+┃ $ cargo test                         ✗ 101 · 14s    (red bar)
+┃    Compiling …
+┃    error: test failed
+┃ $ sleep 70                                 ✓ 1m10s  (green bar)
+┊ $ cargo build                                       (dim: running)
+┊    Compiling …
+┊ █
 ```
+
+The bars are in the left padding, not a cell column; a point's gap
+between runs back to back.
 
 1. **Past commands keep their colours.** Every command line already run
    that is in view (main screen only) is coloured as it was while typed:
@@ -23,8 +25,14 @@ $ █
    being typed (`lex`, `color_of`), commands green or red by whether
    they exist. Follows the `highlight_command_line` setting.
 2. **Each command is marked off** (setting `command_marks`, default on):
-   - a faint line about a point high (a sixteenth of the cell's height, at least a pixel) across the pane at the top of each prompt's
-     first row (its A mark), except at the very top of the view;
+   - a thin bar down the left edge of each command run, from its
+     prompt's first row (its A mark) to the last row of its output, in
+     the green or red of the mark below when it exited 0 or not, the
+     foreground faded while it runs, before it's run (the prompt being
+     typed) or when the shell gave no exit status. It replaced a faint
+     line across the pane above each prompt (Alex, 8 Nov 2026), which
+     marked commands off but didn't say which rows were whose or how
+     they ended;
    - at the right of the command's line (the row holding its B mark), a
      dim green `✓` when it exited 0, a dim red `✗ 2` (its exit status)
      otherwise, followed by the time it took from its C mark to its D
@@ -45,8 +53,8 @@ $ █
    Read once per output (kept by its text), about 150 ns a row; the net
    is built once, in under a millisecond, the first time it's needed.
 
-Nothing here changes a cell: the colours are `Snapshot::ink`, the lines
-`Snapshot::separators` and the marks `Snapshot::command_marks`, drawn by
+Nothing here changes a cell: the colours are `Snapshot::ink`, the bars
+`Snapshot::run_bars` and the marks `Snapshot::command_marks`, drawn by
 the renderer like the ghost text and the completion list.
 
 ## Rules
@@ -58,10 +66,33 @@ the renderer like the ghost text and the completion list.
   cells that match the text and are drawn in the default colour with
   no attributes are coloured, and placing stops at the first cell that
   doesn't match. What the shell coloured itself keeps its colour.
-- **The line** goes at the top of every prompt row in view but row 0
-  and the pane's first prompt, which has no command above it to mark off
-  (under the "restored from …" or welcome line it only underlined that;
-  Alex, 2 Nov 2026).
+- **The bar** (`RunBar { rows, state }`, view rows) runs from the
+  prompt's row (the view's top when the prompt has scrolled above it)
+  to the row before the next prompt. The last run in view goes to the
+  last row of its output (the row before its D mark when D starts a
+  row); while it runs, or before it's run, to the cursor's row, or the
+  row above when the cursor stands at the start of a blank row; when
+  the cursor is out of view, to the view's bottom. Clipped to the view.
+  Only runs with a prompt mark get one: nothing without shell
+  integration or on the alternate screen, and none for what's written
+  before the pane's first prompt (the "restored from …" or welcome
+  line). The pane's first command has its bar.
+- **How it's drawn**: 2 points wide (`RUN_BAR_WIDTH_PT`, times the
+  backing scale: 4 pixels on a Retina screen), in the middle of the
+  left padding, or at its left edge when the padding is narrower than
+  the bar; from the top of its first row to the bottom of its last,
+  a point short at each end, so two runs back to back show as two bars.
+  Green and red are the theme's ANSI 2 and 1 at alpha 150, as the mark
+  at the right; dim is the foreground at alpha 96 (as the line it
+  replaced, which at 48 was too faint on a dark theme). A failed
+  prompt's own red mark in the padding (`Snapshot::failed`, always on)
+  isn't drawn where a bar is: the red bar says it.
+- **Room for it**: while `command_marks` is on the side padding is at
+  least 4 points (the bar and a point either side; `padding_for` in
+  `crates/term-app/src/view.rs`), so a `padding` under 4 still leaves
+  the bar beside the text rather than over it. The default padding (6)
+  is unchanged. Turning the setting on or off reloads the layout like
+  any padding change.
 - **The mark** is drawn only for a command that finished (a D mark with
   an exit status; a D mark without one gets no mark), ending one cell
   short of the right edge, and only when every cell it covers and the
@@ -97,14 +128,16 @@ the renderer like the ghost text and the completion list.
 - `crates/term-complete/src/marks.rs`: `Marks::update`, run per pane after
   the snapshot with the terminal locked (`crates/term-app/src/view.rs`).
   It works everything out again only when the terminal's generation or
-  the settings change, so an idle frame copies what it had; command
+  the settings change, so an idle frame copies what it had (the bars
+  too: `run_bar`, from the commands in view and the snapshot's cursor); command
   lines are read into words once per command (by its number) and output
   rows coloured once per content (a hash of its characters and which
   cells are plain). The formatting is `mark_text` and `duration`.
 - `crates/term-complete/src/output.rs`: the output patterns.
-- `crates/term-render/src/frame.rs`: the line (a rect in the foreground
-  at alpha 96, raised from 48 and one pixel, which was too faint to see on a dark theme) with the failed-prompt marks, the mark (`draw_command_mark`,
-  green or red at alpha 150) with the ghost text. `Snapshot::ink` is now
+- `crates/term-render/src/frame.rs`: the bars (`run_bar`, one rect
+  each, sized from `FrameInput::scale`) with the failed-prompt marks,
+  the mark (`draw_command_mark`, green or red at alpha 150) with the
+  ghost text. `Snapshot::ink` is now
   kept sorted by row, and the renderer finds a row's colours by binary
   search instead of scanning all of them for each glyph.
 - Settings: `command_marks` and `colour_output` in
@@ -147,3 +180,24 @@ are found again and the past lines placed again (their words are kept);
 output rows are read and hashed, and only rows not seen before are
 coloured. This runs only when the terminal changed, at most once per
 frame.
+
+### Run bars (8 Nov 2026)
+
+The bars replaced the lines with no cost to an idle frame: `Marks`
+works them out only when the terminal or the settings change, and a
+frame copies them into the snapshot's reused `run_bars` (no allocation
+once its capacity is there); the renderer draws one rect per bar.
+Measured back to back on a loaded Mac (load average 40 to 100), before
+(ef0de94), after, and before again, to show the noise:
+
+| Benchmark | Before | After | Before again |
+|---|---|---|---|
+| marks idle | 329 ns | 200 ns | 201 ns |
+| marks with output idle | 762 ns | 680 ns | 1.51 µs |
+| marks changed | 17.6 µs | 10.0 µs | 11.8 µs |
+| frame 160x48 prompt plain unchanged | 2.75 µs | 2.84 µs | 5.40 µs |
+| frame 160x48 prompt coloured unchanged | 3.09 µs | 3.16 µs | 3.40 µs |
+| frame 300x100 prompts history unchanged | 14.8 µs | 14.7 µs | 24.7 µs |
+| frame 300x100 coloured unchanged | 6.02 µs | 6.08 µs | 6.39 µs |
+
+Every after number is inside the spread of the two before runs.

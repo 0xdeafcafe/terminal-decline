@@ -76,6 +76,7 @@ fn offscreen_render_reads_back() {
         cursor_on: true,
         focused: true,
         preedit: None,
+        scale: 2.0,
     };
     renderer.prepare(&mut t.state, &input);
     assert_eq!(renderer.pane.frame.glyphs.len(), 1);
@@ -136,6 +137,7 @@ fn render(renderer: &mut Renderer, t: &mut Term, theme: &Theme) -> Pixels {
         cursor_on: true,
         focused: true,
         preedit: None,
+        scale: 2.0,
     };
     renderer.prepare(&mut t.state, &input);
     draw(renderer, t)
@@ -225,6 +227,7 @@ fn snapshot_frames_draw_like_the_live_terminal() {
             cursor_on: true,
             focused,
             preedit,
+            scale: 2.0,
         };
         renderer.prepare(&mut t.state, &input);
         let from_snapshot = draw(&mut renderer, &t);
@@ -332,6 +335,7 @@ fn kept_instances_draw_like_fresh_frames() {
             cursor_on: true,
             focused: true,
             preedit,
+            scale: 2.0,
         };
         kept.prepare(&mut t.state, &input);
         let a = draw(&mut kept, &t);
@@ -566,6 +570,7 @@ fn failed_commands_are_marked_in_the_padding() {
         cursor_on: true,
         focused: true,
         preedit: None,
+        scale: 2.0,
     };
     renderer.prepare(&mut t.state, &input);
     let px = draw_padded(&mut renderer, &t, pad);

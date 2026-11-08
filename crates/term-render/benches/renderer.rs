@@ -65,6 +65,7 @@ fn bench(c: &mut Criterion) {
         cursor_on: true,
         focused: true,
         preedit: None,
+        scale: 2.0,
     };
     let (cw, ch) = (m.cell_width as i32, m.cell_height as i32);
     let (cols, lines) = (160, 48);

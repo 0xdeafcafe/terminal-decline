@@ -67,6 +67,7 @@ struct Opts<'a> {
     focused: bool,
     preedit: Option<&'a str>,
     metrics: Metrics,
+    scale: f64,
 }
 
 impl Default for Opts<'_> {
@@ -77,6 +78,7 @@ impl Default for Opts<'_> {
             focused: true,
             preedit: None,
             metrics: M,
+            scale: 2.0,
         }
     }
 }
@@ -89,6 +91,7 @@ fn input<'a>(theme: &'a Theme, o: &Opts<'a>) -> FrameInput<'a> {
         cursor_on: o.cursor_on,
         focused: o.focused,
         preedit: o.preedit,
+        scale: o.scale,
     }
 }
 
@@ -1400,12 +1403,11 @@ fn popup_covers_the_cells_under_it() {
     assert_eq!(f.glyphs.iter().filter(|g| decode_cp(g) == 'A').count(), 20);
 }
 
-/// The faint line above each prompt (`Snapshot::separators`) is one
-/// pixel across the pane at the top of its row, and a finished
-/// command's mark (`Snapshot::command_marks`) draws in dim green or red
-/// where the app placed it. Both go when the snapshot has none.
+/// A finished command's mark (`Snapshot::command_marks`) draws in dim
+/// green or red where the app placed it, and goes when the snapshot has
+/// none.
 #[test]
-fn separator_lines_and_command_marks() {
+fn command_marks() {
     use term_core::CommandMark;
     let mut t = term(20, 4, &format!("{NO_CURSOR}$ ls\r\na\r\n$ false\r\n$ "));
     let theme = Theme::default();
@@ -1414,7 +1416,6 @@ fn separator_lines_and_command_marks() {
     let mut f = Frame::default();
     f.snapshot(&mut t.state, &input, 0);
     let snap = f.snapshot_mut();
-    snap.separators = vec![2, 3];
     snap.command_marks = vec![
         CommandMark {
             row: 0,
@@ -1430,8 +1431,6 @@ fn separator_lines_and_command_marks() {
         },
     ];
     assert!(f.build_snapshot(&input, &mut Fake));
-    let lines: Vec<_> = f.rects.iter().filter(|r| r.h == 1).map(|r| (r.x, r.y, r.w)).collect();
-    assert_eq!(lines, [(0, 2 * CH, 20 * CW as u16), (0, 3 * CH, 20 * CW as u16)]);
     let row = |f: &Frame, row: i16| -> Vec<(i16, char, Rgba)> {
         let mut g: Vec<_> = f
             .glyphs
@@ -1449,9 +1448,85 @@ fn separator_lines_and_command_marks() {
     assert_eq!(row(&f, 2), [(16, '✗', red), (18, '1', red)]);
     // The row's own text is untouched.
     assert!(f.glyphs.iter().any(|g| decode_cp(g) == 'f' && g.color == theme.foreground));
-    // Without them, nothing of either.
+    // Without them, none.
     f.snapshot(&mut t.state, &input, 0);
     assert!(f.build_snapshot(&input, &mut Fake));
-    assert!(!f.rects.iter().any(|r| r.h == 1));
     assert!(row(&f, 0).is_empty() && row(&f, 2).is_empty());
+}
+
+/// The bar down the left of each command run (`Snapshot::run_bars`):
+/// two points wide (4 pixels at scale 2, 2 at scale 1) in the middle of
+/// the left padding, from its first row's top to its last row's bottom
+/// less a point at each end, clipped to the view; green when it worked,
+/// red when it failed, the foreground faded while it runs. A failed
+/// prompt's own mark isn't drawn where a bar is.
+#[test]
+fn run_bars() {
+    use term_core::{RunBar, RunState};
+    let mut t = term(20, 4, &format!("{NO_CURSOR}$ ls\r\na\r\n$ false\r\n$ "));
+    let theme = Theme::default();
+    let dim = |c: Rgba, a: u32| (c & 0x00FF_FFFF) | a << 24;
+    let (green, red, faded) = (dim(theme.palette[2], 150), dim(theme.palette[1], 150), dim(theme.foreground, 96));
+    let bars = vec![
+        RunBar {
+            rows: 0..2,
+            state: RunState::Worked,
+        },
+        RunBar {
+            rows: 2..3,
+            state: RunState::Failed,
+        },
+        // Past the view's last row: clipped.
+        RunBar {
+            rows: 3..9,
+            state: RunState::Running,
+        },
+    ];
+    // (scale, padding): (x, width, gap) of the bars.
+    for (scale, pad, want) in [(2.0, 12, (4, 4, 2)), (1.0, 12, (5, 2, 1)), (2.0, 2, (0, 4, 2))] {
+        let o = Opts {
+            padding: (pad, 3),
+            scale,
+            ..Opts::default()
+        };
+        let input = input(&theme, &o);
+        let mut f = Frame::default();
+        f.snapshot(&mut t.state, &input, 0);
+        let snap = f.snapshot_mut();
+        snap.run_bars = bars.clone();
+        snap.failed = vec![2];
+        assert!(f.build_snapshot(&input, &mut Fake));
+        let (x, w, gap) = want;
+        let got: Vec<_> = f
+            .rects
+            .iter()
+            .filter(|r| r.x == x && r.w == w)
+            .map(|r| (r.y, r.h, r.color))
+            .collect();
+        let (top, ch) = (3 + gap, CH as u16);
+        assert_eq!(
+            got,
+            [
+                (top, 2 * ch - 2 * gap as u16, green),
+                (top + 2 * CH, ch - 2 * gap as u16, red),
+                (top + 3 * CH, ch - 2 * gap as u16, faded),
+            ],
+            "scale {scale}, padding {pad}"
+        );
+        // Nothing else in the left padding: the failed prompt's own mark
+        // is under its bar.
+        assert!(!f.rects.iter().any(|r| r.x < pad as i16 && r.color == theme.palette[1]));
+    }
+    // Without bars, the failed prompt's mark is drawn as before.
+    let o = Opts {
+        padding: (12, 3),
+        ..Opts::default()
+    };
+    let input = input(&theme, &o);
+    let mut f = Frame::default();
+    f.snapshot(&mut t.state, &input, 0);
+    f.snapshot_mut().failed = vec![2];
+    assert!(f.build_snapshot(&input, &mut Fake));
+    assert!(f.rects.iter().any(|r| r.x < 12 && r.color == theme.palette[1] && r.y == 3 + 2 * CH));
+    assert!(!f.rects.iter().any(|r| r.x < 12 && (r.color == green || r.color == faded)));
 }

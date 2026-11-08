@@ -151,6 +151,7 @@ fn input<'a>(renderer: &Renderer, theme: &'a Theme) -> FrameInput<'a> {
         cursor_on: true,
         focused: true,
         preedit: None,
+        scale: 2.0,
     }
 }
 

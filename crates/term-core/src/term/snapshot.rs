@@ -225,11 +225,11 @@ pub struct Snapshot {
     /// after the snapshot, as `ink`.
     pub popup: Option<Popup>,
     pub ghost: Option<Ghost>,
-    /// The faint lines above prompts and the worked/failed marks of
-    /// finished commands (docs/design/command-marks.md); put in by the
-    /// app after the snapshot, as `ink`. `separators` are view rows
-    /// whose top gets the line.
-    pub separators: Vec<u16>,
+    /// The bars down the left edge of the command runs in view, top to
+    /// bottom, and the worked/failed marks of finished commands
+    /// (docs/design/command-marks.md); put in by the app after the
+    /// snapshot, as `ink`.
+    pub run_bars: Vec<super::RunBar>,
     pub command_marks: Vec<super::CommandMark>,
     /// kitty direct placements that reach into the view, ready images only
     /// (images.md §4.4). Empty until kitty graphics lands (I.2).
@@ -392,7 +392,7 @@ impl Terminal {
         out.highlights.clear();
         out.failed.clear();
         out.ink.clear();
-        out.separators.clear();
+        out.run_bars.clear();
         out.command_marks.clear();
         out.popup = None;
         out.ghost = None;

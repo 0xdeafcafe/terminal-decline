@@ -131,7 +131,7 @@ fn marks(c: &mut Criterion) {
         let mut m = Marks::default();
         let mut frame = |t: &term_core::Term, m: &mut Marks| {
             snap.ink.clear();
-            snap.separators.clear();
+            snap.run_bars.clear();
             snap.command_marks.clear();
             m.update(&t.state, s, &known, &mut snap);
         };

@@ -1236,7 +1236,7 @@ mod tests {
         st.update(&t.state, &settings(), later, &no_wake);
         assert_eq!(st.key(keycode::DOWN, true, false), KeyResult::Redraw);
         let d = st.update(&t.state, &settings(), later, &no_wake);
-        assert_eq!(d.popup.unwrap().hint, "Tab/Enter insert  Esc close");
+        assert_eq!(d.popup.unwrap().hint, "Tab/Enter insert", "short hint in the 32-column list");
         assert_eq!(
             st.key(keycode::KEYPAD_ENTER, true, false),
             KeyResult::Send(b"\x1b[7701~0;0;git; \x07".to_vec())

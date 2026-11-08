@@ -47,7 +47,7 @@ retain access to shell history. Enter runs the command by default; the
 opt-in insertion mode responds to keyboard selection, never hover alone.
 The dropdown is capped at 72 columns, omits repetitive type labels and
 uses plain key hints. See [completion design](docs/design/completion.md)
-for the behaviour and validation status of the 8 November revision.
+for the behaviour and regression coverage of the 8 November revision.
 
 ## Modules (Cargo workspace)
 

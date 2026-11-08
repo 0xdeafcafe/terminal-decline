@@ -3,8 +3,8 @@
 Alex selected Screen from round two, then changed the headline to
 “A peppy terminal for macOS.” The selected and cross-reviewed HTML remains
 in `concepts/round-two/screen/`. The production implementation is in `src/`.
-The earlier Long rest build landed at 14f1c8e; it remains deployed until
-Alex approves publishing this replacement.
+The earlier Long rest build landed at 14f1c8e. Alex approved merging
+and publishing this replacement with the completion dropdown revision.
 
 ## Composition
 
@@ -126,7 +126,7 @@ The existing workflow builds the site and deploys approved main pushes via
 upload-pages-artifact and deploy-pages. Site-only changes are ignored by
 Rust CI. Pages is configured for workflow builds and decline.forbes.red.
 Alex owns the DNS CNAME: decline to 0xdeafcafe.github.io. This Screen revision
-is local pending approval to replace the currently deployed Long rest site.
+replaces Long rest through the main-branch deployment workflow.
 
 ## Copy revision
 

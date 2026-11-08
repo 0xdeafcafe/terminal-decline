@@ -319,6 +319,9 @@ fn webp(bytes: &[u8], into: &mut dyn PixelTarget, limits: &Options) -> Result<bo
     if out as u64 + pixels * own > limits.transient as u64 {
         return Err(DecodeError::TooLarge);
     }
+    if d.is_animated() {
+        check_alph_frames(bytes)?;
+    }
     let icc = d.icc_profile().map_err(webp_error)?;
     let mut buf = vec![0; out];
     d.read_image(&mut buf).map_err(webp_error)?;
@@ -331,6 +334,60 @@ fn webp(bytes: &[u8], into: &mut dyn PixelTarget, limits: &Options) -> Result<bo
         sink.row(layout, row);
     }
     sink.finish()
+}
+
+/// Refuses an animation with a lossy frame with alpha (an ANMF holding
+/// ALPH then VP8) whose VP8 picture is not the frame's size. image-webp
+/// 0.2.4 (the latest, and its main branch as of November 2026) checks
+/// that size for a frame without alpha but not for one with it, then
+/// converts the picture into a buffer of the frame's size: a picture 0
+/// high or 0 wide panics in its `yuv.rs` (issues #5 and #9), a larger one
+/// indexes past the buffer.
+///
+/// Walks the chunks as its `WebPDecoder::new` does (from the end of the
+/// RIFF header, `8 + size` rounded up to even each) and finds the VP8
+/// chunk as its `read_frame` does (right after the ALPH chunk). Every
+/// frame is checked, not only the first one it decodes: a file with a bad
+/// frame is corrupt either way. What this can't read is left to
+/// image-webp, which fails on short data before it converts a picture.
+fn check_alph_frames(bytes: &[u8]) -> Result<(), DecodeError> {
+    /// The kind of the chunk at `at` and the bytes to its payload's end.
+    fn chunk(bytes: &[u8], at: usize) -> Option<(&[u8], usize)> {
+        let head = bytes.get(at..at.checked_add(8)?)?;
+        let size = u32::from_le_bytes([head[4], head[5], head[6], head[7]]) as usize;
+        Some((&head[..4], 8 + size + (size & 1)))
+    }
+    fn u24(b: &[u8]) -> u32 {
+        b[0] as u32 | (b[1] as u32) << 8 | (b[2] as u32) << 16
+    }
+    /// Whether the ANMF frame whose payload starts at `frame` is a lossy
+    /// one with alpha whose picture is not the frame's size.
+    fn mismatched(bytes: &[u8], frame: usize) -> Option<bool> {
+        // 16 bytes of frame header (x, y, width - 1, height - 1, duration:
+        // 3 bytes each; flags), then the frame's first chunk.
+        let head = bytes.get(frame..frame.checked_add(16)?)?;
+        let (fw, fh) = (u24(&head[6..9]) + 1, u24(&head[9..12]) + 1);
+        let (kind, alph) = chunk(bytes, frame + 16)?;
+        if kind != b"ALPH" {
+            return Some(false);
+        }
+        // The VP8 payload: a 3-byte frame tag (bit 0 clear for a key
+        // frame, the only kind with a size), the start code 9d 01 2a, then
+        // the 14-bit width and height.
+        let start = (frame + 16).checked_add(alph)?.checked_add(8)?;
+        let p = bytes.get(start..start.checked_add(10)?)?;
+        let w = u16::from_le_bytes([p[6], p[7]]) & 0x3FFF;
+        let h = u16::from_le_bytes([p[8], p[9]]) & 0x3FFF;
+        Some(p[0] & 1 != 0 || (w as u32, h as u32) != (fw, fh))
+    }
+    let mut at = 12;
+    while let Some((kind, len)) = chunk(bytes, at) {
+        if kind == b"ANMF" && mismatched(bytes, at + 8) == Some(true) {
+            return Err(DecodeError::Corrupt("animation frame and its picture differ in size".into()));
+        }
+        at = at.saturating_add(len);
+    }
+    Ok(())
 }
 
 fn webp_error(e: image_webp::DecodingError) -> DecodeError {

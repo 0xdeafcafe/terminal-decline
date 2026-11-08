@@ -746,7 +746,12 @@ is measured in PR I.5.
   WebP (`cwebp -q 80`, 15 KB) 20.4 ms at its size, 22.3 ms at 400 × 300
   (no DCT scaling to help, unlike JPEG's 3.2 ms). Binary size +196 KB
   stripped (200,768 bytes; thin LTO, measured as for the other decoders:
-  a release binary calling `decode`, before and after).
+  a release binary calling `decode`, before and after). image-webp 0.2.4
+  doesn't check that an animation frame with alpha (ALPH, then VP8) has
+  a VP8 picture of the frame's size, and panics converting one that
+  doesn't (fuzz issues #5, #9; still so on its main branch in November
+  2026), so `decode` reads those frames' sizes from the chunks first and
+  refuses a mismatch as corrupt.
 - ImageIO parses untrusted bytes from programs (possibly remote), and a
   crash in it takes every window. Sniffing in Rust narrows what reaches
   it, and decoding off the lock keeps a slow image from stalling frames,

@@ -3030,7 +3030,11 @@ differs from the above:
   `ViewTop::At`'s `offset` is in its unit (rows × columns for a unit
   shown a row per line). `display_offset()` counts rows at the current
   width from the view to the screen, a block at a time where a block was
-  written at that width.
+  written at that width. `history_rows()` is the same count from
+  history's first row: the furthest back the view goes, and the bound of
+  `display_offset()`. `scrollback_len()` still counts stored lines, which
+  after a width change is not the same thing (the parse fuzz target
+  checked the view against it until #7).
 - **Points** stay stored-line Points. `point_at`, `view_position`,
   `cursor_in_view`, the new `selected_cols(view_line)` (which term-render's
   frame building now uses) and the snapshot's highlights (selection,

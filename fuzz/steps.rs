@@ -187,7 +187,10 @@ pub fn apply(term: &mut Term, step: &Step) {
 /// state panics here rather than later in the app.
 pub fn read_back(term: &Term) {
     let t = &term.state;
-    assert!(t.display_offset() <= t.scrollback_len(), "view scrolled past the scrollback");
+    // Both in rows at the current width: after a width change history's
+    // rows aren't its stored lines (`scrollback_len`), so a line written
+    // wider than the screen lets the view go back further than that.
+    assert!(t.display_offset() <= t.history_rows(), "view scrolled past the scrollback");
     for line in 0..t.lines() {
         // History rows may be wider or narrower than the screen after a
         // resize (no re-wrap yet), so only check that they can be read.

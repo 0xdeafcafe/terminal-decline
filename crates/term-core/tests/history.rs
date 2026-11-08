@@ -57,6 +57,43 @@ fn a_wide_line_shows_as_two_rows_at_half_the_width() {
     assert_eq!(view(&t), ["0123456789", "abcdefghij"]);
 }
 
+/// The view goes back as far as history has rows at the current width,
+/// which after a width change is not its count of stored lines: the bound
+/// of `display_offset` is `history_rows`, not `scrollback_len` (#7).
+#[test]
+fn the_view_goes_back_as_far_as_history_has_rows() {
+    let mut t = shrunk();
+    assert_eq!(t.state.history_rows(), 3);
+    t.state.scroll_view(100);
+    assert_eq!(t.state.display_offset(), 3);
+    assert!(t.state.display_offset() > t.state.scrollback_len());
+    // Back at the width it was written at, a row per stored line.
+    t.state.scroll_view_to_bottom();
+    t.state.resize(20, 2);
+    assert_eq!(t.state.history_rows(), t.state.scrollback_len());
+    // The alternate screen has no history to scroll back through.
+    t.advance(b"\x1b[?1049h");
+    assert_eq!(t.state.history_rows(), 0);
+}
+
+/// The parse fuzz target's input from #7 (fuzz/regressions/parse), as
+/// calls: a line pushed into history at 128 columns, then the width cut to
+/// 30, shows as two rows, and scrolling to the top goes back by both.
+#[test]
+fn a_line_pushed_at_one_width_and_shown_at_another_is_scrolled_through_whole() {
+    let mut t = Term::new(80, 24, 200, term_core::ImagePool::process());
+    t.advance(b"line es0 of the file before less\r\nline 11 of the file be,z=-1\x1b\\");
+    t.state.resize(128, 1);
+    t.advance(b"\x00\x00Ga=p,i=1,C=-1\x1b\\");
+    t.state.resize(30, 2);
+    t.advance(b"1,p=3,c=10,r=3C=");
+    t.state.scroll_view(127);
+    assert_eq!(t.state.scrollback_len(), 1);
+    assert_eq!(t.state.history_rows(), 2);
+    assert_eq!(t.state.display_offset(), 2);
+    assert_eq!(view(&t), ["line es0 of the file before le", "ss"]);
+}
+
 #[test]
 fn points_come_from_the_stored_line() {
     let mut t = shrunk();

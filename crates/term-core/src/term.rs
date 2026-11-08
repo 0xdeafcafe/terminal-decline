@@ -738,6 +738,19 @@ impl Terminal {
         self.scrollback.len()
     }
 
+    /// The rows history takes at the current width (§12.3): the furthest
+    /// back the view scrolls, so [`Terminal::display_offset`] is never more.
+    /// After a width change this differs from [`Terminal::scrollback_len`],
+    /// which counts stored lines: a line written wider shows as several
+    /// rows, and several written narrower may share one.
+    pub fn history_rows(&self) -> usize {
+        if self.alt_active || self.scrollback.is_empty() {
+            return 0;
+        }
+        let u = self.unit_at(self.history_first());
+        self.rows_below(&u, 0)
+    }
+
     /// How many rows the view is scrolled back by (0 = following output),
     /// counted at the current width.
     pub fn display_offset(&self) -> usize {

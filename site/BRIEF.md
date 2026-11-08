@@ -120,3 +120,11 @@ Alex further clarified that native tabs and split panes are basic features,
 not the pitch. The introduction should describe a fast, lightweight terminal
 with crisp text, no bloat and an emphasis on staying lean. Carry that through
 the search description and social card too.
+
+Alex asked to remove the verbose comparison prose and include Warp and
+Terminal.app. Show charts grouped by measure, with all five terminals on one scale
+per chart. The newer three-way results and method sit in a disclosure. Those two terminals only have 30 October measurements: keep
+all five results from that run together, separate from 2 November.
+
+Alex further rejected unclear table rows. Use idle-memory and output-time
+charts as the primary five-terminal comparison, not another table layout.

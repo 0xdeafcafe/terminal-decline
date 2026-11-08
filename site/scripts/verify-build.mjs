@@ -34,9 +34,37 @@ for (const terminal of data.terminals) {
   assert.deepEqual(values.slice(0, 6), [`${terminal.idle} MB`, `${terminal.scrollback} MB`, `${terminal.tabs} MB`, `${terminal.cat.toFixed(2)} s`, `${terminal.cpu.toFixed(2)} s`, `${terminal.idleCpu.toFixed(2)}%`], `Stale comparison for ${terminal.name}`);
   assert(capture.text.includes(`${terminal.idle} MB`) && capture.text.includes(`${terminal.cat.toFixed(2)} s`), `Stale capture for ${terminal.name}`);
 }
-console.log('Static pages, local links, CNAME, social card and captured benchmark values verified. No framework runtime shipped.');
 
 const completion = JSON.parse(await readFile(path.join(site, 'src/data/completion-preview.json'), 'utf8'));
 assert.equal(createHash('sha256').update(await readFile(path.join(site, '..', completion.source))).digest('hex'), completion.sha256, 'Completion source changed; review the text transcription.');
 assert(!index.includes('screenshot-autocomplete'), 'Terminal screenshots must not be shipped.');
 assert(!(await readdir(path.join(dist, 'images'))).some(name => name.startsWith('screenshot-')), 'Obsolete terminal screenshot in build.');
+
+// Keep the older five-terminal comparison tied to its own dated report.
+const earlier = JSON.parse(await readFile(path.join(site, 'src/data/comparison-2026-10-30.json'), 'utf8'));
+const report = await readFile(path.join(site, '../docs/comparison-2026-10-30.md'), 'utf8');
+const reportMetrics = {
+  idle: 'Idle footprint (MB)',
+  tabs: 'Footprint with 4 tabs (MB)',
+  scrollback: 'Footprint after `seq 1 10000` (MB)',
+  cat: '`cat` 100 MB: wall time (s)',
+  cpu: '`cat` 100 MB: terminal + WindowServer CPU (s)',
+  idleCpu: 'Idle CPU (%)',
+};
+assert(report.includes(earlier.date), 'Historical comparison date differs from its report.');
+for (const [key, heading] of Object.entries(reportMetrics)) {
+  const section = report.split(`### ${heading}\n`)[1]?.split('\n### ')[0];
+  assert(section, `Missing historical metric: ${heading}`);
+  for (const terminal of earlier.terminals) {
+    const row = section.split('\n').find(line => line.startsWith(`| ${terminal.name} |`));
+    assert(row, `Missing historical result: ${terminal.name} / ${key}`);
+    assert.equal(terminal[key], Number(row.split('|')[2].trim()), `Historical value differs: ${terminal.name} / ${key}`);
+  }
+}
+assert(earlier.terminals.find(t => t.name === 'Warp').tabsVerified === false, 'Warp tab count must stay unverified in the source data.');
+assert(index.includes('Warp ran with two windows.'), 'Missing Warp measurement limit.');
+assert(index.includes('data-comparison="30 October 2026"') && index.includes('data-comparison="2 November 2026"'), 'Keep the two runs dated separately.');
+const [primary, supplementary] = index.split('<details class="benchmark-method">');
+assert(primary.includes('data-comparison="30 October 2026"') && primary.includes('Warp') && primary.includes('Terminal.app'), 'The visible comparison must include all five terminals from October.');
+assert(!primary.includes('data-comparison="2 November 2026"') && supplementary?.includes('data-comparison="2 November 2026"'), 'Newer results belong in the collapsed disclosure.');
+console.log('Static pages, links, assets and both dated comparisons verified. No framework runtime shipped.');

@@ -30,11 +30,11 @@ with user-select:none limited to chrome and controls. There is no typing,
 blinking or benchmark animation. System light/dark and reduced motion work
 through CSS, with no theme switch or browser framework.
 
-The full comparison table follows, then pins, agent commands, completion
+Grouped comparison charts follow, then pins, agent commands, completion
 and install.
 Table figures and bar proportions come directly from comparison.json;
-there is no second manually typed set of values. Method conditions and
-the earlier Ghostty cat win remain visible. The concept’s flat changes of
+there is no second manually typed set of values. Method details sit in a native disclosure. The older charts show Ghostty’s
+faster output time, and Warp’s two-window condition remains visible. The concept’s flat changes of
 ground, dimensions, colour tokens and asymmetry are preserved. The CSS
 linear-gradient is a hard boundary between two grounds, not a colour fade.
 
@@ -143,3 +143,32 @@ passed. Chrome captures at 1440, 768 and 390 px in both colour schemes
 reported no horizontal overflow, broken images or unresolved page anchors.
 Desktop light and the complete phone dark page were inspected visually.
 All captures stay in the session's temporary review folder.
+
+## Grouped comparisons with Warp and Terminal.app
+
+Alex asked to remove verbose benchmark prose, include Warp and Terminal.app,
+and group the numbers so the comparison is clear. The section uses two
+horizontal bar charts: idle footprint and output time. Each chart contains
+all five terminals from 30 October on one zero-based scale, with numerical
+labels. They sit beside each other on desktop and stack on smaller screens.
+Decline uses bold labels and the foreground colour, without implying it
+wins every measure: Ghostty's output bar is shorter in this run.
+
+The historical numbers are transcribed from docs/comparison-2026-10-30.md
+into src/data/comparison-2026-10-30.json and checked against that report by
+the build verifier. Decline's 31.5 MB and 0.61 s stay with the October run.
+Warp's two-window condition stays visible. Its four-tab count was not
+verified, so that measurement is not charted. Full CPU, scrollback and
+four-tab results remain available through the report links.
+
+The newer 2 November comparison only measured three terminals. Its charts
+sit inside the native “Newer results and method” disclosure, with their own
+date, followed by short method notes and source links. The dated November
+terminal capture in the opening is unchanged. There is no mixing of
+October competitor figures into November's results.
+
+Validation: Astro/TypeScript, the static build and the source-data verifier
+pass. Chrome captures at 320, 390, 768 and 1440 px in both themes report no
+page overflow or label/value collisions. Desktop light, phone dark and
+the expanded phone disclosure were inspected visually. Captures and the
+layout-check script are kept under the session TMPDIR, outside Git.

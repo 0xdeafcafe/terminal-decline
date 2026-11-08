@@ -1,0 +1,59 @@
+{
+  "date": "30 October 2026",
+  "machine": "Apple M1 Max",
+  "system": "macOS 27.0",
+  "source": "https://github.com/0xdeafcafe/terminal-decline/blob/main/docs/comparison-2026-10-30.md",
+  "terminals": [
+    {
+      "name": "Decline",
+      "idle": 31.5,
+      "tabs": 63,
+      "scrollback": 39,
+      "cat": 0.61,
+      "cpu": 0.62,
+      "idleCpu": 0.02,
+      "runs": 4
+    },
+    {
+      "name": "Ghostty",
+      "idle": 67,
+      "tabs": 98,
+      "scrollback": 68,
+      "cat": 0.53,
+      "cpu": 1.68,
+      "idleCpu": 0.64,
+      "runs": 4
+    },
+    {
+      "name": "kitty",
+      "idle": 109,
+      "tabs": 115,
+      "scrollback": 140,
+      "cat": 0.95,
+      "cpu": 1.31,
+      "idleCpu": 0.13,
+      "runs": 4
+    },
+    {
+      "name": "Warp",
+      "idle": 333,
+      "tabs": 332,
+      "scrollback": 310,
+      "cat": 3.59,
+      "cpu": 4.38,
+      "idleCpu": 1.11,
+      "runs": 4,
+      "tabsVerified": false
+    },
+    {
+      "name": "Terminal.app",
+      "idle": 48,
+      "tabs": 139,
+      "scrollback": 64,
+      "cat": 3.97,
+      "cpu": 4.62,
+      "idleCpu": 0.03,
+      "runs": 3
+    }
+  ]
+}

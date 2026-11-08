@@ -16,8 +16,9 @@ export default function Agents() {
         </div>
       </section>
       <section id="completion" aria-labelledby="h-completion">
-        <h2 id="h-completion">See what a flag does</h2>
-        <p className="prose">Press Tab to see matching flags and subcommands, with explanations from the command’s man page or <code>--help</code>. You can also turn on suggestions as you type.</p>
+        <h2 id="h-completion">Find the flag you need</h2>
+        <p className="prose">Press Tab to see suggestions, with explanations alongside flags. Use the up and down arrows to browse, then Tab to insert your choice. Enter runs the command.</p>
+        <p className="prose">You can turn on suggestions as you type, too.</p>
         <div className="comp-term narrow"><Completion /></div>
       </section>
     </>

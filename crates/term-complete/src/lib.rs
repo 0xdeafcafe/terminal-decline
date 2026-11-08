@@ -99,12 +99,15 @@ fn address<T>(a: &Option<Arc<T>>) -> usize {
 #[derive(Debug)]
 struct Open {
     offer: Arc<Offer>,
-    /// The choice moved to with Down (or the mouse); none until then, so
-    /// Up still goes to the shell's history and Return runs the line.
+    /// The first choice for a deliberate list, or the one moved to with
+    /// Down (or the mouse) for passive suggestions. None in a passive
+    /// list until then, leaving Up available for shell history.
     selected: Option<usize>,
-    /// `selected` is the one under the mouse: it is let go when the mouse
-    /// leaves the list or the line is typed on, so Return runs the line
-    /// again.
+    /// Opened deliberately with Tab or Show Completions. Arrows stay in
+    /// this list; a passive as-you-type list still yields Up to history.
+    explicit: bool,
+    /// `selected` is only a hover preview: released on mouse leave or
+    /// typing, and never used by Enter-to-insert.
     hovered: bool,
     /// Where the list was last drawn: its top row and left column (border
     /// included), its width and how many choices it shows.
@@ -290,7 +293,8 @@ impl PaneState {
         let previous = self.open.as_ref().filter(|o| o.start == start && !(o.hovered && changed));
         let selected = previous
             .and_then(|o| o.offer.choices.get(o.selected?))
-            .and_then(|c| offer.choices.iter().position(|x| x.name == c.name));
+            .and_then(|c| offer.choices.iter().position(|x| x.name == c.name))
+            .or(self.asked.then_some(0));
         let hovered = selected.is_some() && previous.is_some_and(|o| o.hovered);
         let scroll = previous.map_or(0, |o| o.scroll);
         // What is typed before the matched part is kept as typed (`~/`,
@@ -300,6 +304,7 @@ impl PaneState {
         let mut open = Open {
             offer,
             selected,
+            explicit: self.asked,
             hovered,
             drawn_at: None,
             scroll,
@@ -411,6 +416,10 @@ impl PaneState {
             self.zsh_described = true;
         }
         let Some(choices) = self.zsh.clone() else { return Drawn::default() };
+        if choices.is_empty() {
+            self.open = None;
+            return Drawn::default();
+        }
         let start = line
             .words
             .iter()
@@ -423,7 +432,8 @@ impl PaneState {
                 prefix: report.text[start..report.cursor].to_string(),
                 keep: String::new(),
             }),
-            selected: previous.as_ref().and_then(|o| o.selected),
+            selected: previous.as_ref().and_then(|o| o.selected).or(Some(0)),
+            explicit: true,
             hovered: previous.as_ref().is_some_and(|o| o.hovered),
             drawn_at: None,
             scroll: previous.as_ref().map_or(0, |o| o.scroll),
@@ -591,14 +601,18 @@ impl PaneState {
         }
         match keycode {
             DOWN => {
-                open.selected = Some(open.selected.map_or(0, |i| (i + 1) % n));
+                open.selected = Some(open.selected.map_or(0, |i| (i + 1).min(n - 1)));
                 KeyResult::Redraw
             }
             // With the setting, Return puts in the choice moved to; with
             // none chosen (or without it), it runs the line as typed.
-            RETURN | KEYPAD_ENTER if open.enter_takes && open.selected.is_some() => self.take(),
-            // Up before Down is the shell's (its history); Up from the
-            // first choice goes back to none.
+            RETURN | KEYPAD_ENTER if open.enter_takes && open.selected.is_some() && !open.hovered => self.take(),
+            // Deliberately opened lists retain keyboard focus. Passive
+            // suggestions still leave Up available for shell history.
+            UP if open.explicit => {
+                open.selected = Some(open.selected.unwrap_or(0).saturating_sub(1));
+                KeyResult::Redraw
+            }
             UP => match open.selected {
                 None => {
                     self.close_on_word();
@@ -625,11 +639,16 @@ impl PaneState {
         }
     }
 
-    /// The mouse moved to view `row`, `col`: the choice under it is
-    /// selected, and let go when it leaves the list. True if that changed
-    /// what is drawn.
+    /// Hover previews a passive suggestion until keyboard navigation
+    /// starts. It cannot replace a keyboard choice or arm Enter to
+    /// insert. True if the highlighted choice changed.
     pub fn hover(&mut self, row: usize, col: usize) -> bool {
         let Some(open) = &mut self.open else { return false };
+        // An incidental mouse move must not replace a keyboard choice.
+        // Clicking a different row still inserts that row directly.
+        if open.selected.is_some() && !open.hovered {
+            return false;
+        }
         match open.choice_at(row, col) {
             Some(i) if open.selected == Some(i) && open.hovered => false,
             Some(i) => {
@@ -753,15 +772,21 @@ impl Open {
     }
 }
 
-/// The keys the list's bottom border shows, the longest that fits in
-/// `width`: Return only puts in a choice once one is chosen.
+/// Plain key names and actions, shortened only when the pane is narrow.
+/// Hover never changes Enter from running a line to inserting a choice.
 fn hint(open: &Open, width: usize) -> String {
-    let hints: &[&str] = if open.selected.is_some() && open.enter_takes {
-        &["⏎ put in · esc close", "⏎ put in"]
+    let hints: &[&str] = if open.selected.is_some() && open.enter_takes && !open.hovered {
+        &[
+            "↑↓ browse  Tab/Enter insert  Esc close",
+            "Tab/Enter insert  Esc close",
+            "Tab/Enter insert",
+            "Tab insert",
+            "Tab",
+        ]
     } else if open.selected.is_some() {
-        &["⇥ put in · esc close", "⇥ put in"]
+        &["↑↓ browse  Tab insert  Esc close", "Tab insert  Esc close", "Tab insert", "Tab"]
     } else {
-        &["⇥ put in · ↓ choose", "⇥ put in"]
+        &["↓ browse  Tab insert  Esc close", "Tab insert  Esc close", "Tab insert", "Tab"]
     };
     hints
         .iter()
@@ -814,13 +839,21 @@ fn place(t: &Terminal, open: &mut Open, s: &Settings, at_end: bool) -> Drawn {
     }
     open.scroll = open.scroll.min(n.saturating_sub(shown));
     let rows_shown = &offer.choices[open.scroll..(open.scroll + shown).min(n)];
-    let detail = |c: &list::Choice| if c.about.is_empty() { c.what.label() } else { c.about.as_str() }.to_string();
-    let widest_text = rows_shown.iter().map(|c| c.name.width()).max().unwrap_or(0);
-    // `│▸` text, two spaces, detail ` │`; details too wide for the
-    // screen are cut short.
-    let room = cols.saturating_sub(widest_text + 7);
-    let mut details: Vec<String> = rows_shown.iter().map(|c| fit(&detail(c), room)).collect();
-    let widest_detail = details.iter().map(|d| d.width()).max().unwrap_or(0);
+    // Size against the whole offer so scrolling does not shift the
+    // dropdown sideways. Keep it compact even in a very wide terminal.
+    // A real description helps; repeating "command" or "flag" does not.
+    let limit = cols.min(72);
+    let widest_text = offer
+        .choices
+        .iter()
+        .map(|c| c.name.width())
+        .max()
+        .unwrap_or(0)
+        .min(32)
+        .min(limit.saturating_sub(5));
+    let room = limit.saturating_sub(widest_text + 7);
+    let widest_detail = offer.choices.iter().map(|c| c.about.width().min(room)).max().unwrap_or(0);
+    let mut details: Vec<String> = rows_shown.iter().map(|c| fit(&c.about, widest_detail)).collect();
     // Each padded to the widest, so they line up on the left.
     for d in &mut details {
         let pad = widest_detail - d.width();
@@ -831,13 +864,13 @@ fn place(t: &Terminal, open: &mut Open, s: &Settings, at_end: bool) -> Drawn {
         .zip(details)
         .enumerate()
         .map(|(i, (c, detail))| PopupItem {
-            text: c.name.clone(),
+            text: fit(&c.name, widest_text),
             detail,
             selected: open.selected == Some(open.scroll + i),
         })
         .collect();
     let widest = widest_text + if widest_detail > 0 { 2 + widest_detail } else { 0 };
-    let width = (widest + 5).clamp(16.min(cols), cols.max(1));
+    let width = (widest + 5).clamp(32.min(cols), limit.max(1));
     // The text starts under the word being completed.
     let word_col = ccol.saturating_sub(offer.prefix.width());
     let col = word_col.saturating_sub(2).min(cols.saturating_sub(width));
@@ -931,7 +964,11 @@ mod tests {
 
     /// A 40×10 terminal at a prompt with `line` typed and reported.
     fn term(line: &str) -> Term {
-        let mut t = Term::new(40, 10, 100, ImagePool::process());
+        term_sized(line, 40)
+    }
+
+    fn term_sized(line: &str, cols: usize) -> Term {
+        let mut t = Term::new(cols, 10, 100, ImagePool::process());
         t.state.set_report_token(TOKEN.as_bytes().try_into().ok());
         t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07");
         t.advance(line.as_bytes());
@@ -1001,7 +1038,7 @@ mod tests {
         let names: Vec<&str> = p.items.iter().map(|i| i.text.as_str()).collect();
         assert_eq!(names, ["git", "grep", "gzip"]);
         assert!(p.items.iter().all(|i| !i.selected), "none until Down");
-        assert_eq!(p.items[0].detail, "command");
+        assert!(p.items[0].detail.is_empty(), "no repetitive type label");
         // Below the cursor's row, its text under the word (column 2).
         assert_eq!((p.row, p.col + 2), (1, 2));
         // The grey text: the rest of the first choice.
@@ -1031,7 +1068,9 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(5));
         };
-        let names: Vec<String> = d.popup.expect("a list").items.into_iter().map(|i| i.text).collect();
+        let popup = d.popup.expect("a list");
+        assert!(popup.items[0].selected, "Show Completions starts on the first choice");
+        let names: Vec<String> = popup.items.into_iter().map(|i| i.text).collect();
         assert_eq!(names, ["git", "grep", "gzip"]);
         assert_eq!(d.ghost.map(|g| g.text).as_deref(), Some("it"));
         // Typing on keeps it open, narrowed.
@@ -1187,7 +1226,7 @@ mod tests {
         let t = term("g");
         let d = settle(&mut st, &t);
         // The bottom border says what puts a choice in.
-        assert_eq!(d.popup.unwrap().hint, "⇥ put in");
+        assert_eq!(d.popup.unwrap().hint, "Tab insert  Esc close");
         assert_eq!(
             st.key(keycode::RETURN, true, false),
             KeyResult::Pass,
@@ -1197,7 +1236,7 @@ mod tests {
         st.update(&t.state, &settings(), later, &no_wake);
         assert_eq!(st.key(keycode::DOWN, true, false), KeyResult::Redraw);
         let d = st.update(&t.state, &settings(), later, &no_wake);
-        assert_eq!(d.popup.unwrap().hint, "⏎ put in");
+        assert_eq!(d.popup.unwrap().hint, "Tab/Enter insert  Esc close");
         assert_eq!(
             st.key(keycode::KEYPAD_ENTER, true, false),
             KeyResult::Send(b"\x1b[7701~0;0;git; \x07".to_vec())
@@ -1211,7 +1250,7 @@ mod tests {
         settle(&mut st, &t);
         st.key(keycode::DOWN, true, false);
         let d = st.update(&t.state, &s, later, &no_wake);
-        assert_eq!(d.popup.unwrap().hint, "⇥ put in");
+        assert_eq!(d.popup.unwrap().hint, "Tab insert  Esc close");
         assert_eq!(st.key(keycode::RETURN, true, false), KeyResult::Pass);
     }
 
@@ -1265,7 +1304,7 @@ mod tests {
         assert!(p.items[0].detail.starts_with("the default"));
         // The grey text shows the rest of the first, as for ours.
         assert_eq!(d.ghost.map(|g| (g.row, g.col, g.text)), Some((0, 17, "in".to_string())));
-        assert_eq!(st.key(keycode::DOWN, true, false), KeyResult::Redraw);
+        assert!(p.items[0].selected, "Tab starts on a visible choice");
         assert_eq!(st.key(keycode::DOWN, true, false), KeyResult::Redraw);
         st.update(&t.state, &settings(), Instant::now(), &no_wake);
         assert_eq!(st.key(keycode::TAB, true, false), KeyResult::Send(b"\x1b[7701~#2\x07".to_vec()));
@@ -1278,6 +1317,124 @@ mod tests {
         assert_eq!(st.key(b'x'.into(), true, false), KeyResult::Pass);
         assert!(!st.is_open());
         assert_eq!(st.update(&t.state, &settings(), Instant::now(), &no_wake).popup, None);
+    }
+
+    #[test]
+    fn deliberate_list_keeps_arrows_inside_its_bounds() {
+        let mut st = state("/nonexistent");
+        let t = term("g");
+        let s = Settings {
+            enter_takes: false,
+            ..settings()
+        };
+        st.zsh_matches(term_core::ShellMatches {
+            shown: vec!["git".into(), "grep".into()],
+        });
+        let p = st.update(&t.state, &s, Instant::now(), &no_wake).popup.unwrap();
+        assert!(p.items[0].selected);
+        assert_eq!(st.key(keycode::UP, true, false), KeyResult::Redraw);
+        assert!(st.update(&t.state, &s, Instant::now(), &no_wake).popup.unwrap().items[0].selected);
+        for _ in 0..3 {
+            assert_eq!(st.key(keycode::DOWN, true, false), KeyResult::Redraw);
+        }
+        assert!(st.update(&t.state, &s, Instant::now(), &no_wake).popup.unwrap().items[1].selected);
+        assert_eq!(
+            st.key(keycode::RETURN, true, false),
+            KeyResult::Pass,
+            "default Enter still runs the line"
+        );
+        assert!(!st.is_open(), "running the line closes zsh's list");
+        st.zsh_matches(term_core::ShellMatches {
+            shown: vec!["git".into(), "grep".into()],
+        });
+        st.update(&t.state, &s, Instant::now(), &no_wake);
+        assert_eq!(st.key(keycode::ESCAPE, true, false), KeyResult::Redraw);
+        assert_eq!(st.key(keycode::UP, true, false), KeyResult::Pass, "history after dismissal");
+    }
+
+    #[test]
+    fn mouse_motion_cannot_replace_a_keyboard_choice() {
+        let mut st = state("/nonexistent");
+        let t = term("g");
+        let s = settings();
+        st.zsh_matches(term_core::ShellMatches {
+            shown: vec!["git".into(), "grep".into()],
+        });
+        let p = st.update(&t.state, &s, Instant::now(), &no_wake).popup.unwrap();
+        assert!(!st.hover(p.row as usize + 2, p.col as usize + 2));
+        assert!(!st.hover(9, 39));
+        assert_eq!(st.key(keycode::RETURN, true, false), KeyResult::Send(b"\x1b[7701~#1\x07".to_vec()));
+        // A deliberate click still inserts another row.
+        st.zsh_matches(term_core::ShellMatches {
+            shown: vec!["git".into(), "grep".into()],
+        });
+        let p = st.update(&t.state, &s, Instant::now(), &no_wake).popup.unwrap();
+        assert_eq!(
+            st.click(p.row as usize + 2, p.col as usize + 2),
+            Some(KeyResult::Send(b"\x1b[7701~#2\x07".to_vec()))
+        );
+    }
+
+    #[test]
+    fn passive_hover_never_arms_enter() {
+        let path = programs("hover-enter", &["git", "grep"]);
+        let mut st = state(&path);
+        let t = term("g");
+        let p = settle(&mut st, &t).popup.unwrap();
+        assert!(st.hover(p.row as usize + 2, p.col as usize + 2));
+        let p = st.update(&t.state, &settings(), Instant::now(), &no_wake).popup.unwrap();
+        assert!(!p.hint.contains("Enter"));
+        assert_eq!(st.key(keycode::RETURN, true, false), KeyResult::Pass);
+        // Tab may still insert the visibly highlighted hover choice.
+        assert_eq!(
+            st.key(keycode::TAB, true, false),
+            KeyResult::Send(b"\x1b[7701~0;0;grep; \x07".to_vec())
+        );
+    }
+
+    #[test]
+    fn popup_is_bounded_and_stable_when_scrolling() {
+        let long = "--a-very-long-flag-name-that-must-still-be-inserted-in-full";
+        for cols in [12, 32, 80, 160] {
+            let t = term_sized("g", cols);
+            let mut st = state("/nonexistent");
+            let s = Settings {
+                rows: 1,
+                enter_takes: false,
+                ..settings()
+            };
+            st.zsh_matches(term_core::ShellMatches {
+                shown: vec![
+                    "--all  -- Fetch all remotes".into(),
+                    format!("{long}  -- {}", "Long description ".repeat(20)),
+                ],
+            });
+            let first = st.update(&t.state, &s, Instant::now(), &no_wake).popup.unwrap();
+            st.key(keycode::DOWN, true, false);
+            let last = st.update(&t.state, &s, Instant::now(), &no_wake).popup.unwrap();
+            assert_eq!(
+                (first.col, first.width),
+                (last.col, last.width),
+                "no horizontal jump at {cols} columns"
+            );
+            assert!(last.width as usize <= cols.min(72));
+            assert!(last.col as usize + last.width as usize <= cols);
+            assert!(last.items[0].text.width() + 5 <= last.width as usize);
+            assert!(last.hint.is_empty() || last.hint.width() + 6 <= last.width as usize);
+            assert_eq!(
+                st.key(keycode::TAB, true, false),
+                KeyResult::Send(b"\x1b[7701~#2\x07".to_vec()),
+                "truncation must not change the inserted match"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_zsh_matches_leave_arrows_to_the_shell() {
+        let mut st = state("/nonexistent");
+        st.zsh_matches(term_core::ShellMatches { shown: vec![] });
+        assert_eq!(st.update(&term("g").state, &settings(), Instant::now(), &no_wake), Drawn::default());
+        assert_eq!(st.key(keycode::DOWN, true, false), KeyResult::Pass);
     }
 
     #[test]

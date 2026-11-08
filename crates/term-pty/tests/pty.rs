@@ -159,6 +159,17 @@ fn output_then_exit() {
 }
 
 #[test]
+fn tty_name_is_the_programs_terminal() {
+    // What `tty` (ttyname(0)) prints in the program, so another app can
+    // name the pane by it (the `decline://focus?tty=` URL).
+    let mut s = spawn("tty", &["sh", "-c", "printf '<%s>' \"$(tty)\""], |_, _| {});
+    let name = s.pty().tty_name().expect("a tty name").to_string();
+    assert!(name.starts_with("/dev/"), "{name:?}");
+    s.wait_for_text(&format!("<{name}>"));
+    s.wait_exit();
+}
+
+#[test]
 fn direct_commands_run_without_the_shell() {
     // A shell that can't run anything: a direct command never uses it, and
     // its arguments reach the program as they are.

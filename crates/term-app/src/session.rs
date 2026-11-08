@@ -782,6 +782,11 @@ impl Session {
         self.pty.as_ref().map(Pty::pid)
     }
 
+    /// The terminal's device path (`/dev/ttys004`), while it has a program.
+    pub fn tty_name(&self) -> Option<&str> {
+        self.pty.as_ref()?.tty_name()
+    }
+
     /// The working directory of the program in the foreground.
     pub fn foreground_cwd(&self) -> Option<String> {
         self.pty.as_ref()?.foreground_cwd()

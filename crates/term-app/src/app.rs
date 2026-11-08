@@ -68,6 +68,9 @@ pub struct AppIvars {
     /// dropped on the Dock icon of an app not running): their windows open
     /// instead of the first window.
     opened_at_launch: RefCell<Vec<String>>,
+    /// `decline://focus` URLs that came before launch finished: their
+    /// terminals' device paths, looked for once the windows are open.
+    focus_at_launch: RefCell<Vec<String>>,
     /// Quit without asking, even with `confirm_close` (a restart into a
     /// new build, or the test-only `quit`).
     quit_without_asking: Cell<bool>,
@@ -240,6 +243,10 @@ define_class!(
             for dir in folders {
                 self.open_folder(dir, None);
             }
+            let focus = std::mem::take(&mut *self.ivars().focus_at_launch.borrow_mut());
+            for tty in focus {
+                self.focus_tty(&tty);
+            }
             let mtm = MainThreadMarker::from(self);
             unsafe { NSApplication::sharedApplication(mtm).setServicesProvider(Some(self)) };
             self.watch_for_new_build();
@@ -303,10 +310,29 @@ define_class!(
 
         /// Folders (or files, which open in their folder) dropped on the
         /// Dock icon or opened with `open -a`: a window there, or a tab when
-        /// macOS prefers tabs.
+        /// macOS prefers tabs. The app's own `decline://` URLs
+        /// ([`desktop::parse_app_url`]) never open one: a focus URL
+        /// brings its pane forward.
         #[unsafe(method(application:openURLs:))]
         fn open_urls(&self, _app: &NSApplication, urls: &NSArray<NSURL>) {
-            for dir in folders_of(urls.iter().filter_map(|u| u.path()).map(|p| p.to_string())) {
+            let (ours, files): (Vec<_>, Vec<_>) = urls
+                .iter()
+                .partition(|u| u.absoluteString().is_some_and(|s| desktop::is_app_url(&s.to_string())));
+            for url in ours {
+                let Some(desktop::AppUrl::Focus { tty }) =
+                    url.absoluteString().and_then(|s| desktop::parse_app_url(&s.to_string()))
+                else {
+                    // Another request, or none: only the app comes forward.
+                    crate::background::activate_ignoring_other_apps(MainThreadMarker::from(self));
+                    continue;
+                };
+                if self.ivars().launched.get() {
+                    self.focus_tty(&tty);
+                } else {
+                    self.ivars().focus_at_launch.borrow_mut().push(tty);
+                }
+            }
+            for dir in folders_of(files.iter().filter_map(|u| u.path()).map(|p| p.to_string())) {
                 if self.ivars().launched.get() {
                     self.open_folder(dir, None);
                 } else {
@@ -553,6 +579,7 @@ impl AppDelegate {
             restore: RefCell::new(restore),
             launched: Cell::new(false),
             opened_at_launch: RefCell::new(Vec::new()),
+            focus_at_launch: RefCell::new(Vec::new()),
             quit_without_asking: Cell::new(false),
             restarting: Cell::new(false),
             settings: RefCell::new(None),
@@ -845,6 +872,17 @@ impl AppDelegate {
             }
         }
         app.terminate(None);
+    }
+
+    /// Bring forward the pane whose terminal is device `tty` (a
+    /// `decline://focus` URL): its window key and in front, its tab
+    /// selected, the pane focused, and the app active. An unknown device
+    /// only brings the app forward; nothing opens.
+    fn focus_tty(&self, tty: &str) {
+        if let Some((view, pane)) = crate::view::pane_on_tty(tty) {
+            crate::view::show_pane(view, pane as usize);
+        }
+        crate::background::activate_ignoring_other_apps(MainThreadMarker::from(self));
     }
 
     /// A window in `dir`, or a tab of the window in front: as `how` says,

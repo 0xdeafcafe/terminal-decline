@@ -40,6 +40,9 @@ pub struct Pty {
     master: OwnedFd,
     pid: libc::pid_t,
     child: Child,
+    /// The terminal's device path (`/dev/ttys004`), as `ttyname(0)` gives
+    /// it in the program.
+    tty_name: Option<String>,
 }
 
 /// The program's process, shared between the [`Pty`] (which hangs up on it
@@ -160,12 +163,15 @@ impl Pty {
 
         let mut ws = size.winsize();
         let mut master: libc::c_int = -1;
+        // The slave's device path, filled in by forkpty (with strcpy, from
+        // ptsname: PATH_MAX is more than it ever writes).
+        let mut name = [0 as libc::c_char; libc::PATH_MAX as usize];
         // Opening a PTY fails now and then when several processes open PTYs
         // at once (seen on macOS 27: posix_openpt fails with errno -6, a
         // negated ENXIO, about once in 400 under load), so retry a few times.
         let mut tries = 0;
         let pid = loop {
-            let pid = unsafe { libc::forkpty(&mut master, std::ptr::null_mut(), std::ptr::null_mut(), &raw mut ws) };
+            let pid = unsafe { libc::forkpty(&mut master, name.as_mut_ptr(), std::ptr::null_mut(), &raw mut ws) };
             tries += 1;
             if pid >= 0 || tries == 5 {
                 break pid;
@@ -213,15 +219,28 @@ impl Pty {
             libc::fcntl(master.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC);
         }
         set_nonblocking(master.as_raw_fd());
+        let tty_name = unsafe { std::ffi::CStr::from_ptr(name.as_ptr()) }
+            .to_str()
+            .ok()
+            .filter(|n| !n.is_empty())
+            .map(str::to_string);
         Ok(Pty {
             master,
             pid,
             child: Child::new(pid),
+            tty_name,
         })
     }
 
     pub fn pid(&self) -> libc::pid_t {
         self.pid
+    }
+
+    /// The terminal's device path (`/dev/ttys004`): what `ttyname(0)` and
+    /// `tty` give in the program, so another app can name the pane it runs
+    /// in.
+    pub fn tty_name(&self) -> Option<&str> {
+        self.tty_name.as_deref()
     }
 
     /// A handle on the program's process, for its exit status.

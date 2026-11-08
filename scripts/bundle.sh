@@ -259,6 +259,22 @@ cat > "$contents/Info.plist" <<EOF
       </array>
     </dict>
   </array>
+  <!-- decline://focus?tty=/dev/ttys004 brings forward the pane on that
+       terminal (application:openURLs:, crates/term-app/src/desktop.rs).
+       Only the app claims it: pins write their own Info.plist. -->
+  <key>CFBundleURLTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleURLName</key>
+      <string>${bundle_id}</string>
+      <key>CFBundleTypeRole</key>
+      <string>Viewer</string>
+      <key>CFBundleURLSchemes</key>
+      <array>
+        <string>decline</string>
+      </array>
+    </dict>
+  </array>
   <!-- Finder's Services menu (and the right-click menu's Services) for a
        folder: the selectors are in crates/term-app/src/app.rs. -->
   <key>NSServices</key>

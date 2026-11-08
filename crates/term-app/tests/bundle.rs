@@ -1,7 +1,7 @@
 //! The app bundle `scripts/bundle.sh` makes (docs/design/pins.md §2): the
 //! launcher, the library and the pin stub in their places, signed inside
 //! out; an Info.plist that is valid and declares what the app answers
-//! (folders opened with it, the Services menu items, named with
+//! (folders opened with it, its `decline://` URLs, the Services menu items, named with
 //! [`terminal_decline_app::PRODUCT_NAME`]) and the usage strings; and an
 //! app that starts.
 #![cfg(target_os = "macos")]
@@ -81,6 +81,11 @@ fn info_plist_declares_folders_services_and_usage() {
     assert_eq!(extract(&plist, "CFBundleShortVersionString"), "1.2.3");
     assert_eq!(extract(&plist, "CFBundleVersion"), "7");
     assert_eq!(extract(&plist, "CFBundleDocumentTypes.0.LSItemContentTypes.0"), "public.folder");
+    // decline://focus?tty=… (desktop::parse_app_url).
+    assert_eq!(
+        extract(&plist, "CFBundleURLTypes.0.CFBundleURLSchemes.0"),
+        terminal_decline_app::desktop::URL_SCHEME
+    );
     let bundle_name = extract(&plist, "CFBundleName");
     for (i, (message, title)) in [("newWindowAtFolder", "Window"), ("newTabAtFolder", "Tab")].into_iter().enumerate() {
         let service = |key: &str| extract(&plist, &format!("NSServices.{i}.{key}"));

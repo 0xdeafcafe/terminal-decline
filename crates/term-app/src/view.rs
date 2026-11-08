@@ -438,6 +438,17 @@ pub(crate) fn show_pane(id: usize, pane: usize) {
     });
 }
 
+/// The window and pane whose terminal is device `tty` (`/dev/ttys004`, as
+/// [`term_pty::Pty::tty_name`] gives it): compared as they are, path to
+/// path.
+pub(crate) fn pane_on_tty(tty: &str) -> Option<(usize, PaneId)> {
+    all_views().iter().find_map(|v| {
+        v.with_state(|st| st.panes.iter().find(|(_, p)| p.session.tty_name() == Some(tty)).map(|(id, _)| *id))
+            .flatten()
+            .map(|pane| (v.id(), pane))
+    })
+}
+
 /// Wake the main thread to draw pane `pane` of window `id` (called from
 /// any thread).
 fn wake(id: usize, pane: PaneId) {

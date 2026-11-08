@@ -804,6 +804,20 @@ What the app does with files and folders from the rest of macOS
   Full Screen while that window is full screen;
   `NSWindow.userTabbingPreference`). An app that isn't running yet opens
   those windows instead of its first one.
+- `open "decline://focus?tty=/dev/ttys004"` brings forward the pane
+  whose terminal is that device, the path `ttyname(0)` (or `tty`) gives
+  in its program: its window key and in front, its tab selected, the
+  split pane focused, and the app active. The bundle claims the
+  `decline` scheme (`CFBundleURLTypes`; pins don't), and
+  `application:openURLs:` sends those URLs to `desktop::parse_app_url`
+  rather than treating them as folders. The value may be
+  percent-encoded, and a bare `ttys004` means `/dev/ttys004`; it is
+  then compared, path to path, with each pane's device as `forkpty`
+  named it (`Pty::tty_name`). An unknown device, another host
+  (`decline://other`) or no `tty` only brings the app forward, and says
+  nothing: such a URL never opens a window or tab of its own. One that
+  launches the app (which opens its windows as any launch does) waits
+  until those are open, as folders do.
 - Services (`NSServices` in the Info.plist that `scripts/bundle.sh`
   writes): "New Terminal Decline Window at Folder" and "New Terminal
   Decline Tab at Folder", for folders in Finder (its right-click menu's

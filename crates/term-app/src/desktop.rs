@@ -1,6 +1,7 @@
 //! What the app does with files and folders from the rest of macOS:
 //! dragged onto a window, dropped on the Dock icon (or `open -a`), or sent
-//! by a Services menu item. The AppKit side is in `app` and `view`; this is
+//! by a Services menu item, and the app's own `decline://` URLs (another
+//! app bringing a pane forward). The AppKit side is in `app` and `view`; this is
 //! the logic they share, tested on its own.
 
 use std::path::{Path, PathBuf};
@@ -69,6 +70,70 @@ pub fn folder_for(path: &Path) -> Option<PathBuf> {
     }
 }
 
+/// The URL scheme the app claims (`CFBundleURLTypes` in the Info.plist
+/// `scripts/bundle.sh` writes).
+pub const URL_SCHEME: &str = "decline";
+
+/// Whether `url` is one of the app's own (`decline:…`, in any case), not a
+/// file or folder.
+pub fn is_app_url(url: &str) -> bool {
+    url.split_once(':')
+        .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case(URL_SCHEME))
+}
+
+/// What a `decline://` URL asks for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AppUrl {
+    /// `decline://focus?tty=/dev/ttys004`: bring forward the pane whose
+    /// terminal is that device (the path `ttyname(0)` gives in its
+    /// program). The value may be percent-encoded; a bare name
+    /// (`ttys004`) means the one in `/dev`.
+    Focus { tty: String },
+}
+
+/// The request in a `decline://` URL; `None` for another scheme, another
+/// host (`decline://other`), a focus with no `tty`, or bad percent
+/// encoding.
+pub fn parse_app_url(url: &str) -> Option<AppUrl> {
+    let (scheme, rest) = url.split_once(':')?;
+    if !scheme.eq_ignore_ascii_case(URL_SCHEME) {
+        return None;
+    }
+    let rest = rest.strip_prefix("//")?;
+    let rest = rest.split_once('#').map_or(rest, |(r, _)| r);
+    let (place, query) = rest.split_once('?').unwrap_or((rest, ""));
+    let host = place.strip_suffix('/').unwrap_or(place);
+    if !host.eq_ignore_ascii_case("focus") {
+        return None;
+    }
+    let value = query.split('&').find_map(|pair| pair.strip_prefix("tty="))?;
+    let tty = percent_decode(value)?;
+    if tty.is_empty() || tty.chars().any(char::is_control) {
+        return None;
+    }
+    let tty = if tty.starts_with('/') { tty } else { format!("/dev/{tty}") };
+    Some(AppUrl::Focus { tty })
+}
+
+/// `%XX` escapes decoded (a `+` stays a `+`); `None` for a bad escape or
+/// text that isn't UTF-8 once decoded.
+fn percent_decode(s: &str) -> Option<String> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = std::str::from_utf8(bytes.get(i + 1..i + 3)?).ok()?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
 /// A new window or a new tab.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Open {
@@ -108,6 +173,58 @@ pub struct FrontWindow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn focus_urls_name_a_tty() {
+        let focus = |tty: &str| Some(AppUrl::Focus { tty: tty.into() });
+        for (url, want) in [
+            ("decline://focus?tty=/dev/ttys004", focus("/dev/ttys004")),
+            ("decline://focus?tty=%2Fdev%2Fttys004", focus("/dev/ttys004")),
+            ("decline://focus?tty=%2fdev%2fttys012", focus("/dev/ttys012")),
+            ("decline://focus/?tty=/dev/ttys004", focus("/dev/ttys004")),
+            ("DECLINE://Focus?tty=/dev/ttys004", focus("/dev/ttys004")),
+            ("decline://focus?x=1&tty=/dev/ttys004&y=2", focus("/dev/ttys004")),
+            ("decline://focus?tty=/dev/ttys004#top", focus("/dev/ttys004")),
+            // A bare name is the device in /dev.
+            ("decline://focus?tty=ttys004", focus("/dev/ttys004")),
+            // No tty.
+            ("decline://focus", None),
+            ("decline://focus?", None),
+            ("decline://focus?tty=", None),
+            ("decline://focus?tty", None),
+            ("decline://focus?pty=/dev/ttys004", None),
+            // Other hosts, other schemes.
+            ("decline://other?tty=/dev/ttys004", None),
+            ("decline://", None),
+            ("decline:focus?tty=/dev/ttys004", None),
+            ("file:///dev/ttys004", None),
+            ("https://focus?tty=/dev/ttys004", None),
+            // Junk.
+            ("", None),
+            ("decline", None),
+            ("decline://focus?tty=%zz", None),
+            ("decline://focus?tty=%2", None),
+            ("decline://focus?tty=%ff", None),
+            ("decline://focus?tty=/dev/a%0Ab", None),
+        ] {
+            assert_eq!(parse_app_url(url), want, "{url:?}");
+        }
+    }
+
+    #[test]
+    fn app_urls_are_told_from_files() {
+        for (url, want) in [
+            ("decline://focus?tty=/dev/ttys004", true),
+            ("Decline://other", true),
+            ("decline:", true),
+            ("file:///Users/me/src/", false),
+            ("/Users/me/decline:x", false),
+            ("declined://focus", false),
+            ("", false),
+        ] {
+            assert_eq!(is_app_url(url), want, "{url:?}");
+        }
+    }
 
     #[test]
     fn plain_paths_stay_as_they_are() {

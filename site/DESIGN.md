@@ -9,16 +9,16 @@ Alex approves publishing this replacement.
 ## Composition
 
 A spruce opening carries the outlined wordmark, visible Homebrew command,
-heavy mint title and the measured footprint/speed figures. A wide terminal
+heavy mint title and a plain introduction to the terminal. A wide terminal
 window crosses the boundary between spruce and the page ground. Its tab
-strip is ordinary page navigation: Footprint, Pins, Agents and Install.
+strip is ordinary page navigation: Comparison, Pins, Agents and Install.
 It is not a simulated interactive app. Chrome is aria-hidden where purely
 decorative; the navigation remains accessible and keyboard operable.
 
 The desktop window contains the captured comparison at left, documentation
 commands at upper right and the completion transcription below them. At
 860px and below it retains only the comparison. The commands already occur
-in their supporting sections; completion is displayed in Agents on narrow
+in their supporting sections; completion is displayed in its own section on narrow
 screens. CSS display:none ensures only one completion view is exposed.
 
 The heading uses the native SF Pro stack at weight 800, with a responsive
@@ -30,7 +30,8 @@ with user-select:none limited to chrome and controls. There is no typing,
 blinking or benchmark animation. System light/dark and reduced motion work
 through CSS, with no theme switch or browser framework.
 
-The full comparison table follows, then pins, agent commands and install.
+The full comparison table follows, then pins, agent commands, completion
+and install.
 Table figures and bar proportions come directly from comparison.json;
 there is no second manually typed set of values. Method conditions and
 the earlier Ghostty cat win remain visible. The concept’s flat changes of
@@ -126,3 +127,19 @@ upload-pages-artifact and deploy-pages. Site-only changes are ignored by
 Rust CI. Pages is configured for workflow builds and decline.forbes.red.
 Alex owns the DNS CNAME: decline to 0xdeafcafe.github.io. This Screen revision
 is local pending approval to replace the currently deployed Long rest site.
+
+## Copy revision
+
+The opening now explains Decline in plain language rather than presenting
+two measurements and their test conditions as a pitch. Benchmark labels
+explain that the cat test displays a text file. The method, measured values
+and earlier Ghostty win remain available. Captured terminal text is unchanged.
+Pins and agent control describe a use before the command example. Completion
+is a separate section, and installation explains what to open afterwards.
+The social card and search description use the same product language.
+
+Copy revision validation: the static build and existing asset/data checks
+passed. Chrome captures at 1440, 768 and 390 px in both colour schemes
+reported no horizontal overflow, broken images or unresolved page anchors.
+Desktop light and the complete phone dark page were inspected visually.
+All captures stay in the session's temporary review folder.

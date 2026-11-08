@@ -8,7 +8,7 @@ export default function TerminalWindow({ children }: { children: ReactNode }) {
         <span className="title">Terminal Decline</span>
       </div>
       <nav className="tabs ui" aria-label="Page sections">
-        <a href="#numbers">Footprint</a><a href="#pins">Pins</a><a href="#agents">Agents</a><a href="#install">Install</a>
+        <a href="#numbers">Comparison</a><a href="#pins">Pins</a><a href="#agents">Agents</a><a href="#install">Install</a>
       </nav>
       {children}
     </div>

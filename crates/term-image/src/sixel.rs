@@ -344,6 +344,13 @@ impl<T: PixelTarget> Decoder<T> {
         if self.nparams >= 4 {
             self.raster = (ph.min(self.limits.max_width), pv.min(self.limits.max_height));
             let (w, h) = self.raster;
+            // A later raster command replaces an earlier one. Nothing is
+            // painted yet, so the target the earlier one made holds
+            // nothing: drop it, rather than end with a target and no size
+            // (a 0 × 0 image, issue #8).
+            if self.target.as_ref().is_some_and(|t| (t.width(), t.height()) != (w, h)) {
+                self.target = None;
+            }
             if w > 0 && h > 0 && self.target.is_none() {
                 self.allocate(w, h, alloc);
             }
@@ -546,6 +553,9 @@ impl<T: PixelTarget> Decoder<T> {
         };
         let (w, h) = self.size();
         let (w, h) = (w.min(target.width()), h.min(target.height()));
+        if w == 0 || h == 0 {
+            return Finished { image: None, palette };
+        }
         if (target.width(), target.height()) != (w, h)
             && let Some(mut exact) = alloc(w, h)
             && exact.width() >= w

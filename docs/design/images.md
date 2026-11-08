@@ -915,7 +915,10 @@ slices (`put_slice` from vte's DCS passthrough, cells §14):
 - **Raster attributes** `" Pan ; Pad ; Ph ; Pv`: the aspect `Pan/Pad`
   (overrides P1; rounded to a whole vertical scale 1–5; `Pad = 0` is
   taken as 1) and the size, which lets the decoder allocate once. chafa
-  and img2sixel send `"1;1;W;H`.
+  and img2sixel send `"1;1;W;H`. Before the first pixel the last ones
+  win (a later `"…;0;0` takes the size back); after it they are ignored,
+  as in xterm. With no size and nothing painted there is no image, never
+  a 0 × 0 one.
 - **Colours** `# Pc ; Pu ; Px ; Py ; Pz`: select register `Pc`, or define
   it in HLS (`Pu = 1`; DEC's HLS, where hue 0° is **blue**, not red as in
   the usual HLS) or RGB percentages (`Pu = 2`). At most 1024 registers

@@ -98,9 +98,14 @@ impl Inflate {
             }
             match r.status {
                 Ok(MZStatus::StreamEnd) => self.done = true,
+                // miniz hands on at most what its 32 KB window holds past
+                // its write position, so a short block doesn't mean the
+                // output is all out, even once the input is used up: go on
+                // until a call makes no progress. (Stopping on a short
+                // block lost the rest of the output with the last slice,
+                // and made the result depend on the slicing: issue #6.)
                 Ok(_) => {
-                    // A full output block may mean more output is waiting.
-                    if input.is_empty() && r.bytes_written < BLOCK {
+                    if r.bytes_consumed == 0 && r.bytes_written == 0 {
                         break;
                     }
                 }

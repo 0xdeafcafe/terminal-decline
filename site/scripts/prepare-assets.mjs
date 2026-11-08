@@ -22,8 +22,8 @@ const social = `<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630
 <text x="180" y="140" font-size="42">Terminal Decline</text>
 <text x="80" y="285" font-size="84" font-weight="800" fill="#B9E5CC">A peppy terminal</text>
 <text x="80" y="375" font-size="84" font-weight="800" fill="#B9E5CC">for macOS.</text>
-<text x="84" y="455" font-size="32">Fast and light on memory.</text>
-<text x="84" y="548" font-size="24" fill="#B9E5CC">Native Mac tabs and split panes.</text>
+<text x="84" y="455" font-size="32">A fast, lightweight terminal.</text>
+<text x="84" y="548" font-size="24" fill="#B9E5CC">Crisp text, no bloat, and built to stay lean.</text>
 </g></svg>`;
 await sharp(Buffer.from(social)).png().toFile(path.join(output, 'social.png'));
 console.log(`Prepared ${Object.keys(assets).length} pin assets and social card.`);

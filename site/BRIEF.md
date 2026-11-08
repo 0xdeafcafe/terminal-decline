@@ -115,3 +115,8 @@ evidence belongs in the comparison, with a plain explanation of the test.
 Describe pins and agent control by what the reader can do with them.
 Completion has its own section rather than being an aside under agents.
 Do not alter the captured terminal data or imply a measured latency win.
+
+Alex further clarified that native tabs and split panes are basic features,
+not the pitch. The introduction should describe a fast, lightweight terminal
+with crisp text, no bloat and an emphasis on staying lean. Carry that through
+the search description and social card too.

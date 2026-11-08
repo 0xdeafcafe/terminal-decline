@@ -18,7 +18,8 @@ A report, never a gate (docs/perf-watch.md). Three steps, run by
   - app.*: a release bundle started in the background under the test
     control, fed a scrollback flood (scripts/pressure/gen.py big), then
     its footprint (/usr/bin/footprint, phys_footprint), threads, and CPU
-    time, wake-ups and context switches over a minute sitting idle.
+    time, wake-ups and context switches over a minute sitting idle, from
+    a minute after the flood.
 A part that fails is left out with a note in `errors`; the rest still runs.
 
 `report` compares with the previous run in the history (and with the run
@@ -55,6 +56,14 @@ SCHEMA = 1
 
 FLOOD_BYTES = 20_000_000
 SETTLE_SECONDS = 10
+# The idle minute starts this long after the flood, not at the settle:
+# for some 40 s after the flood the process still wakes now and then, 5
+# to 111 times in that minute, varying run to run, while the app's own
+# threads all sleep (sampled: only macOS's libapp_launch_measurement and
+# dispatch timers run, on the main queue). Counted, it made idle wake-ups
+# and context switches jump between runs of one build (6 and 49 a minute
+# at ef0de94, issue #10); from a minute on, it is quiet.
+IDLE_AFTER_SECONDS = 60
 IDLE_SECONDS = 60
 LAUNCH_TIMEOUT = 180
 
@@ -275,9 +284,11 @@ def measure_app(app, idle_seconds=IDLE_SECONDS):
             if not wait_for(lambda: len(read_dumps(dump)) >= 1, LAUNCH_TIMEOUT, child):
                 raise RuntimeError(f"no dump after the flood within {LAUNCH_TIMEOUT}s (exit status {child.poll()})")
             flooded = read_dumps(dump)[0]
+            dumped = time.monotonic()
             time.sleep(SETTLE_SECONDS)
+            fp_flood = footprint_tool(child.pid) or proc.sample(child.pid)["phys_footprint"]
+            time.sleep(max(0.0, dumped + IDLE_AFTER_SECONDS - time.monotonic()))
             a = proc.sample(child.pid)
-            fp_flood = footprint_tool(child.pid) or a["phys_footprint"]
             time.sleep(idle_seconds)
             b = proc.sample(child.pid)
             fp_idle = footprint_tool(child.pid) or b["phys_footprint"]

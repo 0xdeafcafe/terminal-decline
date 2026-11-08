@@ -26,8 +26,8 @@ machine moves them little.
 | `scrollback.<output>` | Scrollback bytes per line from the example `scrollback_mem`, as `scripts/bench-gate.py` reads them. Deterministic. |
 | `app.history_bytes` | A release bundle (`scripts/bundle.sh`, ad hoc signed, without Sparkle) started in the background under the test control, its window behind every other and never taking focus. Its shell `cat`s a 20 MB flood from `scripts/pressure/gen.py big`; the test control's dump then reports the bytes history holds. |
 | `app.footprint_after_flood` | `/usr/bin/footprint` (phys_footprint, not RSS) 10 s after the flood, once the idle trim has run. |
-| `app.footprint_idle`, `app.threads` | Footprint and thread count after the app has then sat idle for a minute. |
-| `app.idle_cpu_ms_per_min`, `app.idle_wakeups_per_min`, `app.idle_context_switches_per_min` | CPU time, wake-ups (idle and interrupt) and context switches over that minute, from `proc_pid_rusage` and `proc_pidinfo` read from outside the app (no `sudo` needed, unlike `powermetrics`). While idle the shell waits in `read`, a builtin, so nothing in the tab changes. |
+| `app.footprint_idle`, `app.threads` | Footprint and thread count after the app has then sat idle for a minute, starting a minute after the flood. |
+| `app.idle_cpu_ms_per_min`, `app.idle_wakeups_per_min`, `app.idle_context_switches_per_min` | CPU time, wake-ups (idle and interrupt) and context switches over that minute, from `proc_pid_rusage` and `proc_pidinfo` read from outside the app (no `sudo` needed, unlike `powermetrics`). While idle the shell waits in `read`, a builtin, so nothing in the tab changes. The minute starts a minute after the flood, not at the 10 s mark: until about 40 s after it, macOS's own launch work in the process (libapp_launch_measurement and dispatch timers on the main queue, while the app's threads all sleep) wakes it 5 to 111 times, differently each run, which made one build read 6 and 49 wake-ups a minute (issue #10). |
 | `size.dylib`, `size.launcher`, `size.stub`, `size.bundle` | Bytes of the library, launcher and pin stub in the bundle, and the whole bundle. |
 
 ## Comparing, and the issue
@@ -63,7 +63,11 @@ it was opened against; while it is open, later runs compare with those,
 update its table, and comment when the set of numbers over changes. When
 everything is back under, the job closes it. To accept new numbers as the
 new normal, close the issue by hand: the next run compares with the
-latest run again.
+latest run again. To accept some of them while others are still being
+looked into, edit the issue's body: in its hidden `perf-watch-baseline`
+comment, set those numbers to the ones accepted, and say why in a
+comment on the issue. Later runs compare with the edited baseline and
+keep it.
 
 ## Trying a change to the watch
 

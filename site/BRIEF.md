@@ -105,3 +105,13 @@ tabs, its compact single-pane phone opening and the visible install command.
 All terminal evidence stays coloured HTML at 13px/1.3, selectable separately
 from chrome. The selected source and cross-review are in
 concepts/round-two/screen. New publication requires approval.
+
+## Copy revision after Screen
+
+Alex rejected the bare idle-memory and cat-time opening as meaningless
+without context. Keep “A peppy terminal for macOS.” and explain the product
+in ordinary sentences. Speed and low memory use still lead, but numerical
+evidence belongs in the comparison, with a plain explanation of the test.
+Describe pins and agent control by what the reader can do with them.
+Completion has its own section rather than being an aside under agents.
+Do not alter the captured terminal data or imply a measured latency win.

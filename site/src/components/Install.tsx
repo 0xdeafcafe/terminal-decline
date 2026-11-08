@@ -5,10 +5,10 @@ export default function Install() {
     <section id="install" aria-labelledby="h-inst" className="closing">
       <div className="slope ui"><Slope /></div>
       <div>
-        <h2 id="h-inst">Install</h2>
-        <p className="prose">Releases are for Apple Silicon and need macOS 14 Sonoma or later.</p>
+        <h2 id="h-inst">Install Decline</h2>
+        <p className="prose">On an Apple Silicon Mac running macOS 14 Sonoma or later, install with Homebrew:</p>
         <code className="cmdline sel">brew install --cask 0xdeafcafe/tap/terminal-decline</code>
-        <p className="small prose">Installs Terminal Decline.app and the command as <code>terminal-decline</code> and <code>decline</code>.</p>
+        <p className="small prose">Then open Terminal Decline from Applications. The <code>decline</code> command is installed too.</p>
         <ul className="links">
           <li><a href="https://github.com/0xdeafcafe/terminal-decline#install">Build from source</a></li>
           <li><a href="https://github.com/0xdeafcafe/terminal-decline/blob/main/DESIGN.md">Technical notes</a></li>

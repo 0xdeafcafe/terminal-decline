@@ -11,16 +11,16 @@ export default function Pins() {
       <div className="duo">
         <div>
           <h2 id="h-pin">Pin a command to the Dock</h2>
-          <p className="prose">A pin gives a command its own Mac app, with its own icon, windows and settings. It uses the program’s own icon when there is one, otherwise it draws one.</p>
+          <p className="prose">Open your favourite command-line app from the Dock. It gets its own windows and settings, just like a Mac app.</p>
           <code className="cmdline sel">{pinCommand}</code>
-          <p className="small prose">Needs <a href="https://github.com/0xdeafcafe/rush">rush</a> installed. <a href="https://github.com/0xdeafcafe/terminal-decline#pin-a-program-to-the-dock">Pin options</a>.</p>
+          <p className="small prose">This example needs <a href="https://github.com/0xdeafcafe/rush">rush</a> installed. <a href="https://github.com/0xdeafcafe/terminal-decline#pin-a-program-to-the-dock">Pin options</a>.</p>
         </div>
         <div>
           <div className="pinrow">{pins.map(pin => <figure key={pin.file}>
             <img src={`/images/${pin.file}.webp`} width={pin.size} height={pin.size} className={pin.size === 32 ? 'sm' : pin.size === 16 ? 'xs' : undefined} alt={pin.size < 100 ? `Rush pin at ${pin.size} pixels` : `Generated ${pin.name} pin`} loading="lazy" decoding="async" />
             <figcaption>{pin.name}</figcaption>
           </figure>)}</div>
-          <p className="small prose">Generated pin icons, not the installed rush icon.</p>
+          <p className="small prose">Example icons made by Decline. It uses the program’s own icon when one is available.</p>
         </div>
       </div>
     </section>

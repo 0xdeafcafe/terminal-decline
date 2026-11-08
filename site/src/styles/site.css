@@ -33,7 +33,7 @@ code,pre,.term{font-family:var(--mono)}
 .install button:hover{background:#D6F0E1}
 .install button:focus-visible{outline-color:var(--mint)}
 h1{margin:20px 0 0;font:800 clamp(44px,7.2vw,96px)/.98 var(--sans);letter-spacing:-.045em;color:var(--mint)}
-.lead{margin:14px 0 0;font:600 clamp(22px,2.7vw,32px)/1.25 var(--sans);letter-spacing:-.02em;color:#EAF7EF}
+.lead{max-width:44ch;margin:14px 0 0;font:600 clamp(22px,2.7vw,32px)/1.25 var(--sans);letter-spacing:-.02em;color:#EAF7EF}
 .lead-sub{margin:6px 0 0;color:var(--plate-muted);max-width:60ch}
 .lead-sub .alt{color:var(--plate-muted)}
 

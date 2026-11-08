@@ -34,7 +34,7 @@ and the list and colours are tested as below (§12). bash and fish get
 | Grey text after the cursor | Kept: the top choice shows grey after the cursor, Right arrow at the end of the line takes it |
 | History order | Yes: commands ordered by how often they appear in the shell's history file |
 | On by default | On for everyone (every setting in §10 defaults to true), except the list opening as you type (`completion_as_you_type`) and Enter putting a choice in (`completion_enter_puts_in`), both opt-in since 1 Nov 2026 at Alex's ask: by default the list shows zsh's matches on Tab, described from man pages where zsh gave no description |
-| Enter with the list open | Runs the line as typed. With `completion_enter_puts_in` (off by default, since Enter is the shell's), once a choice is chosen (Down, or the mouse over it) Enter puts that one in instead, as VS Code's terminal does. Added 1 Nov 2026 at Alex's ask |
+| Enter with the list open | Runs the line as typed. With `completion_enter_puts_in` (off by default, since Enter is the shell's), a keyboard choice lets Enter insert instead. The pending 8 November revision stops hover from changing Enter and highlights the first choice when Tab or Show Completions opens the list (§9) |
 
 The find bar stays the only AppKit UI of our own; the list is drawn like
 the cursor and the selection, so it costs no view, layer or backing
@@ -97,8 +97,13 @@ Files and folders, folders first, with the size of a file:
                                    └────────────────────────┘
 ```
 
-At most 8 rows of choices, scrolling; the detail pane shows only for
-flags with more description than fits on their row.
+At most 8 rows of choices, scrolling. The dropdown is at most 72 cells
+wide and stays the same width while browsing a set of suggestions.
+Names have at most 32 visible cells. Longer names and descriptions are
+ellipsised for display only; insertion always uses the full choice.
+Descriptions stay beside their options. Repeated type labels such as
+`command`, `flag` and `folder` are omitted. The older sketches above are
+illustrative; there is no separate detail pane in the implementation.
 
 ## 3. Knowing the command line
 
@@ -443,18 +448,21 @@ that doesn't know `--help` would just run.
   flag. It closes on Esc, a key that isn't text or one of its own, the
   cursor leaving the word, a C mark, or the window losing focus. After
   Esc it doesn't open again until the word changes.
-- While it's open: Up/Down move, Tab takes the choice, Esc closes.
-  Enter goes to the shell, so it runs what you typed. With
-  `completion_enter_puts_in` on, once a choice is chosen (with Down, or
-  the mouse over it) Enter puts it in instead and runs nothing; with
-  nothing chosen it still runs the line. Up from the first choice goes
-  back to none. The bottom border says what puts a choice in: `⏎ put
-  in` when Enter would, else `⇥ put in` (with `· ↓ choose` / `· esc
-  close` when the list is wide enough). Typing goes to the shell as always and
-  filters the list.
-- The mouse: over a choice, it is chosen (the grey text follows it); off
-  the list, or typing, lets go of it, so Enter runs the line again. A
-  click on a choice puts it in.
+- A list requested with Tab or Show Completions starts with the first
+  choice highlighted. Up/Down stay within its first and last choices,
+  without wrapping or unexpectedly going into shell history. Esc closes
+  it and returns the arrows to the shell.
+- Passive as-you-type suggestions still start without a choice. Down
+  enters the list. Up from the first choice clears the selection, then
+  Up goes to shell history. Down stops at the last suggestion.
+- Tab inserts the choice. Enter runs the line by default. With the opt-in
+  `completion_enter_puts_in`, Enter inserts a keyboard choice instead.
+  The footer uses plain names (`Tab insert`, `Esc close`) and includes
+  arrow navigation when it fits. It shows `Tab/Enter insert` only when
+  Enter would insert. Narrow panes get a shorter hint.
+- Hover can preview a passive suggestion, but cannot take over a
+  keyboard selection or make Enter insert. Clicking any choice still
+  inserts it. Typing clears a passive hover selection.
 - Taking a folder opens its list straight away, without more typing.
 - Right arrow, at the end of the line, takes the grey text after the
   cursor.
@@ -865,3 +873,21 @@ Measured 1 Nov 2026 (load 5–8, 17 during the latency run):
 
 Not yet: the `[keybind]` actions for the list's keys,
 bash and fish. The frame and latency benchmarks are still to run.
+
+## Dropdown interaction revision (8 November 2026, pending CI)
+
+Alex found the completion keys confusing and the list visually noisy.
+The revision gives deliberately opened lists visible keyboard focus,
+keeps their arrows inside the list, and prevents incidental mouse movement
+from replacing that focus. As-you-type suggestions remain opt-in and
+preserve the existing path back to shell history. Enter-to-insert remains
+opt-in, but hovering no longer activates it.
+
+The popup uses the existing renderer and theme. Its width is capped,
+category labels are removed, and the footer says what a key does in
+ordinary words. Full suggestion names remain intact for insertion.
+Regression tests cover boundary navigation, Enter defaults and opt-in,
+mouse interference, narrow panes, stable width while scrolling and empty
+shell matches. Existing tests cover filtering, folder continuation and
+passive-list history behaviour. Local formatting is checked; compilation
+and tests must run on GitHub under the repository's CI-only rule.

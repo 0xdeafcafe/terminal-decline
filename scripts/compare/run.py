@@ -40,8 +40,9 @@ see the comparison doc). Terminal.app's preferences are exported first and
 imported back at the end in case it wrote them.
 
 --latency: keypress → pixels with scripts/latency/probe.swift, for every
-terminal, when the terminal running this has Accessibility and Screen
-Recording (`probe check`); otherwise recorded as skipped. The probe watches
+terminal, when the probe has Accessibility and Screen Recording (`probe
+check`; signed, it runs as an app of its own, see scripts/latency/run.py);
+otherwise recorded as skipped. The probe watches
 the terminal's frontmost window, the one its keys go to. --latency-keys:
 how many keys (200). --latency-log: Decline's latency run also writes its
 own timing of each key (DECLINE_LATENCY_LOG), joined with the probe's
@@ -772,14 +773,14 @@ def measure_latency(ctx, key, keys=200):
             f.write(echo + "\n")
         time.sleep(1.5)
         n = keys + latency.WARM_UP
-        subprocess.run([str(ctx.probe), "keys", str(main), str(latency.KEY_A)], check=True, capture_output=True)
+        ctx.probe.run("keys", main, latency.KEY_A)
         time.sleep(0.5)
         # The window the keys go to: the frontmost on screen (CGWindowList
         # is front to back). Not the probe's default, the largest, which is
         # a coin toss for Warp's two windows of one size.
         front = [w for w in t.windows() if w[6] and w[0] == main]
         win = ["--window", str(front[0][1])] if front else []
-        subprocess.run([str(ctx.probe), "measure", str(main), str(n), str(latency.KEY_A), *win, "--out", str(out)], check=True)
+        ctx.probe.run("measure", main, n, latency.KEY_A, *win, "--out", out)
         rows = latency.read_jsonl(out)[latency.WARM_UP :]
         ms = [r["ms"] for r in rows if "ms" in r]
         row.update(latency.stats(ms))
@@ -997,9 +998,12 @@ def main():
                         f.write(json.dumps(row) + "\n")
         if args.latency:
             ctx.probe = latency.build_probe(out_dir)
-            check = subprocess.run([str(ctx.probe), "check"], capture_output=True, text=True).stdout.strip()
+            try:
+                check = ctx.probe.run("check").strip()
+            except (RuntimeError, subprocess.CalledProcessError) as e:
+                check = f"probe check failed: {e}"
             for t in terminals:
-                if "screen_recording=false" in check or "post_events=false" in check:
+                if "screen_recording=true" not in check or "post_events=true" not in check:
                     row = {"terminal": t, "kind": "latency", "skipped": f"needs Accessibility and Screen Recording ({check})"}
                 else:
                     wait_load()

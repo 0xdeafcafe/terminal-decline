@@ -24,8 +24,12 @@ each at the display link rates given (`DECLINE_LATENCY_HZ`).
 
 External (`--external`): `probe.swift` posts the keys from outside and
 watches the window's pixels with ScreenCaptureKit, so any terminal can be
-measured the same way. It needs Accessibility and Screen Recording for the
-terminal running this script. Same scenarios, except that flood opens the
+measured the same way. It needs Accessibility and Screen Recording: with
+a signing identity ($DECLINE_PROBE_SIGN_ID, else the first "Developer ID
+Application" one) it runs as LatencyProbe.app, signed, through `open`, and
+those go to that app (bundle id red.forbes.terminal-decline.probe); without
+one, the bare binary runs under the terminal running this script's grants.
+Same scenarios, except that flood opens the
 second window with Cmd+N (`echo.py --flood-first`); the display runs at
 its own rate. For decline, the in-app log is kept too, to compare the two
 clocks.
@@ -42,6 +46,7 @@ import json
 import os
 import plistlib
 import random
+import re
 import shutil
 import signal
 import subprocess
@@ -153,12 +158,107 @@ def make_bundle(binary, out_dir):
     return app
 
 
+PROBE_BUNDLE_ID = "red.forbes.terminal-decline.probe"
+PROBE_SUMMARY = re.compile(r"^probe: \d+ keys, ")
+
+
+def sign_identity():
+    """The identity to sign the probe's app with: $DECLINE_PROBE_SIGN_ID,
+    else the first "Developer ID Application" one in the keychain, else
+    None."""
+    if os.environ.get("DECLINE_PROBE_SIGN_ID"):
+        return os.environ["DECLINE_PROBE_SIGN_ID"]
+    r = subprocess.run(["/usr/bin/security", "find-identity", "-v", "-p", "codesigning"], capture_output=True, text=True)
+    for line in r.stdout.splitlines():
+        m = re.match(r"\s*\d+\) ([0-9A-F]{40}) \"Developer ID Application", line)
+        if m:
+            return m.group(1)
+    return None
+
+
+class Probe:
+    """probe.swift, built. With a signing identity it runs as an app of its
+    own (LatencyProbe.app, started through `open`): macOS grants Screen
+    Recording and Accessibility to the process responsible, which for a
+    bare binary is whatever terminal started it, and those grants go stale.
+    The app's grant follows its bundle id and signing identity, so a probe
+    rebuilt and signed the same way keeps it. Without an identity (a CI
+    runner) the bare binary runs, under the terminal's grants."""
+
+    def __init__(self, exe, app=None):
+        self.exe = exe
+        self.app = app
+
+    def where(self):
+        return f"LatencyProbe.app ({PROBE_BUNDLE_ID}, {self.app})" if self.app else "the terminal running this"
+
+    def run(self, *args):
+        """Run it with these arguments to the end; its stdout. Raises if it
+        failed."""
+        args = [str(a) for a in args]
+        if not self.app:
+            return subprocess.run([str(self.exe), *args], check=True, capture_output=True, text=True).stdout
+        tmp = Path(tempfile.mkdtemp(prefix="decline-probe-"))
+        out, err = tmp / "out", tmp / "err"
+        try:
+            exe = str(self.app / "Contents/MacOS/probe")
+            before = set(pids_of(exe))
+            subprocess.run(["/usr/bin/open", "-n", "--stdout", str(out), "--stderr", str(err), str(self.app), "--args", *args], check=True)
+            # `open -W` doesn't wait here: find its process and wait for it.
+            pid, deadline = None, time.monotonic() + 10
+            while pid is None and time.monotonic() < deadline:
+                new = set(pids_of(exe)) - before
+                pid = new.pop() if new else None
+                if pid is None:
+                    if out.exists() and out.stat().st_size or err.exists() and err.stat().st_size:
+                        break  # done already
+                    time.sleep(0.02)
+            while pid is not None and pid in pids_of(exe):
+                time.sleep(0.05)
+            stdout = out.read_text() if out.exists() else ""
+            stderr = err.read_text() if err.exists() else ""
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+        # No exit status through `open`: anything on stderr but measure's
+        # summary is a failure (die() writes there).
+        problems = [l for l in stderr.splitlines() if l.strip() and not PROBE_SUMMARY.match(l)]
+        if problems:
+            raise RuntimeError(f"probe {' '.join(args)}: {'; '.join(problems)}")
+        if stderr:
+            sys.stderr.write(stderr)
+        return stdout
+
+
 def build_probe(out_dir):
     exe = out_dir / "probe"
     src = HERE / "probe.swift"
-    if not exe.exists() or exe.stat().st_mtime < src.stat().st_mtime:
+    fresh = not exe.exists() or exe.stat().st_mtime < src.stat().st_mtime
+    if fresh:
         subprocess.run(["swiftc", "-O", "-swift-version", "5", str(src), "-o", str(exe)], check=True)
-    return exe
+    identity = sign_identity()
+    if not identity:
+        return Probe(exe)
+    app = out_dir / "LatencyProbe.app"
+    inner = app / "Contents/MacOS/probe"
+    if fresh or not inner.exists():
+        shutil.rmtree(app, ignore_errors=True)
+        inner.parent.mkdir(parents=True)
+        shutil.copy2(exe, inner)
+        with open(app / "Contents/Info.plist", "wb") as f:
+            plistlib.dump(
+                {
+                    "CFBundleIdentifier": PROBE_BUNDLE_ID,
+                    "CFBundleName": "Decline Latency Probe",
+                    "CFBundleExecutable": "probe",
+                    "CFBundlePackageType": "APPL",
+                    "LSUIElement": True,
+                },
+                f,
+            )
+        # The binary, then the bundle around it.
+        for path in (inner, app):
+            subprocess.run(["codesign", "--force", "-s", identity, str(path)], check=True, capture_output=True)
+    return Probe(exe, app)
 
 
 def pids_of(exe):
@@ -323,7 +423,7 @@ def run_inapp(bundle, scenario, hz, n_keys, out_dir):
 
 
 def probe_out(probe, *args):
-    return subprocess.run([str(probe), *map(str, args)], check=True, capture_output=True, text=True).stdout
+    return probe.run(*args)
 
 
 def window_ids(probe, pid):
@@ -362,7 +462,7 @@ def run_external(probe, bundle, terminal, scenario, n_keys, out_dir):
         # htop redraws the whole screen every 100 ms: watch only its bottom
         # line, where the search text is.
         region = ["--bottom", "20"] if scenario == "htop" else []
-        subprocess.run([str(probe), "measure", str(app.pid), str(n_keys + WARM_UP), codes, *window, *region, "--out", str(out)], check=True)
+        probe.run("measure", app.pid, n_keys + WARM_UP, codes, *window, *region, "--out", out)
         time.sleep(0.3)
     finally:
         app.stop()
@@ -434,7 +534,7 @@ def main():
             probe = build_probe(out_dir)
             check = probe_out(probe, "check")
             if "screen_recording=false" in check or "post_events=false" in check:
-                raise SystemExit(f"probe: {check.strip()}: grant Screen Recording and Accessibility to this terminal")
+                raise SystemExit(f"probe: {check.strip()}: grant Screen Recording and Accessibility to {probe.where()}")
             for scenario in scenarios:
                 if scenario in ("zsh", "zsh-off", "zsh-list"):
                     continue  # in-app only: the setting is decline's

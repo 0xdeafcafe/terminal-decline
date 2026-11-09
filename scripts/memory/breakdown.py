@@ -2,16 +2,20 @@
 """Where Terminal Decline's idle footprint goes, and what a change did to it.
 
     scripts/memory/breakdown.py --bundle LABEL=PATH [--bundle LABEL=PATH ...]
-                                [--rounds 5] [--bare] [--out target/memory]
+                                [--rounds 5] [--bare] [--wait-calm]
+                                [--max-load 6] [--foreground]
+                                [--out target/memory]
 
 Launches each bundle the way scripts/compare/run.py does (its Decline
 class: Menlo 13, 100×30 cells, 10k lines of scrollback, a config in a temp
-folder), interleaved round by round, and per launch records
+folder; in the background, as the smoke tests run, unless --foreground),
+interleaved round by round, and per launch records
 `/usr/bin/footprint -f bytes` (phys_footprint to the byte, and each
 category's dirty bytes) at the compare's three points:
 
 - idle: 5 s after the window is up;
 - seq: after `clear; seq 1 10000`, 2 s later;
+- after: idle again, 10 s after that;
 - tabs: a second launch with four tabs (three opened after start), 6 s
   after the last.
 
@@ -32,8 +36,11 @@ Raw rows go to OUT/rows.jsonl. For a GitHub runner, see
 import argparse
 import importlib.util
 import json
+import os
+import plistlib
 import re
 import shutil
+import signal
 import statistics
 import subprocess
 import sys
@@ -44,6 +51,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 
+sys.dont_write_bytecode = True  # no __pycache__ in scripts/compare
 _spec = importlib.util.spec_from_file_location("compare_run", ROOT / "scripts/compare/run.py")
 cmp = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(cmp)
@@ -115,6 +123,12 @@ def run_decline(ctx, label, bundle, rnd, details):
         rows.append({"label": label, "point": "seq", "round": rnd, "bytes": total, "cats": cats})
         if details:
             keep_details(ctx.out_dir, f"{label}-seq", pids[0])
+        # Idle again: the idle trims have run (view.rs, schedule_trim).
+        time.sleep(10)
+        total, cats = measure(t.pids())
+        rows.append({"label": label, "point": "after", "round": rnd, "bytes": total, "cats": cats})
+        if details:
+            keep_details(ctx.out_dir, f"{label}-after", pids[0])
     finally:
         t.stop()
     t = cmp.Decline(ctx, tabs=True)
@@ -134,24 +148,69 @@ def run_decline(ctx, label, bundle, rnd, details):
     return rows
 
 
-def run_bare(ctx, exe, rnd, details):
+# Launch options for both apps: in the background (DECLINE_TEST_BACKGROUND,
+# crates/term-app/src/background.rs, which bare.swift copies), unless
+# --foreground. Empty when in the foreground.
+BACKGROUND_OPEN = []
+
+
+def in_background():
+    """Make scripts/compare/run.py's launches of Decline background ones."""
+    BACKGROUND_OPEN[:] = ["-g", "--env", "DECLINE_TEST_BACKGROUND=1"]
+    open_n = cmp.open_n
+    cmp.open_n = lambda bundle, args, open_args=(): open_n(bundle, args, [*BACKGROUND_OPEN, *open_args])
+
+
+def bare_bundle(exe, out_dir):
+    """bare.swift's binary as an app bundle, launched with `open` as the
+    terminals are: a bundled app checks in with LaunchServices, and that
+    costs memory a bare binary doesn't pay."""
+    app = out_dir / "Bare.app"
+    shutil.rmtree(app, ignore_errors=True)
+    (app / "Contents/MacOS").mkdir(parents=True)
+    shutil.copy2(exe, app / "Contents/MacOS/bare")
+    with open(app / "Contents/Info.plist", "wb") as f:
+        plistlib.dump(
+            {
+                "CFBundleExecutable": "bare",
+                "CFBundleIdentifier": "red.forbes.terminal-decline.bare",
+                "CFBundleName": "Bare",
+                "CFBundlePackageType": "APPL",
+                "CFBundleShortVersionString": "1",
+                "LSMinimumSystemVersion": "13.0",
+                "NSPrincipalClass": "NSApplication",
+            },
+            f,
+        )
+    subprocess.run(["codesign", "-s", "-", "--force", str(app)], capture_output=True)
+    return app
+
+
+def run_bare(ctx, app, rnd, details):
     rows = []
     for point, args in (("idle", ["1"]), ("text", ["1", "text"]), ("tabs", ["4"])):
-        p = subprocess.Popen([str(exe), *args], stdout=subprocess.PIPE, text=True)
+        before = cmp.in_bundle(app)
+        subprocess.run(["/usr/bin/open", "-n", *BACKGROUND_OPEN, str(app), "--args", *args], check=True)
+        pids = []
         try:
-            p.stdout.readline()  # "ready"
-            time.sleep(5)
-            total, cats = measure([p.pid])
-            rows.append({"label": "bare", "point": point, "round": rnd, "bytes": total, "cats": cats, "threads": threads(p.pid)})
+            deadline = time.monotonic() + 30
+            while not pids and time.monotonic() < deadline:
+                time.sleep(0.2)
+                pids = sorted(cmp.in_bundle(app) - before)
+            if not pids:
+                raise RuntimeError("bare never started")
+            time.sleep(6)
+            total, cats = measure(pids)
+            rows.append({"label": "bare", "point": point, "round": rnd, "bytes": total, "cats": cats, "threads": threads(pids[0])})
             if details:
-                keep_details(ctx.out_dir, f"bare-{point}", p.pid)
+                keep_details(ctx.out_dir, f"bare-{point}", pids[0])
         finally:
-            p.terminate()
-            try:
-                p.wait(5)
-            except subprocess.TimeoutExpired:
-                p.kill()
-            time.sleep(0.5)
+            for pid in pids:
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+            time.sleep(1)
     return rows
 
 
@@ -198,6 +257,15 @@ def main():
     ap.add_argument("--rounds", type=int, default=5)
     ap.add_argument("--bare", action="store_true")
     ap.add_argument("--out", default=str(ROOT / "target/memory"))
+    ap.add_argument("--wait-calm", action="store_true", help="first wait for a quiet machine, as run.py --wait-calm")
+    ap.add_argument(
+        "--max-load",
+        type=float,
+        default=cmp.MAX_LOAD[0],
+        help="wait before each launch until the 1-minute load is below this (default %(default)s); "
+        "footprint doesn't depend on load as times do, so a busy shared Mac can raise it",
+    )
+    ap.add_argument("--foreground", action="store_true", help="launch the apps in front, activated (default: in the background, never taking focus)")
     ap.add_argument("--report", action="store_true", help="only print the report of OUT/rows.jsonl")
     args = ap.parse_args()
     out_dir = Path(args.out).resolve()
@@ -207,6 +275,9 @@ def main():
         rows = [json.loads(l) for l in rows_file.read_text().splitlines() if l.strip()]
         print(report(rows), end="")
         return
+    cmp.MAX_LOAD[0] = args.max_load
+    if not args.foreground:
+        in_background()
     bundles = [(lb, Path(p).resolve()) for lb, p in (b.split("=", 1) for b in args.bundle)]
     ctx = cmp.Ctx()
     ctx.idle = 0
@@ -214,8 +285,10 @@ def main():
     ctx.screenshots = True
     ctx.work = Path(tempfile.mkdtemp(prefix="decline-memory-"))
     ctx.helper = cmp.build_swift(cmp.HERE / "helper.swift", out_dir / "helper")
-    bare = cmp.build_swift(HERE / "bare.swift", out_dir / "bare") if args.bare else None
+    bare = bare_bundle(cmp.build_swift(HERE / "bare.swift", out_dir / "bare"), out_dir) if args.bare else None
     rows = []
+    if args.wait_calm:
+        cmp.wait_calm()
     try:
         for rnd in range(1, args.rounds + 1):
             for label, bundle in bundles:
@@ -240,7 +313,7 @@ def main():
                 for r in rows:
                     f.write(json.dumps(r) + "\n")
     finally:
-        for _, bundle in bundles:
+        for _, bundle in bundles + ([("bare", bare)] if bare else []):
             subprocess.run([cmp.LSREGISTER, "-u", str(bundle)], capture_output=True)
         shutil.rmtree(ctx.work, ignore_errors=True)
     text = report(rows)

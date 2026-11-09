@@ -1,13 +1,14 @@
 // The floor under Terminal Decline's footprint: a bare AppKit app with
 // what any Metal terminal window needs and nothing else, measured beside
 // it by scripts/memory/breakdown.py (which builds this with
-// `swiftc -O -swift-version 5`).
+// `swiftc -O -swift-version 5` and wraps in an app bundle, launched with
+// `open` as the terminals are).
 //
 //   bare [tabs] [text]
 //
 // `tabs` windows (default 1) of 812×524 points, native tabs of one
 // another, each a layer-backed view with a CAMetalLayer of two drawables
-// that draws one cleared frame; an app menu with Quit. `text` also makes
+// that draws two cleared frames; an app menu with Quit. `text` also makes
 // Menlo 13 with Core Text and rasterises ASCII into a bitmap once, as a
 // terminal must before it can draw anything.
 
@@ -19,6 +20,10 @@ import QuartzCore
 let args = Array(CommandLine.arguments.dropFirst())
 let tabs = args.compactMap { Int($0) }.first ?? 1
 let text = args.contains("text")
+// As Decline's DECLINE_TEST_BACKGROUND (crates/term-app/src/background.rs):
+// an accessory app whose transparent windows stay behind the others and
+// never take focus, so a run on a shared Mac doesn't get in anyone's way.
+let background = ProcessInfo.processInfo.environment["DECLINE_TEST_BACKGROUND"].map { !$0.isEmpty && $0 != "0" } ?? false
 let device = MTLCreateSystemDefaultDevice()!
 let queue = device.makeCommandQueue()!
 
@@ -77,17 +82,23 @@ final class Delegate: NSObject, NSApplicationDelegate {
             let v = MetalView(frame: NSRect(x: 0, y: 0, width: 812, height: 524))
             v.wantsLayer = true
             w.contentView = v
+            if background { w.alphaValue = 0 }
             if i == 0 {
-                w.makeKeyAndOrderFront(nil)
+                if background { w.orderBack(nil) } else { w.makeKeyAndOrderFront(nil) }
             } else {
                 windows[0].addTabbedWindow(w, ordered: .above)
-                w.makeKeyAndOrderFront(nil)
+                if background { w.orderBack(nil) } else { w.makeKeyAndOrderFront(nil) }
             }
             windows.append(w)
             views.append(v)
         }
-        NSApp.activate(ignoringOtherApps: true)
+        if !background { NSApp.activate(ignoringOtherApps: true) }
+        // Two frames, as any terminal draws more than one: the layer then
+        // holds both its drawables.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            for v in self.views { v.draw() }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
             for v in self.views { v.draw() }
             print("ready")
             fflush(stdout)
@@ -96,7 +107,7 @@ final class Delegate: NSObject, NSApplicationDelegate {
 }
 
 let app = NSApplication.shared
-app.setActivationPolicy(.regular)
+app.setActivationPolicy(background ? .accessory : .regular)
 let menu = NSMenu()
 let item = NSMenuItem()
 menu.addItem(item)

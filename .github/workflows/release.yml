@@ -203,14 +203,22 @@ jobs:
         with:
           name: terminal-decline-macos-arm64
           path: dist
-      - name: Publish rolling nightly prerelease
+      - name: Publish nightly prerelease
         run: |
-          gh release delete nightly --cleanup-tag --yes || true
-          gh release create nightly dist/* \
+          # Releases are immutable here: a published release's tag can
+          # never be used again, so each nightly gets a tag of its own
+          # and only the newest few are kept.
+          tag="nightly-$(date -u +%Y%m%d)-${GITHUB_SHA::7}"
+          gh release view "$tag" >/dev/null 2>&1 && { echo "$tag is already published"; exit 0; }
+          gh release create "$tag" dist/* \
             --prerelease \
+            --latest=false \
             --target "$GITHUB_SHA" \
             --title "Nightly (${{ needs.build.outputs.version }})" \
             --notes "Automated nightly build of ${GITHUB_SHA}. Ad-hoc or Developer ID signed depending on repository secrets. Not for production use."
+          gh release list --limit 100 --json tagName,isPrerelease,createdAt \
+            -q '[.[] | select(.isPrerelease and (.tagName | startswith("nightly-")))] | sort_by(.createdAt) | reverse | .[3:][].tagName' |
+            while read -r old; do gh release delete "$old" --cleanup-tag --yes || true; done
 
   sign:
     # Signs the update and writes the appcast (docs/design/updater.md

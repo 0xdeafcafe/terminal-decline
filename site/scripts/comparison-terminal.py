@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 import sys
 
-DATA = json.loads((Path(__file__).resolve().parents[1] / 'src/data/comparison.json').read_text())
+DATA = json.loads((Path(__file__).resolve().parents[1] / 'src/data/readme-2026-11-02.json').read_text())
 RESET = '\033[0m'
 GREEN = '\033[32m'
 BOLD = '\033[1m'

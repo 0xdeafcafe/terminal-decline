@@ -1,12 +1,13 @@
 {
-  "date": "2 November 2026",
-  "machine": "Apple M1 Max",
-  "system": "macOS 27.0",
+  "date": "9 November 2026",
+  "machine": "a GitHub-hosted macOS runner (Apple M1, virtual, 3 cores)",
+  "system": "macOS 26.7.2",
   "runs": 5,
-  "source": "https://github.com/0xdeafcafe/terminal-decline#benchmarks",
+  "source": "https://github.com/0xdeafcafe/terminal-decline/blob/main/docs/comparison-2026-11-09.md",
   "terminals": [
-    {"name": "Decline", "idle": 26, "tabs": 47, "scrollback": 19, "cat": 0.58, "cpu": 0.66, "idleCpu": 0.02},
-    {"name": "Ghostty", "idle": 60, "tabs": 87, "scrollback": 56, "cat": 0.66, "cpu": 2.04, "idleCpu": 0.03},
-    {"name": "kitty", "idle": 99, "tabs": 104, "scrollback": 130, "cat": 1.05, "cpu": 1.63, "idleCpu": 0.12}
+    {"name": "Decline", "idle": 21, "tabs": 30, "scrollback": 22, "cat": 1.12, "cpu": 1.18, "idleCpu": 0.01},
+    {"name": "Ghostty", "idle": 37, "tabs": 55, "scrollback": 38, "cat": 1.63, "cpu": 3.7, "idleCpu": 0.37},
+    {"name": "Warp", "idle": 190, "tabs": 204, "scrollback": 182, "cat": 6.6, "cpu": 7.44, "idleCpu": 1.12},
+    {"name": "Terminal.app", "idle": 72, "tabs": 85, "scrollback": 71, "cat": 5.02, "cpu": 6.13, "idleCpu": 0.04}
   ]
 }

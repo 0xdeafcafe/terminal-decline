@@ -7,6 +7,8 @@
 //   helper usage <pid>...         per process: pid cpu_ns idle_wakeups
 //                                interrupt_wakeups (proc_pid_rusage; the
 //                                user's own processes only)
+//   helper screens               one line per display: width height
+//                                (points) and pixels a point
 //   helper font <name> <size>    the NSFont as Terminal.app keeps it in a
 //                                profile (an NSKeyedArchiver archive), in hex
 //
@@ -61,11 +63,18 @@ func font(_ name: String, _ size: Double) {
     print(data.map { String(format: "%02x", $0) }.joined())
 }
 
+func screens() {
+    for s in NSScreen.screens {
+        print(Int(s.frame.width), Int(s.frame.height), s.backingScaleFactor)
+    }
+}
+
 switch args.first {
+case "screens": screens()
 case "windows": windows(Set(args.dropFirst().compactMap { Int32($0) }))
 case "usage": usage(args.dropFirst().compactMap { Int32($0) })
 case "font" where args.count == 3: font(args[1], Double(args[2]) ?? 13)
 default:
-    FileHandle.standardError.write("usage: helper windows <pid>... | helper usage <pid>... | helper font <name> <size>\n".data(using: .utf8)!)
+    FileHandle.standardError.write("usage: helper windows <pid>... | helper usage <pid>... | helper screens | helper font <name> <size>\n".data(using: .utf8)!)
     exit(2)
 }

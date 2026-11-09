@@ -1,5 +1,4 @@
 import comparison from '../data/comparison.json';
-import earlierComparison from '../data/comparison-2026-10-30.json';
 
 interface Measurements {
   name: string;
@@ -11,7 +10,7 @@ const metrics = [
   { key: 'cat', label: '100 MB output', unit: ' s' },
 ] as const;
 
-function ComparisonCharts({ date, terminals }: { date: string; terminals: Measurements[] }) {
+function ComparisonChart({ date, terminals }: { date: string; terminals: Measurements[] }) {
   return (
     <div className="comparison-charts" data-comparison={date}>
       {metrics.map(metric => {
@@ -38,17 +37,14 @@ export default function Measured() {
   return (
     <section id="numbers" aria-labelledby="h-num">
       <h2 id="h-num">How it compares</h2>
-      <p className="small prose">{earlierComparison.date}, M1 Max. Lower is better.</p>
-      <ComparisonCharts date={earlierComparison.date} terminals={earlierComparison.terminals} />
+      <p className="small prose">{comparison.date}, on {comparison.machine}, {comparison.system}. Medians of {comparison.runs} rounds. Lower is better.</p>
+      <ComparisonChart date={comparison.date} terminals={comparison.terminals} />
       <p className="small prose">Warp ran with two windows.</p>
       <details className="benchmark-method">
-        <summary>Newer results and method</summary>
-        <p className="prose">{comparison.date}, M1 Max.</p>
-        <ComparisonCharts date={comparison.date} terminals={comparison.terminals} />
+        <summary>Method</summary>
         <div className="notes">
-          <p>Memory is physical footprint. Output time is for <code>cat</code> of a 100 MB text file. Neither run measured input latency.</p>
-          <p>2 November: medians of five runs. <a href={comparison.source}>Full results and method</a>.</p>
-          <p>30 October: medians of four runs per terminal, three for Terminal.app. <a href={earlierComparison.source}>Full results and method</a>.</p>
+          <p>Memory is physical footprint, summed over each terminal’s processes. Output time is for <code>cat</code> of a 100 MB text file. Each terminal ran the same script on the same clean runner, taken in turns. kitty could not run there: it needs OpenGL 3.3, which the runner’s virtual GPU lacks. <a href={comparison.source}>Full results and method</a>, with CPU, input latency and four tabs.</p>
+          <p>Earlier runs on an M1 Max, which include kitty: <a href="https://github.com/0xdeafcafe/terminal-decline#benchmarks">2 November</a> and <a href="https://github.com/0xdeafcafe/terminal-decline/blob/main/docs/comparison-2026-10-30.md">30 October</a>.</p>
         </div>
       </details>
     </section>

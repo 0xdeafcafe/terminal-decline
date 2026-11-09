@@ -1,0 +1,161 @@
+name: Compare
+
+# Terminal Decline against other macOS terminals (scripts/compare/run.py,
+# whose docstring is the method), on a GitHub-hosted macOS runner instead
+# of a developer's Mac: a clean machine with nothing else running, the
+# same for every terminal. By hand only: it takes the better part of an
+# hour of macOS runner time. The results and the report are uploaded as
+# artifacts, and the report is the job summary.
+#
+# GitHub dispatches a workflow only once it is on the default branch:
+# `gh workflow run compare.yml [--ref <branch>] -f rounds=5`.
+
+on:
+  workflow_dispatch:
+    inputs:
+      rounds:
+        description: rounds (each runs every terminal once, interleaved)
+        default: "5"
+      terminals:
+        description: terminals, comma-separated
+        default: decline,ghostty,kitty,warp,terminal
+      latency:
+        description: also measure keypress → pixels, when the runner allows it
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: compare-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  compare:
+    # Apple silicon (macos-latest is arm64), with a logged-in GUI session:
+    # apps opened with `open` get windows, as in the smoke tests and the
+    # perf watch.
+    runs-on: macos-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98.1"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: perf-watch
+          save-if: false
+
+      # As the perf watch builds it (perf_watch.py build_bundle): the
+      # release library, launcher and stub, bundled and signed ad hoc,
+      # without Sparkle.
+      - name: Build Terminal Decline.app
+        run: |
+          cargo build --release --locked -p term-dylib
+          cargo build --locked -p term-pin --bins --profile release-stub
+          app=$(env -u DOGFOOD -u HARDENED -u CODESIGN_IDENTITY -u SPARKLE_REQUIRED \
+            scripts/bundle.sh "$RUNNER_TEMP/bundle" 0.0.0 1 | tail -n 1)
+          test -d "$app"
+          echo "DECLINE_APP=$app" >> "$GITHUB_ENV"
+
+      - name: Install the other terminals
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+          TERMINALS: ${{ inputs.terminals }}
+        run: |
+          casks=()
+          for t in ghostty kitty warp; do
+            if [[ ",$TERMINALS," == *",$t,"* ]]; then casks+=("$t"); fi
+          done
+          if ((${#casks[@]})); then brew install --cask "${casks[@]}"; fi
+          # Downloaded apps are quarantined: their first launch would wait
+          # on Gatekeeper's "downloaded from the internet" dialog.
+          for app in /Applications/Ghostty.app /Applications/kitty.app /Applications/Warp.app; do
+            if [[ -d "$app" ]]; then sudo xattr -dr com.apple.quarantine "$app" || true; fi
+          done
+
+      # Warp's first launch shows onboarding ("Welcome to Warp", then a
+      # sign-in offer). HasCompletedOnboarding is the private preference
+      # its onboarding sets when done (warpdotdev/warp, app/src/root_view.rs:
+      # has_completed_local_onboarding); with it, a Warp that isn't signed
+      # in opens straight to a terminal (SkipFirebaseAnonymousUser). The
+      # rest are the one-time banners and modals a Warp that has been used
+      # has dismissed. Its settings for the run are run.py's
+      # (~/.warp/settings.toml).
+      - name: Skip Warp's onboarding
+        if: contains(inputs.terminals, 'warp')
+        run: |
+          d=dev.warp.Warp-Stable
+          for k in HasCompletedHOAOnboarding WelcomeTipsCompleted TelemetryBannerDismissed \
+            DismissedWarpAIWarmWelcome HasAutoOpenedWelcomeFolder HasOpenedWarpDriveOnStartUp \
+            AgentModeOnboardingBlockShown SessionSharingOnboardingBlockShown AliasExpansionBannerSeen \
+            DidShowActiveAIPermissionsDialog DidShowADELaunchModal DidShowAgentCliLaunchModal \
+            DidShowAgents3LaunchModal DidShowCodeLaunchModal DidShowFreeAiRemovalModal \
+            DidShowOpenWarpLaunchModal DidShowOrchestrationLaunchModal DidShowOzLaunchModal \
+            DidShowUpgradeToProModal AppAddedAsLoginItem HasCompletedOnboarding; do
+            defaults write "$d" "$k" -string true
+          done
+          defaults write "$d" IsAnyAIEnabled -string false
+          defaults write "$d" TelemetryEnabled -string false
+          defaults write "$d" CrashReportingEnabled -string false
+
+      - name: The runner
+        run: |
+          sysctl -n hw.model machdep.cpu.brand_string hw.ncpu hw.memsize
+          sw_vers
+          uptime
+
+      # kitty draws with OpenGL 3.3, which the runner's virtual GPU may not
+      # offer: try it once, and if it can't open a window, say why and
+      # leave it out rather than fail every round.
+      - name: Can kitty open a window here?
+        if: contains(inputs.terminals, 'kitty')
+        run: |
+          log="$RUNNER_TEMP/kitty.log"
+          /Applications/kitty.app/Contents/MacOS/kitty --config NONE sh -c "touch '$RUNNER_TEMP/kitty-ok'" > "$log" 2>&1 &
+          for _ in $(seq 30); do [[ -e "$RUNNER_TEMP/kitty-ok" ]] && break; sleep 1; done
+          pkill -f /Applications/kitty.app/ || true
+          if [[ -e "$RUNNER_TEMP/kitty-ok" ]]; then
+            echo "kitty runs"
+          else
+            cat "$log"
+            why=$(grep -o 'kitty requires[^.]*\.\|Failed to create GLFWwindow[^.]*\.' "$log" | head -n 1)
+            echo "UNAVAILABLE=--unavailable=kitty=couldn't open a window on this runner (${why:-no window in 30 s})" >> "$GITHUB_ENV"
+          fi
+
+      - name: Compare
+        env:
+          ROUNDS: ${{ inputs.rounds }}
+          TERMINALS: ${{ inputs.terminals }}
+          LATENCY: ${{ inputs.latency }}
+        run: |
+          latency=()
+          if [[ "$LATENCY" == "true" ]]; then latency=(--latency); fi
+          python3 scripts/compare/run.py --bundle "$DECLINE_APP" --terminals "$TERMINALS" \
+            --rounds "$ROUNDS" --max-load 4 --out compare --screenshots ${UNAVAILABLE:+"$UNAVAILABLE"} "${latency[@]}"
+
+      - name: Report
+        if: always()
+        run: |
+          if [[ -s compare/results.jsonl ]]; then
+            python3 scripts/compare/run.py --report --out compare > compare/report.md
+            { echo "## Compare: ${{ inputs.terminals }}, ${{ inputs.rounds }} rounds"; cat compare/report.md; } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "no results" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: compare
+          path: |
+            compare/results.jsonl
+            compare/report.md
+            compare/*.png
+          if-no-files-found: ignore

@@ -172,3 +172,17 @@ pass. Chrome captures at 320, 390, 768 and 1440 px in both themes report no
 page overflow or label/value collisions. Desktop light, phone dark and
 the expanded phone disclosure were inspected visually. Captures and the
 layout-check script are kept under the session TMPDIR, outside Git.
+
+## One chart, from the runner
+
+The two dated chart groups (30 October, and 2 November in the disclosure)
+are replaced by one: the 9 November comparison, run by the Compare
+workflow on a GitHub-hosted macOS runner (an Apple M1 virtual machine, 3
+cores, macOS 26.7.2), medians of 5 rounds. It is labelled as that machine,
+not the M1 Max. kitty could not run there (no OpenGL 3.3), so the chart has
+Decline, Ghostty, Warp and Terminal.app; the method notes say why and link
+the earlier M1 Max runs, which include kitty. `src/data/comparison.json`
+transcribes docs/comparison-2026-11-09.md and the verifier checks it
+against that report. The README's 2 November table, which the opening's
+captured terminal shows, moved to `src/data/readme-2026-11-02.json`; the
+capture is unchanged.

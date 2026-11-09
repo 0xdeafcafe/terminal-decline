@@ -5,6 +5,7 @@
                            [--rounds 5] [--idle 30] [--app target/release/terminal-decline]
                            [--bundle DIR/Terminal Decline.app]
                            [--out target/compare] [--wait-calm] [--latency]
+                           [--screenshots]
     scripts/compare/run.py --report [--out target/compare]
 
 Each round runs every terminal in turn (interleaved: A B C D E, then again),
@@ -40,11 +41,28 @@ imported back at the end in case it wrote them.
 
 --latency: keypress → pixels with scripts/latency/probe.swift, for every
 terminal, when the terminal running this has Accessibility and Screen
-Recording (`probe check`); otherwise recorded as skipped.
+Recording (`probe check`); otherwise recorded as skipped. The probe watches
+the terminal's frontmost window, the one its keys go to.
+
+On a GitHub runner (.github/workflows/compare.yml) the same method runs on a
+fresh macOS VM: the workflow installs the other terminals, marks Warp's
+onboarding done (it would otherwise open to "Welcome to Warp"), and passes
+--unavailable for a terminal that can't open a window there.
 
 --wait-calm: wait (up to 3 h) until the 5-minute load average is under 4
 and no agent's test instance runs, twice 5 minutes apart. Before each run
 the 1-minute load is checked and the run waits while it is over 6.
+
+--unavailable KEY=REASON: a terminal that can't run on this machine (kitty
+needs OpenGL 3.3, which a GitHub runner's virtual GPU lacks): recorded as
+not measured, with the reason, and left out of the rounds.
+
+--screenshots: when a run fails, a screenshot of the screen goes to
+OUT/fail-<terminal>-<kind>-<round>.png (for a machine you can't look at,
+such as a CI runner; .github/workflows/compare.yml).
+
+The first row of each run (kind "machine") records the Mac: model, CPU,
+cores, memory, macOS, displays, and each terminal's version.
 
 Raw rows go to OUT/results.jsonl (appended); --report prints the tables.
 """
@@ -152,6 +170,50 @@ def wait_load(max_s=1800):
     return loads()
 
 
+def sysctl(name):
+    return subprocess.run(["sysctl", "-n", name], capture_output=True, text=True).stdout.strip()
+
+
+def app_version(bundle):
+    try:
+        with open(Path(bundle) / "Contents/Info.plist", "rb") as f:
+            info = plistlib.load(f)
+    except (OSError, ValueError):
+        return None
+    return info.get("CFBundleShortVersionString") or info.get("CFBundleVersion")
+
+
+def machine(ctx, terminals):
+    """The Mac this ran on, and what ran: one row of kind "machine"."""
+    sw = {}
+    for line in subprocess.run(["sw_vers"], capture_output=True, text=True).stdout.splitlines():
+        k, _, v = line.partition(":")
+        sw[k.strip()] = v.strip()
+    displays = []
+    for line in subprocess.run([str(ctx.helper), "screens"], capture_output=True, text=True).stdout.splitlines():
+        w, h, scale = line.split()
+        displays.append({"points": f"{w}×{h}", "scale": float(scale)})
+    commit = os.environ.get("GITHUB_SHA") or subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+    versions = {t: app_version(ctx.decline_bundle if t == "decline" else BUNDLES[t]) for t in terminals}
+    return {
+        "kind": "machine",
+        "model": sysctl("hw.model"),
+        "cpu": sysctl("machdep.cpu.brand_string"),
+        "cores": int(sysctl("hw.ncpu") or 0),
+        "memory_gb": round(int(sysctl("hw.memsize") or 0) / 2**30, 1),
+        "macos": f"{sw.get('ProductVersion', '')} ({sw.get('BuildVersion', '')})",
+        "displays": displays,
+        "runner": os.environ.get("RUNNER_NAME") and {"name": os.environ.get("RUNNER_NAME"), "os": os.environ.get("ImageOS"), "image": os.environ.get("ImageVersion")},
+        "decline_commit": commit,
+        "versions": versions,
+    }
+
+
+def screenshot(ctx, name):
+    if ctx.screenshots:
+        subprocess.run(["/usr/sbin/screencapture", "-x", str(ctx.out_dir / f"fail-{name}.png")], capture_output=True)
+
+
 # --- processes -----------------------------------------------------------
 
 
@@ -216,8 +278,10 @@ class Terminal:
         deadline = time.monotonic() + 90
         while not (self.dir / "ready").exists():
             if time.monotonic() > deadline:
+                err = self.stderr_tail()
+                screenshot(ctx, f"{self.key}-{'tabs' if tabs else 'main'}-start")
                 self.stop()
-                raise RuntimeError(f"{self.key}: the driver never started")
+                raise RuntimeError(f"{self.key}: the driver never started" + (f"; its stderr ends: {err}" if err else ""))
             time.sleep(0.1)
         self.ready_s = time.monotonic() - self.started
 
@@ -240,6 +304,12 @@ class Terminal:
         pass
 
     # Common.
+    def stderr_tail(self, n=600):
+        try:
+            return (self.dir / "stderr").read_text(errors="replace")[-n:].strip()
+        except OSError:
+            return ""
+
     def program(self):
         return ["/bin/sh", str(self.dir / "driver.sh"), str(self.dir)]
 
@@ -387,7 +457,7 @@ class Ghostty(Terminal):
             )
             + "\n"
         )
-        open_n(self.bundle, ["--config-default-files=false", f"--config-file={cfg}"])
+        open_n(self.bundle, ["--config-default-files=false", f"--config-file={cfg}"], ["--stderr", str(self.dir / "stderr")])
 
     def open_tab(self, n):
         # A folder dropped on (opened with) Ghostty opens as a new tab. Goes
@@ -422,7 +492,7 @@ class Kitty(Terminal):
             self.sock = f"{self.sockdir}/s"
             lines += ["allow_remote_control socket-only", f"listen_on unix:{self.sock}"]
         cfg.write_text("\n".join(lines) + "\n")
-        open_n(self.bundle, ["--config", str(cfg), *self.program()])
+        open_n(self.bundle, ["--config", str(cfg), *self.program()], ["--stderr", str(self.dir / "stderr")])
 
     def socket(self):
         # kitty adds its pid to the path given.
@@ -548,6 +618,7 @@ maximum_grid_size = {SCROLLBACK}
 
     def launch(self):
         settings = Path.home() / ".warp/settings.toml"
+        settings.parent.mkdir(exist_ok=True)
         self.saved = self.ctx.work / "warp-settings.toml"
         if settings.exists() and not self.saved.exists():
             shutil.copy2(settings, self.saved)
@@ -561,7 +632,7 @@ maximum_grid_size = {SCROLLBACK}
         # counted. Both windows' zsh is a plain one (ZDOTDIR of our own).
         zdot = self.dir / "zdot"
         zdot.mkdir()
-        open_n(self.bundle, [], ["--env", f"ZDOTDIR={zdot}"])
+        open_n(self.bundle, [], ["--env", f"ZDOTDIR={zdot}", "--stderr", str(self.dir / "stderr")])
         time.sleep(3)
         subprocess.run(["/usr/bin/open", f"warp://launch/{name}"], check=True)
 
@@ -690,7 +761,12 @@ def measure_latency(ctx, key, keys=200):
         n = keys + latency.WARM_UP
         subprocess.run([str(ctx.probe), "keys", str(main), str(latency.KEY_A)], check=True, capture_output=True)
         time.sleep(0.5)
-        subprocess.run([str(ctx.probe), "measure", str(main), str(n), str(latency.KEY_A), "--out", str(out)], check=True)
+        # The window the keys go to: the frontmost on screen (CGWindowList
+        # is front to back). Not the probe's default, the largest, which is
+        # a coin toss for Warp's two windows of one size.
+        front = [w for w in t.windows() if w[6] and w[0] == main]
+        win = ["--window", str(front[0][1])] if front else []
+        subprocess.run([str(ctx.probe), "measure", str(main), str(n), str(latency.KEY_A), *win, "--out", str(out)], check=True)
         rows = latency.read_jsonl(out)[latency.WARM_UP :]
         ms = [r["ms"] for r in rows if "ms" in r]
         row.update(latency.stats(ms))
@@ -735,9 +811,19 @@ def fmt(v):
 
 def report(out_dir):
     rows = [json.loads(l) for l in (out_dir / "results.jsonl").read_text().splitlines() if l.strip()]
+    machines = [r for r in rows if r.get("kind") == "machine"]
+    missing = {r["terminal"]: r["reason"] for r in rows if r.get("kind") == "unavailable"}
+    rows = [r for r in rows if r.get("kind") not in ("machine", "unavailable")]
     order = [k for k in KINDS if any(r["terminal"] == k for r in rows)]
     order.sort(key=lambda k: list(NAMES).index(k))
     lines = []
+    for m in {json.dumps({k: v for k, v in m.items() if k not in ("versions", "decline_commit")}, sort_keys=True): m for m in machines}.values():
+        shown = ", ".join(f"{d['points']} points at {d['scale']:g}× " for d in m.get("displays", []))
+        lines.append(f"Mac: {m['model']}, {m['cpu']}, {m['cores']} cores, {m['memory_gb']} GB, macOS {m['macos']}" + (f"; display {shown.strip()}" if shown else ""))
+        if m.get("runner"):
+            lines.append(f"Runner: {m['runner'].get('os')} image {m['runner'].get('image')} ({m['runner'].get('name')})")
+    for m in machines[-1:]:
+        lines.append("Versions: " + "; ".join(f"{NAMES[k]} {v}" for k, v in m.get("versions", {}).items()) + f"; Terminal Decline at {m.get('decline_commit', '')[:7]}")
     for field, title, unit, kind in METRICS:
         values = {k: [r[field] for r in rows if r["terminal"] == k and r["kind"] == kind and r.get(field) is not None] for k in order}
         med = {k: statistics.median(v) for k, v in values.items() if v}
@@ -765,6 +851,8 @@ def report(out_dir):
         for r in lat:
             if "skipped" in r:
                 lines.append(f"| {NAMES[r['terminal']]} | skipped: {r['skipped']} | | | | |")
+            elif not r.get("n"):
+                lines.append(f"| {NAMES[r['terminal']]} | no key seen drawn | | | 0 | {r['missed']} |")
             else:
                 lines.append(f"| {NAMES[r['terminal']]} | {r['p50']:.1f} | {r['p95']:.1f} | {r['p99']:.1f} | {r['n']} | {r['missed']} |")
     sizes = {}
@@ -775,6 +863,13 @@ def report(out_dir):
     lines.append("\nWindow size (points): " + "; ".join(f"{NAMES[k]} {', '.join(sorted(sizes[k]))}" for k in order if k in sizes))
     tabs = {k: sorted({str(r.get("tabs")) for r in rows if r["terminal"] == k and r["kind"] == "tabs"}) for k in order}
     lines.append("Tabs seen in the 4-tab runs: " + "; ".join(f"{NAMES[k]} {', '.join(v)}" for k, v in tabs.items() if v))
+    for k, why in missing.items():
+        lines.append(f"Not measured: {NAMES[k]}: {why}")
+    errors = [r for r in rows if r.get("error")]
+    if errors:
+        lines.append("Runs that failed (not in the tables):")
+        for r in errors:
+            lines.append(f"- {NAMES[r['terminal']]} {r['kind']}, round {r['round']}: {r['error']}")
     l = [x for r in rows for x in [r.get("load_before")] if x]
     if l:
         lines.append(f"1-minute load before runs: {min(x[0] for x in l):.1f} – {max(x[0] for x in l):.1f}")
@@ -800,6 +895,8 @@ def main():
     ap.add_argument("--big", default="", help="the file to cat (default: made with gen.py big in OUT)")
     ap.add_argument("--wait-calm", action="store_true")
     ap.add_argument("--latency", action="store_true")
+    ap.add_argument("--unavailable", action="append", default=[], metavar="KEY=REASON", help="a terminal that can't run here, and why")
+    ap.add_argument("--screenshots", action="store_true", help="a screenshot of the screen when a run fails")
     ap.add_argument("--skip", default="", help="parts to leave out: main,tabs")
     ap.add_argument("--max-load", type=float, default=6.0, help="pause before a run while the 1-minute load is above this")
     ap.add_argument("--report", action="store_true")
@@ -811,6 +908,8 @@ def main():
         return
     MAX_LOAD[0] = args.max_load
     terminals = [t for t in args.terminals.split(",") if t]
+    unavailable = dict(u.split("=", 1) for u in args.unavailable)
+    terminals = [t for t in terminals if t not in unavailable]
     for t in terminals:
         if t not in KINDS:
             sys.exit(f"unknown terminal {t}; known: {', '.join(KINDS)}")
@@ -823,6 +922,8 @@ def main():
 
     ctx = Ctx()
     ctx.idle = args.idle
+    ctx.out_dir = out_dir
+    ctx.screenshots = args.screenshots
     ctx.work = Path(tempfile.mkdtemp(prefix="decline-compare-"))
     ctx.helper = build_swift(HERE / "helper.swift", out_dir / "helper")
     ctx.big = Path(args.big).resolve() if args.big else out_dir / "big.txt"
@@ -844,6 +945,10 @@ def main():
         subprocess.run(["defaults", "export", AppleTerminal.DOMAIN, str(backup)], check=True)
 
     results = out_dir / "results.jsonl"
+    with open(results, "a") as f:
+        f.write(json.dumps(machine(ctx, terminals)) + "\n")
+        for t, why in unavailable.items():
+            f.write(json.dumps({"terminal": t, "kind": "unavailable", "reason": why}) + "\n")
     skip = set(args.skip.split(","))
     try:
         if args.wait_calm:
@@ -858,6 +963,7 @@ def main():
                         row = fn(ctx, t, r)
                     except Exception as e:  # keep going; the row says why
                         row = {"terminal": t, "kind": kind, "round": r, "error": str(e)}
+                        screenshot(ctx, f"{t}-{kind}-{r}")
                     row["time"] = time.strftime("%Y-%m-%dT%H:%M:%S")
                     log(json.dumps(row))
                     with open(results, "a") as f:
@@ -874,6 +980,7 @@ def main():
                         row = measure_latency(ctx, t)
                     except Exception as e:
                         row = {"terminal": t, "kind": "latency", "skipped": f"error: {e}"}
+                        screenshot(ctx, f"{t}-latency")
                 log(json.dumps(row))
                 with open(results, "a") as f:
                     f.write(json.dumps(row) + "\n")

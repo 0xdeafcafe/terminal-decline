@@ -24,7 +24,8 @@ assert(index.includes('og:image') && index.includes('/images/social.png'), 'Miss
 assert(missing.includes('noindex'), '404 should not be indexed.');
 const capture = JSON.parse(await readFile(path.join(site, 'src/data/terminal-preview.json'), 'utf8'));
 assert.equal(capture.rows.map(row => row.map(run => run.text).join('')).join('\n'), capture.text, 'Terminal runs differ from the captured text.');
-const data = JSON.parse(await readFile(path.join(site, 'src/data/comparison.json'), 'utf8'));
+// The README's 2 November table, which the hero's captured terminal shows.
+const data = JSON.parse(await readFile(path.join(site, 'src/data/readme-2026-11-02.json'), 'utf8'));
 const readme = await readFile(path.join(site, '../README.md'), 'utf8');
 assert(readme.includes(data.date), 'Comparison date no longer matches the README.');
 for (const terminal of data.terminals) {
@@ -40,9 +41,10 @@ assert.equal(createHash('sha256').update(await readFile(path.join(site, '..', co
 assert(!index.includes('screenshot-autocomplete'), 'Terminal screenshots must not be shipped.');
 assert(!(await readdir(path.join(dist, 'images'))).some(name => name.startsWith('screenshot-')), 'Obsolete terminal screenshot in build.');
 
-// Keep the older five-terminal comparison tied to its own dated report.
-const earlier = JSON.parse(await readFile(path.join(site, 'src/data/comparison-2026-10-30.json'), 'utf8'));
-const report = await readFile(path.join(site, '../docs/comparison-2026-10-30.md'), 'utf8');
+// The chart: the latest comparison, tied to its own dated report.
+const chart = JSON.parse(await readFile(path.join(site, 'src/data/comparison.json'), 'utf8'));
+const reportName = chart.source.split('/').pop();
+const report = await readFile(path.join(site, '../docs', reportName), 'utf8');
 const reportMetrics = {
   idle: 'Idle footprint (MB)',
   tabs: 'Footprint with 4 tabs (MB)',
@@ -51,20 +53,22 @@ const reportMetrics = {
   cpu: '`cat` 100 MB: terminal + WindowServer CPU (s)',
   idleCpu: 'Idle CPU (%)',
 };
-assert(report.includes(earlier.date), 'Historical comparison date differs from its report.');
+assert(report.includes(chart.date), 'Comparison date differs from its report.');
+assert(report.includes(`Medians of **${chart.runs} rounds**`), 'Comparison rounds differ from its report.');
+assert(!/M1 Max/.test(chart.machine) && /runner/.test(chart.machine), 'Label the chart with the machine it ran on.');
 for (const [key, heading] of Object.entries(reportMetrics)) {
   const section = report.split(`### ${heading}\n`)[1]?.split('\n### ')[0];
-  assert(section, `Missing historical metric: ${heading}`);
-  for (const terminal of earlier.terminals) {
+  assert(section, `Missing metric: ${heading}`);
+  for (const terminal of chart.terminals) {
     const row = section.split('\n').find(line => line.startsWith(`| ${terminal.name} |`));
-    assert(row, `Missing historical result: ${terminal.name} / ${key}`);
-    assert.equal(terminal[key], Number(row.split('|')[2].trim()), `Historical value differs: ${terminal.name} / ${key}`);
+    assert(row, `Missing result: ${terminal.name} / ${key}`);
+    assert.equal(terminal[key], Number(row.split('|')[2].trim()), `Value differs from the report: ${terminal.name} / ${key}`);
   }
 }
-assert(earlier.terminals.find(t => t.name === 'Warp').tabsVerified === false, 'Warp tab count must stay unverified in the source data.');
 assert(index.includes('Warp ran with two windows.'), 'Missing Warp measurement limit.');
-assert(index.includes('data-comparison="30 October 2026"') && index.includes('data-comparison="2 November 2026"'), 'Keep the two runs dated separately.');
-const [primary, supplementary] = index.split('<details class="benchmark-method">');
-assert(primary.includes('data-comparison="30 October 2026"') && primary.includes('Warp') && primary.includes('Terminal.app'), 'The visible comparison must include all five terminals from October.');
-assert(!primary.includes('data-comparison="2 November 2026"') && supplementary?.includes('data-comparison="2 November 2026"'), 'Newer results belong in the collapsed disclosure.');
-console.log('Static pages, links, assets and both dated comparisons verified. No framework runtime shipped.');
+assert.equal(index.match(/data-comparison="/g)?.length, 1, 'One comparison chart.');
+assert(index.includes(`data-comparison="${chart.date}"`), 'The chart must be the latest comparison.');
+const [primary, method] = index.split('<details class="benchmark-method">');
+assert(primary.includes(chart.machine.replace("'", '&#39;')) || primary.includes('GitHub-hosted macOS runner'), 'Name the runner above the chart.');
+assert(method?.includes('comparison-2026-10-30.md') && method.includes('#benchmarks'), 'Earlier runs belong in the method notes as links.');
+console.log('Static pages, links, assets, the README table and the dated comparison verified. No framework runtime shipped.');

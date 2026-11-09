@@ -12,7 +12,9 @@
 //!   terminal still locked (for a program that echoes, the echo);
 //! - `t3`: the frame showing it reached the glass (the drawable's
 //!   `presentedTime`), plus on the way `frame_start` (that frame locked the
-//!   terminal to build), `commit` (sent to the GPU) and `gpu_done`.
+//!   terminal to build), `built` and `drawable` (built, it asked for its
+//!   drawable, and `nextDrawable` returned), `commit` (sent to the GPU)
+//!   and `gpu_done`.
 //!
 //! One line of JSON per key is appended to the file once its frame is
 //! presented (see [`Key`]). Unset, the cost is one check of a `OnceLock`
@@ -62,6 +64,10 @@ pub struct Key {
     pub t1: f64,
     pub t2: Option<f64>,
     pub frame_start: Option<f64>,
+    /// The frame was built and asked for its drawable, and had it
+    /// (`nextDrawable` returned).
+    pub built: Option<f64>,
+    pub drawable: Option<f64>,
     pub commit: Option<f64>,
     pub gpu_done: Option<f64>,
     /// `None` if the frame was never shown (macOS dropped it).
@@ -351,6 +357,14 @@ impl FrameKeys {
     pub fn with_scroll(keys: Vec<Key>, frame: Option<ScrollFrame>) -> FrameKeys {
         FrameKeys {
             state: Mutex::new((keys, frame, 0)),
+        }
+    }
+
+    /// The frame asked for its drawable at `asked` and had it now.
+    pub fn drawable(&self, asked: f64) {
+        let t = now();
+        for k in &mut self.lock().0 {
+            (k.built, k.drawable) = (Some(asked), Some(t));
         }
     }
 

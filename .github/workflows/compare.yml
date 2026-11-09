@@ -23,6 +23,13 @@ on:
         description: also measure keypress → pixels, when the runner allows it
         type: boolean
         default: true
+      latency_keys:
+        description: keys in the latency run
+        default: "200"
+      latency_log:
+        description: also log Decline's own timing of each key, and show where its time went
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -134,9 +141,12 @@ jobs:
           ROUNDS: ${{ inputs.rounds }}
           TERMINALS: ${{ inputs.terminals }}
           LATENCY: ${{ inputs.latency }}
+          LATENCY_KEYS: ${{ inputs.latency_keys }}
+          LATENCY_LOG: ${{ inputs.latency_log }}
         run: |
           latency=()
-          if [[ "$LATENCY" == "true" ]]; then latency=(--latency); fi
+          if [[ "$LATENCY" == "true" ]]; then latency=(--latency --latency-keys "${LATENCY_KEYS:-200}"); fi
+          if [[ "$LATENCY" == "true" && "$LATENCY_LOG" == "true" ]]; then latency+=(--latency-log); fi
           python3 scripts/compare/run.py --bundle "$DECLINE_APP" --terminals "$TERMINALS" \
             --rounds "$ROUNDS" --max-load 4 --out compare --screenshots ${UNAVAILABLE:+"$UNAVAILABLE"} "${latency[@]}"
 
@@ -158,4 +168,5 @@ jobs:
             compare/results.jsonl
             compare/report.md
             compare/*.png
+            compare/latency-*.jsonl
           if-no-files-found: ignore

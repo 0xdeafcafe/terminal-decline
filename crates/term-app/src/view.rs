@@ -3571,11 +3571,13 @@ fn present_timed(
     lat: &'static Latency,
     frame: FrameKeys,
 ) {
+    let asked = latency::now();
     let Some(drawable) = layer.nextDrawable() else {
         frame.presented(lat, 0.0);
         frame.gpu_done(lat, 0.0);
         return;
     };
+    frame.drawable(asked);
     let cmd = renderer.encode_panes(&drawable.texture(), clear, panes, dividers);
     let frame = Arc::new(frame);
     let on_gpu = frame.clone();

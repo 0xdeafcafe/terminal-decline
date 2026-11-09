@@ -2,3 +2,4 @@ target/
 .claude/worktrees/
 .DS_Store
 vendor/*/Cargo.lock
+__pycache__/

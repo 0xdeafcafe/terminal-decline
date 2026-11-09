@@ -5,7 +5,7 @@
                            [--rounds 5] [--idle 30] [--app target/release/terminal-decline]
                            [--bundle DIR/Terminal Decline.app]
                            [--out target/compare] [--wait-calm] [--latency]
-                           [--screenshots]
+                           [--latency-keys 200] [--latency-log] [--screenshots]
     scripts/compare/run.py --report [--out target/compare]
 
 Each round runs every terminal in turn (interleaved: A B C D E, then again),
@@ -42,7 +42,11 @@ imported back at the end in case it wrote them.
 --latency: keypress → pixels with scripts/latency/probe.swift, for every
 terminal, when the terminal running this has Accessibility and Screen
 Recording (`probe check`); otherwise recorded as skipped. The probe watches
-the terminal's frontmost window, the one its keys go to.
+the terminal's frontmost window, the one its keys go to. --latency-keys:
+how many keys (200). --latency-log: Decline's latency run also writes its
+own timing of each key (DECLINE_LATENCY_LOG), joined with the probe's
+(scripts/latency/join.py) into where the time went; both logs are kept in
+OUT as latency-decline-probe.jsonl and latency-decline-app.jsonl.
 
 On a GitHub runner (.github/workflows/compare.yml) the same method runs on a
 fresh macOS VM: the workflow installs the other terminals, marks Warp's
@@ -403,6 +407,8 @@ class Decline(Terminal):
             f"scrollback = {SCROLLBACK}\npadding = {PADDING}\nconfirm_close = false\n"
         )
         env = {"XDG_CONFIG_HOME": str(xdg)}
+        if getattr(self.ctx, "app_latency_log", None):
+            env["DECLINE_LATENCY_LOG"] = str(self.ctx.app_latency_log)
         if self.tabs:
             # The test-only remote control (control.rs), for `tab`.
             env["DECLINE_TEST_DUMP"] = str(self.dir / "dump.jsonl")
@@ -749,7 +755,14 @@ def measure_latency(ctx, key, keys=200):
     import run as latency  # scripts/latency/run.py
 
     row = {"terminal": key, "kind": "latency"}
-    t = KINDS[key](ctx)
+    app_log = ctx.out_dir / f"latency-{key}-app.jsonl" if key == "decline" and ctx.latency_log else None
+    if app_log:
+        app_log.unlink(missing_ok=True)
+    ctx.app_latency_log = app_log
+    try:
+        t = KINDS[key](ctx)
+    finally:
+        ctx.app_latency_log = None
     try:
         time.sleep(3)
         main = t.pids()[0]
@@ -771,6 +784,11 @@ def measure_latency(ctx, key, keys=200):
         ms = [r["ms"] for r in rows if "ms" in r]
         row.update(latency.stats(ms))
         row["missed"] = len(rows) - len(ms)
+        if app_log:
+            import join  # scripts/latency/join.py
+
+            shutil.copy(out, ctx.out_dir / f"latency-{key}-probe.jsonl")
+            row["stages"] = join.stage_stats(join.join(rows, join.read_jsonl(app_log)))
     finally:
         t.stop()
     return row
@@ -855,6 +873,12 @@ def report(out_dir):
                 lines.append(f"| {NAMES[r['terminal']]} | no key seen drawn | | | 0 | {r['missed']} |")
             else:
                 lines.append(f"| {NAMES[r['terminal']]} | {r['p50']:.1f} | {r['p95']:.1f} | {r['p99']:.1f} | {r['n']} | {r['missed']} |")
+        for r in lat:
+            if r.get("stages"):
+                import join  # scripts/latency/join.py
+
+                lines.append(f"\nWhere {NAMES[r['terminal']]}'s time went (its own log joined with the probe's, ms):\n")
+                lines.append(join.table(r["stages"]))
     sizes = {}
     for r in rows:
         if r["kind"] == "main" and r.get("windows"):
@@ -895,6 +919,8 @@ def main():
     ap.add_argument("--big", default="", help="the file to cat (default: made with gen.py big in OUT)")
     ap.add_argument("--wait-calm", action="store_true")
     ap.add_argument("--latency", action="store_true")
+    ap.add_argument("--latency-keys", type=int, default=200)
+    ap.add_argument("--latency-log", action="store_true", help="Decline's own timing of each key, joined with the probe's")
     ap.add_argument("--unavailable", action="append", default=[], metavar="KEY=REASON", help="a terminal that can't run here, and why")
     ap.add_argument("--screenshots", action="store_true", help="a screenshot of the screen when a run fails")
     ap.add_argument("--skip", default="", help="parts to leave out: main,tabs")
@@ -924,6 +950,7 @@ def main():
     ctx.idle = args.idle
     ctx.out_dir = out_dir
     ctx.screenshots = args.screenshots
+    ctx.latency_log = args.latency_log
     ctx.work = Path(tempfile.mkdtemp(prefix="decline-compare-"))
     ctx.helper = build_swift(HERE / "helper.swift", out_dir / "helper")
     ctx.big = Path(args.big).resolve() if args.big else out_dir / "big.txt"
@@ -977,7 +1004,7 @@ def main():
                 else:
                     wait_load()
                     try:
-                        row = measure_latency(ctx, t)
+                        row = measure_latency(ctx, t, args.latency_keys)
                     except Exception as e:
                         row = {"terminal": t, "kind": "latency", "skipped": f"error: {e}"}
                         screenshot(ctx, f"{t}-latency")

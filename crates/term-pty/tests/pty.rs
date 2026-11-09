@@ -339,3 +339,86 @@ fn no_cwd_starts_in_home() {
     let (out, home) = pwd("homecwd", |_| None);
     assert_eq!(Path::new(&out), home);
 }
+
+/// Runs `script` under `/bin/sh` and hands its output, through a
+/// [`term_pty::Pump`], to `take` on a thread of its own, one batch per
+/// call; `take` returning false stops taking. Returns everything taken.
+fn pumped(name: &str, script: &str, mut take: impl FnMut(&[u8]) -> bool + Send + 'static) -> Vec<u8> {
+    let home = TempDir::new(name);
+    let cmd = Command {
+        argv: argv(&["/bin/sh", "-c", script]),
+        env: vec![("HOME".into(), home.str().into())],
+        direct: true,
+        ..Command::default()
+    };
+    let pty = Pty::spawn(&cmd, SIZE).unwrap();
+    let mut pump = term_pty::Pump::start(pty.reader().unwrap()).unwrap();
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let (mut all, mut batch) = (Vec::new(), Vec::new());
+        while pump.next(&mut batch) {
+            all.extend_from_slice(&batch);
+            if !take(&batch) {
+                break;
+            }
+        }
+        let _ = tx.send(all);
+    });
+    let out = rx.recv_timeout(DEADLINE).expect("pumped output in time");
+    drop(pty);
+    out
+}
+
+/// `out` is `seq 1 last` on a terminal; if not, where it first differs.
+/// Carriage returns are left out: when the PTY's queue fills between the
+/// `\r` and `\n` of a newline (`onlcr`), macOS writes the `\r` again
+/// once there is room (seen on CI as `49579\r\r\n`), which a terminal
+/// draws the same.
+fn assert_seq(out: &[u8], last: u32) {
+    let out: Vec<u8> = out.iter().copied().filter(|&b| b != b'\r').collect();
+    let out = &out[..];
+    let want: String = (1..=last).map(|i| format!("{i}\n")).collect();
+    let want = want.as_bytes();
+    if out == want {
+        return;
+    }
+    let at = out.iter().zip(want).position(|(a, b)| a != b).unwrap_or(out.len().min(want.len()));
+    let around = |b: &[u8]| String::from_utf8_lossy(&b[at.saturating_sub(40)..(at + 40).min(b.len())]).into_owned();
+    panic!(
+        "{} bytes, wanted {}; first difference at {at}: got {:?}, wanted {:?}",
+        out.len(),
+        want.len(),
+        around(out),
+        around(want)
+    );
+}
+
+#[test]
+fn pump_hands_over_a_flood_in_order_and_ends() {
+    let out = pumped("pump-flood", "seq 1 200000", |_| true);
+    assert_seq(&out, 200_000);
+}
+
+#[test]
+fn pump_holds_a_flood_back_while_the_parse_lags() {
+    // The parse sleeps on every batch, so the reads have to wait for it:
+    // no batch is ever more than the buffer's bound and a read.
+    let out = pumped("pump-slow", "seq 1 100000", |batch| {
+        assert!(batch.len() <= term_pty::PUMP_CAP + 4096, "batch of {}", batch.len());
+        std::thread::sleep(Duration::from_millis(2));
+        true
+    });
+    assert_seq(&out, 100_000);
+}
+
+#[test]
+fn pump_hands_over_a_short_write_at_once() {
+    // The program is still running: what it wrote must not wait in the
+    // buffer for more.
+    let mut seen = Vec::new();
+    let out = pumped("pump-short", "printf ready; sleep 30", move |batch| {
+        seen.extend_from_slice(batch);
+        seen != b"ready"
+    });
+    assert_eq!(out, b"ready");
+}

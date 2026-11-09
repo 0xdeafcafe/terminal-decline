@@ -10,8 +10,10 @@ use std::sync::{Arc, Mutex};
 
 mod command;
 pub mod integration;
+mod pump;
 
 pub use command::{Command, Reports, build_argv, build_env, exec_argv, resolve_cwd};
+pub use pump::{PUMP_CAP, Pump};
 
 #[derive(Clone, Copy, Debug)]
 pub struct Size {

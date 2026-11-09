@@ -240,18 +240,19 @@ compressed.
 
 ## Threads
 
-Two threads do the heavy lifting: one reads the program's output and
-parses it, and the main thread draws. They meet at the terminal's lock,
-and the main thread never waits on it for more than 500 µs. Two more sit
-alongside them: a writer for keys and replies, and a glyph thread that
-shapes text.
+Two threads do the heavy lifting: one parses the program's output, and
+the main thread draws. They meet at the terminal's lock, and the main
+thread never waits on it for more than 500 µs. Three more sit alongside
+them: one that reads the PTY for the parser, a writer for keys and
+replies, and a glyph thread that shapes text.
 
 How output gets from the program to the screen, and keys get back to it:
 
 ```mermaid
 flowchart LR
-    prog["program on the PTY"] -- "~1 KB per read" --> reader["pty-reader thread<br/>read_batch"]
-    reader -- "parse under the terminal's lock" --> core["term-core Terminal"]
+    prog["program on the PTY"] -- "~1 KB per read" --> pump["pty-read thread<br/>Pump, ≤ 64 KB buffered"]
+    pump -- "all read so far" --> reader["pty-reader thread"]
+    reader -- "parse under the terminal's lock,<br/>≤ 16 KB a time" --> core["term-core Terminal"]
     reader -- "replies to queries" --> writer["pty-writer thread"]
     reader -- "dirty flag was clear:<br/>wake" --> main["main thread<br/>CADisplayLink tick or output_arrived"]
     main -- "frame_policy decides,<br/>lock_for_frame, snapshot" --> core
@@ -264,17 +265,24 @@ flowchart LR
     writer --> prog
 ```
 
-1. **Reader thread** (one per pane's session, `pty-reader`): the PTY is
-   non-blocking. A macOS PTY returns at most ~1 KB per `read()` and
-   buffers ~2 KB, so the reader (`BatchReader::read_batch`, into a 64 KB
-   buffer) parses what one read gives and only waits with `poll` when the
-   PTY is empty; draining it until empty would cost a failing read per
-   batch for nothing. In a flood (the last read came back full) it looks
-   again for up to 30 µs (`FLOOD_SPIN`) before it sleeps, since the
-   writer refills the PTY within microseconds and a sleep and wake-up per
-   kilobyte costs both sides a context switch; typing and idle never
-   spin. The terminal's lock is held for one read's parse, so drawing and
-   typing never wait long. Replies to queries (cursor position, device
+1. **Reader threads** (two per pane's session). `pty-read`
+   (`term_pty::Pump`) reads the non-blocking PTY into a buffer of at
+   most 64 KB (`PUMP_CAP`; when the parse lags, it stops reading and the
+   PTY slows the program down). A macOS PTY returns at most ~1 KB per
+   `read()` and buffers ~2 KB, and each read costs about as much kernel
+   time as parsing what it returned, so reading on a thread of its own
+   lets a flood's reads overlap its parse instead of adding to it. It
+   waits with `poll` only when the PTY is empty; in a flood (the last
+   read came back full) it looks again for up to 30 µs (`FLOOD_SPIN`)
+   before it sleeps, since the writer refills the PTY within
+   microseconds and a sleep and wake-up per kilobyte costs both sides a
+   context switch; typing and idle never spin. It wakes the parser when
+   8 KB are buffered, when a read came back short, or when the PTY is
+   empty, so a keystroke's echo is handed over at once. `pty-reader`
+   takes everything buffered at once and parses it in pieces of at most
+   16 KB (`PARSE_MAX`), each under one hold of the terminal's lock
+   (~100 µs of coloured text), so drawing and typing never wait long.
+   Replies to queries (cursor position, device
    attributes) are handed to the writer thread. After parsing it wakes
    the main thread **only if** no redraw is already pending (an atomic
    flag), so a flood of output causes at most one redraw per display

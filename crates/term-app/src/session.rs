@@ -3,10 +3,13 @@
 //! window's view uses this; so do the headless pipeline tests.
 //!
 //! Threads:
-//! - reader: one `read_batch` per loop, parse it, queue any replies for the
-//!   writer, then set the dirty flag and call `wake` only if it was clear (so
-//!   a flood of output wakes the main thread at most once per frame). When
-//!   the program has exited it calls `on_exit`.
+//! - pty-read: reads the PTY into a bounded buffer ([`term_pty::Pump`]), so
+//!   the reads of a flood overlap its parse.
+//! - reader: takes what pty-read has read, parses it (in pieces of at most
+//!   [`PARSE_MAX`], one lock each), queues any replies for the writer, then
+//!   sets the dirty flag and calls `wake` only if it was clear (so a flood of
+//!   output wakes the main thread at most once per frame). When the program
+//!   has exited it calls `on_exit`.
 //! - writer: writes typed input and query replies to the PTY, waiting for
 //!   room there rather than on the main thread.
 //! - prompt-wait, only for a command typed for a restored tab
@@ -36,8 +39,9 @@ use term_pty::{Child, Command, Pty, Size};
 use crate::control::ControlScanner;
 use crate::images::SessionImages;
 
-/// A macOS PTY hands out ~1 KB per read, so 64 KB is plenty.
-const READ_BUF: usize = 64 * 1024;
+/// The most output parsed under one hold of the terminal's lock: ~100 µs
+/// of coloured text, well inside the frame's [`FRAME_LOCK_WAIT`].
+const PARSE_MAX: usize = 16 * 1024;
 
 /// A program that fails within this long keeps its window open, so its
 /// error can be read.
@@ -489,7 +493,7 @@ impl Session {
             }
         })?;
 
-        let mut reader = pty.reader()?;
+        let mut pump = term_pty::Pump::start(pty.reader()?)?;
         let child = pty.child();
         let (term2, dirty2, tx2) = (term.clone(), dirty.clone(), tx.clone());
         let batches = Arc::new(AtomicU64::new(0));
@@ -512,7 +516,7 @@ impl Session {
             interactive();
             // A panic anywhere else in the loop stops the session too.
             let read = catch_unwind(AssertUnwindSafe(|| -> Result<(), Bug> {
-                let mut buf = vec![0u8; READ_BUF];
+                let mut batch = Vec::with_capacity(term_pty::PUMP_CAP);
                 let mut scanner = on_control.as_ref().map(|_| ControlScanner::default());
                 let mut prefs = on_prefs.as_ref().map(|_| ControlScanner::new(crate::control::PREFS_PREFIX));
                 let mut asked = Vec::new();
@@ -548,36 +552,38 @@ impl Session {
                         // Decoding lags: let the PTY slow the program down.
                         images.hold_back();
                     }
-                    let n = reader.read_batch(&mut buf);
-                    if n == 0 {
+                    if !pump.next(&mut batch) {
                         return Ok(());
                     }
-                    batches2.fetch_add(1, Ordering::Relaxed);
-                    let parse_started = on_output.as_ref().map(|_| Instant::now());
-                    let mut start = 0;
-                    let mut wake_view = false;
-                    if let (Some(scanner), Some(control)) = (&mut scanner, &mut on_control) {
-                        scanner.feed(&buf[..n], &mut found);
-                        for (end, cmd) in found.drain(..) {
-                            parse(&buf[start..end])?;
-                            start = end;
-                            control(cmd);
-                            wake_view = true;
+                    for buf in batch.chunks(PARSE_MAX) {
+                        let n = buf.len();
+                        batches2.fetch_add(1, Ordering::Relaxed);
+                        let parse_started = on_output.as_ref().map(|_| Instant::now());
+                        let mut start = 0;
+                        let mut wake_view = false;
+                        if let (Some(scanner), Some(control)) = (&mut scanner, &mut on_control) {
+                            scanner.feed(&buf[..n], &mut found);
+                            for (end, cmd) in found.drain(..) {
+                                parse(&buf[start..end])?;
+                                start = end;
+                                control(cmd);
+                                wake_view = true;
+                            }
                         }
-                    }
-                    wake_view |= parse(&buf[start..n])?;
-                    if let (Some(f), Some(t0)) = (&mut on_output, parse_started) {
-                        f(&buf[..n], t0.elapsed());
-                    }
-                    if let (Some(scanner), Some(ask)) = (&mut prefs, &mut on_prefs) {
-                        scanner.feed(&buf[..n], &mut asked);
-                        for (_, what) in asked.drain(..) {
-                            ask(what);
-                            wake_view = true;
+                        wake_view |= parse(&buf[start..n])?;
+                        if let (Some(f), Some(t0)) = (&mut on_output, parse_started) {
+                            f(&buf[..n], t0.elapsed());
                         }
-                    }
-                    if wake_view && !dirty2.swap(true, Ordering::AcqRel) {
-                        wake();
+                        if let (Some(scanner), Some(ask)) = (&mut prefs, &mut on_prefs) {
+                            scanner.feed(&buf[..n], &mut asked);
+                            for (_, what) in asked.drain(..) {
+                                ask(what);
+                                wake_view = true;
+                            }
+                        }
+                        if wake_view && !dirty2.swap(true, Ordering::AcqRel) {
+                            wake();
+                        }
                     }
                 }
             }));
@@ -592,8 +598,7 @@ impl Session {
                     // Keep reading (and dropping) output until the program
                     // is gone: on macOS a process can't finish exiting while
                     // its terminal holds output nobody reads.
-                    let mut sink = [0u8; 4096];
-                    while reader.read_batch(&mut sink) > 0 {}
+                    while pump.next(&mut Vec::new()) {}
                     Outcome::Hold
                 }
             };

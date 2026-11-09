@@ -31,6 +31,7 @@ mod pane_view;
 pub mod paths;
 pub mod pin;
 pub mod prefs;
+mod responsive;
 pub mod scroll;
 pub mod search;
 pub mod secure_input;

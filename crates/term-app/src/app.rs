@@ -375,6 +375,7 @@ define_class!(
 
         #[unsafe(method(applicationDidBecomeActive:))]
         fn did_become_active(&self, _n: &NSNotification) {
+            crate::responsive::set_active(true);
             secure_input::apply(self.ivars().secure.borrow_mut().set_active(true));
             if let Some(v) = self.key_view() {
                 crate::notify::seen(MainThreadMarker::from(self), v.id());
@@ -387,6 +388,7 @@ define_class!(
 
         #[unsafe(method(applicationDidResignActive:))]
         fn did_resign_active(&self, _n: &NSNotification) {
+            crate::responsive::set_active(false);
             secure_input::apply(self.ivars().secure.borrow_mut().set_active(false));
         }
 

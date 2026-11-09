@@ -14,7 +14,9 @@ p50 / p95 / p99 in ms.
 It also finds the display's refresh grid from the probe's display times
 (they fall on refreshes) and counts, for each key, the refreshes that went
 by between the frame's commit and the one it was seen at: 0 means the
-window server showed it at the first refresh after it was sent.
+window server showed it at the first refresh after it was sent. On a
+display with a variable refresh rate (ProMotion) there is no such grid,
+and it says so instead.
 """
 
 import json
@@ -131,6 +133,10 @@ def table(s):
             + ", ".join(f"{k}: {v}" for k, v in s["refreshes_after_commit"].items())
             + f". Commit at {s['commit_phase']['p50']:.2f} of the refresh (p50)."
         )
+    elif s.get("keys"):
+        # A ProMotion display shows a frame when it comes (variable refresh),
+        # so its display times keep to no grid of 30, 60 or 120 Hz.
+        lines.append("\nNo refresh grid in the display times (a variable refresh rate), so no refresh counts.")
     lines.append(f"Keys joined with Decline's log: {s['joined']} of {s['keys']}.")
     return "\n".join(lines)
 

@@ -115,6 +115,9 @@ pub(crate) struct Win {
     /// Last key, paste, scroll or click in any pane: typing gets the full
     /// refresh rate.
     pub(crate) last_input: Instant,
+    /// A key asked for the mouse pointer to be hidden until it moves: done
+    /// once the frame after it is on its way (see [`hide_cursor`]).
+    pub(crate) hide_cursor: bool,
     /// The display refresh a display-link tick draws for (its timestamp,
     /// host seconds), until that tick draws.
     refresh_at: Option<f64>,
@@ -1058,6 +1061,7 @@ impl WindowView {
                 frames: 0,
                 rate: 0,
                 last_input: Instant::now(),
+                hide_cursor: false,
                 refresh_at: None,
                 test,
                 top_inset: titlebar,
@@ -1745,8 +1749,10 @@ impl WindowView {
                 win.idle_ticks = win.idle_ticks.saturating_add(1);
                 win.link.setPaused(true);
                 let token = win.frames;
+                let hide = std::mem::take(&mut win.hide_cursor);
                 drop(ticks);
                 drop(guard);
+                hide_cursor(hide);
                 self.schedule_trim(token, trim_after);
                 self.schedule_filters(token);
                 return;
@@ -2104,6 +2110,7 @@ impl WindowView {
             win.renderer.hide(minimised);
         }
         win.frames += 1;
+        let hide = std::mem::take(&mut win.hide_cursor);
         let mut poll_dump = false;
         // A dump shows every glyph, and all of a trackpad's movement: it
         // waits for the frame that has them.
@@ -2123,6 +2130,7 @@ impl WindowView {
             .filter_map(|(id, status)| panes.get(id)?.find.as_ref().map(|f| (f.bar.clone(), *status)))
             .collect();
         drop(guard);
+        hide_cursor(hide);
         for pane in blinking {
             self.schedule_blink(pane);
         }
@@ -3556,6 +3564,18 @@ fn play_scroll(id: usize, events: Arc<Vec<crate::scroll::Input>>, i: usize, star
         });
         play_scroll(id, events, i + 1, start, hz);
     });
+}
+
+/// Hide the mouse pointer until it moves, if a key asked for it since the
+/// last frame. A synchronous call to the window server: 0.2 ms at the
+/// median but 3 ms at p95 and up to 19 ms on a busy Mac, so a key no
+/// longer makes it before its bytes go to the program; the frame showing
+/// the echo (or the pause after a key with none) makes it once that frame
+/// is committed.
+fn hide_cursor(asked: bool) {
+    if asked {
+        NSCursor::setHiddenUntilMouseMoves(true);
+    }
 }
 
 /// Present `panes` like [`Renderer::present_panes`], with handlers that

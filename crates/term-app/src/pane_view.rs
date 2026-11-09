@@ -940,7 +940,9 @@ impl PaneView {
         }
         let action = crate::keys::translate(&input, modes);
         if input.flags & crate::keys::flags::COMMAND == 0 {
-            NSCursor::setHiddenUntilMouseMoves(true);
+            // After the frame this key leads to (`view::hide_cursor`), not
+            // on its way to the program.
+            self.with(|win, _| win.hide_cursor = true);
         }
         let went_to_program = matches!(action, KeyAction::Send(_)) || (action == KeyAction::ToTextInput && !modes.composing);
         if went_to_program {

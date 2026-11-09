@@ -52,8 +52,10 @@ const FRAMES_IN_FLIGHT: usize = 2;
 /// Drawables a `CAMetalLayer` holds at most (its default
 /// `maximumDrawableCount`), so the surfaces a window may have shown.
 const SURFACES: usize = 3;
-/// Starting sizes of the glyph textures, pixels.
-const MASK_ATLAS: u32 = 1024;
+/// Starting sizes of the glyph textures, pixels. The coverage texture grows
+/// from 256² (64 KB) as glyphs need it: on a 1× display ASCII and more fit,
+/// at 2× it may double while ASCII loads (`preload`).
+const MASK_ATLAS: u32 = 256;
 const COLOR_ATLAS: u32 = 256;
 /// Caps keep the glyph textures within 16 MB each (R8 at 4096², BGRA at 2048²).
 const MAX_MASK_ATLAS: u32 = 4096;
@@ -1712,7 +1714,7 @@ impl Renderer {
             cache.windows += 1;
             cache.make_resident();
             if new {
-                preload(&mut cache, id, &fonts);
+                preload(&mut cache, &shared.gpu, id, &fonts);
             }
         }
         Renderer {
@@ -1886,7 +1888,7 @@ impl Renderer {
                 return None;
             }
             if new {
-                preload(&mut self.shared.glyphs.borrow_mut(), id, &fonts);
+                preload(&mut self.shared.glyphs.borrow_mut(), &self.shared.gpu, id, &fonts);
             }
             Some(PaneFonts {
                 shared: self.shared.clone(),
@@ -1941,7 +1943,7 @@ impl Renderer {
             cache.fonts_dropped(old, &self.shared.gpu.device);
         }
         if new {
-            preload(&mut cache, id, &self.fonts);
+            preload(&mut cache, &self.shared.gpu, id, &self.fonts);
         }
     }
 
@@ -2343,11 +2345,19 @@ fn finish(shared: &Shared, id: FontsId, fonts: &Fonts, rules: &GlyphRules, pane:
     true
 }
 
-/// Rasterise printable ASCII for new fonts, so first frames don't.
-fn preload(cache: &mut GlyphCache, id: FontsId, fonts: &Fonts) {
-    let mut glyphs = cache.source(id, fonts);
-    for c in 0x21..0x7F {
-        glyphs.glyph(c, Style::Regular);
+/// Rasterise printable ASCII for new fonts, so first frames don't. The
+/// coverage texture starts small (it is most of an idle window's GPU
+/// memory); when ASCII doesn't fit, it grows here, keeping its glyphs, and
+/// that growth isn't a flood's: the idle trim doesn't shrink it back.
+fn preload(cache: &mut GlyphCache, gpu: &Gpu, id: FontsId, fonts: &Fonts) {
+    loop {
+        let mut glyphs = cache.source(id, fonts);
+        for c in 0x21..0x7F {
+            glyphs.glyph(c, Style::Regular);
+        }
+        if !cache.mask.packer.is_full() || !cache.mask.grow(gpu) {
+            return;
+        }
     }
 }
 

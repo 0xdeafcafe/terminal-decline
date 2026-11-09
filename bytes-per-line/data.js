@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794112897462,
+  "lastUpdate": 1794199404379,
   "repoUrl": "https://github.com/0xdeafcafe/terminal-decline",
   "entries": {
     "Scrollback bytes per line": [
@@ -564,6 +564,68 @@ window.BENCHMARK_DATA = {
           "url": "https://github.com/0xdeafcafe/terminal-decline/commit/14f1c8e206d5d978b07ae61a8f513f50034438b4"
         },
         "date": 1794112895945,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "scrollback CJK",
+            "value": 72,
+            "unit": "bytes/line"
+          },
+          {
+            "name": "scrollback compiler error",
+            "value": 67,
+            "unit": "bytes/line"
+          },
+          {
+            "name": "scrollback emoji-heavy",
+            "value": 81,
+            "unit": "bytes/line"
+          },
+          {
+            "name": "scrollback full-width background",
+            "value": 26,
+            "unit": "bytes/line"
+          },
+          {
+            "name": "scrollback gradient 160 cells",
+            "value": 2020,
+            "unit": "bytes/line"
+          },
+          {
+            "name": "scrollback ls --color",
+            "value": 61,
+            "unit": "bytes/line"
+          },
+          {
+            "name": "scrollback placeholder image row",
+            "value": 56,
+            "unit": "bytes/line"
+          },
+          {
+            "name": "scrollback plain 40 chars",
+            "value": 46,
+            "unit": "bytes/line"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Alexander Forbes-Reed",
+            "username": "0xdeafcafe",
+            "email": "git@alex.forbes.red"
+          },
+          "committer": {
+            "name": "Alexander Forbes-Reed",
+            "username": "0xdeafcafe",
+            "email": "git@alex.forbes.red"
+          },
+          "id": "e1569e7c2af82d103d6cce34f5492c40ffdea4a5",
+          "message": "ci: compare the terminals on a GitHub macOS runner, and show one chart from it\n\n- .github/workflows/compare.yml (workflow_dispatch: rounds, terminals,\n  latency): builds the release bundle, installs Ghostty, kitty and Warp\n  (Warp's onboarding skipped by its own HasCompletedOnboarding default,\n  not signed in), runs scripts/compare/run.py, and puts the report in\n  the job summary and the results in an artifact;\n- run.py records the machine (model, CPU, macOS, displays, versions,\n  commit), terminals that can't run with why (--unavailable: kitty has\n  no OpenGL 3.3 on the runner), failed runs, and screenshots of a\n  terminal that never starts; the latency probe watches the frontmost\n  window;\n- docs/comparison-2026-11-09.md: Decline lowest on every metric in two\n  5-round runs (idle 21 MB against Ghostty 37, Terminal.app 72, Warp\n  190; cat of 100 MB 1.12 s against 1.63, 5.02, 6.60; latency p50 17.2\n  ms against 19.7, 22.3, 33.1);\n- the site shows that run as one chart, labelled as the runner it ran\n  on, with the M1 Max runs of 30 October and 2 November as links.",
+          "timestamp": "2026-11-09T02:15:39Z",
+          "url": "https://github.com/0xdeafcafe/terminal-decline/commit/e1569e7c2af82d103d6cce34f5492c40ffdea4a5"
+        },
+        "date": 1794199403082,
         "tool": "customSmallerIsBetter",
         "benches": [
           {

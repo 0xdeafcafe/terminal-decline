@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794112900489,
+  "lastUpdate": 1794199407609,
   "repoUrl": "https://github.com/0xdeafcafe/terminal-decline",
   "entries": {
     "Throughput": [
@@ -1679,6 +1679,188 @@ window.BENCHMARK_DATA = {
           {
             "name": "typing/echo+report",
             "value": 1506653,
+            "unit": "elem/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Alexander Forbes-Reed",
+            "username": "0xdeafcafe",
+            "email": "git@alex.forbes.red"
+          },
+          "committer": {
+            "name": "Alexander Forbes-Reed",
+            "username": "0xdeafcafe",
+            "email": "git@alex.forbes.red"
+          },
+          "id": "e1569e7c2af82d103d6cce34f5492c40ffdea4a5",
+          "message": "ci: compare the terminals on a GitHub macOS runner, and show one chart from it\n\n- .github/workflows/compare.yml (workflow_dispatch: rounds, terminals,\n  latency): builds the release bundle, installs Ghostty, kitty and Warp\n  (Warp's onboarding skipped by its own HasCompletedOnboarding default,\n  not signed in), runs scripts/compare/run.py, and puts the report in\n  the job summary and the results in an artifact;\n- run.py records the machine (model, CPU, macOS, displays, versions,\n  commit), terminals that can't run with why (--unavailable: kitty has\n  no OpenGL 3.3 on the runner), failed runs, and screenshots of a\n  terminal that never starts; the latency probe watches the frontmost\n  window;\n- docs/comparison-2026-11-09.md: Decline lowest on every metric in two\n  5-round runs (idle 21 MB against Ghostty 37, Terminal.app 72, Warp\n  190; cat of 100 MB 1.12 s against 1.63, 5.02, 6.60; latency p50 17.2\n  ms against 19.7, 22.3, 33.1);\n- the site shows that run as one chart, labelled as the runner it ran\n  on, with the M1 Max runs of 30 October and 2 November as links.",
+          "timestamp": "2026-11-09T02:15:39Z",
+          "url": "https://github.com/0xdeafcafe/terminal-decline/commit/e1569e7c2af82d103d6cce34f5492c40ffdea4a5"
+        },
+        "date": 1794199406650,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "parse/clusters",
+            "value": 89.06,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse/coloured",
+            "value": 223.22,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse/plain",
+            "value": 631.9,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse/seq",
+            "value": 173.78,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse/tui",
+            "value": 353.39,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse/unicode",
+            "value": 137.14,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse_1k/clusters",
+            "value": 88.13,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse_1k/coloured",
+            "value": 223.92,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse_1k/plain",
+            "value": 626.1,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse_1k/seq",
+            "value": 179.54,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse_1k/tui",
+            "value": 348.26,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse_1k/unicode",
+            "value": 132.66,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "history decode/background",
+            "value": 8813714,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history decode/cjk",
+            "value": 5360430,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history decode/emoji",
+            "value": 4080141,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history decode/gradient",
+            "value": 554506,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history decode/ls",
+            "value": 6067155,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history decode/plain",
+            "value": 10480148,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/background",
+            "value": 5772475,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/cjk",
+            "value": 7562340,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/emoji",
+            "value": 9554694,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/gradient",
+            "value": 377919,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/keyed/background",
+            "value": 6004129,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/keyed/cjk",
+            "value": 7621207,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/keyed/emoji",
+            "value": 9609949,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/keyed/gradient",
+            "value": 375138,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/keyed/ls",
+            "value": 12661859,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/keyed/plain",
+            "value": 27591803,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/ls",
+            "value": 10432711,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/plain",
+            "value": 25015929,
+            "unit": "elem/s"
+          },
+          {
+            "name": "typing/echo",
+            "value": 19611506,
+            "unit": "elem/s"
+          },
+          {
+            "name": "typing/echo+report",
+            "value": 2025769,
             "unit": "elem/s"
           }
         ]

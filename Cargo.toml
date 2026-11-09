@@ -48,6 +48,23 @@ objc2-image-io = { version = "0.3", default-features = false, features = ["std"]
 [patch.crates-io]
 vte = { path = "vendor/vte" }
 
+# Debug builds, which here are the test builds CI runs (agents don't
+# build locally). Line tables are enough for panics and backtraces, and
+# compile and link faster than full debuginfo. Dependencies are optimised:
+# CI keeps them in its cache, so it costs nothing per push, and the tests
+# that decode images, inflate, or run thousands of proptest cases spend
+# most of their time in them. term-core at opt-level 1 makes its property
+# and Unicode stream tests several times faster; debug assertions and
+# overflow checks stay on in all of them.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.dev.package.term-core]
+opt-level = 1
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

@@ -68,13 +68,20 @@ jobs:
         with:
           # Branches start from main's; only main saves.
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      # Unit, integration, property and doctests, plus the fuzz corpus replay.
-      - name: cargo test -p term-core
-        run: cargo test -p term-core --locked
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+      # Unit, integration and property tests, plus the fuzz corpus replay.
+      # nextest runs the test binaries side by side (cargo test runs them
+      # one after another, and props, unicode and history take most of it).
+      - name: cargo nextest run -p term-core
+        run: cargo nextest run -p term-core --locked --profile ci
+      # nextest does not run doctests
+      - run: cargo test -p term-core --doc --locked
       # TODO: drop continue-on-error once term-pty builds on Linux.
-      - name: cargo test -p term-pty
+      - name: cargo nextest run -p term-pty
         continue-on-error: true
-        run: cargo test -p term-pty --locked
+        run: cargo nextest run -p term-pty --locked --profile ci
 
   macos:
     name: clippy and tests (macOS)
@@ -155,7 +162,9 @@ jobs:
       # The bundled-app smoke tests embed the pinned Sparkle.
       - name: Fetch Sparkle
         run: scripts/sparkle.sh
-      - run: cargo nextest run --workspace --locked --profile ci --run-ignored only -E 'binary(smoke)'
+      # Only the smoke binary: `--workspace` would build every test binary
+      # in the workspace (and link each) just to filter them all out.
+      - run: cargo nextest run -p terminal-decline --test smoke --locked --profile ci --run-ignored only
       - uses: actions/upload-artifact@v4
         if: always()
         with:

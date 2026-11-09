@@ -1,0 +1,117 @@
+name: Memory
+
+# Where Terminal Decline's idle footprint goes, and what a change did to
+# it (scripts/memory/breakdown.py, whose docstring is the method): this
+# commit and a base commit, built on the same GitHub macOS runner and
+# measured in turn, with footprint's categories, `footprint -v`, vmmap and
+# heap, and a bare AppKit + CAMetalLayer window as the floor. A
+# diagnostic, never a gate; by hand only.
+#
+# `gh workflow run memory.yml [--ref <branch>] -f base=origin/main`, or,
+# before this file is on main, push a tag `memory/<anything>` (the base
+# is then where the commit left main).
+
+on:
+  push:
+    tags: ["memory/**"]
+  workflow_dispatch:
+    inputs:
+      base:
+        description: the commit to compare with (empty for where this left main)
+        default: ""
+      rounds:
+        description: rounds (each runs both builds, interleaved)
+        default: "5"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: memory-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  memory:
+    runs-on: macos-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98.1"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: perf-watch
+          save-if: false
+
+      - name: Base commit
+        env:
+          BASE: ${{ inputs.base }}
+        run: |
+          base=${BASE:-$(git merge-base HEAD origin/main)}
+          base=$(git rev-parse "$base")
+          echo "BASE_SHA=$base" >> "$GITHUB_ENV"
+          echo "base $base, head $(git rev-parse HEAD)"
+
+      # As compare.yml builds it: release library, launcher and stub,
+      # bundled and signed ad hoc, without Sparkle. The base first, from a
+      # worktree sharing this target dir, so the head rebuilds only what
+      # changed.
+      - name: Build both
+        run: |
+          build() {
+            (cd "$1" &&
+              CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" cargo build --release --locked -p term-dylib >&2 &&
+              CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" cargo build --locked -p term-pin --bins --profile release-stub >&2 &&
+              env -u DOGFOOD -u HARDENED -u CODESIGN_IDENTITY -u SPARKLE_REQUIRED \
+                scripts/bundle.sh "$2" 0.0.0 1 | tail -n 1)
+          }
+          git worktree add --detach "$RUNNER_TEMP/base" "$BASE_SHA"
+          ln -s "$GITHUB_WORKSPACE/target" "$RUNNER_TEMP/base/target"
+          base_app=$(build "$RUNNER_TEMP/base" "$RUNNER_TEMP/bundle-base")
+          head_app=$(build "$GITHUB_WORKSPACE" "$RUNNER_TEMP/bundle-head")
+          test -d "$base_app" && test -d "$head_app"
+          echo "BASE_APP=$base_app" >> "$GITHUB_ENV"
+          echo "HEAD_APP=$head_app" >> "$GITHUB_ENV"
+          ls -l "$base_app/Contents/Frameworks" "$head_app/Contents/Frameworks"
+
+      - name: The runner
+        run: |
+          sysctl -n hw.model machdep.cpu.brand_string hw.ncpu hw.memsize
+          sw_vers
+          uptime
+
+      - name: Measure
+        env:
+          ROUNDS: ${{ inputs.rounds || '5' }}
+        run: |
+          python3 scripts/memory/breakdown.py --bundle "base=$BASE_APP" --bundle "head=$HEAD_APP" \
+            --rounds "$ROUNDS" --bare --out memory
+
+      - name: Report
+        if: always()
+        run: |
+          if [[ -s memory/rows.jsonl ]]; then
+            {
+              echo "## Memory: head $(git rev-parse --short HEAD) against base ${BASE_SHA::7}"
+              python3 scripts/memory/breakdown.py --report --out memory
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "no results" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: memory
+          path: |
+            memory/*.jsonl
+            memory/*.md
+            memory/*.txt
+            memory/*.png
+          if-no-files-found: ignore

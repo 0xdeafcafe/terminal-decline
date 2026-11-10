@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794199407609,
+  "lastUpdate": 1794285845068,
   "repoUrl": "https://github.com/0xdeafcafe/terminal-decline",
   "entries": {
     "Throughput": [
@@ -1861,6 +1861,188 @@ window.BENCHMARK_DATA = {
           {
             "name": "typing/echo+report",
             "value": 2025769,
+            "unit": "elem/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Alexander Forbes-Reed",
+            "username": "0xdeafcafe",
+            "email": "git@alex.forbes.red"
+          },
+          "committer": {
+            "name": "Alexander Forbes-Reed",
+            "username": "0xdeafcafe",
+            "email": "git@alex.forbes.red"
+          },
+          "id": "60220ecb3127a5be12daed61ad3020ebeb78167e",
+          "message": "fix(ci): give each nightly a tag of its own, as releases are immutable\n\nThe nightly job deleted the release called nightly and made it again,\nand since immutable releases were turned on GitHub refuses that: a\npublished release's tag can't be used again. Each nightly now gets\nnightly-<date>-<sha>, marked not latest so releases/latest stays the\nstable release the appcast is read from, and all but the newest three\nnightlies are deleted.",
+          "timestamp": "2026-11-09T04:50:44Z",
+          "url": "https://github.com/0xdeafcafe/terminal-decline/commit/60220ecb3127a5be12daed61ad3020ebeb78167e"
+        },
+        "date": 1794285844196,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "parse/clusters",
+            "value": 51.16,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse/coloured",
+            "value": 198.71,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse/plain",
+            "value": 531.05,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse/seq",
+            "value": 133.35,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse/tui",
+            "value": 326.71,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse/unicode",
+            "value": 98.41,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse_1k/clusters",
+            "value": 73.98,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse_1k/coloured",
+            "value": 186.24,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse_1k/plain",
+            "value": 533.46,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse_1k/seq",
+            "value": 162.91,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse_1k/tui",
+            "value": 308.37,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse_1k/unicode",
+            "value": 115.61,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "history decode/background",
+            "value": 7145237,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history decode/cjk",
+            "value": 4194988,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history decode/emoji",
+            "value": 3350591,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history decode/gradient",
+            "value": 388100,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history decode/ls",
+            "value": 4905846,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history decode/plain",
+            "value": 8812283,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/background",
+            "value": 4498945,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/cjk",
+            "value": 4650802,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/emoji",
+            "value": 6470275,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/gradient",
+            "value": 245408,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/keyed/background",
+            "value": 4182766,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/keyed/cjk",
+            "value": 5492273,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/keyed/emoji",
+            "value": 8343376,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/keyed/gradient",
+            "value": 207931,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/keyed/ls",
+            "value": 7897819,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/keyed/plain",
+            "value": 17586694,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/ls",
+            "value": 6942510,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/plain",
+            "value": 13716490,
+            "unit": "elem/s"
+          },
+          {
+            "name": "typing/echo",
+            "value": 18383506,
+            "unit": "elem/s"
+          },
+          {
+            "name": "typing/echo+report",
+            "value": 1628828,
             "unit": "elem/s"
           }
         ]

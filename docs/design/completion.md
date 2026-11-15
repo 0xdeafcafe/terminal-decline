@@ -891,3 +891,16 @@ mouse interference, narrow panes, stable width while scrolling and empty
 shell matches. Existing tests cover filtering, folder continuation and
 passive-list history behaviour. Compilation and tests run on GitHub
 under the repository's CI-only rule.
+
+## Grey text without the list (15 November 2026)
+
+Alex, with the list as you type off (the default): "I press tab and it
+doesn't select it, there is no greyed out text of the suggested one
+inline". The grey text was only drawn with the list, so with the list
+off nothing was ever suggested as you type, and Tab went to zsh. Now,
+with the list off and `completion_ghost_text` on, the top choice shows
+grey after the cursor at once (no pause), with no list; Tab or Right
+takes it, Esc hides it until the word changes (and goes on to the
+shell in vi insert mode), and every other key is the shell's. With no
+grey text showing, Tab asks zsh as before (§7). Test:
+`grey_text_without_the_list_and_tab_takes_it`.

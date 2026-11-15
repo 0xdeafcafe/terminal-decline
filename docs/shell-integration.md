@@ -176,6 +176,13 @@ fish aren't coloured yet.
 
 ## The completion list
 
+As you type, the most likely choice for the word (a command you run
+often, a file, a flag) shows grey after the cursor, list or no list;
+Tab or Right at the end of the line takes it, and Esc hides it until
+you change the word (Settings > Completion > Grey text after the
+cursor, `completion_ghost_text`). With no grey text showing, Tab is
+zsh's.
+
 Tab shows zsh's matches in the app's list, with what each one is: zsh's
 own description, or for flags and subcommands zsh doesn't describe, the
 line from the man page (or `--help`). With Settings > Completion > Open

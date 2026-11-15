@@ -395,7 +395,8 @@ pub struct Config {
     /// Choices shown before the list scrolls.
     #[serde(deserialize_with = "completion_rows")]
     pub completion_rows: u32,
-    /// The first choice's rest grey after the cursor; Right takes it.
+    /// The first choice's rest grey after the cursor as you type, list
+    /// open or not; Tab or Right takes it.
     pub completion_ghost_text: bool,
     /// Files and folders in the list.
     pub completion_files: bool,

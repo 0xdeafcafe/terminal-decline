@@ -126,6 +126,10 @@ struct Open {
     enter_takes: bool,
     /// zsh's matches: taking one sends its number for zsh to insert.
     zsh: bool,
+    /// Only the grey text is shown, not the list: the list doesn't open
+    /// as you type, but the top choice still shows after the cursor, and
+    /// Tab or Right takes it. Its other keys go to the shell.
+    ghost_only: bool,
 }
 
 /// What a key did to the list.
@@ -247,7 +251,9 @@ impl PaneState {
         if self.zsh.is_some() {
             return self.show_zsh(t, report, s, wake);
         }
-        if !s.as_you_type && !self.asked {
+        // Without the list as you type, the grey text alone, at once.
+        let ghost_only = !s.as_you_type && !self.asked;
+        if ghost_only && !s.ghost {
             self.open = None;
             return Drawn::default();
         }
@@ -255,7 +261,7 @@ impl PaneState {
         if self.open.is_none() && self.quiet && !self.asked {
             return Drawn::default();
         }
-        if self.open.is_none() && !self.soon && !self.asked {
+        if self.open.is_none() && !self.soon && !self.asked && !ghost_only {
             let waited = now.saturating_duration_since(since);
             if waited < s.delay {
                 let mut drawn = Drawn::default();
@@ -314,8 +320,19 @@ impl PaneState {
             vi: report.keymap == Keymap::ViInsert,
             enter_takes: s.enter_takes,
             zsh: false,
+            ghost_only,
         };
-        let drawn = place(t, &mut open, s, report.cursor == report.text.len());
+        let mut drawn = place(t, &mut open, s, report.cursor == report.text.len());
+        if ghost_only {
+            // No list to draw, click or hover; nothing at all without
+            // grey text, so Tab goes to zsh.
+            drawn.popup = None;
+            open.drawn_at = None;
+            if drawn.ghost.is_none() {
+                self.open = None;
+                return drawn;
+            }
+        }
         self.open = Some(open);
         self.soon = false;
         drawn
@@ -443,6 +460,7 @@ impl PaneState {
             vi: report.keymap == Keymap::ViInsert,
             enter_takes: s.enter_takes,
             zsh: true,
+            ghost_only: false,
         };
         let drawn = place(t, &mut open, s, report.cursor == report.text.len());
         self.open = Some(open);
@@ -594,6 +612,18 @@ impl PaneState {
         let Some(open) = &mut self.open else { return KeyResult::Pass };
         if !plain {
             return KeyResult::Pass;
+        }
+        if open.ghost_only {
+            return match keycode {
+                TAB | RIGHT => self.take(),
+                // Hides it; in vi insert mode Esc goes on to the shell.
+                ESCAPE => {
+                    let vi = open.vi;
+                    self.close_on_word();
+                    if vi { KeyResult::CloseAndPass } else { KeyResult::Redraw }
+                }
+                _ => KeyResult::Pass,
+            };
         }
         let n = open.offer.choices.len();
         if matches!(keycode, DOWN | UP) {
@@ -1057,7 +1087,7 @@ mod tests {
         };
         let t = term("g");
         let t0 = Instant::now();
-        assert_eq!(st.update(&t.state, &s, t0, &no_wake), Drawn::default(), "not by itself");
+        assert_eq!(st.update(&t.state, &s, t0, &no_wake).popup, None, "not by itself");
         assert!(st.ask(&t.state));
         let deadline = Instant::now() + Duration::from_secs(5);
         let d = loop {
@@ -1470,6 +1500,58 @@ mod tests {
             shown: vec!["git".into(), "grep".into()],
         });
         assert!(st.update(&t.state, &s, later, &no_wake).popup.is_some(), "zsh's matches on Tab");
+    }
+
+    /// Without the list as you type, the top choice still shows grey
+    /// after the cursor, at once, and Tab or Right takes it; with no
+    /// grey text, Tab is zsh's.
+    #[test]
+    fn grey_text_without_the_list_and_tab_takes_it() {
+        let path = programs("ghost-only", &["gzip", "git", "grep"]);
+        let s = Settings {
+            as_you_type: false,
+            ..settings()
+        };
+        let wait_ghost = |st: &mut PaneState, t: &Term| {
+            let now = Instant::now();
+            let deadline = now + Duration::from_secs(5);
+            loop {
+                let d = st.update(&t.state, &s, now, &no_wake);
+                if d.ghost.is_some() || Instant::now() > deadline {
+                    return d;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        let mut st = state(&path);
+        let t = term("g");
+        let d = wait_ghost(&mut st, &t);
+        assert_eq!(d.popup, None, "no list");
+        assert_eq!(d.ghost.map(|g| (g.row, g.col, g.text)), Some((0, 3, "it".to_string())));
+        // Arrows and Return stay the shell's.
+        assert_eq!(st.key(keycode::DOWN, true, false), KeyResult::Pass);
+        assert_eq!(st.key(keycode::RETURN, true, false), KeyResult::Pass);
+        let d = wait_ghost(&mut st, &t);
+        assert!(d.ghost.is_some());
+        assert_eq!(
+            st.key(keycode::TAB, true, false),
+            KeyResult::Send(b"\x1b[7701~0;0;git; \x07".to_vec())
+        );
+        // Right takes it too.
+        let mut st = state(&path);
+        wait_ghost(&mut st, &t);
+        assert!(matches!(st.key(keycode::RIGHT, true, false), KeyResult::Send(_)));
+        // Esc hides it until the word changes.
+        let mut st = state(&path);
+        wait_ghost(&mut st, &t);
+        assert_eq!(st.key(keycode::ESCAPE, true, false), KeyResult::Redraw);
+        assert_eq!(st.update(&t.state, &s, Instant::now(), &no_wake).ghost, None);
+        assert_eq!(st.key(keycode::TAB, true, false), KeyResult::Pass, "Tab to zsh");
+        // With the grey text off: nothing, and Tab is zsh's.
+        let off = Settings { ghost: false, ..s };
+        let mut st = state(&path);
+        assert_eq!(st.update(&t.state, &off, Instant::now(), &no_wake), Drawn::default());
+        assert_eq!(st.key(keycode::TAB, true, false), KeyResult::Pass);
     }
 
     #[test]

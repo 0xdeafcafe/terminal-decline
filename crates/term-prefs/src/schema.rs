@@ -777,7 +777,7 @@ pub const SETTINGS: &[Setting] = &[
         "Grey text after the cursor",
         Completion,
         Editor::Toggle,
-        "The first choice's rest shown grey after the cursor; Right takes it",
+        "The first choice's rest shown grey after the cursor as you type; Tab or Right takes it",
     ),
     setting(
         "completion_files",

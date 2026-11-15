@@ -30,6 +30,18 @@ with OSC 7); the app bundles it as
 `Terminal Decline.app/Contents/Resources/shell-integration` (a build in
 a checkout uses the checkout's `shell/`).
 
+## Line-editing keys
+
+The app sends the Mac's line-editing keys the way Terminal.app does:
+Option+Left and Option+Right are `ESC b` and `ESC f` (back and forward
+a word), Option+Delete `ESC d` and Option+Backspace `ESC DEL` (delete a
+word), Cmd+Left and Cmd+Right `^A` and `^E`, and Cmd+Backspace `^U`
+(delete to the start of the line). zsh, bash, fish and readline bind all
+of these, except that zsh's `^U` kills the whole line: `decline.zsh`
+rebinds it to `backward-kill-line`, unless your `.zshrc` bound `^U` to
+something else. A program that asks for the kitty keyboard protocol gets
+Option+arrows as keys with their Alt bit instead.
+
 ## How the app loads it
 
 Only into the login shell it starts for a tab, window or pane, or a

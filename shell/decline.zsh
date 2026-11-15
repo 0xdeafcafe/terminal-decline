@@ -88,6 +88,18 @@ _decline_preexec() {
   typeset -g _decline_ran=1
 }
 
+# Cmd+Backspace sends ^U, as in Terminal.app and Ghostty, for "delete
+# to the start of the line"; zsh's emacs keymap has ^U kill the whole
+# line instead. Make it what bash and readline do, unless the user's
+# .zshrc bound ^U to something of its own.
+() {
+  local km w
+  for km in main emacs; do
+    w=${${(z)"$(bindkey -M $km '^U' 2>/dev/null)"}[2]}
+    [[ $w == kill-whole-line ]] && bindkey -M $km '^U' backward-kill-line
+  done
+}
+
 autoload -Uz add-zsh-hook
 add-zsh-hook precmd _decline_precmd
 add-zsh-hook preexec _decline_preexec

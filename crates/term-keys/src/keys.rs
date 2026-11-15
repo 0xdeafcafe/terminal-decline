@@ -168,7 +168,7 @@ pub fn translate(input: &KeyInput, modes: KeyModes) -> KeyAction {
         let bytes: &[u8] = match input.keycode {
             0x7B => b"\x01", // Cmd+Left: start of line
             0x7C => b"\x05", // Cmd+Right: end of line
-            0x33 => b"\x15", // Cmd+Backspace: delete line
+            0x33 => b"\x15", // Cmd+Backspace: delete to start of line
             _ => return KeyAction::ToMenu,
         };
         return KeyAction::Send(bytes.to_vec());
@@ -293,6 +293,9 @@ fn key_action(input: &KeyInput, modes: KeyModes) -> KeyAction {
             && !mods.any()
             && let Some(b) = keypad_app_bytes(code)
         {
+            return KeyAction::Send(b.to_vec());
+        }
+        if let Some(b) = mac_word_key(key, mods) {
             return KeyAction::Send(b.to_vec());
         }
         let mut bytes = encode_key(key, mods, modes.app_cursor);
@@ -859,6 +862,25 @@ pub fn encode_key(key: Key, mods: Mods, app_cursor: bool) -> Vec<u8> {
     s.into_bytes()
 }
 
+/// Option alone with Left, Right or Forward Delete, outside the kitty
+/// protocol: the Mac's word keys, as Terminal.app sends them (ESC b,
+/// ESC f, ESC d), which zsh, bash, fish and readline all bind to moving
+/// and deleting by word. xterm's `CSI 1;3D` is bound by none of them out
+/// of the box, so zsh typed it as text. (Option+Backspace is ESC DEL
+/// already.) A program that wants Alt+arrows told apart asks for the
+/// kitty protocol, which still reports them as keys.
+fn mac_word_key(key: Key, mods: Mods) -> Option<&'static [u8]> {
+    if !mods.alt || mods.shift || mods.ctrl {
+        return None;
+    }
+    match key {
+        Key::Left => Some(b"\x1bb"),
+        Key::Right => Some(b"\x1bf"),
+        Key::Delete => Some(b"\x1bd"),
+        _ => None,
+    }
+}
+
 /// `CSI n ~` numbers of F5–F12.
 fn legacy_f_number(n: u8) -> u8 {
     match n {
@@ -1057,6 +1079,9 @@ mod tests {
             for (mod_name, flags, m) in MODS {
                 for (name, code, letter) in letters {
                     let want = match (m, app_cursor) {
+                        // Option alone: the Mac's word keys.
+                        (3, _) if letter == 'D' => "\x1bb".to_string(),
+                        (3, _) if letter == 'C' => "\x1bf".to_string(),
                         (1, false) => format!("\x1b[{letter}"),
                         (1, true) => format!("\x1bO{letter}"),
                         _ => format!("\x1b[1;{m}{letter}"),
@@ -1076,7 +1101,11 @@ mod tests {
                     rows += 1;
                 }
                 for (name, code, n) in tildes {
-                    let want = if m == 1 { format!("\x1b[{n}~") } else { format!("\x1b[{n};{m}~") };
+                    let want = match m {
+                        1 => format!("\x1b[{n}~"),
+                        3 if n == 3 => "\x1bd".to_string(),
+                        _ => format!("\x1b[{n};{m}~"),
+                    };
                     assert_eq!(
                         translate(&key(code, flags), modes(app_cursor)),
                         send(want.as_bytes()),
@@ -1267,8 +1296,36 @@ mod tests {
             ..KeyModes::default()
         };
         assert_eq!(translate(&press(left, ""), m), send(b"\x1ba"));
-        // Special keys with Option are Alt whatever the setting.
-        assert_eq!(translate(&key(0x7B, right), m), send(b"\x1b[1;3D"));
+        // Special keys with Option are Alt whatever the setting, with
+        // the Mac's word keys for Left, Right and Forward Delete.
+        assert_eq!(translate(&key(0x7E, right), m), send(b"\x1b[1;3A"));
+        assert_eq!(translate(&key(0x7B, right), m), send(b"\x1bb"));
+    }
+
+    #[test]
+    fn option_arrows_move_by_word() {
+        let m = KeyModes::default();
+        let opt = OPTION | LEFT_OPTION;
+        assert_eq!(translate(&key(0x7B, opt), m), send(b"\x1bb"));
+        assert_eq!(translate(&key(0x7C, opt), m), send(b"\x1bf"));
+        assert_eq!(translate(&key(0x75, opt), m), send(b"\x1bd"));
+        assert_eq!(translate(&key(0x33, opt), m), send(b"\x1b\x7f"));
+        // In application cursor mode too, as Terminal.app does.
+        let app = KeyModes {
+            app_cursor: true,
+            ..KeyModes::default()
+        };
+        assert_eq!(translate(&key(0x7B, opt), app), send(b"\x1bb"));
+        // With another modifier, or Up and Down: xterm's sequences.
+        assert_eq!(translate(&key(0x7B, opt | SHIFT), m), send(b"\x1b[1;4D"));
+        assert_eq!(translate(&key(0x7C, opt | CONTROL), m), send(b"\x1b[1;7C"));
+        assert_eq!(translate(&key(0x7D, opt), m), send(b"\x1b[1;3B"));
+        // Under the kitty protocol: the key, with its Alt bit.
+        let kitty = KeyModes {
+            kitty_flags: kitty::DISAMBIGUATE,
+            ..KeyModes::default()
+        };
+        assert_eq!(translate(&key(0x7B, opt), kitty), send(b"\x1b[1;3D"));
     }
 
     /// A key on a non-Latin layout: `here` is what the current layout

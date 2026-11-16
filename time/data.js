@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794285847986,
+  "lastUpdate": 1794804311130,
   "repoUrl": "https://github.com/0xdeafcafe/terminal-decline",
   "entries": {
     "Time per iteration": [
@@ -8258,6 +8258,763 @@ window.BENCHMARK_DATA = {
           {
             "name": "typing/echo+report",
             "value": 23.944,
+            "unit": "µs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Alexander Forbes-Reed",
+            "username": "0xdeafcafe",
+            "email": "git@alex.forbes.red"
+          },
+          "committer": {
+            "name": "Alexander Forbes-Reed",
+            "username": "0xdeafcafe",
+            "email": "git@alex.forbes.red"
+          },
+          "id": "6b1e8790e84ac8b47fa123f95804f3fc7236d211",
+          "message": "fix(complete): suggest in grey as you type and take it with Tab\n\nWith completion_as_you_type off (the default) the grey text after the\ncursor was never drawn, since it came only with the list, and Tab went\nstraight to zsh: nothing was suggested while typing. Now the top choice\nshows grey at once with the list closed; Tab or Right takes it, Esc\nhides it, and other keys go to the shell. With no grey text showing,\nTab asks zsh as before.",
+          "timestamp": "2026-11-15T14:07:01Z",
+          "url": "https://github.com/0xdeafcafe/terminal-decline/commit/6b1e8790e84ac8b47fa123f95804f3fc7236d211"
+        },
+        "date": 1794804309970,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "frame 1 pane 160x48 coloured",
+            "value": 53.046,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 1 pane 160x48 coloured unchanged",
+            "value": 3.747,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 160x48 prompt coloured unchanged",
+            "value": 4.196,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 160x48 prompt list open unchanged",
+            "value": 12.665,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 160x48 prompt plain unchanged",
+            "value": 3.609,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 203x50 sparse",
+            "value": 16.522,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 203x50 sparse one row",
+            "value": 4.257,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 203x50 sparse unchanged",
+            "value": 4.251,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 300x100 coloured",
+            "value": 195.252,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 300x100 coloured history",
+            "value": 271.761,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 300x100 coloured history reflowed unchanged",
+            "value": 8.98,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 300x100 coloured history smooth line",
+            "value": 71.514,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 300x100 coloured history unchanged",
+            "value": 13.366,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 300x100 coloured live",
+            "value": 152.384,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 300x100 coloured one row",
+            "value": 8.398,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 300x100 coloured one row live",
+            "value": 172.537,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 300x100 coloured scrolled",
+            "value": 67.126,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 300x100 coloured scrolled live",
+            "value": 228.731,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 300x100 coloured unchanged",
+            "value": 7.035,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 300x100 per-cell style",
+            "value": 218.915,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 300x100 per-cell style live",
+            "value": 261.867,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 300x100 per-cell style unchanged",
+            "value": 7.746,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 300x100 plain",
+            "value": 178.5,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 300x100 plain history",
+            "value": 202.509,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 300x100 plain history reflowed unchanged",
+            "value": 8.544,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 300x100 plain history smooth line",
+            "value": 61.949,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 300x100 plain history unchanged",
+            "value": 11.303,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 300x100 plain live",
+            "value": 138.426,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 300x100 plain unchanged",
+            "value": 8.355,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 300x100 prompts history unchanged",
+            "value": 19.77,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 300x100 unicode",
+            "value": 209.083,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 300x100 unicode history",
+            "value": 403.33,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 300x100 unicode live",
+            "value": 132.794,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 300x100 unicode menlo",
+            "value": 289.757,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 300x100 unicode menlo unchanged",
+            "value": 7.357,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 300x100 unicode unchanged",
+            "value": 6.729,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 4 panes 80x24 coloured",
+            "value": 60.272,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 4 panes 80x24 coloured unchanged",
+            "value": 7.523,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 80x24 plain",
+            "value": 11.008,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 80x24 plain live",
+            "value": 8.631,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 80x24 plain one row",
+            "value": 2.314,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 80x24 plain one row live",
+            "value": 9.329,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 80x24 plain scrolled",
+            "value": 4.981,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 80x24 plain scrolled live",
+            "value": 9.582,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 80x24 plain unchanged",
+            "value": 1.78,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 80x24 unicode menlo",
+            "value": 20.641,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 80x24 unicode menlo unchanged",
+            "value": 1.941,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 80x24 with_images 10 placements",
+            "value": 3.472,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 80x24 with_images none",
+            "value": 2.144,
+            "unit": "µs"
+          },
+          {
+            "name": "frame 80x24 with_images placeholders",
+            "value": 3.763,
+            "unit": "µs"
+          },
+          {
+            "name": "frame code 100x30 jetbrains",
+            "value": 63.406,
+            "unit": "µs"
+          },
+          {
+            "name": "frame code 100x30 jetbrains cold",
+            "value": 2676.047,
+            "unit": "µs"
+          },
+          {
+            "name": "frame code 100x30 jetbrains one row",
+            "value": 3.797,
+            "unit": "µs"
+          },
+          {
+            "name": "frame code 100x30 jetbrains rebuilt",
+            "value": 34.381,
+            "unit": "µs"
+          },
+          {
+            "name": "frame code 100x30 jetbrains scrolled",
+            "value": 7.671,
+            "unit": "µs"
+          },
+          {
+            "name": "frame code 100x30 jetbrains unchanged",
+            "value": 2.02,
+            "unit": "µs"
+          },
+          {
+            "name": "frame code 100x30 menlo",
+            "value": 26.86,
+            "unit": "µs"
+          },
+          {
+            "name": "frame code 100x30 menlo cold",
+            "value": 22.798,
+            "unit": "µs"
+          },
+          {
+            "name": "frame code 100x30 menlo one row",
+            "value": 2.761,
+            "unit": "µs"
+          },
+          {
+            "name": "frame code 100x30 menlo rebuilt",
+            "value": 19.986,
+            "unit": "µs"
+          },
+          {
+            "name": "frame code 100x30 menlo scrolled",
+            "value": 7.124,
+            "unit": "µs"
+          },
+          {
+            "name": "frame code 100x30 menlo unchanged",
+            "value": 2.066,
+            "unit": "µs"
+          },
+          {
+            "name": "frame code 300x100 jetbrains",
+            "value": 639.177,
+            "unit": "µs"
+          },
+          {
+            "name": "frame code 300x100 jetbrains cold",
+            "value": 4267.001,
+            "unit": "µs"
+          },
+          {
+            "name": "frame code 300x100 jetbrains one row",
+            "value": 11.23,
+            "unit": "µs"
+          },
+          {
+            "name": "frame code 300x100 jetbrains rebuilt",
+            "value": 293.737,
+            "unit": "µs"
+          },
+          {
+            "name": "frame code 300x100 jetbrains scrolled",
+            "value": 43.089,
+            "unit": "µs"
+          },
+          {
+            "name": "frame code 300x100 jetbrains unchanged",
+            "value": 5.878,
+            "unit": "µs"
+          },
+          {
+            "name": "frame code 300x100 menlo",
+            "value": 172.135,
+            "unit": "µs"
+          },
+          {
+            "name": "frame code 300x100 menlo cold",
+            "value": 172.51,
+            "unit": "µs"
+          },
+          {
+            "name": "frame code 300x100 menlo one row",
+            "value": 7.856,
+            "unit": "µs"
+          },
+          {
+            "name": "frame code 300x100 menlo rebuilt",
+            "value": 160.119,
+            "unit": "µs"
+          },
+          {
+            "name": "frame code 300x100 menlo scrolled",
+            "value": 46.628,
+            "unit": "µs"
+          },
+          {
+            "name": "frame code 300x100 menlo unchanged",
+            "value": 6.377,
+            "unit": "µs"
+          },
+          {
+            "name": "history decode/background",
+            "value": 1060.333,
+            "unit": "µs"
+          },
+          {
+            "name": "history decode/cjk",
+            "value": 1820.01,
+            "unit": "µs"
+          },
+          {
+            "name": "history decode/emoji",
+            "value": 2361.443,
+            "unit": "µs"
+          },
+          {
+            "name": "history decode/gradient",
+            "value": 17077.218,
+            "unit": "µs"
+          },
+          {
+            "name": "history decode/ls",
+            "value": 1569.247,
+            "unit": "µs"
+          },
+          {
+            "name": "history decode/plain",
+            "value": 894.257,
+            "unit": "µs"
+          },
+          {
+            "name": "history push/background",
+            "value": 1816.668,
+            "unit": "µs"
+          },
+          {
+            "name": "history push/cjk",
+            "value": 1482.566,
+            "unit": "µs"
+          },
+          {
+            "name": "history push/emoji",
+            "value": 1112.793,
+            "unit": "µs"
+          },
+          {
+            "name": "history push/gradient",
+            "value": 37396.248,
+            "unit": "µs"
+          },
+          {
+            "name": "history push/keyed/background",
+            "value": 1878.158,
+            "unit": "µs"
+          },
+          {
+            "name": "history push/keyed/cjk",
+            "value": 1381.586,
+            "unit": "µs"
+          },
+          {
+            "name": "history push/keyed/emoji",
+            "value": 1323.501,
+            "unit": "µs"
+          },
+          {
+            "name": "history push/keyed/gradient",
+            "value": 24890.662,
+            "unit": "µs"
+          },
+          {
+            "name": "history push/keyed/ls",
+            "value": 862.051,
+            "unit": "µs"
+          },
+          {
+            "name": "history push/keyed/plain",
+            "value": 457.086,
+            "unit": "µs"
+          },
+          {
+            "name": "history push/ls",
+            "value": 1771.094,
+            "unit": "µs"
+          },
+          {
+            "name": "history push/plain",
+            "value": 639.352,
+            "unit": "µs"
+          },
+          {
+            "name": "history_at_width/display_offset_at_200",
+            "value": 28.189,
+            "unit": "µs"
+          },
+          {
+            "name": "history_at_width/display_offset_at_300",
+            "value": 11.067,
+            "unit": "µs"
+          },
+          {
+            "name": "history_at_width/scroll_page_at_200",
+            "value": 131.214,
+            "unit": "µs"
+          },
+          {
+            "name": "history_at_width/scroll_page_at_300",
+            "value": 44.872,
+            "unit": "µs"
+          },
+          {
+            "name": "parse/clusters",
+            "value": 40981.441,
+            "unit": "µs"
+          },
+          {
+            "name": "parse/coloured",
+            "value": 16830.866,
+            "unit": "µs"
+          },
+          {
+            "name": "parse/plain",
+            "value": 6357.515,
+            "unit": "µs"
+          },
+          {
+            "name": "parse/seq",
+            "value": 21727.73,
+            "unit": "µs"
+          },
+          {
+            "name": "parse/tui",
+            "value": 13419.793,
+            "unit": "µs"
+          },
+          {
+            "name": "parse/unicode",
+            "value": 27704.218,
+            "unit": "µs"
+          },
+          {
+            "name": "parse_1k/clusters",
+            "value": 45140.242,
+            "unit": "µs"
+          },
+          {
+            "name": "parse_1k/coloured",
+            "value": 21268.243,
+            "unit": "µs"
+          },
+          {
+            "name": "parse_1k/plain",
+            "value": 6615.841,
+            "unit": "µs"
+          },
+          {
+            "name": "parse_1k/seq",
+            "value": 23446.447,
+            "unit": "µs"
+          },
+          {
+            "name": "parse_1k/tui",
+            "value": 13186.596,
+            "unit": "µs"
+          },
+          {
+            "name": "parse_1k/unicode",
+            "value": 32475.269,
+            "unit": "µs"
+          },
+          {
+            "name": "renderer 1 pane 160x48 encode",
+            "value": 43.288,
+            "unit": "µs"
+          },
+          {
+            "name": "renderer 1 pane 160x48 encode one row",
+            "value": 36.745,
+            "unit": "µs"
+          },
+          {
+            "name": "renderer 1 pane 160x48 prepare",
+            "value": 114.573,
+            "unit": "µs"
+          },
+          {
+            "name": "renderer 1 pane 160x48 prepare unchanged",
+            "value": 5.64,
+            "unit": "µs"
+          },
+          {
+            "name": "renderer 4 panes 80x24 build",
+            "value": 73.456,
+            "unit": "µs"
+          },
+          {
+            "name": "renderer 4 panes 80x24 build unchanged",
+            "value": 10.257,
+            "unit": "µs"
+          },
+          {
+            "name": "renderer 4 panes 80x24 encode",
+            "value": 33.932,
+            "unit": "µs"
+          },
+          {
+            "name": "resize/height_300x100_ascii",
+            "value": 331.624,
+            "unit": "µs"
+          },
+          {
+            "name": "resize/height_300x100_cjk",
+            "value": 269.139,
+            "unit": "µs"
+          },
+          {
+            "name": "resize/width_300x100_ascii",
+            "value": 328.283,
+            "unit": "µs"
+          },
+          {
+            "name": "resize/width_300x100_cjk",
+            "value": 292.674,
+            "unit": "µs"
+          },
+          {
+            "name": "search_100k/filters/build_all",
+            "value": 11982.286,
+            "unit": "µs"
+          },
+          {
+            "name": "search_100k/job/absent",
+            "value": 50.467,
+            "unit": "µs"
+          },
+          {
+            "name": "search_100k/job/absent_ignore_case",
+            "value": 54.373,
+            "unit": "µs"
+          },
+          {
+            "name": "search_100k/job/common_ignore_case",
+            "value": 7660.967,
+            "unit": "µs"
+          },
+          {
+            "name": "search_100k/job/non_ascii_ignore_case",
+            "value": 174.2,
+            "unit": "µs"
+          },
+          {
+            "name": "search_100k/job/rare",
+            "value": 66.384,
+            "unit": "µs"
+          },
+          {
+            "name": "search_100k/job/rare_ignore_case",
+            "value": 59.927,
+            "unit": "µs"
+          },
+          {
+            "name": "search_100k/scan/absent",
+            "value": 378.473,
+            "unit": "µs"
+          },
+          {
+            "name": "search_100k/scan/absent_ignore_case",
+            "value": 810.764,
+            "unit": "µs"
+          },
+          {
+            "name": "search_100k/scan/common_ignore_case",
+            "value": 8001.24,
+            "unit": "µs"
+          },
+          {
+            "name": "search_100k/scan/non_ascii_ignore_case",
+            "value": 790.81,
+            "unit": "µs"
+          },
+          {
+            "name": "search_100k/scan/rare",
+            "value": 610.816,
+            "unit": "µs"
+          },
+          {
+            "name": "search_100k/scan/rare_ignore_case",
+            "value": 851.311,
+            "unit": "µs"
+          },
+          {
+            "name": "search_100k/start/absent",
+            "value": 28.04,
+            "unit": "µs"
+          },
+          {
+            "name": "search_100k/start/absent_ignore_case",
+            "value": 34.34,
+            "unit": "µs"
+          },
+          {
+            "name": "search_100k/start/common_ignore_case",
+            "value": 32.18,
+            "unit": "µs"
+          },
+          {
+            "name": "search_100k/start/non_ascii_ignore_case",
+            "value": 48.874,
+            "unit": "µs"
+          },
+          {
+            "name": "search_100k/start/rare",
+            "value": 34.572,
+            "unit": "µs"
+          },
+          {
+            "name": "search_100k/start/rare_ignore_case",
+            "value": 27.797,
+            "unit": "µs"
+          },
+          {
+            "name": "snapshot 300x100 full copy",
+            "value": 11.666,
+            "unit": "µs"
+          },
+          {
+            "name": "snapshot 300x100 history full copy",
+            "value": 67.237,
+            "unit": "µs"
+          },
+          {
+            "name": "snapshot 300x100 spinner",
+            "value": 5.338,
+            "unit": "µs"
+          },
+          {
+            "name": "snapshot 300x100 unchanged",
+            "value": 6.236,
+            "unit": "µs"
+          },
+          {
+            "name": "snapshot 80x24 full copy",
+            "value": 1.344,
+            "unit": "µs"
+          },
+          {
+            "name": "snapshot 80x24 spinner",
+            "value": 1.859,
+            "unit": "µs"
+          },
+          {
+            "name": "snapshot 80x24 unchanged",
+            "value": 1.541,
+            "unit": "µs"
+          },
+          {
+            "name": "typing/echo",
+            "value": 1.961,
+            "unit": "µs"
+          },
+          {
+            "name": "typing/echo+report",
+            "value": 18.823,
             "unit": "µs"
           }
         ]

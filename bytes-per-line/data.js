@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794285841883,
+  "lastUpdate": 1794804303515,
   "repoUrl": "https://github.com/0xdeafcafe/terminal-decline",
   "entries": {
     "Scrollback bytes per line": [
@@ -688,6 +688,68 @@ window.BENCHMARK_DATA = {
           "url": "https://github.com/0xdeafcafe/terminal-decline/commit/60220ecb3127a5be12daed61ad3020ebeb78167e"
         },
         "date": 1794285840545,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "scrollback CJK",
+            "value": 72,
+            "unit": "bytes/line"
+          },
+          {
+            "name": "scrollback compiler error",
+            "value": 67,
+            "unit": "bytes/line"
+          },
+          {
+            "name": "scrollback emoji-heavy",
+            "value": 81,
+            "unit": "bytes/line"
+          },
+          {
+            "name": "scrollback full-width background",
+            "value": 26,
+            "unit": "bytes/line"
+          },
+          {
+            "name": "scrollback gradient 160 cells",
+            "value": 2020,
+            "unit": "bytes/line"
+          },
+          {
+            "name": "scrollback ls --color",
+            "value": 61,
+            "unit": "bytes/line"
+          },
+          {
+            "name": "scrollback placeholder image row",
+            "value": 56,
+            "unit": "bytes/line"
+          },
+          {
+            "name": "scrollback plain 40 chars",
+            "value": 46,
+            "unit": "bytes/line"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Alexander Forbes-Reed",
+            "username": "0xdeafcafe",
+            "email": "git@alex.forbes.red"
+          },
+          "committer": {
+            "name": "Alexander Forbes-Reed",
+            "username": "0xdeafcafe",
+            "email": "git@alex.forbes.red"
+          },
+          "id": "6b1e8790e84ac8b47fa123f95804f3fc7236d211",
+          "message": "fix(complete): suggest in grey as you type and take it with Tab\n\nWith completion_as_you_type off (the default) the grey text after the\ncursor was never drawn, since it came only with the list, and Tab went\nstraight to zsh: nothing was suggested while typing. Now the top choice\nshows grey at once with the list closed; Tab or Right takes it, Esc\nhides it, and other keys go to the shell. With no grey text showing,\nTab asks zsh as before.",
+          "timestamp": "2026-11-15T14:07:01Z",
+          "url": "https://github.com/0xdeafcafe/terminal-decline/commit/6b1e8790e84ac8b47fa123f95804f3fc7236d211"
+        },
+        "date": 1794804301572,
         "tool": "customSmallerIsBetter",
         "benches": [
           {

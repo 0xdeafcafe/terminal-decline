@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794285845068,
+  "lastUpdate": 1794804307721,
   "repoUrl": "https://github.com/0xdeafcafe/terminal-decline",
   "entries": {
     "Throughput": [
@@ -2043,6 +2043,188 @@ window.BENCHMARK_DATA = {
           {
             "name": "typing/echo+report",
             "value": 1628828,
+            "unit": "elem/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Alexander Forbes-Reed",
+            "username": "0xdeafcafe",
+            "email": "git@alex.forbes.red"
+          },
+          "committer": {
+            "name": "Alexander Forbes-Reed",
+            "username": "0xdeafcafe",
+            "email": "git@alex.forbes.red"
+          },
+          "id": "6b1e8790e84ac8b47fa123f95804f3fc7236d211",
+          "message": "fix(complete): suggest in grey as you type and take it with Tab\n\nWith completion_as_you_type off (the default) the grey text after the\ncursor was never drawn, since it came only with the list, and Tab went\nstraight to zsh: nothing was suggested while typing. Now the top choice\nshows grey at once with the list closed; Tab or Right takes it, Esc\nhides it, and other keys go to the shell. With no grey text showing,\nTab asks zsh as before.",
+          "timestamp": "2026-11-15T14:07:01Z",
+          "url": "https://github.com/0xdeafcafe/terminal-decline/commit/6b1e8790e84ac8b47fa123f95804f3fc7236d211"
+        },
+        "date": 1794804306401,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "parse/clusters",
+            "value": 97.61,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse/coloured",
+            "value": 237.66,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse/plain",
+            "value": 629.18,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse/seq",
+            "value": 184.1,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse/tui",
+            "value": 298.07,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse/unicode",
+            "value": 144.38,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse_1k/clusters",
+            "value": 88.61,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse_1k/coloured",
+            "value": 188.08,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse_1k/plain",
+            "value": 604.61,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse_1k/seq",
+            "value": 170.6,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse_1k/tui",
+            "value": 303.34,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "parse_1k/unicode",
+            "value": 123.17,
+            "unit": "MiB/s"
+          },
+          {
+            "name": "history decode/background",
+            "value": 9430999,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history decode/cjk",
+            "value": 5494476,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history decode/emoji",
+            "value": 4234699,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history decode/gradient",
+            "value": 585575,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history decode/ls",
+            "value": 6372483,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history decode/plain",
+            "value": 11182467,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/background",
+            "value": 5504582,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/cjk",
+            "value": 6745063,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/emoji",
+            "value": 8986396,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/gradient",
+            "value": 267407,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/keyed/background",
+            "value": 5324365,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/keyed/cjk",
+            "value": 7238060,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/keyed/emoji",
+            "value": 7555719,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/keyed/gradient",
+            "value": 401757,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/keyed/ls",
+            "value": 11600247,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/keyed/plain",
+            "value": 21877712,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/ls",
+            "value": 5646229,
+            "unit": "elem/s"
+          },
+          {
+            "name": "history push/plain",
+            "value": 15640836,
+            "unit": "elem/s"
+          },
+          {
+            "name": "typing/echo",
+            "value": 19890849,
+            "unit": "elem/s"
+          },
+          {
+            "name": "typing/echo+report",
+            "value": 2071919,
             "unit": "elem/s"
           }
         ]

@@ -22,6 +22,8 @@ mod commands;
 mod compress;
 mod graphics;
 mod history;
+mod live;
+pub use live::Live;
 mod own_images;
 mod panel;
 mod reflow;
@@ -203,7 +205,7 @@ pub enum MouseMode {
     Motion,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Modes {
     pub app_cursor: bool,
     pub app_keypad: bool,

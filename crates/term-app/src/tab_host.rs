@@ -1,8 +1,12 @@
 //! A window's tabs (docs/design/tabs.md §5): the window's content view
-//! and its delegate, holding a [`WindowView`] for each tab, all hidden
-//! but the selected one, with the tab bar ([`TabBar`]) over their title
+//! and its delegate, holding a [`WindowView`] for each tab, all out of
+//! sight but the selected one, with the tab bar ([`TabBar`]) over their title
 //! row while there are two or more. A tab is a view, not a window of its
 //! own: macOS's window tabs are turned off for our windows.
+//!
+//! A tab behind is moved out of the window, not hidden: a hidden view's
+//! display link stops, and with it the frame a test's dump waits for and
+//! the idle bookkeeping a tab does as a window behind another did.
 //!
 //! What the window tells its delegate goes to the selected tab (key,
 //! covered and uncovered) or to them all (full screen, closing).
@@ -22,6 +26,9 @@ thread_local! {
     /// Every window's host, to find a window's (main thread).
     static HOSTS: RefCell<Vec<Weak<TabHost>>> = const { RefCell::new(Vec::new()) };
 }
+
+/// How far left of the window a tab behind is kept, past its own width.
+const BEHIND: f64 = 64.0;
 
 pub struct Ivars {
     /// The tabs, in the bar's order.
@@ -196,8 +203,7 @@ impl TabHost {
         if at <= iv.selected.get() && self.count() > 1 {
             iv.selected.set(iv.selected.get() + 1);
         }
-        view.setHidden(self.count() > 1);
-        view.setFrame(self.bounds());
+        view.setFrame(self.place(self.count() == 1));
         // Under the bar.
         self.addSubview_positioned_relativeTo(view, objc2_app_kit::NSWindowOrderingMode::Below, None);
         self.refresh_bar();
@@ -214,12 +220,7 @@ impl TabHost {
         {
             old.put_behind();
         }
-        for (i, tab) in tabs.iter().enumerate() {
-            let hide = i != index;
-            if tab.isHidden() != hide {
-                tab.setHidden(hide);
-            }
-        }
+        self.place_tabs();
         if let Some(window) = self.window() {
             if let Some(pane) = new.first_responder() {
                 window.makeFirstResponder(Some(&pane));
@@ -292,15 +293,30 @@ impl TabHost {
     /// with what each tab says now (hidden with one tab, and with no
     /// title row: full screen).
     pub fn lay_out(&self) {
+        self.place_tabs();
+        self.refresh_bar();
+    }
+
+    /// Where a tab goes: the selected one fills the host, the others
+    /// are the same size beside it, out of the window.
+    fn place(&self, selected: bool) -> NSRect {
         let bounds = self.bounds();
-        let tabs = self.views();
-        for tab in &tabs {
-            let f = tab.frame();
-            if f.size.width != bounds.size.width || f.size.height != bounds.size.height || f.origin.x != 0.0 || f.origin.y != 0.0 {
-                tab.setFrame(bounds);
+        match selected {
+            true => bounds,
+            false => NSRect::new(NSPoint::new(-(bounds.size.width + BEHIND), 0.0), bounds.size),
+        }
+    }
+
+    fn place_tabs(&self) {
+        let selected = self.ivars().selected.get();
+        for (i, tab) in self.views().iter().enumerate() {
+            let (now, to) = (tab.frame(), self.place(i == selected));
+            if now.size.width != to.size.width || now.size.height != to.size.height {
+                tab.setFrame(to);
+            } else if now.origin.x != to.origin.x || now.origin.y != to.origin.y {
+                tab.setFrameOrigin(to.origin);
             }
         }
-        self.refresh_bar();
     }
 
     /// The bar, as the tabs are now.

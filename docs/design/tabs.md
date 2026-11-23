@@ -42,7 +42,7 @@ bar:
 | Width | equal shares of the row, 90 pt to 220 pt each; past that the row scrolls and a `⌄` menu lists every tab | Safari's and Ghostty's; a tab is never 700 pt |
 | One tab | no bar: the title row shows the title, as now | nothing to pick between |
 | The split line | starts under the bar | 4 above |
-| Pane strips | same band for every pane; the focused one differs by its text only (full colour against faint). The rail goes | 5 above; the cursor already says which pane has focus |
+| Pane strips | one band for every pane (5%); the focused one keeps its rail in the cursor colour and its brighter text | 5 above; the rail was Alex's pick on 5 Nov and stays unless he says otherwise |
 | System tab settings | "Prefer tabs" in System Settings still decides whether a folder dropped on the Dock opens a tab; Merge All Windows and Move Tab to New Window are ours | same menu items, same shortcuts |
 
 ## 3. The look
@@ -176,9 +176,9 @@ what the transparent title bar was for.
 
 ## 8. Plan
 
-1. Pane strips match; the split line stops under the top inset; tab and
-   window titles shortened (no app name, status as a dot in the strip).
-   Independent of the rest, lands first.
+1. Pane strips share one band and the split line starts under the top
+   inset (done, 23 Nov 2026). Titles change with the bar, in step 3:
+   until then the system's tab shows the window's title.
 2. `TabHost` with one tab: no visible change, every smoke test passes.
 3. Several tabs in a host, the bar (look per §3), select, close, new,
    save and restore.

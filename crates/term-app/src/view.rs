@@ -2351,7 +2351,12 @@ impl WindowView {
             st.dividers = layout
                 .dividers
                 .iter()
-                .map(|d| rect_instance(d.line, colour, transition::slot::DIVIDER))
+                .map(|d| {
+                    // Under the title bar (and the tabs), not through it.
+                    let top = (titlebar * scale).round() as i32;
+                    let (y, h) = layout::below(d.line.y, d.line.h, top);
+                    rect_instance(PxRect { y, h, ..d.line }, colour, transition::slot::DIVIDER)
+                })
                 .collect();
             st.grabs = layout.dividers;
             // With several panes the window can't be made smaller than

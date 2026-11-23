@@ -100,8 +100,9 @@ impl Panes {
   `split` refuses with `TooSmall` (the window beeps). The window's
   `contentMinSize` follows `min_size`.
 - Dividers' grab zones start below `top_inset`, so a drag in the
-  transparent title bar still moves the window; the line itself runs the
-  pane's full height.
+  transparent title bar still moves the window; the line starts there
+  too (since 23 Nov 2026: it ran up through the tabs to the top of the
+  window).
 - `neighbour(Left)`: of the panes whose right edge touches the focused
   pane's left edge, the one overlapping the focused pane's vertical
   centre, else the one with the most overlap (Ghostty, iTerm2).

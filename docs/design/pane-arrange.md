@@ -120,7 +120,8 @@ glyphs to the shared textures, as a second window at that size would.
   `✓ cargo build · 1m 12s`, `waiting · ~/src/decline`.
 - **Look**: one line of the system's small font, its height
   (`STRIP_HEIGHT`, 20 pt), on a band of the theme's background tinted
-  towards its foreground (9% on the focused pane, 4% on the others,
+  towards its foreground (5% on every pane since 23 Nov 2026, when
+  the focused pane's 9% beside another's 4% read as two different bars;
   at the theme's background opacity) with a 1 pt hairline in the
   divider colour under it; the focused pane's strip has a 2 pt rail in
   the theme's cursor colour across its top and its text in the theme's

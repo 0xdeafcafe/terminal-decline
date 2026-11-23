@@ -2,7 +2,7 @@
 //! top of each pane while the window shows two or more, or while macOS
 //! shows no title bar of its own (full screen), saying the pane's name or
 //! what it is doing. A band in the theme's colours (the background
-//! tinted towards the foreground, a hairline in the divider colour under
+//! tinted towards the foreground, the same for every pane, a hairline in the divider colour under
 //! it, and on the focused pane a rail in the cursor colour across its
 //! top) with an `NSTextField` label, in a plain view, a subview of the
 //! pane's view as the find bar is: the Metal path doesn't change. A click
@@ -22,9 +22,9 @@ pub const HEIGHT: f64 = 20.0;
 /// The label's inset from the strip's left and right, points.
 const INSET: f64 = 10.0;
 /// How far the band is tinted from the theme's background towards its
-/// foreground: the focused pane's, the others'.
-const TINT_FOCUSED: f32 = 0.09;
-const TINT: f32 = 0.04;
+/// foreground, the same for every pane: side by side they are one bar,
+/// and the rail and the text say which has focus.
+const TINT: f32 = 0.05;
 /// How far the others' text is from the background to the foreground.
 const TEXT_FAINT: f32 = 0.5;
 /// The focused pane's rail across the top, points.
@@ -125,7 +125,7 @@ impl PaneStrip {
     }
 
     /// Show it at `top` points down the pane, `width` wide, saying `text`
-    /// in `look`'s colours: the focused pane's band more tinted, with the
+    /// in `look`'s colours: the focused pane's with the
     /// accent rail across its top and its text in the foreground; the
     /// others' fainter.
     pub fn show(&self, width: f64, top: f64, text: &str, focused: bool, look: Look) {
@@ -204,7 +204,7 @@ fn mix(a: u32, b: u32, t: f32) -> u32 {
 /// The band's, the hairline's and the text's colours, 0xRRGGBB.
 fn colours(look: Look, focused: bool) -> (u32, u32, u32) {
     let (fg, bg) = (look.foreground, look.background);
-    let band = mix(bg, fg, if focused { TINT_FOCUSED } else { TINT });
+    let band = mix(bg, fg, TINT);
     let ink = if focused { fg } else { mix(bg, fg, TEXT_FAINT) };
     (band, look.divider, ink)
 }
@@ -252,7 +252,7 @@ mod tests {
         assert_eq!(rule, 0x333333);
         assert!(band > 0 && band < 0x404040, "a little lighter than the background: {band:06x}");
         let (faint_band, _, faint_ink) = colours(look, false);
-        assert!(faint_band < band, "the others' band is less tinted");
+        assert_eq!(faint_band, band, "every pane's band is the same");
         assert_eq!(faint_ink, 0x808080, "the others' text is halfway");
     }
 

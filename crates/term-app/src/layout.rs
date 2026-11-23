@@ -43,6 +43,13 @@ pub fn top_inset(window_height: f64, layout_height: f64) -> f64 {
     (window_height - layout_height).max(0.0)
 }
 
+/// A line from `y` down `h` pixels, cut to start no higher than `top`:
+/// a divider between panes starts under the title bar, not in it.
+pub fn below(y: i32, h: i32, top: i32) -> (i32, i32) {
+    let cut = (top - y).clamp(0, h.max(0));
+    (y + cut, h - cut)
+}
+
 /// `padding` and `titlebar` are in points.
 pub fn padding(padding: f64, titlebar: f64, scale: f64) -> Padding {
     let p = (padding * scale).round() as u32;
@@ -112,6 +119,14 @@ mod tests {
             let p = padding(pad, titlebar, scale);
             assert_eq!((p.x, p.top, p.bottom), want, "pad={pad} titlebar={titlebar} scale={scale}");
         }
+    }
+
+    #[test]
+    fn a_divider_starts_under_the_title_bar() {
+        assert_eq!(below(0, 600, 56), (56, 544), "a line from the top of the window");
+        assert_eq!(below(300, 2, 56), (300, 2), "one lower down is left alone");
+        assert_eq!(below(0, 600, 0), (0, 600), "full screen: no title bar");
+        assert_eq!(below(0, 20, 56), (20, 0), "never a negative height");
     }
 
     /// A tab bar appearing under the title bar pushes the grid down: the top

@@ -14,7 +14,7 @@ use std::cell::{Cell, RefCell};
 
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, Sel};
-use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
+use objc2::{AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSBox, NSEvent, NSFont, NSLineBreakMode, NSMenu, NSMenuItem, NSResponder, NSTextField, NSTrackingArea, NSTrackingAreaOptions, NSView,
 };
@@ -192,7 +192,7 @@ define_class!(
         /// The pressed tab follows the pointer along the bar.
         #[unsafe(method(mouseDragged:))]
         fn mouse_dragged(&self, event: &NSEvent) {
-            let (Some(host), Some(from), Some(bar)) = (self.ivars().host.load(), self.ivars().press.get(), self.superview()) else {
+            let (Some(host), Some(from), Some(bar)) = (self.ivars().host.load(), self.ivars().press.get(), unsafe { self.superview() }) else {
                 return;
             };
             let now = event.locationInWindow();
@@ -216,7 +216,7 @@ define_class!(
             if self.ivars().press.take().is_none() {
                 return;
             }
-            let outside = self.superview().and_then(|bar| {
+            let outside = unsafe { self.superview() }.and_then(|bar| {
                 let p = bar.convertPoint_fromView(event.locationInWindow(), None);
                 let off = p.y < -TEAR || p.y > bar.frame().size.height + TEAR;
                 off.then(NSEvent::mouseLocation)

@@ -1202,7 +1202,10 @@ fn reflow_piece() -> impl Strategy<Value = Vec<u8>> {
         3 => Just(b"\r\n".to_vec()),
         1 => Just(b"\x1b[41m\x1b[K\x1b[0m".to_vec()),
         1 => Just(b"\x1b[44mblue\x1b[0m".to_vec()),
-        1 => Just(b"\x1b]133;A\x07$ ".to_vec()),
+        // Each prompt is followed by its command's start: at an open
+        // prompt a resize cuts the prompt's rows for the shell to redraw
+        // (tests/term.rs covers that), which this property doesn't allow.
+        1 => Just(b"\x1b]133;A\x07$ \x1b]133;C\x07".to_vec()),
         1 => Just(b"\x1b]133;C\x07".to_vec()),
     ]
 }

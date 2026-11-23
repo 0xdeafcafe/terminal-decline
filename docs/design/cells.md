@@ -2944,6 +2944,14 @@ resize(cols, lines), primary screen (style sweeps blocked throughout, §5.2):
   keeps its own size meanwhile (`check_invariants` allows that) and is
   reflowed once when the program leaves; for that reflow the saved cursor
   stands for the cursor, since 1049 restores it next.
+- **The prompt at the cursor isn't reflowed** (added later). When the
+  width changes and the cursor is at a prompt (the last OSC 133 mark
+  before it is an A, or a B with its A), the rows from that A down are
+  kept one row each, cut at the new width. Shells redraw on SIGWINCH by
+  going up as many rows as the prompt took before, then clearing below.
+  A reflowed full-width prompt (a Powerlevel10k ruler) takes more rows,
+  so each resize left a copy behind. Without marks the prompt is
+  reflowed like any other text, as in other terminals.
 - **Selection text** reads history rows to their own width, which may now
   be wider than the screen's.
 - **Measured** (`cargo bench -p term-core --bench resize`, new: 300×100,

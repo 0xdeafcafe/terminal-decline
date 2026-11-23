@@ -142,6 +142,14 @@ Option-click is the usual rectangular selection. Shift, Cmd or Ctrl held
 with Option leave it alone too. Over a program that has taken the mouse,
 Option-drag makes a rectangular selection (as Shift+Option-drag does).
 
+**Resizing at a prompt** keeps the prompt's rows as they were, each cut
+at the new width instead of wrapped, because the shell redraws the
+prompt itself. zsh and bash move the cursor up by as many rows as the
+prompt took before the resize and redraw from there. A wrapped prompt
+takes more rows, so without the marks a prompt that fills the width (a
+Powerlevel10k ruler, a right prompt) leaves a broken copy of itself
+behind on each resize.
+
 With no prompt that way, or no output to select, the app beeps. The
 shortcuts can be changed in `[keybind]` (`previous_prompt`,
 `next_prompt`, `select_output`, `copy_command`, `copy_output`,

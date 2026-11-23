@@ -579,3 +579,61 @@ fn images_are_off_without_the_hidden_switch() {
         assert!(!term_core::ImagePool::process().enabled());
     }
 }
+
+/// A two-row prompt whose first row fills the width (a ruler, as
+/// powerlevel10k draws), then the command line with the cursor on it.
+fn ruler_prompt(t: &mut Term, cols: usize) {
+    t.advance(b"out\r\n\x1b]133;A\x07");
+    t.advance("-".repeat(cols).as_bytes());
+    t.advance(b"\r\n> \x1b]133;B\x07ls");
+}
+
+#[test]
+fn resize_keeps_the_rows_of_the_prompt_at_the_cursor() {
+    let mut t = Term::new(20, 6, 100, term_core::ImagePool::process());
+    ruler_prompt(&mut t, 20);
+    t.state.resize(10, 6);
+    // The ruler is cut, not wrapped: the prompt still takes two rows, so
+    // the shell's redraw (up one row, clear below) lands on its start.
+    assert_eq!(text(&t, 0), "out");
+    assert_eq!(text(&t, 1), "-".repeat(10));
+    assert!(!t.state.visible_row(1).wrapped());
+    assert_eq!(text(&t, 2), "> ls");
+    assert_eq!((t.state.cursor().row(), t.state.cursor().col()), (2, 4));
+    // The redraw at the new width replaces it whole.
+    t.advance(b"\x1b[A\r\x1b[J\x1b]133;A\x07");
+    t.advance("-".repeat(10).as_bytes());
+    t.advance(b"\r\n> \x1b]133;B\x07ls");
+    assert_eq!(text(&t, 1), "-".repeat(10));
+    assert_eq!(text(&t, 2), "> ls");
+    assert_eq!(text(&t, 3), "");
+    t.state.resize(30, 6);
+    assert_eq!(text(&t, 1), "-".repeat(10));
+    assert_eq!((t.state.cursor().row(), t.state.cursor().col()), (2, 4));
+}
+
+#[test]
+fn resize_reflows_prompts_once_a_command_runs() {
+    let mut t = Term::new(20, 6, 100, term_core::ImagePool::process());
+    ruler_prompt(&mut t, 20);
+    t.advance(b"\r\n\x1b]133;C\x07");
+    t.advance("x".repeat(15).as_bytes());
+    t.state.resize(10, 6);
+    // Nothing is waiting to redraw: the prompt and output wrap as usual.
+    assert_eq!(text(&t, 1), "-".repeat(10));
+    assert_eq!(text(&t, 2), "-".repeat(10));
+    assert_eq!(text(&t, 3), "> ls");
+    assert_eq!(text(&t, 4), "x".repeat(10));
+    assert_eq!(text(&t, 5), "x".repeat(5));
+}
+
+#[test]
+fn resize_without_prompt_marks_reflows_the_prompt() {
+    let mut t = Term::new(20, 6, 100, term_core::ImagePool::process());
+    t.advance(b"out\r\n");
+    t.advance("-".repeat(20).as_bytes());
+    t.advance(b"\r\n> ls");
+    t.state.resize(10, 6);
+    assert_eq!(text(&t, 2), "-".repeat(10));
+    assert_eq!(text(&t, 3), "> ls");
+}

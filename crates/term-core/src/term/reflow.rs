@@ -188,6 +188,53 @@ pub(super) fn emit_row(flat: &Flat, len: usize, starts: &[usize], cols: usize, r
     row
 }
 
+/// The first of `rows` (the screen, with the cursor on its last row) that
+/// the prompt the cursor is at starts on: the row of the last OSC 133 A
+/// above the cursor, if no command has started since (no C or D after
+/// it). `None` when the shell hasn't marked a prompt, or isn't at one.
+///
+/// Shells redraw their prompt on SIGWINCH by moving the cursor up as many
+/// rows as the prompt and command line took before the resize, then
+/// clearing to the end of the screen. A reflowed prompt takes another
+/// number of rows, so the redraw starts in the wrong place and leaves
+/// copies of the prompt behind; one whose rows are kept as they are
+/// redraws cleanly.
+fn prompt_start(rows: &[(Row, Cell)], cursor_col: usize) -> Option<usize> {
+    use crate::cell::MarkKind;
+    let last = rows.len().checked_sub(1)?;
+    let mut need_prompt = false;
+    for r in (0..=last).rev() {
+        let row = &rows[r].0;
+        if !row.has_marks() {
+            continue;
+        }
+        // The latest mark on the row; D and A are sent back to back, and
+        // A and B too for an empty prompt.
+        let rank = |k: MarkKind| match k {
+            MarkKind::End => 0,
+            MarkKind::Prompt => 1,
+            MarkKind::Input => 2,
+            MarkKind::Output => 3,
+        };
+        let has_prompt = row.marks().any(|m| m.kind == MarkKind::Prompt);
+        if need_prompt {
+            return has_prompt.then_some(r);
+        }
+        let latest = row
+            .marks()
+            .filter(|m| r < last || (m.col as usize) <= cursor_col)
+            .max_by_key(|m| (m.col, rank(m.kind)));
+        match latest.map(|m| m.kind) {
+            None => continue,
+            Some(MarkKind::Prompt) => return Some(r),
+            Some(MarkKind::Input) if has_prompt => return Some(r),
+            Some(MarkKind::Input) => need_prompt = true,
+            Some(MarkKind::Output | MarkKind::End) => return None,
+        }
+    }
+    None
+}
+
 fn is_blank_row(row: &Row) -> bool {
     !row.wrapped && !row.has_marks() && row.cells.iter().all(|c| c.is_blank() && !c.is_wide_part())
 }
@@ -297,10 +344,17 @@ impl Terminal {
         let mut lines_meta: Vec<Line> = Vec::new();
         let mut out: Vec<Row> = Vec::new();
         let mut cursor = TextCursor { line: 0, offset: 0 };
+        // The prompt the cursor is at keeps its rows, one line each, cut
+        // at the new width: the shell redraws it (see `prompt_start`).
+        let kept_from = if cols != old_cols && cursor_row >= n_pulled {
+            prompt_start(&old[n_pulled..=cursor_row], cursor_off_in_row).map_or(usize::MAX, |r| n_pulled + r)
+        } else {
+            usize::MAX
+        };
         let mut i = 0;
         while i < old.len() {
             let mut j = i;
-            while j + 1 < old.len() && old[j].0.wrapped {
+            while i < kept_from && j + 1 < kept_from && j + 1 < old.len() && old[j].0.wrapped {
                 j += 1;
             }
             let mut flat = Flat::default();
@@ -322,7 +376,11 @@ impl Terminal {
             } else {
                 0
             };
-            let len = flat.trimmed_len(keep);
+            let mut len = flat.trimmed_len(keep);
+            if i >= kept_from && len > cols {
+                // One row: a wide character across the cut goes.
+                len = if flat.cells[cols - 1].is_wide() { cols - 1 } else { cols };
+            }
             let starts = split(&flat.cells, len, cols);
             let first_row = out.len();
             emit(&flat, len, &starts, cols, &mut out);

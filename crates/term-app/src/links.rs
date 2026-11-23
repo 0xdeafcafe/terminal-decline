@@ -1,8 +1,8 @@
 //! Links in the terminal (roadmap E.2): what is under the pointer (an
 //! OSC 8 hyperlink, else a plain URL in the text, else a file path that
 //! exists), and which of them Cmd-click opens. A plain click on one
-//! selects it and opens a small menu (Open, Copy; for a path also Reveal
-//! in Finder); see the pane view.
+//! selects it and opens a small menu (Open, Copy; for a path, or a link to
+//! a file here, the file's menu); see the pane view.
 //!
 //! Only `http`, `https` and `mailto` links open as they are, and `file`
 //! links naming this Mac (no host, `localhost` or its own name). Anything
@@ -75,6 +75,55 @@ impl Target {
             Target::Path { shown, path, .. } | Target::Missing { shown, path, .. } => format!("{path}{}", location_suffix(shown)),
         }
     }
+}
+
+impl Target {
+    /// A link to a file on this Mac (`host` is its name) that is there
+    /// (`exists`), as that path: a program's `file:` link gets the menu
+    /// the same file's path written out gets (Open With, Quick Look,
+    /// Reveal in Finder, Copy Path), not a web link's Open and Copy.
+    /// Anything else as it is.
+    pub fn as_file(self, host: &str, exists: impl FnOnce(&str) -> bool) -> Target {
+        let Target::Url { uri, start, end } = &self else { return self };
+        match local_file(uri, host).filter(|path| exists(path)) {
+            // Nothing shown beside the path: a link carries no `:line`.
+            Some(path) => Target::Path {
+                shown: String::new(),
+                path,
+                start: *start,
+                end: *end,
+                pieces: vec![(*start, *end)],
+            },
+            None => self,
+        }
+    }
+}
+
+/// The absolute path a `file:` link names on this Mac (`host` is its
+/// name), unescaped, without any `?query` or `#fragment`; `None` for any
+/// other link, or another machine's file.
+pub fn local_file(uri: &str, host: &str) -> Option<String> {
+    let url = to_open(uri, host).ok()?;
+    let path = url.strip_prefix("file://")?;
+    let path = &path[..path.find(['?', '#']).unwrap_or(path.len())];
+    let b = path.as_bytes();
+    let hex = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%'
+            && i + 2 < b.len()
+            && let (Some(h), Some(l)) = (hex(b[i + 1]), hex(b[i + 2]))
+        {
+            out.push((h << 4) | l);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    let path = String::from_utf8(out).ok()?;
+    path.starts_with('/').then_some(path)
 }
 
 /// The `:line` or `:line:col` at the end of `shown`, or nothing.
@@ -404,6 +453,47 @@ mod tests {
         // Over ssh, paths name another machine's files.
         t.advance(b"\x1b]7;file://elsewhere.example/tmp\x1b\\");
         assert_eq!(at(&t, &mut cache, 30), None);
+    }
+
+    /// A program's link to a file here that exists is that path, with a
+    /// path's menu; a web link, another machine's file, or a file that
+    /// isn't there stays a link.
+    #[test]
+    fn file_links_to_files_here_are_paths() {
+        let mut t = term_core::Term::new(40, 2, 0, term_core::ImagePool::process());
+        t.advance(b"\x1b]8;;file:///tmp/a%20b.png\x1b\\shot\x1b]8;;\x1b\\");
+        let p = |col| t.state.point_at(0, col);
+        let url = |uri: &str| Target::Url {
+            uri: uri.into(),
+            start: p(0),
+            end: p(3),
+        };
+        let mut cache = ExistsCache::default();
+        let found = target_at(&t.state, p(1), &mut cache, None);
+        assert_eq!(found, Some(url("file:///tmp/a%20b.png")));
+        let file = found.unwrap().as_file("mac.local", |path| path == "/tmp/a b.png");
+        assert!(matches!(&file, Target::Path { path, .. } if path == "/tmp/a b.png"), "{file:?}");
+        assert_eq!((file.span(), file.pieces()), ((p(0), p(3)), vec![(p(0), p(3))]));
+        assert_eq!(file.copy_text(), "/tmp/a b.png");
+
+        for (uri, why) in [
+            ("https://example.com/a.png", "a web link"),
+            ("file://other.example/tmp/a.png", "another machine's file"),
+            ("file:///tmp/gone.png", "not there"),
+            ("file:relative.png", "not a whole path"),
+        ] {
+            assert_eq!(url(uri).as_file("mac.local", |path| path == "/tmp/a.png"), url(uri), "{why}");
+        }
+        for (uri, want) in [
+            ("file:///tmp/a.rs#L12", Some("/tmp/a.rs")),
+            ("file://localhost/tmp/a.rs?x=1", Some("/tmp/a.rs")),
+            ("file://MAC/tmp/caf%C3%A9%2", Some("/tmp/caf\u{e9}%2")),
+            ("file:/tmp/100%", Some("/tmp/100%")),
+            ("file:///tmp/%ff", None),
+            ("mailto:me@example.com", None),
+        ] {
+            assert_eq!(local_file(uri, "mac.local").as_deref(), want, "{uri}");
+        }
     }
 
     #[test]

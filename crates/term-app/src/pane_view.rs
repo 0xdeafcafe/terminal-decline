@@ -1355,8 +1355,9 @@ impl PaneView {
 
     /// The plain click on a link or path stood alone: select all of it
     /// (so Copy works as for any selection) and open its menu at the
-    /// click: Open and Copy for a link; Open, Reveal in Finder and Copy
-    /// Path for a path. Nothing if the text there changed meanwhile.
+    /// click: Open and Copy for a link; the file's menu
+    /// ([`crate::file_menu`]) for a path, or a link to a file here.
+    /// Nothing if the text there changed meanwhile.
     fn show_click_menu(&self) {
         let Some((target, at)) = self.ivars().click.take() else { return };
         let (start, end) = target.span();
@@ -1377,6 +1378,9 @@ impl PaneView {
                 .set_selection(Some(term_core::Selection::new(start, end)));
         });
         self.request_redraw();
+        // A link to a file here gets the file's menu, as its path
+        // written out does (asked afresh: the menu acts on it).
+        let target = target.as_file(&crate::links::host_name(), |path| std::fs::metadata(path).is_ok());
         let kind = match target {
             crate::links::Target::Url { .. } => "url",
             crate::links::Target::Path { .. } => "path",

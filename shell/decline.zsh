@@ -207,6 +207,14 @@ if [[ -n ${_decline_token-} && -n ${_decline_features-} && -n $TTY ]] \
       _decline_take_line ${payload#=}
       return 0
     fi
+    # `!again`: an app that took this shell over from another (a
+    # restart into a new build) asks for the reports afresh.
+    if [[ $payload == '!again' ]]; then
+      _decline_last_env= _decline_last_line=
+      _decline_env
+      _decline_line
+      return 0
+    fi
     if [[ $payload == '!clear' ]]; then
       (( HISTNO == HISTCMD )) || HISTNO=$HISTCMD
       BUFFER=

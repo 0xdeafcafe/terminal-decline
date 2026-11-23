@@ -436,6 +436,10 @@ pub struct Session {
     typed: Arc<AtomicBool>,
     /// Its side of the decode queue, when images are on.
     images: Option<Arc<SessionImages>>,
+    /// Its program was started by another process and handed over
+    /// ([`Session::adopt`]): it is where it was, so nothing is typed at
+    /// its prompt.
+    adopted: bool,
 }
 
 impl Session {
@@ -478,6 +482,7 @@ impl Session {
                     at_prompt: Arc::default(),
                     typed: Arc::default(),
                     images: None,
+                    adopted: false,
                 });
             }
         };
@@ -501,7 +506,7 @@ impl Session {
                 ..size
             });
         }
-        let session = Session::run(
+        let mut session = Session::run(
             pty,
             Arc::new(Mutex::new(term)),
             Arc::new(AtomicBool::new(true)),
@@ -515,6 +520,7 @@ impl Session {
             std::thread::sleep(REPAINT_PAUSE);
         }
         let _ = session.resize(size);
+        session.adopted = true;
         Ok(session)
     }
 
@@ -688,6 +694,7 @@ impl Session {
             at_prompt: Arc::default(),
             typed: Arc::default(),
             images,
+            adopted: false,
         })
     }
 
@@ -719,6 +726,9 @@ impl Session {
     /// `text` must have no control characters (quote them, as
     /// [`crate::running::quote`] does): they would be dropped.
     pub fn type_at_prompt(&self, text: String) {
+        if self.adopted {
+            return;
+        }
         let (Some(pty), Some(tx)) = (&self.pty, &self.input) else { return };
         let Ok(modes) = pty.modes() else { return };
         *lock_slot(&self.at_prompt) = Some(tx.clone());

@@ -838,14 +838,24 @@ impl AppDelegate {
             // by Launch Services, it would come up outside the test's
             // environment. The windows it would reopen go beside the dump.
             path.push(".restart");
-            let saved = self.saved_windows(None);
+            let saved = self.saved_windows(None, None);
             let _ = std::fs::write(path, serde_json::to_vec(&saved).expect("saved windows serialise"));
             self.ivars().restarting.set(true);
             self.quit_without_asking();
             return;
         }
         let store = crate::saved_history::Store::current();
-        let saved = self.saved_windows(self.history_to_save(&store, false).as_ref().map(|(s, l)| (*s, *l)));
+        // The programs running in the panes are offered to the new
+        // build, which carries on with them (docs/design/handoff.md).
+        // Without an offer, or with nobody taking it, this is the
+        // restart it always was: new shells, the history shown again.
+        let offer = std::env::var_os("HOME")
+            .ok_or_else(|| std::io::Error::other("no HOME"))
+            .and_then(|home| crate::handoff::socket_path(std::path::Path::new(&home), std::process::id()))
+            .and_then(crate::handoff::Offer::new)
+            .inspect_err(|e| eprintln!("terminal-decline: the programs can't be handed to the new build: {e}"))
+            .ok();
+        let saved = self.saved_windows(self.history_to_save(&store, false).as_ref().map(|(s, l)| (*s, *l)), offer.as_ref());
         // The new build registers the quick terminal's hotkey as it starts:
         // this one lets it go first.
         self.ivars().hotkey.borrow_mut().take();
@@ -855,8 +865,37 @@ impl AppDelegate {
             self.register_hotkey();
             return;
         }
+        if let Some(offer) = &offer {
+            self.hand_over(offer);
+        }
         self.ivars().restarting.set(true);
         self.quit_without_asking();
+    }
+
+    /// Give the programs `offer` numbered to the new build, once it has
+    /// connected: from then on they are its own, and this app's panes
+    /// are still. With nobody connecting (an older build, one that
+    /// didn't start) nothing is given, and the programs end when this
+    /// app quits, as they always did.
+    fn hand_over(&self, offer: &crate::handoff::Offer) {
+        let panes = offer.panes();
+        if panes.is_empty() {
+            return;
+        }
+        let taker = match offer.accept() {
+            Ok(taker) => taker,
+            Err(e) => {
+                eprintln!("terminal-decline: the new build didn't take the running programs: {e}");
+                return;
+            }
+        };
+        let mut items = Vec::new();
+        for (id, window, pane) in panes {
+            crate::view::with_view(window, |v| items.extend(v.hand_over_pane(pane, id)));
+        }
+        if let Err(e) = taker.give(&items, crate::handoff::TAKE_TIMEOUT) {
+            eprintln!("terminal-decline: the running programs weren't handed to the new build: {e}");
+        }
     }
 
     /// Quit, without asking whatever `confirm_close` says.
@@ -950,7 +989,7 @@ impl AppDelegate {
         }
         let store = crate::saved_history::Store::current();
         let history = self.history_to_save(&store, true);
-        let saved = self.saved_windows(history);
+        let saved = self.saved_windows(history, None);
         let json = serde_json::to_vec(&saved).expect("saved windows serialise");
         if let Err(e) = store.save_session(&json) {
             eprintln!("terminal-decline: saving the windows for the next launch: {e}");
@@ -959,7 +998,11 @@ impl AppDelegate {
 
     /// Each window to reopen after a restart, tabs in order with their
     /// group's index. With `history`, each pane's history saved too.
-    fn saved_windows(&self, history: Option<(&crate::saved_history::Store, usize)>) -> Vec<SavedWindow> {
+    fn saved_windows(
+        &self,
+        history: Option<(&crate::saved_history::Store, usize)>,
+        offer: Option<&crate::handoff::Offer>,
+    ) -> Vec<SavedWindow> {
         let windows = self.ivars().windows.borrow();
         let ours = |w: &NSWindow| {
             windows
@@ -982,7 +1025,8 @@ impl AppDelegate {
                 full_screen,
                 tab_group,
                 selected,
-                panes: view.as_ref().and_then(|v| v.saved_panes(history)),
+                panes: view.as_ref().and_then(|v| v.saved_panes(history, offer)),
+                live: offer.and_then(|o| view.as_ref().and_then(|v| v.saved_live(o))),
                 command: view.as_ref().and_then(|v| v.command_to_restore()),
                 history: history.and_then(|(store, limit)| view.as_ref().and_then(|v| v.saved_history(store, limit))),
             }
@@ -1015,7 +1059,18 @@ impl AppDelegate {
     /// the same panes, and type the command each pane was running at its
     /// shell's prompt.
     fn restore(&self, saved: Vec<SavedWindow>) {
+        // The programs the build before left running, before any pane
+        // opens to claim its own (docs/design/handoff.md).
+        for socket in crate::handoff::sockets(&saved) {
+            if let Err(e) = crate::handoff::take_all(&socket) {
+                eprintln!("terminal-decline: the running programs weren't taken over: {e}");
+            }
+        }
         crate::welcome::restoring(|| self.restore_groups(saved));
+        let unclaimed = crate::handoff::drop_unclaimed();
+        if unclaimed > 0 {
+            eprintln!("terminal-decline: {unclaimed} programs handed over had no pane to go to");
+        }
     }
 
     fn restore_groups(&self, saved: Vec<SavedWindow>) {
@@ -1033,7 +1088,8 @@ impl AppDelegate {
                 };
                 // With panes, each pane types its own command.
                 let command = w.command.filter(|_| w.panes.is_none());
-                let opened = self.open_window_as(w.cwd, place, None, false, w.panes, None, w.history, command.clone());
+                let live = w.live.as_ref().map(|l| l.id);
+                let opened = self.open_window_as(w.cwd, place, None, false, w.panes, None, w.history, live, command.clone());
                 if let (Some(command), Some(view)) = (command, opened.as_ref().and_then(|o| self.view_of(o))) {
                     view.type_at_prompt(command);
                 }
@@ -1175,7 +1231,7 @@ impl AppDelegate {
             Some(window) => Place::TabOf(window),
             None => Place::Cascade,
         };
-        let opened = self.open_window_as(None, place, None, true, None, None, None, None);
+        let opened = self.open_window_as(None, place, None, true, None, None, None, None, None);
         *self.ivars().settings.borrow_mut() = opened;
     }
 
@@ -1285,7 +1341,7 @@ impl AppDelegate {
     /// Open a window in `cwd` (else the configured one) at `place`, running
     /// `argv` (else the configured program).
     fn open_window(&self, cwd: Option<String>, place: Place, argv: Option<Vec<String>>) -> Option<Retained<NSWindow>> {
-        self.open_window_as(cwd, place, argv, false, None, None, None, None)
+        self.open_window_as(cwd, place, argv, false, None, None, None, None, None)
     }
 
     /// [`Self::open_window`], or with `settings` the Settings tab: the
@@ -1305,6 +1361,7 @@ impl AppDelegate {
         layout: Option<crate::reload::SavedPanes>,
         hosted: Option<Hosted>,
         history: Option<String>,
+        live: Option<u64>,
         was_running: Option<String>,
     ) -> Option<Retained<NSWindow>> {
         let mtm = MainThreadMarker::from(self);
@@ -1478,6 +1535,7 @@ impl AppDelegate {
                     tabs: 1 + self.terminal_tabs(),
                 }),
                 history,
+                live,
                 was_running,
             },
         ) {
@@ -1553,7 +1611,7 @@ impl AppDelegate {
             adopt,
         };
         let window = self
-            .open_window_as(None, Place::Cascade, None, false, None, Some(hosted), None, None)
+            .open_window_as(None, Place::Cascade, None, false, None, Some(hosted), None, None, None)
             .ok_or("couldn't open a window")?;
         let Some(view) = self.view_of(&window) else {
             window.close();
@@ -1672,7 +1730,7 @@ pub(crate) fn write_saved_windows(path: &std::path::Path) {
         dir.push(".restore");
         let store = crate::saved_history::Store::in_dir(dir.into());
         let history = delegate.history_to_save(&store, false);
-        let json = serde_json::to_string(&delegate.saved_windows(history)).expect("saved windows serialise");
+        let json = serde_json::to_string(&delegate.saved_windows(history, None)).expect("saved windows serialise");
         if let Err(e) = std::fs::write(path, json) {
             eprintln!("terminal-decline: writing {}: {e}", path.display());
         }

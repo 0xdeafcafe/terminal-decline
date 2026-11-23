@@ -47,6 +47,7 @@ pub mod welcome;
 // Moved to crates of their own, under their old names here.
 pub use term_activity::{activity, prompts, running};
 pub mod clear_line;
+pub mod handoff;
 pub use term_complete as complete;
 pub use term_config::{config, quick, theme};
 pub use term_import as import;

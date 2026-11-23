@@ -1,7 +1,18 @@
 # Tabs the app draws
 
-Status: design, nothing built. Asked for by Alex on 23 Nov 2026, from two
-screenshots of 0.3.0; the look (§3) is his to pick.
+Status: steps 1 to 3 of §8 landed on 23 Nov 2026 (look A, Alex's pick,
+with the focused pane's rail kept); step 4 (dragging, the menu,
+VoiceOver) and the measurements are not built. Asked for by Alex on
+23 Nov 2026, from two screenshots of 0.3.0.
+
+Landed: `tab_host.rs` (the window's content view and delegate, a
+`WindowView` a tab), `tab_bar.rs` (the bar, its widths and what a tab
+says), `closeTab:`, `Closing::Tab`, the dump's `tab_bar`. Different from
+§5 as written: a tab behind is moved out of the window, not hidden (a
+hidden view's display link stops); tabs narrower than 90 pt squeeze
+instead of scrolling; a tab's close button on hover isn't there yet
+(middle click and Close Tab close it). Nobody had seen it drawn when it
+landed: CI's smoke tests check what it holds, not how it looks.
 
 This reverses a goal: DESIGN.md says "no tab bar of our own (tabs are
 macOS's native window tabs)", kept for memory (roadmap, E.1: about

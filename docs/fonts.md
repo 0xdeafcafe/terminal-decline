@@ -34,6 +34,7 @@ list.
 | `font_synthetic_bold` | `true` | `font_synthetic_bold = false`: a family with no bold face draws bold text regular instead of thickened |
 | `font_synthetic_italic` | `true` | `font_synthetic_italic = false`: a family with no italic face draws italic text upright instead of slanted |
 | `symbol_map` | none | `symbol_map = { "U+E000-U+F8FF,U+F0000-U+FFFFD" = "Symbols Nerd Font Mono" }`: these code points come from that font first (Nerd Font icons with any family) |
+| (icons) | automatic | A Private Use Area character (a prompt's Nerd Font icon) that the family, `font_fallback` and `symbol_map` all lack is drawn from an installed icon font: Symbols Nerd Font, then other Nerd Fonts ("MesloLGS NF"), then Powerline fonts. With none installed it is a boxed question mark |
 | `emoji_font` | Apple Color Emoji | `emoji_font = "Noto Color Emoji"`: emoji the font has come from it |
 
 Faces and fonts are named by family ("Menlo"), full name ("Menlo Bold

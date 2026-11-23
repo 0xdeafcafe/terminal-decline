@@ -113,6 +113,61 @@ pub fn list_families() -> Vec<FamilyInfo> {
     out
 }
 
+/// How good an installed family is as a source of icons (Private Use
+/// Area characters) the terminal's own font lacks, lower first, or `None`
+/// for a family that isn't an icon font: the symbols-only Nerd Font,
+/// Nerd Fonts made for terminals ("Mono", or the "NF" short names such as
+/// "MesloLGS NF"), other Nerd Fonts, then Powerline-patched fonts.
+pub(crate) fn icon_rank(family: &str) -> Option<u8> {
+    let f = family.to_ascii_lowercase();
+    let words: Vec<&str> = f.split_whitespace().collect();
+    let nerd = f.contains("nerd font") || words.last().is_some_and(|w| matches!(*w, "nf" | "nfm" | "nfp"));
+    if f.starts_with("symbols nerd font") {
+        Some(if f.ends_with("mono") { 0 } else { 1 })
+    } else if nerd {
+        Some(if f.ends_with("mono") || f.ends_with(" nf") || f.ends_with(" nfm") {
+            2
+        } else {
+            3
+        })
+    } else if f.contains("powerline") {
+        Some(4)
+    } else {
+        None
+    }
+}
+
+/// The PostScript names of the installed icon fonts' regular faces, best
+/// first ([`icon_rank`]), then by name. Reads the list of installed fonts
+/// and opens none.
+pub(crate) fn icon_fonts() -> Vec<String> {
+    let collection = unsafe { CTFontCollection::from_available_fonts(None) };
+    let Some(descs) = (unsafe { collection.matching_font_descriptors() }) else {
+        return Vec::new();
+    };
+    let mut found: Vec<(u8, String, String)> = Vec::new();
+    for i in 0..descs.count() {
+        let d = unsafe { descs.value_at_index(i) } as *const CTFontDescriptor;
+        let Some(d) = (unsafe { d.as_ref() }) else { continue };
+        let Some(family) = string_attr(d, unsafe { kCTFontFamilyNameAttribute }) else {
+            continue;
+        };
+        let Some(rank) = icon_rank(&family) else { continue };
+        let (traits, weight) = traits(d);
+        if traits.contains(CTFontSymbolicTraits::BoldTrait) || traits.contains(CTFontSymbolicTraits::ItalicTrait) || weight.abs() > 0.1 {
+            continue;
+        }
+        let Some(postscript) = string_attr(d, unsafe { kCTFontNameAttribute }) else {
+            continue;
+        };
+        if !found.iter().any(|(_, f, _)| *f == family) {
+            found.push((rank, family, postscript));
+        }
+    }
+    found.sort();
+    found.into_iter().map(|(_, _, postscript)| postscript).collect()
+}
+
 fn string_attr(d: &CTFontDescriptor, key: &CFString) -> Option<String> {
     let v = unsafe { d.attribute(key) }?;
     Some(v.downcast::<CFString>().ok()?.to_string())
@@ -179,6 +234,24 @@ pub fn format_families(families: &[FamilyInfo], mono: bool, styles: bool) -> Str
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn icon_fonts_are_ranked_and_others_are_not_icon_fonts() {
+        use super::icon_rank;
+        let ranked = [
+            "Symbols Nerd Font Mono",
+            "Symbols Nerd Font",
+            "MesloLGS NF",
+            "JetBrainsMono Nerd Font",
+            "Meslo LG S for Powerline",
+        ];
+        let ranks: Vec<u8> = ranked.iter().map(|f| icon_rank(f).expect(f)).collect();
+        assert!(ranks.windows(2).all(|w| w[0] < w[1]), "{ranks:?}");
+        assert_eq!(icon_rank("JetBrainsMono Nerd Font Mono"), icon_rank("MesloLGS NF"));
+        for other in ["JetBrains Mono", "Menlo", "Info", "SF Mono", "Nerdy"] {
+            assert_eq!(icon_rank(other), None, "{other}");
+        }
+    }
+
     use super::*;
 
     #[test]

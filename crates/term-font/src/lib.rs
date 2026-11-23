@@ -145,6 +145,9 @@ struct Core {
     symbols: Vec<(std::ops::RangeInclusive<u32>, CFRetained<CTFont>)>,
     /// [`FontConfig::emoji_font`], if found.
     emoji: Option<CFRetained<CTFont>>,
+    /// The installed icon fonts ([`list::icon_fonts`]) at the face's
+    /// size, looked for the first time an icon has no glyph anywhere.
+    icons: std::sync::OnceLock<Vec<CFRetained<CTFont>>>,
 }
 
 // Core Text fonts and colour spaces are immutable and documented as
@@ -347,6 +350,7 @@ impl Fonts {
                 synthetic_bold,
                 symbols,
                 emoji,
+                icons: std::sync::OnceLock::new(),
             }),
             clusters: RefCell::new(shape::ClusterCache::new(shape::ClusterCache::CAP)),
             metrics,
@@ -744,6 +748,15 @@ impl Core {
                 glyph_for(&face, ch)
             }
         });
+        // An icon nothing has (Core Text answers with its Last Resort
+        // font: a boxed question mark) comes from an installed icon font:
+        // a prompt's Nerd Font icons show with any font chosen.
+        let boxed = found.as_ref().is_none_or(|(font, _)| is_last_resort(font));
+        let found = if boxed && fit::is_private_use(ch) {
+            self.icon(&face, ch).or(found)
+        } else {
+            found
+        };
         // A colour glyph from the emoji font the config names, where it
         // has one.
         let found = match (&self.emoji, found) {
@@ -756,6 +769,16 @@ impl Core {
         let r = found.and_then(|(font, glyph)| Some((reg.id(&font)?, glyph)));
         reg.store(ch, style, r);
         r
+    }
+
+    /// `ch` in the first installed icon font that has it, at `face`'s
+    /// size.
+    fn icon(&self, face: &CTFont, ch: char) -> Option<(CFRetained<CTFont>, CGGlyph)> {
+        let fonts = self.icons.get_or_init(|| {
+            let size = unsafe { face.size() };
+            list::icon_fonts().iter().filter_map(|name| Some(named(name, size)?.0)).collect()
+        });
+        fonts.iter().find_map(|font| glyph_in(font, ch))
     }
 
     /// An icon, fitted to its cells ([`fit`]): a Private Use Area
@@ -1080,6 +1103,12 @@ fn glyph_in(font: &CTFont, ch: char) -> Option<(CFRetained<CTFont>, CGGlyph)> {
     let mut glyphs = [0 as CGGlyph; 2];
     let found = unsafe { font.glyphs_for_characters(NonNull::from(&mut utf16[0]), NonNull::from(&mut glyphs[0]), units as isize) };
     (found && glyphs[0] != 0).then(|| (font.retain(), glyphs[0]))
+}
+
+/// Whether `font` is Core Text's Last Resort font, which has a glyph for
+/// every character: a box saying which block it is from.
+fn is_last_resort(font: &CTFont) -> bool {
+    unsafe { font.post_script_name() }.to_string() == "LastResort"
 }
 
 /// Whether `font` has colour glyphs (emoji).

@@ -234,6 +234,11 @@ pub struct Modes {
     /// 2031: report the colour scheme (`CSI ? 997 ; 1 n` dark, `2 n`
     /// light) whenever it changes.
     pub color_scheme_reports: bool,
+    /// 5387 (Decline's own): the program has menus of its own for the
+    /// links and paths it shows, so a right click over one is sent to it
+    /// like any other while it takes the mouse, not answered with
+    /// Decline's menu (docs/design/links.md §1).
+    pub own_link_menus: bool,
 }
 
 impl Default for Modes {
@@ -256,6 +261,7 @@ impl Default for Modes {
             sixel_private_colors: true,
             sixel_cursor_right: false,
             color_scheme_reports: false,
+            own_link_menus: false,
         }
     }
 }
@@ -3108,6 +3114,7 @@ impl Terminal {
             1070 => set(self.modes.sixel_private_colors),
             8452 => set(self.modes.sixel_cursor_right),
             2031 => set(self.modes.color_scheme_reports),
+            5387 => set(self.modes.own_link_menus),
             _ => 0,
         }
     }
@@ -3186,6 +3193,7 @@ impl Terminal {
             1070 => self.modes.sixel_private_colors = on,
             8452 => self.modes.sixel_cursor_right = on,
             2031 => self.modes.color_scheme_reports = on,
+            5387 => self.modes.own_link_menus = on,
             _ => {}
         }
     }

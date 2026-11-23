@@ -47,6 +47,13 @@ by Alex.
   from the program) also brings up the menu. (From 2 Nov 2026 a plain
   click there opened the menu and the program missed it; Alex found that
   not nice, as rush has its own dialog on a click.)
+- **A program with menus of its own** (rush) sets private mode 5387
+  (`CSI ? 5387 h`, Decline's own; reset with `l`, asked with DECRQM) and
+  then gets every right-click too while it takes the mouse, as it would
+  in any other terminal: its menu is the one that comes up, in Decline
+  as in iTerm or Ghostty, not sometimes one and sometimes the other.
+  Cmd-click still opens a link or path, and Shift-click still brings up
+  Decline's menu. A terminal that doesn't know the mode ignores it.
 - **Pictures.** The underline leaves out cells drawn as a picture: block
   elements (the half blocks TUIs draw images with), legacy computing
   blocks, kitty placeholders and cells under an image placement. The

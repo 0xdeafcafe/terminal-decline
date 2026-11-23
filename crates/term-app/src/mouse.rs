@@ -40,6 +40,15 @@ pub fn opens_menu(reporting: bool, button: u8, ctrl: bool) -> bool {
     !reporting && (button == RIGHT || (button == LEFT && ctrl))
 }
 
+/// Whether a right click on a link or path opens Decline's menu for it
+/// though the program takes the mouse (`reporting`): it does, the rest
+/// of the click going nowhere, unless the program said it has menus of
+/// its own for them (mode 5387, `own_menus`). Then, as in any other
+/// terminal, the click is the program's, and Shift brings up Decline's.
+pub fn menu_over_program(reporting: bool, button: u8, own_menus: bool) -> bool {
+    reporting && button == RIGHT && !own_menus
+}
+
 /// One mouse report for a 0-based `line` and `col`. `None` when X10 can't
 /// carry the position.
 pub fn encode(code: u8, line: usize, col: usize, press: bool, sgr: bool) -> Option<Vec<u8>> {
@@ -79,6 +88,24 @@ pub fn wheel_code(lines: isize, mods: u8) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_right_click_on_a_link_is_declines_unless_the_program_has_menus() {
+        for (reporting, button, own_menus, want) in [
+            (true, RIGHT, false, true),
+            (true, RIGHT, true, false),
+            (true, LEFT, false, false),
+            (true, MIDDLE, false, false),
+            (false, RIGHT, false, false),
+            (false, RIGHT, true, false),
+        ] {
+            assert_eq!(
+                menu_over_program(reporting, button, own_menus),
+                want,
+                "{reporting} {button} {own_menus}"
+            );
+        }
+    }
 
     #[test]
     fn right_and_control_clicks_open_the_menu_unless_reported() {

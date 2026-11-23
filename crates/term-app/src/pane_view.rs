@@ -1804,6 +1804,13 @@ impl PaneView {
         )
     }
 
+    /// Whether the program said it has menus of its own for the links
+    /// and paths it shows (mode 5387).
+    fn program_has_link_menus(&self) -> bool {
+        self.with(|_, p| p.session.lock_term().state.modes().own_link_menus)
+            .unwrap_or(false)
+    }
+
     /// Whether the program wants this mouse event (Shift or Option force
     /// selection, except on the scroll wheel).
     fn reporting(&self, event: &NSEvent) -> Option<(term_core::MouseMode, bool)> {
@@ -1901,10 +1908,10 @@ impl PaneView {
         // A right-click on an underlined link or path while the program
         // takes the mouse opens its menu at once (a plain click is the
         // program's; Alex, 2 Nov 2026); the rest of the click goes
-        // nowhere. Any other right-click is the program's.
-        if button == mouse::RIGHT
-            && press
-            && self.reporting(event).is_some()
+        // nowhere. Any other right-click is the program's, as every one
+        // is once it says it has menus of its own for them (mode 5387).
+        if press
+            && mouse::menu_over_program(self.reporting(event).is_some(), button, self.program_has_link_menus())
             && let Some(target) = self.target_at_cell(line, col)
         {
             let in_view = self.convertPoint_fromView(event.locationInWindow(), None);

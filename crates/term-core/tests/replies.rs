@@ -309,6 +309,24 @@ fn decaln_resets_margins_and_homes_the_cursor() {
     assert_eq!(String::from_utf8(t.state.take_replies()).unwrap(), "\x1bP1$r1;10r\x1b\\");
 }
 
+// ------------------------------------------- A program's own menus (5387)
+
+/// Mode 5387, Decline's own: off until a program sets it, reported by
+/// DECRQM, and off again after a reset.
+#[test]
+fn a_program_says_it_has_link_menus() {
+    let mut t = new(10, 2);
+    assert!(!t.state.modes().own_link_menus);
+    assert_eq!(ask(&mut t, "\x1b[?5387$p"), "\x1b[?5387;2$y");
+    assert_eq!(ask(&mut t, "\x1b[?1003;5387h"), "");
+    assert!(t.state.modes().own_link_menus);
+    assert_eq!(ask(&mut t, "\x1b[?5387$p"), "\x1b[?5387;1$y");
+    ask(&mut t, "\x1b[?5387l");
+    assert!(!t.state.modes().own_link_menus);
+    ask(&mut t, "\x1b[?5387h\x1bc");
+    assert!(!t.state.modes().own_link_menus, "off after a full reset");
+}
+
 // ------------------------------------------------- Colour scheme (2031)
 
 /// Mode 2031 and DSR 996, as Contour specifies them (its VT extension

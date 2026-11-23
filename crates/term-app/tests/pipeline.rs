@@ -637,6 +637,94 @@ fn shell_integration_snippets_mark_prompts() {
     assert!(tried.len() >= 2, "{tried:?}");
 }
 
+/// `/bin/sh -c script` in `home`, as a session.
+fn sh_session(script: &str, home: TempDir, cols: u16, lines: u16) -> Harness {
+    let cmd = Command {
+        argv: vec!["/bin/sh".into(), "-c".into(), script.into()],
+        cwd: Some(home.path().to_str().unwrap().into()),
+        env: vec![("HOME".into(), home.path().to_str().unwrap().into())],
+        shell: Some("/bin/sh".into()),
+        ..Command::default()
+    };
+    let signal = Arc::new(Signal::default());
+    let session = Session::spawn(
+        &cmd,
+        size(cols, lines),
+        Term::new(cols as usize, lines as usize, 1000, term_core::ImagePool::process()),
+        signal.hooks(),
+    )
+    .expect("spawn");
+    Harness {
+        session: Some(session),
+        signal,
+        _home: home,
+    }
+}
+
+/// Hand `old`'s program to a new session, as a restart into a new build
+/// does between two processes (docs/design/handoff.md): the terminal the
+/// new one starts with, and the session.
+fn hand_over(mut old: Harness, cols: u16, lines: u16) -> (String, Harness) {
+    let pid = old.session().pid().unwrap();
+    let (handed, live) = old.session.as_mut().unwrap().hand_over(1000, 1).expect("handed over");
+    let before = old.dump();
+    let home = TempDir::new(&format!("handed-{pid}"));
+    // The old app quits: its session goes, the program stays.
+    drop(old);
+    assert_eq!(unsafe { libc::kill(pid, 0) }, 0, "the program ended with its first session");
+    let mut term = Term::new(cols as usize, lines as usize, 1000, term_core::ImagePool::process());
+    term.restore_live(&live).expect("restored");
+    let signal = Arc::new(Signal::default());
+    let session = Session::adopt(handed, size(cols, lines), term, signal.hooks()).expect("adopt");
+    assert_eq!(session.pid(), Some(pid));
+    (
+        before,
+        Harness {
+            session: Some(session),
+            signal,
+            _home: home,
+        },
+    )
+}
+
+/// A program handed from one session to another carries on: the screen
+/// is what it was, what it had counted is still counted, typing reaches
+/// it and its output shows; ending the first session didn't end it, and
+/// nobody was told it exited.
+#[test]
+fn a_handed_over_program_carries_on_in_the_new_session() {
+    let script = "n=0; printf '\\033[32mready\\033[0m\\n'; while read line; do n=$((n+1)); echo \"$n:$line\"; done";
+    let old = sh_session(script, TempDir::new("hand-over"), 40, 6);
+    old.wait_for("ready", |d| d.contains("ready"));
+    old.type_text("one\n");
+    old.wait_for("the first line counted", |d| d.contains("1:one"));
+    let exits = old.signal.clone();
+    let (before, new) = hand_over(old, 40, 6);
+    assert_eq!(new.dump(), before);
+    new.type_text("two\n");
+    new.wait_for("the count going on", |d| d.contains("2:two"));
+    assert!(new.dump().contains("1:one"), "{}", new.dump());
+    // The first session's program didn't exit, and it didn't say so.
+    assert!(exits.outcome().is_none(), "the old session reported an exit");
+}
+
+/// A full-screen program's screen isn't handed over: the new session
+/// starts its alternate screen empty and has the program repaint, by a
+/// size change it sees.
+#[test]
+fn a_handed_over_full_screen_program_repaints() {
+    let script = "printf '\\033[?1049h\\033[2Jsecret'; trap 'printf \"\\033[Hpainted \"; stty size' WINCH; \
+                  while :; do read -t 1 line; done";
+    let old = sh_session(script, TempDir::new("hand-over-alt"), 40, 6);
+    old.wait_for("the program's screen", |d| d.contains("secret"));
+    let (_, new) = hand_over(old, 40, 6);
+    assert!(new.session().lock_term().state.alt_screen_active());
+    // What it showed isn't there until it paints again, at the size the
+    // pane has.
+    new.wait_for("the repaint", |d| d.contains("painted 6 40"));
+    assert!(!new.dump().contains("secret"), "{}", new.dump());
+}
+
 /// A restored command isn't typed once something else has been: it would
 /// be mixed into what the user typed.
 #[test]

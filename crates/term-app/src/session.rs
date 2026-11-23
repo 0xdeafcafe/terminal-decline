@@ -52,6 +52,10 @@ pub const PRESS_ANY_KEY: &str = "press any key to close";
 /// editor is reading, and how long the output must have been quiet.
 const PROMPT_CHECK: Duration = Duration::from_millis(50);
 
+/// How long an adopted full-screen program's PTY stays a row shorter, so
+/// the program sees the size change and repaints ([`Session::adopt`]).
+const REPAINT_PAUSE: Duration = Duration::from_millis(60);
+
 /// How long [`Session::type_at_prompt`] waits for a prompt before giving up.
 const PROMPT_WAIT: Duration = Duration::from_secs(30);
 
@@ -477,7 +481,73 @@ impl Session {
                 });
             }
         };
+        Session::run(pty, term, dirty, terminal_id, hooks, started)
+    }
 
+    /// Carry on with a program another process started and handed over
+    /// (docs/design/handoff.md): `term` is its terminal as that process
+    /// had it ([`Term::restore_live`]), `size` what the pane has now.
+    /// A full-screen program is made to repaint (its screen wasn't
+    /// handed over): the PTY is a row shorter for a moment.
+    pub fn adopt(handed: term_pty::Handed, size: Size, mut term: Term, hooks: Hooks) -> io::Result<Session> {
+        term.state.set_image_host(crate::images::process_host());
+        term.state.set_reads_off_lock(true);
+        let terminal_id = term.state.terminal_id();
+        let repaint = term.state.alt_screen_active();
+        let pty = Pty::adopt(handed)?;
+        if repaint && size.lines > 1 {
+            let _ = pty.resize(Size {
+                lines: size.lines - 1,
+                ..size
+            });
+        }
+        let session = Session::run(
+            pty,
+            Arc::new(Mutex::new(term)),
+            Arc::new(AtomicBool::new(true)),
+            terminal_id,
+            hooks,
+            Instant::now(),
+        )?;
+        if repaint {
+            // Long enough for the program to have seen the other size:
+            // one that finds the size unchanged may not repaint.
+            std::thread::sleep(REPAINT_PAUSE);
+        }
+        let _ = session.resize(size);
+        Ok(session)
+    }
+
+    /// Stop reading and give the program to another process: the PTY to
+    /// hand it, and the terminal as it is now with the newest `history`
+    /// lines. Nothing more is read here, and dropping this session no
+    /// longer ends the program.
+    pub fn hand_over(&mut self, history: usize, saved_at: u64) -> io::Result<(term_pty::Handed, term_core::Live)> {
+        let Some(pty) = &mut self.pty else {
+            return Err(io::Error::new(io::ErrorKind::NotFound, "no program"));
+        };
+        pty.stop_readers();
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.join();
+        }
+        // Stopped, or ended at that moment: only a running program is
+        // handed over.
+        if pty.child().try_wait().is_some() {
+            return Err(io::Error::new(io::ErrorKind::NotFound, "the program has exited"));
+        }
+        let live = lock(&self.term).state.save_live(history, saved_at);
+        Ok((pty.hand_over()?, live))
+    }
+
+    /// The threads of a session on `pty`.
+    fn run(
+        pty: Pty,
+        term: Arc<Mutex<Term>>,
+        dirty: Arc<AtomicBool>,
+        terminal_id: u64,
+        hooks: Hooks,
+        started: Instant,
+    ) -> io::Result<Session> {
         let (tx, rx) = mpsc::channel::<Vec<u8>>();
         let mut writer = pty.writer()?;
         let writer = std::thread::Builder::new().name("pty-writer".into()).spawn(move || {
@@ -511,7 +581,7 @@ impl Session {
         let reader = std::thread::Builder::new().name("pty-reader".into()).spawn(move || {
             interactive();
             // A panic anywhere else in the loop stops the session too.
-            let read = catch_unwind(AssertUnwindSafe(|| -> Result<(), Bug> {
+            let read = catch_unwind(AssertUnwindSafe(|| -> Result<term_pty::Batch, Bug> {
                 let mut buf = vec![0u8; READ_BUF];
                 let mut scanner = on_control.as_ref().map(|_| ControlScanner::default());
                 let mut prefs = on_prefs.as_ref().map(|_| ControlScanner::new(crate::control::PREFS_PREFIX));
@@ -548,10 +618,10 @@ impl Session {
                         // Decoding lags: let the PTY slow the program down.
                         images.hold_back();
                     }
-                    let n = reader.read_batch(&mut buf);
-                    if n == 0 {
-                        return Ok(());
-                    }
+                    let n = match reader.read(&mut buf) {
+                        term_pty::Batch::Bytes(n) => n,
+                        end => return Ok(end),
+                    };
                     batches2.fetch_add(1, Ordering::Relaxed);
                     let parse_started = on_output.as_ref().map(|_| Instant::now());
                     let mut start = 0;
@@ -582,10 +652,13 @@ impl Session {
                 }
             }));
             let outcome = match read {
+                // Handed to another process (`Session::hand_over`): the
+                // program runs on, and nothing here ended.
+                Ok(Ok(term_pty::Batch::Stopped)) => return,
                 // The message is in the terminal already.
-                Ok(Ok(())) if stopped2.load(Ordering::Acquire) => Outcome::Hold,
-                Ok(Ok(())) if quiet_exit => Outcome::Closed,
-                Ok(Ok(())) => finished(&term2, &child, started),
+                Ok(Ok(_)) if stopped2.load(Ordering::Acquire) => Outcome::Hold,
+                Ok(Ok(_)) if quiet_exit => Outcome::Closed,
+                Ok(Ok(_)) => finished(&term2, &child, started),
                 Ok(Err(Bug)) | Err(_) => {
                     child.signal(libc::SIGKILL, true);
                     show_bug(&term2);

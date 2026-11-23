@@ -178,7 +178,7 @@ impl PaneStrip {
 }
 
 /// An `NSBox` that only fills.
-fn plain_box(mtm: MainThreadMarker) -> Retained<NSBox> {
+pub(crate) fn plain_box(mtm: MainThreadMarker) -> Retained<NSBox> {
     let b = NSBox::new(mtm);
     b.setBoxType(NSBoxType::Custom);
     b.setTitlePosition(NSTitlePosition::NoTitle);
@@ -187,13 +187,13 @@ fn plain_box(mtm: MainThreadMarker) -> Retained<NSBox> {
 }
 
 /// 0xRRGGBB as an sRGB colour.
-fn ns_colour(rgb: u32, alpha: f64) -> Retained<NSColor> {
+pub(crate) fn ns_colour(rgb: u32, alpha: f64) -> Retained<NSColor> {
     let c = |s: u32| ((rgb >> s) & 0xFF) as f64 / 255.0;
     NSColor::colorWithSRGBRed_green_blue_alpha(c(16), c(8), c(0), alpha)
 }
 
 /// `a` (0xRRGGBB) moved `t` of the way to `b`.
-fn mix(a: u32, b: u32, t: f32) -> u32 {
+pub(crate) fn mix(a: u32, b: u32, t: f32) -> u32 {
     let ch = |shift: u32| {
         let (x, y) = (((a >> shift) & 0xFF) as f32, ((b >> shift) & 0xFF) as f32);
         ((x + (y - x) * t).round() as u32) << shift

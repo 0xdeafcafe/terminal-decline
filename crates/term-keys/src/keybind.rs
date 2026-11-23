@@ -308,7 +308,7 @@ impl MenuAction {
 
     /// The menu item's action, sent up the responder chain. `close`
     /// closes the focused pane, and the tab with its last pane;
-    /// `close_tab` is the title bar's close button.
+    /// `close_tab` closes the tab with the keys (`closeTab:`, the window view).
     pub fn selector(self) -> &'static CStr {
         match self {
             MenuAction::NewWindow => c"newWindow:",
@@ -333,7 +333,7 @@ impl MenuAction {
             MenuAction::UseSelectionForFind => c"useSelectionForFind:",
             MenuAction::SplitRight => c"splitRight:",
             MenuAction::SplitDown => c"splitDown:",
-            MenuAction::CloseTab => c"performClose:",
+            MenuAction::CloseTab => c"closeTab:",
             MenuAction::CloseWindow => c"closeWindow:",
             MenuAction::FocusPaneLeft => c"selectPaneLeft:",
             MenuAction::FocusPaneRight => c"selectPaneRight:",

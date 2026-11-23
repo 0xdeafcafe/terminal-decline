@@ -22,11 +22,11 @@ use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSApplication, NSBeep, NSCursor, NSEvent, NSEventMask, NSEventModifierFlags, NSMenuItem,
-    NSModalResponse, NSPasteboardTypeString, NSResponder, NSView, NSWindow, NSWindowDelegate, NSWindowOrderingMode,
+    NSModalResponse, NSPasteboardTypeString, NSResponder, NSView, NSWindow, NSWindowOrderingMode,
 };
 use objc2_foundation::{
-    NSArray, NSKeyValueObservingOptions, NSNotification, NSObjectNSKeyValueObserverRegistration, NSObjectProtocol, NSPoint, NSRect,
-    NSRunLoop, NSRunLoopCommonModes, NSSize, NSString,
+    NSArray, NSKeyValueObservingOptions, NSObjectNSKeyValueObserverRegistration, NSObjectProtocol, NSPoint, NSRect, NSRunLoop,
+    NSRunLoopCommonModes, NSSize, NSString,
 };
 use objc2_metal::{MTLCommandBuffer, MTLDrawable};
 use objc2_quartz_core::{CADisplayLink, CALayer, CAMetalDrawable, CAMetalLayer};
@@ -49,6 +49,7 @@ use crate::reload::{SavedPane, SavedPanes};
 use crate::running::Closing;
 use crate::select::{Block, Gesture};
 use crate::session::{Events, Hooks, Outcome, PendingEvents, Session};
+use crate::tab_host::TabHost;
 use crate::theme::Appearance;
 
 pub(crate) const BLINK_INTERVAL: Duration = Duration::from_millis(530);
@@ -378,6 +379,8 @@ pub struct Ivars {
     /// The window's frame from before it went full screen, saved for a
     /// restart in its place; `None` while it isn't full screen.
     normal_frame: StdCell<Option<NSRect>>,
+    /// The tab's title: the window's while this is the tab in front.
+    title: RefCell<String>,
 }
 
 /// The key path observed for the tab bar showing or hiding.
@@ -418,6 +421,9 @@ pub(crate) fn sync_visibility_soon() {
 pub(crate) fn bring_to_front(id: usize) {
     with_view(id, |v| {
         if let Some(window) = v.window() {
+            if let Some(host) = TabHost::of_view(v) {
+                host.select_view(v);
+            }
             crate::background::make_key_and_order_front(&window);
             crate::background::activate(MainThreadMarker::from(v));
             // An inactive app gets no key notifications to notice the switch.
@@ -630,6 +636,12 @@ define_class!(
             self.close_focused_pane();
         }
 
+        /// Shell > Close Tab: this tab and its panes.
+        #[unsafe(method(closeTab:))]
+        fn close_tab_item(&self, _sender: Option<&AnyObject>) {
+            self.close_tab_asking();
+        }
+
         /// Shell > Close Window (Cmd+Shift+W): every tab of the window.
         #[unsafe(method(closeWindow:))]
         fn close_window_item(&self, _sender: Option<&AnyObject>) {
@@ -757,72 +769,6 @@ define_class!(
     }
 
     unsafe impl NSObjectProtocol for WindowView {}
-
-    unsafe impl NSWindowDelegate for WindowView {
-        #[unsafe(method(windowDidBecomeKey:))]
-        fn window_did_become_key(&self, _n: &NSNotification) {
-            // A tab brought to the front becomes key: show it now, so its
-            // first frame is drawn before it reaches the screen.
-            self.sync_visibility();
-            self.set_focus(true);
-            sync_visibility_soon();
-            let mtm = MainThreadMarker::from(self);
-            if objc2_app_kit::NSApplication::sharedApplication(mtm).isActive() {
-                crate::notify::seen(mtm, self.ivars().id);
-            }
-        }
-
-        #[unsafe(method(windowDidResignKey:))]
-        fn window_did_resign_key(&self, _n: &NSNotification) {
-            // Another window or tab, or another app: a chord being
-            // recorded is cancelled.
-            self.finish_recording(None);
-            self.set_focus(false);
-            if let Some(window) = self.window() {
-                crate::app::quick_resigned_key(&window);
-            }
-            // The tab put behind resigns key before its group selects
-            // another tab; look again once that has happened.
-            sync_visibility_soon();
-        }
-
-        #[unsafe(method(windowDidChangeOcclusionState:))]
-        fn window_did_change_occlusion(&self, _n: &NSNotification) {
-            if self.sync_visibility() {
-                self.redraw_all();
-            }
-        }
-
-        /// With `confirm_close`, ask first while a program runs in any
-        /// pane: once, naming them all.
-        #[unsafe(method(windowShouldClose:))]
-        fn window_should_close(&self, window: &NSWindow) -> bool {
-            let ask = self.with_state(|st| st.win.config.confirm_close).unwrap_or(false);
-            let programs = if ask { self.running_programs() } else { Vec::new() };
-            let close = programs.is_empty();
-            if !close {
-                self.ask_to_close(window, Closing::Window, &programs, AfterAsk::Window);
-            }
-            close
-        }
-
-        #[unsafe(method(windowWillClose:))]
-        fn window_will_close(&self, _n: &NSNotification) {
-            self.shut_down();
-        }
-
-        #[unsafe(method(windowWillEnterFullScreen:))]
-        fn window_will_enter_full_screen(&self, _n: &NSNotification) {
-            if let Some(window) = self.window() {
-                self.ivars().normal_frame.set(Some(window.frame()));
-            }
-        }
-
-        #[unsafe(method(windowDidExitFullScreen:))]
-        fn window_did_exit_full_screen(&self, _n: &NSNotification) {
-            self.ivars().normal_frame.set(None);
-        }
-    }
 );
 
 pub struct Launch {
@@ -885,6 +831,7 @@ impl WindowView {
             first: RefCell::new(None),
             observed: RefCell::new(None),
             normal_frame: StdCell::new(None),
+            title: RefCell::new(String::new()),
         });
         let view: Retained<WindowView> = unsafe { msg_send![super(this), initWithFrame: frame] };
         view.setWantsLayer(true);
@@ -1215,10 +1162,8 @@ impl WindowView {
         });
         let Some(Some((title, tick, clock))) = got else { return };
         self.refresh_strips();
-        if let Some(window) = self.window()
-            && window.title().to_string() != title
-        {
-            window.setTitle(&NSString::from_str(&title));
+        if *self.ivars().title.borrow() != title {
+            self.set_title(&title);
         }
         // One shot, to the next change of the title: none at the prompt,
         // none while hidden (showing the window refreshes it).
@@ -1326,7 +1271,7 @@ impl WindowView {
     /// Pane `pane`'s name for a notification (its program's title, else
     /// the window's, else the app's) and its folder, with `~` for home.
     fn pane_names(&self, pane: PaneId) -> (String, Option<String>) {
-        let window_title = self.window().map(|w| w.title().to_string()).filter(|t| !t.is_empty());
+        let window_title = Some(self.title()).filter(|t| !t.is_empty());
         let (title, cwd) = self
             .with_state(|st| st.panes.get(&pane).map(|p| (p.title.clone(), pane_cwd(p))))
             .flatten()
@@ -1523,9 +1468,7 @@ impl WindowView {
     /// even before its occlusion state catches up with a tab switch.
     pub(crate) fn visible(&self) -> bool {
         self.window().is_some_and(|w| {
-            let behind = crate::background::tab_group(&w)
-                .and_then(|g| g.selectedWindow())
-                .is_some_and(|front| !std::ptr::eq::<NSWindow>(&*front, &*w));
+            let behind = TabHost::of_view(self).is_some_and(|h| !h.is_selected(self));
             // Ordered out: the quick terminal while hidden.
             w.isVisible()
                 && !behind
@@ -2593,7 +2536,7 @@ impl WindowView {
         }
     }
 
-    fn shut_down(&self) {
+    pub(crate) fn shut_down(&self) {
         let observed = self.ivars().observed.borrow_mut().take();
         if let Some(window) = observed {
             unsafe { window.removeObserver_forKeyPath(self, &NSString::from_str(LAYOUT_RECT)) };
@@ -2642,9 +2585,27 @@ impl WindowView {
         }
     }
 
-    pub(crate) fn close_window(&self) {
-        if let Some(window) = self.window() {
-            window.close();
+    /// Close this tab without asking, ending what runs in it; the window
+    /// with its last tab.
+    pub(crate) fn close_tab(&self) {
+        let Some(window) = self.window() else { return };
+        match TabHost::of(&window) {
+            Some(host) if host.count() > 1 => host.close(self),
+            _ => window.close(),
+        }
+    }
+
+    /// Shell > Close Tab, a middle click on the tab, and Close with one
+    /// pane left: this tab, asking first with `confirm_close` while a
+    /// program runs in any of its panes.
+    pub(crate) fn close_tab_asking(&self) {
+        let Some(window) = self.window() else { return };
+        let ask = self.with_state(|st| st.win.config.confirm_close).unwrap_or(false);
+        let programs = if ask { self.running_programs() } else { Vec::new() };
+        if programs.is_empty() {
+            self.close_tab();
+        } else {
+            self.ask_to_close(&window, Closing::Tab, &programs, AfterAsk::Tab);
         }
     }
 
@@ -2906,15 +2867,15 @@ impl WindowView {
     }
 
     /// Shell > Close: the focused pane, asking first with `confirm_close`
-    /// while a program runs in it. The last pane closes the tab, through
-    /// `performClose:` (so `windowShouldClose:` asks).
+    /// while a program runs in it. The last pane closes the tab, asking
+    /// as Close Tab does.
     pub(crate) fn close_focused_pane(&self) {
         let Some(window) = self.window() else { return };
         let Some((pane, count, ask)) = self.with_state(|st| (st.tree.focused(), st.tree.len(), st.win.config.confirm_close)) else {
             return;
         };
         if count == 1 {
-            window.performClose(None);
+            self.close_tab_asking();
             return;
         }
         match ask.then(|| self.pane_program(pane)).flatten() {
@@ -2944,7 +2905,7 @@ impl WindowView {
             return;
         };
         let Some(next) = next else {
-            self.close_window();
+            self.close_tab();
             return;
         };
         if self.with_state(|st| st.win.recording.as_ref().is_some_and(|r| r.pane == pane)) == Some(true) {
@@ -2959,7 +2920,7 @@ impl WindowView {
         };
         closed.view.removeFromSuperview();
         if closed.settings {
-            crate::app::settings_closed(&window);
+            crate::app::settings_closed(self);
         }
         drop(closed); // hangs up on its program
         self.resize();
@@ -2976,7 +2937,7 @@ impl WindowView {
             Vec::new()
         };
         if programs.is_empty() {
-            close_tabs(&window);
+            window.close();
         } else {
             self.ask_to_close(&window, Closing::Window, &programs, AfterAsk::AllTabs);
         }
@@ -3552,10 +3513,10 @@ impl WindowView {
             if response == NSAlertFirstButtonReturn {
                 with_view(id, |v| match then {
                     AfterAsk::Pane(pane) => v.close_pane(pane),
-                    AfterAsk::Window => v.close_window(),
+                    AfterAsk::Tab => v.close_tab(),
                     AfterAsk::AllTabs => {
                         if let Some(window) = v.window() {
-                            close_tabs(&window);
+                            window.close();
                         }
                     }
                 });
@@ -3736,32 +3697,13 @@ pub(crate) fn pane_padding(config: &Config, titlebar: f64, scale: f64, rect: PxR
 #[derive(Clone, Copy)]
 enum AfterAsk {
     Pane(PaneId),
-    Window,
+    Tab,
     AllTabs,
 }
 
-/// The window views of `window`'s tabs (just its own without tabs).
+/// The window views of `window`'s tabs, in order.
 fn tab_views(window: &NSWindow) -> Vec<Retained<WindowView>> {
-    let tabs: Vec<Retained<NSWindow>> = match window.tabbedWindows() {
-        Some(tabs) => tabs.iter().collect(),
-        None => vec![objc2::Message::retain(window)],
-    };
-    let views: Vec<Retained<WindowView>> = VIEWS.with(|v| v.borrow().values().filter_map(|w| w.load()).collect());
-    views
-        .into_iter()
-        .filter(|v| v.window().is_some_and(|w| tabs.iter().any(|t| std::ptr::eq::<NSWindow>(&**t, &*w))))
-        .collect()
-}
-
-/// Close every tab of `window` without asking.
-fn close_tabs(window: &NSWindow) {
-    let tabs: Vec<Retained<NSWindow>> = match window.tabbedWindows() {
-        Some(tabs) => tabs.iter().collect(),
-        None => vec![objc2::Message::retain(window)],
-    };
-    for tab in tabs {
-        tab.close();
-    }
+    TabHost::of(window).map(|h| h.views()).unwrap_or_default()
 }
 
 /// A pane about to be opened.
@@ -4210,8 +4152,110 @@ pub fn content_size(config: &Config, m: term_font::Metrics, scale: f64, titlebar
     NSSize::new(w, h)
 }
 
-pub fn delegate_of(view: &WindowView) -> &ProtocolObject<dyn NSWindowDelegate> {
-    ProtocolObject::from_ref(view)
+/// What the window tells its delegate, the tab host
+/// ([`TabHost`]), passed on to its tabs; and what a tab is to its host.
+impl WindowView {
+    /// The window became key with this tab in front, or this tab was
+    /// brought to the front of the key window.
+    pub(crate) fn became_key(&self) {
+        // Shown now, so its first frame is drawn before it reaches the
+        // screen.
+        self.sync_visibility();
+        self.set_focus(true);
+        sync_visibility_soon();
+        let mtm = MainThreadMarker::from(self);
+        if objc2_app_kit::NSApplication::sharedApplication(mtm).isActive() {
+            crate::notify::seen(mtm, self.ivars().id);
+        }
+    }
+
+    /// Another window, or another app, has the keys.
+    pub(crate) fn resigned_key(&self) {
+        self.put_behind();
+        if let Some(window) = self.window() {
+            crate::app::quick_resigned_key(&window);
+        }
+        sync_visibility_soon();
+    }
+
+    /// Another tab of the window came to the front: a chord being
+    /// recorded is cancelled, and the program is told the focus left.
+    pub(crate) fn put_behind(&self) {
+        self.finish_recording(None);
+        self.set_focus(false);
+    }
+
+    pub(crate) fn occlusion_changed(&self) {
+        if self.sync_visibility() {
+            self.redraw_all();
+        }
+    }
+
+    /// The window is asked to close (its close button, `performClose:`):
+    /// with `confirm_close`, ask first while a program runs in any pane
+    /// of any tab, once, naming them all.
+    pub(crate) fn window_should_close(&self, window: &NSWindow) -> bool {
+        let ask = self.with_state(|st| st.win.config.confirm_close).unwrap_or(false);
+        let programs: Vec<String> = if ask {
+            tab_views(window).iter().flat_map(|v| v.running_programs()).collect()
+        } else {
+            Vec::new()
+        };
+        let close = programs.is_empty();
+        if !close {
+            self.ask_to_close(window, Closing::Window, &programs, AfterAsk::AllTabs);
+        }
+        close
+    }
+
+    pub(crate) fn will_enter_full_screen(&self) {
+        if let Some(window) = self.window() {
+            self.ivars().normal_frame.set(Some(window.frame()));
+        }
+    }
+
+    pub(crate) fn did_exit_full_screen(&self) {
+        self.ivars().normal_frame.set(None);
+    }
+
+    /// The tab's title: the window's while it is the tab in front.
+    pub(crate) fn title(&self) -> String {
+        self.ivars().title.borrow().clone()
+    }
+
+    /// Give the tab `title`: its window too while it is the tab in
+    /// front, and the tab bar is drawn again.
+    pub(crate) fn set_title(&self, title: &str) {
+        *self.ivars().title.borrow_mut() = title.to_string();
+        let host = TabHost::of_view(self);
+        if let Some(window) = self.window()
+            && host.as_ref().is_none_or(|h| h.is_selected(self))
+            && window.title().to_string() != title
+        {
+            window.setTitle(&NSString::from_str(title));
+        }
+        if let Some(host) = host {
+            host.refresh_bar();
+        }
+    }
+
+    /// What the tab bar says of this tab: its focused pane's strip text
+    /// (its name, else its status without the app's name).
+    pub(crate) fn tab_text(&self) -> String {
+        let name = self.with_state(|st| st.focused().and_then(|p| p.name.clone())).flatten();
+        crate::pane_strip::title_text(name.as_deref(), &self.title())
+    }
+
+    /// The theme's colours, as pane strips and the tab bar are drawn.
+    pub(crate) fn look(&self) -> Option<crate::pane_strip::Look> {
+        self.with_state(|st| crate::pane_strip::Look {
+            foreground: crate::config::rgb_of(st.win.theme.foreground),
+            background: crate::config::rgb_of(st.win.theme.background),
+            divider: crate::config::rgb_of(st.win.divider),
+            accent: crate::config::rgb_of(st.win.theme.cursor),
+            opacity: st.win.theme.background_opacity,
+        })
+    }
 }
 
 /// Test-only control (`DECLINE_TEST_DUMP`); see [`crate::control`].
@@ -4468,19 +4512,16 @@ impl WindowView {
                 let _ = DispatchQueue::main().after(DispatchTime::NOW.time(2_000_000), move || with_view(id, |v| v.poll_dump()));
             }
             Some(true) => {
-                let me = self.window();
-                let tabs = me.as_ref().and_then(|w| w.tabbedWindows());
+                let host = TabHost::of_view(self);
                 let window = Window {
                     id: self.ivars().id,
-                    tabs: tabs.as_ref().map_or(1, |t| t.len()),
-                    tab: tabs
-                        .zip(me)
-                        .and_then(|(t, me)| t.iter().position(|w| std::ptr::eq::<NSWindow>(&*w, &*me)))
-                        .unwrap_or(0),
+                    tabs: host.as_ref().map_or(1, |h| h.count()),
+                    tab: host.as_ref().and_then(|h| h.index_of(self)).unwrap_or(0),
+                    tab_bar: host.as_ref().and_then(|h| h.bar_texts()),
                     visible: self.visible(),
                     sheet: self.window().is_some_and(|w| w.attachedSheet().is_some()),
                     top_inset: self.titlebar_height(),
-                    title: self.window().map(|w| w.title().to_string()).unwrap_or_default(),
+                    title: self.title(),
                     badge: objc2_app_kit::NSApplication::sharedApplication(MainThreadMarker::from(self))
                         .dockTile()
                         .badgeLabel()
@@ -4553,6 +4594,7 @@ struct Window {
     id: usize,
     tabs: usize,
     tab: usize,
+    tab_bar: Option<Vec<String>>,
     visible: bool,
     sheet: bool,
     top_inset: f64,
@@ -4658,6 +4700,7 @@ fn write_dump(st: &mut State, window: Window) {
         window: window.id,
         tabs: window.tabs,
         tab: window.tab,
+        tab_bar: window.tab_bar,
         visible: window.visible,
         sheet: window.sheet,
         hidden: win.hidden,

@@ -572,6 +572,9 @@ pub struct Dump {
     pub tabs: usize,
     /// This tab's place in the tab bar, from 0 (0 without tabs).
     pub tab: usize,
+    /// What each tab says in the tab bar, in order; `None` while the bar
+    /// is hidden (one tab, or full screen).
+    pub tab_bar: Option<Vec<String>>,
     /// Whether the window can be seen (a background tab can't).
     pub visible: bool,
     /// Times the window was hidden or covered and gave back its drawables.

@@ -289,13 +289,13 @@ fn smoke_font_bigger_changes_the_cells() {
 }
 
 /// A second tab through the `tab` control command: both tabs run their
-/// program, the tab bar that appears costs both of them lines at the top,
-/// the first tab's program is told its new size, and the first tab, now in
-/// the background, is hidden and gives back its drawables; brought back to
-/// the front (the `front` control command), it shows again.
+/// program, the tab bar that appears is in the title row and costs
+/// neither of them a line, and the first tab, now in the background, is
+/// hidden and gives back its drawables; brought back to the front (the
+/// `front` control command), it shows again.
 #[test]
 #[ignore = "opens a window; run with --run-ignored"]
-fn smoke_second_tab_shrinks_the_grid() {
+fn smoke_second_tab_keeps_the_grid() {
     if !have_metal() {
         return;
     }
@@ -306,8 +306,8 @@ fn smoke_second_tab_shrinks_the_grid() {
     let wait = |cond: &str| format!("i=0; while ! {{ {cond}; }} && [ $i -lt 200 ]; do sleep 0.05; i=$((i+1)); done; ");
     let script = format!(
         "if mkdir '{d}/first' 2>/dev/null; then \
-           s0=$(stty size); echo one; {dump}{tab}\
-           {wait_two}{wait_size}stty size; {dump}{front}{dump}{quit}\
+           echo one; {dump}{tab}\
+           {wait_two}stty size; {dump}{front}{dump}{quit}\
          else \
            echo two; {dump}{wait_dump}touch '{d}/two-done'; \
          fi; sleep 20",
@@ -316,7 +316,6 @@ fn smoke_second_tab_shrinks_the_grid() {
         front = osc("front"),
         quit = osc("quit"),
         wait_two = wait(&format!("[ -e '{d}/two-done' ]")),
-        wait_size = wait("[ \"$(stty size)\" != \"$s0\" ]"),
         wait_dump = wait(&format!("grep -q '\"window\":2' '{}'", dir.dump_file().display())),
     );
     let (status, _) = decline(&dir, &script, true);
@@ -333,14 +332,19 @@ fn smoke_second_tab_shrinks_the_grid() {
     assert!(screen(two).starts_with("two|"), "{}", screen(two));
     assert_eq!(num(before, "tabs"), 1.0, "{before}");
     assert_eq!((num(after, "tabs"), num(two, "tabs")), (2.0, 2.0), "{after} {two}");
-    // The tab bar pushes the grid down in both tabs, and costs lines.
-    assert!(num(after, "pad_top") > num(before, "pad_top"), "{before} {after}");
+    // The tab bar is in the title row: the grid stays where it was, in
+    // both tabs, and keeps its lines.
+    assert_eq!(num(after, "pad_top"), num(before, "pad_top"), "{before} {after}");
     assert_eq!(num(two, "pad_top"), num(after, "pad_top"), "{two} {after}");
     let lines = |x: &Value| num(x, "lines");
-    assert!(lines(after) < lines(before), "{before} {after}");
+    assert_eq!(lines(after), lines(before), "{before} {after}");
     assert_eq!(lines(two), lines(after));
     assert_eq!(num(two, "cols"), num(after, "cols"));
-    // The program in the first tab was told.
+    // No bar with one tab; with two, a tab for each, in order.
+    assert!(before["tab_bar"].is_null(), "{before}");
+    assert_eq!(after["tab_bar"].as_array().map(Vec::len), Some(2), "{after}");
+    assert_eq!((num(after, "tab"), num(two, "tab")), (0.0, 1.0), "{after} {two}");
+    // The first tab's program has the size it had.
     let size = format!("{} {}|", lines(after), num(after, "cols"));
     assert!(screen(after).contains(&size), "{size} in {}", screen(after));
     // The first tab is behind the second: hidden, and it gave back memory.

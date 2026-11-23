@@ -9,8 +9,8 @@ use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_se
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSApplication, NSApplicationDelegate, NSApplicationTerminateReply, NSAutoresizingMaskOptions,
     NSBackingStoreType, NSColor, NSEventModifierFlags, NSMenu, NSMenuItem, NSPasteboard, NSScreen, NSVisualEffectBlendingMode,
-    NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView, NSWindow, NSWindowOrderingMode, NSWindowStyleMask,
-    NSWindowTabbingMode, NSWindowTitleVisibility, NSWindowUserTabbingPreference,
+    NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView, NSWindow, NSWindowStyleMask, NSWindowTabbingMode,
+    NSWindowTitleVisibility, NSWindowUserTabbingPreference,
 };
 use objc2_foundation::{NSArray, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSString, NSURL};
 use term_font::Fonts;
@@ -22,7 +22,8 @@ use crate::desktop::{self, FrontWindow, Open, TabPreference};
 use crate::keybind::{Keybinds, MenuAction};
 use crate::reload::SavedWindow;
 use crate::secure_input::{self, SecureInput};
-use crate::view::{Launch, WindowView, content_size, delegate_of};
+use crate::tab_host::TabHost;
+use crate::view::{Launch, WindowView, content_size};
 
 mod quick;
 pub(crate) use quick::{resigned_key as quick_resigned_key, status as quick_status, toggle_quick_now};
@@ -78,7 +79,7 @@ pub struct AppIvars {
     /// itself: a quit's own save for the next launch is skipped.
     restarting: Cell<bool>,
     /// The Settings tab, while it is open: Cmd+, brings it to the front.
-    settings: RefCell<Option<Retained<NSWindow>>>,
+    settings: RefCell<Option<Retained<WindowView>>>,
     /// The errors of the config in effect, so a reload writes only new
     /// ones into the windows.
     errors: RefCell<Vec<String>>,
@@ -156,7 +157,7 @@ impl crate::ctl::window::WindowControl for HostedWindow {
 
     fn close(&self) {
         let id = self.id;
-        dispatch2::DispatchQueue::main().exec_async(move || crate::view::with_view(id, |v| v.close_window()));
+        dispatch2::DispatchQueue::main().exec_async(move || crate::view::with_view(id, |v| v.close_tab()));
     }
 }
 
@@ -520,10 +521,9 @@ define_class!(
         #[unsafe(method(selectTab:))]
         fn select_tab(&self, sender: Option<&AnyObject>) {
             let Some(item) = sender.and_then(|s| s.downcast_ref::<NSMenuItem>()) else { return };
-            let Some(window) = self.key_window() else { return };
-            let Some(tabs) = window.tabbedWindows() else { return };
-            if let Some(i) = tab_index(item.tag(), tabs.len()) {
-                crate::background::make_key_and_order_front(&tabs.objectAtIndex(i));
+            let Some(host) = self.key_window().and_then(|w| TabHost::of(&w)) else { return };
+            if let Some(i) = tab_index(item.tag(), host.count()) {
+                host.select(i);
             }
         }
 
@@ -545,7 +545,7 @@ define_class!(
                 crate::background::closed(window, open);
             }
             let mut settings = self.ivars().settings.borrow_mut();
-            if settings.as_deref().is_some_and(is_closed) {
+            if settings.as_ref().is_some_and(|v| v.window().is_none_or(|w| is_closed(&w))) {
                 *settings = None;
                 drop(settings);
                 self.end_preview();
@@ -1004,52 +1004,40 @@ impl AppDelegate {
         offer: Option<&crate::handoff::Offer>,
     ) -> Vec<SavedWindow> {
         let windows = self.ivars().windows.borrow();
-        let ours = |w: &NSWindow| {
-            windows
-                .iter()
-                .find(|(o, _)| std::ptr::eq::<NSWindow>(&**o, w))
-                .map(|(_, v)| v.clone())
-        };
-        let save = |w: &NSWindow, tab_group, selected| {
-            let view = ours(w);
+        let save = |w: &NSWindow, view: &WindowView, tab_group, selected| {
             let full_screen = w.styleMask().contains(NSWindowStyleMask::FullScreen);
             // Full screen: the frame to come back to when it leaves.
-            let f = view
-                .as_ref()
-                .and_then(|v| v.normal_frame())
-                .filter(|_| full_screen)
-                .unwrap_or_else(|| w.frame());
+            let f = view.normal_frame().filter(|_| full_screen).unwrap_or_else(|| w.frame());
             SavedWindow {
-                cwd: view.as_ref().and_then(|v| v.foreground_cwd()),
+                cwd: view.foreground_cwd(),
                 frame: [f.origin.x, f.origin.y, f.size.width, f.size.height],
                 full_screen,
                 tab_group,
                 selected,
-                panes: view.as_ref().and_then(|v| v.saved_panes(history, offer)),
-                live: offer.and_then(|o| view.as_ref().and_then(|v| v.saved_live(o))),
-                command: view.as_ref().and_then(|v| v.command_to_restore()),
-                history: history.and_then(|(store, limit)| view.as_ref().and_then(|v| v.saved_history(store, limit))),
+                panes: view.saved_panes(history, offer),
+                live: offer.and_then(|o| view.saved_live(o)),
+                command: view.command_to_restore(),
+                history: history.and_then(|(store, limit)| view.saved_history(store, limit)),
             }
         };
         let mut saved = Vec::new();
         let mut done: Vec<*const NSWindow> = Vec::new();
         let mut groups = 0;
-        for (w, _) in windows.iter() {
+        for (w, view) in windows.iter() {
             // The quick terminal isn't reopened as a window.
             if done.contains(&Retained::as_ptr(w)) || self.is_quick(w) {
                 continue;
             }
-            match w.tabbedWindows().filter(|t| t.len() > 1) {
-                Some(tabs) => {
-                    let front = w.tabGroup().and_then(|g| g.selectedWindow());
-                    for tab in tabs.iter().filter(|t| ours(t).is_some()) {
-                        let selected = front.as_deref().is_some_and(|f| std::ptr::eq::<NSWindow>(f, &*tab));
-                        saved.push(save(&tab, Some(groups), selected));
-                        done.push(Retained::as_ptr(&tab));
+            done.push(Retained::as_ptr(w));
+            match TabHost::of(w).filter(|h| h.count() > 1) {
+                Some(host) => {
+                    let front = host.selected_index();
+                    for (i, tab) in host.views().iter().enumerate() {
+                        saved.push(save(w, tab, Some(groups), i == front));
                     }
                     groups += 1;
                 }
-                None => saved.push(save(w, None, false)),
+                None => saved.push(save(w, view, None, false)),
             }
         }
         saved
@@ -1076,7 +1064,7 @@ impl AppDelegate {
     fn restore_groups(&self, saved: Vec<SavedWindow>) {
         for group in crate::reload::tab_groups(saved) {
             let mut first: Option<Retained<NSWindow>> = None;
-            let mut front = None;
+            let mut front: Option<Retained<WindowView>> = None;
             let full_screen = group.iter().any(|w| w.full_screen);
             for w in group {
                 let place = match &first {
@@ -1090,18 +1078,22 @@ impl AppDelegate {
                 let command = w.command.filter(|_| w.panes.is_none());
                 let live = w.live.as_ref().map(|l| l.id);
                 let opened = self.open_window_as(w.cwd, place, None, false, w.panes, None, w.history, live, command.clone());
-                if let (Some(command), Some(view)) = (command, opened.as_ref().and_then(|o| self.view_of(o))) {
+                // The tab just opened is the one in front.
+                let view = opened.as_ref().and_then(|o| self.view_of(o));
+                if let (Some(command), Some(view)) = (command, &view) {
                     view.type_at_prompt(command);
                 }
                 if w.selected {
-                    front = opened.clone();
+                    front = view;
                 }
                 if first.is_none() {
                     first = opened;
                 }
             }
-            if let Some(front) = front {
-                crate::background::make_key_and_order_front(&front);
+            if let Some(front) = front
+                && let Some(host) = TabHost::of_view(&front)
+            {
+                host.select_view(&front);
             }
             // Into full screen once it's on screen, at its saved frame so
             // leaving full screen puts it back there.
@@ -1218,13 +1210,10 @@ impl AppDelegate {
     /// new one in the front window running the preferences.
     fn show_settings(&self) {
         let open = self.ivars().settings.borrow().clone();
-        if let Some(window) = open {
-            crate::background::make_key_and_order_front(&window);
-            if let Some(view) = self.view_of(&window) {
-                view.focus_settings();
-            }
-            crate::background::activate(MainThreadMarker::from(self));
-            crate::view::sync_visibility_soon();
+        if let Some(view) = open {
+            // Its tab to the front of its window, and the window too.
+            crate::view::bring_to_front(view.id());
+            view.focus_settings();
             return;
         }
         let place = match self.front_window() {
@@ -1232,13 +1221,14 @@ impl AppDelegate {
             None => Place::Cascade,
         };
         let opened = self.open_window_as(None, place, None, true, None, None, None, None, None);
-        *self.ivars().settings.borrow_mut() = opened;
+        // The tab just opened is the one in front.
+        *self.ivars().settings.borrow_mut() = opened.and_then(|w| self.view_of(&w));
     }
 
     /// Bytes typed into the Settings tab (test-only `type-settings`).
     fn type_into_settings(&self, bytes: Vec<u8>) {
-        let window = self.ivars().settings.borrow().clone();
-        if let Some(view) = window.and_then(|w| self.view_of(&w)) {
+        let view = self.ivars().settings.borrow().clone();
+        if let Some(view) = view {
             view.type_bytes(bytes);
         }
     }
@@ -1329,13 +1319,18 @@ impl AppDelegate {
         self.view_of(&key).map(|_| key)
     }
 
+    /// The tab in front in `window`, if it is one of ours.
     fn view_of(&self, window: &NSWindow) -> Option<Retained<WindowView>> {
-        self.ivars()
+        let ours = self
+            .ivars()
             .windows
             .borrow()
             .iter()
-            .find(|(w, _)| std::ptr::eq::<NSWindow>(&**w, window))
-            .map(|(_, v)| v.clone())
+            .any(|(w, _)| std::ptr::eq::<NSWindow>(&**w, window));
+        if !ours {
+            return None;
+        }
+        TabHost::of(window).and_then(|h| h.selected())
     }
 
     /// Open a window in `cwd` (else the configured one) at `place`, running
@@ -1400,56 +1395,76 @@ impl AppDelegate {
             | NSWindowStyleMask::FullSizeContentView;
         let probe = NSRect::new(NSPoint::new(0.0, 0.0), objc2_foundation::NSSize::new(400.0, 300.0));
         let is_quick = matches!(place, Place::Quick(_));
-        let window = match is_quick {
-            true => quick::QuickWindow::create(mtm, probe),
-            false => unsafe {
-                NSWindow::initWithContentRect_styleMask_backing_defer(
-                    NSWindow::alloc(mtm),
-                    probe,
-                    style,
-                    NSBackingStoreType::Buffered,
-                    false,
-                )
-            },
-        };
-        unsafe { window.setReleasedWhenClosed(false) };
-        window.setTitlebarAppearsTransparent(true);
-        window.setTitleVisibility(NSWindowTitleVisibility::Hidden);
-        window.setTabbingIdentifier(&NSString::from_str(if is_quick { quick::TABBING_ID } else { TABBING_ID }));
-        // A new window stays a window even when System Settings prefers
-        // tabs (Cmd+T is for tabs); tabbing is allowed again once it is on
-        // screen, for Merge All Windows and dragging tabs together.
-        window.setTabbingMode(NSWindowTabbingMode::Disallowed);
-        let title = match settings {
+        let title: String = match settings {
             true => "Settings".into(),
             false => config.title.clone().unwrap_or_else(|| "Terminal Decline".into()),
         };
-        window.setTitle(&NSString::from_str(&title));
+        // A tab is a view in the window it is a tab of (tab_host.rs); a
+        // window gets a host for its tabs, with this one in it.
+        let tab_of = match &place {
+            Place::TabOf(parent) => TabHost::of(parent).map(|host| (parent.clone(), host)),
+            _ => None,
+        };
+        let is_tab = tab_of.is_some();
+        let (window, host, view) = match tab_of {
+            Some((window, host)) => {
+                let view = WindowView::new(mtm, host.bounds());
+                view.set_title(&title);
+                host.add(&view);
+                (window, host, view)
+            }
+            None => {
+                let window = match is_quick {
+                    true => quick::QuickWindow::create(mtm, probe),
+                    false => unsafe {
+                        NSWindow::initWithContentRect_styleMask_backing_defer(
+                            NSWindow::alloc(mtm),
+                            probe,
+                            style,
+                            NSBackingStoreType::Buffered,
+                            false,
+                        )
+                    },
+                };
+                unsafe { window.setReleasedWhenClosed(false) };
+                window.setTitlebarAppearsTransparent(true);
+                window.setTitleVisibility(NSWindowTitleVisibility::Hidden);
+                window.setTabbingIdentifier(&NSString::from_str(if is_quick { quick::TABBING_ID } else { TABBING_ID }));
+                // Tabs are the app's own: macOS never makes this window a
+                // tab of another, whatever System Settings prefers.
+                window.setTabbingMode(NSWindowTabbingMode::Disallowed);
+                window.setTitle(&NSString::from_str(&title));
 
-        let titlebar = window.frame().size.height - window.contentLayoutRect().size.height;
-        let size = content_size(&config, metrics, scale, titlebar.max(0.0));
-        window.setContentSize(size);
-        let bounds = NSRect::new(NSPoint::new(0.0, 0.0), size);
+                let titlebar = window.frame().size.height - window.contentLayoutRect().size.height;
+                let size = content_size(&config, metrics, scale, titlebar.max(0.0));
+                window.setContentSize(size);
+                let bounds = NSRect::new(NSPoint::new(0.0, 0.0), size);
 
-        let view = WindowView::new(mtm, bounds);
-        view.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable);
-        if !settings {
-            apply_opacity(&window, &config);
-        }
-        if config.opacity < 1.0 && config.blur && !settings {
-            let blur = NSVisualEffectView::initWithFrame(NSVisualEffectView::alloc(mtm), bounds);
-            blur.setMaterial(NSVisualEffectMaterial::UnderWindowBackground);
-            blur.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
-            blur.setState(NSVisualEffectState::Active);
-            blur.addSubview(&view);
-            window.setContentView(Some(&blur));
-        } else {
-            window.setContentView(Some(&view));
-        }
-        window.setDelegate(Some(delegate_of(&view)));
-        if let Some(pane) = view.first_responder() {
-            window.makeFirstResponder(Some(&pane));
-        }
+                let host = TabHost::new(mtm, bounds);
+                host.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable);
+                let view = WindowView::new(mtm, bounds);
+                view.set_title(&title);
+                if !settings {
+                    apply_opacity(&window, &config);
+                }
+                if config.opacity < 1.0 && config.blur && !settings {
+                    let blur = NSVisualEffectView::initWithFrame(NSVisualEffectView::alloc(mtm), bounds);
+                    blur.setMaterial(NSVisualEffectMaterial::UnderWindowBackground);
+                    blur.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
+                    blur.setState(NSVisualEffectState::Active);
+                    blur.addSubview(&host);
+                    window.setContentView(Some(&blur));
+                } else {
+                    window.setContentView(Some(&host));
+                }
+                host.add(&view);
+                window.setDelegate(Some(crate::tab_host::delegate_of(&host)));
+                if let Some(pane) = view.first_responder() {
+                    window.makeFirstResponder(Some(&pane));
+                }
+                (window, host, view)
+            }
+        };
         // Mouse moves come through each pane's tracking area: the window's
         // own would send them all to the first responder, wherever the
         // pointer is.
@@ -1491,10 +1506,8 @@ impl AppDelegate {
                 }
                 None => window.center(),
             },
-            Place::TabOf(parent) => {
-                window.setTabbingMode(NSWindowTabbingMode::Automatic);
-                parent.addTabbedWindow_ordered(&window, NSWindowOrderingMode::Above);
-            }
+            // Its window's frame is its own.
+            Place::TabOf(_) => {}
         }
         if quiet {
             crate::background::order_back(&window);
@@ -1504,9 +1517,6 @@ impl AppDelegate {
         // A new tab puts the one in front behind it, without key
         // notifications while the app is inactive.
         crate::view::sync_visibility_soon();
-        if !is_quick {
-            window.setTabbingMode(NSWindowTabbingMode::Automatic);
-        }
         if std::env::var_os("DECLINE_DEBUG").is_some() {
             // Test tooling uses this to screenshot the window.
             eprintln!("terminal-decline: window {}", window.windowNumber());
@@ -1540,24 +1550,27 @@ impl AppDelegate {
             },
         ) {
             eprintln!("terminal-decline: could not open a window: {e}");
-            window.close();
+            match is_tab {
+                true => host.close(&view),
+                false => window.close(),
+            }
             return None;
         }
-        // A restored layout has panes of its own: its focused one gets
-        // the keys.
-        if let Some(pane) = view.first_responder() {
-            window.makeFirstResponder(Some(&pane));
+        if !is_tab {
+            let center = objc2_foundation::NSNotificationCenter::defaultCenter();
+            unsafe {
+                center.addObserver_selector_name_object(
+                    self,
+                    sel!(windowClosed:),
+                    Some(objc2_app_kit::NSWindowWillCloseNotification),
+                    Some(&window),
+                )
+            };
         }
-        let center = objc2_foundation::NSNotificationCenter::defaultCenter();
-        unsafe {
-            center.addObserver_selector_name_object(
-                self,
-                sel!(windowClosed:),
-                Some(objc2_app_kit::NSWindowWillCloseNotification),
-                Some(&window),
-            )
-        };
-        self.ivars().windows.borrow_mut().push((window.clone(), view));
+        self.ivars().windows.borrow_mut().push((window.clone(), view.clone()));
+        // To the front of its window, with the keys: a restored layout
+        // has panes of its own, and its focused one gets them.
+        host.select_view(&view);
         Some(window)
     }
 }
@@ -1571,7 +1584,7 @@ impl AppDelegate {
             .windows
             .borrow()
             .iter()
-            .filter(|(w, _)| !self.is_quick(w) && !settings.as_ref().is_some_and(|s| std::ptr::eq::<NSWindow>(&**s, &**w)))
+            .filter(|(w, v)| !self.is_quick(w) && !settings.as_ref().is_some_and(|s| std::ptr::eq::<WindowView>(&**s, &**v)))
             .count()
     }
 }
@@ -1698,11 +1711,28 @@ fn tab_index(tag: isize, tabs: usize) -> Option<usize> {
 
 /// The Settings pane of `window` closed, leaving other panes: Cmd+,
 /// opens a new Settings tab from now on.
-pub(crate) fn settings_closed(window: &NSWindow) {
+/// `view`'s tab closed, its window staying open with its other tabs: it
+/// is no longer one of the app's, and no longer the Settings tab if it
+/// was.
+pub(crate) fn tab_closed(view: &WindowView) {
+    let delegate = DELEGATE.with(|d| d.borrow().as_ref().and_then(|w| w.load()));
+    if let Some(delegate) = delegate {
+        delegate
+            .ivars()
+            .windows
+            .borrow_mut()
+            .retain(|(_, v)| !std::ptr::eq::<WindowView>(&**v, view));
+        // A new build waiting for programs to end looks again.
+        busy_may_have_changed();
+    }
+    settings_closed(view);
+}
+
+pub(crate) fn settings_closed(view: &WindowView) {
     let delegate = DELEGATE.with(|d| d.borrow().as_ref().and_then(|w| w.load()));
     if let Some(delegate) = delegate {
         let mut settings = delegate.ivars().settings.borrow_mut();
-        if settings.as_deref().is_some_and(|s| std::ptr::eq::<NSWindow>(s, window)) {
+        if settings.as_deref().is_some_and(|s| std::ptr::eq::<WindowView>(s, view)) {
             *settings = None;
             drop(settings);
             delegate.end_preview();
@@ -1833,10 +1863,8 @@ pub(crate) fn show_settings_now() {
 pub(crate) fn settings_status() -> (bool, bool) {
     let delegate = DELEGATE.with(|d| d.borrow().as_ref().and_then(|w| w.load()));
     let Some(delegate) = delegate else { return (false, false) };
-    let window = delegate.ivars().settings.borrow().clone();
-    window
-        .and_then(|w| delegate.view_of(&w))
-        .map_or((false, false), |v| v.settings_status())
+    let view = delegate.ivars().settings.borrow().clone();
+    view.map_or((false, false), |v| v.settings_status())
 }
 
 /// What's New (the menu item, or a click on "Updated to …"): the page

@@ -417,7 +417,9 @@ pub fn name_of(pid: libc::pid_t) -> Option<String> {
 pub enum Closing {
     /// One pane of several.
     Pane,
-    /// A window (or tab), with all its panes.
+    /// A tab, with all its panes.
+    Tab,
+    /// A window, with all its tabs and their panes.
     Window,
 }
 
@@ -437,6 +439,7 @@ fn names(programs: &[String]) -> String {
 pub fn close_question(what: Closing, programs: &[String]) -> (String, String) {
     let what = match what {
         Closing::Pane => "pane",
+        Closing::Tab => "tab",
         Closing::Window => "window",
     };
     let text = match programs {
@@ -820,6 +823,7 @@ mod tests {
                 "vim is still running in it. Closing the pane ends it.".into()
             )
         );
+        assert_eq!(close_question(Closing::Tab, &["vim".into()]).0, "Close this tab?");
         assert_eq!(
             close_question(Closing::Window, &["vim".into(), "top".into(), "vim".into()]).1,
             "Programs are still running in 3 of its panes (vim, top). Closing the window ends them."

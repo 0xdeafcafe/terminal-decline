@@ -95,9 +95,9 @@ fn rows(kind: &str) -> (Vec<Row>, Vec<Style>) {
                         });
                     }
                 }
-                for c in 0..COLS {
+                for (c, cell) in row.cells.iter_mut().enumerate().take(COLS) {
                     let id = 4 + i * COLS + c;
-                    row.cells[c] = template(&styles, id).with_char('█');
+                    *cell = template(&styles, id).with_char('█');
                 }
             }
             _ => unreachable!(),

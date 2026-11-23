@@ -1158,8 +1158,8 @@ fn a_placeholder_row_is_stored_as_section_11_4_says() {
         },
     ];
     let mut row = Row::new(80, Cell::BLANK);
-    for col in 0..40 {
-        row.cells[col] = template(&styles, 1).with_placeholder(3, col as u16);
+    for (col, cell) in row.cells.iter_mut().enumerate().take(40) {
+        *cell = template(&styles, 1).with_placeholder(3, col as u16);
     }
     let mut sb = Scrollback::new(100);
     sb.push(&row, &styles);

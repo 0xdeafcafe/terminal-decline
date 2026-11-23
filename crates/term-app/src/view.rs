@@ -845,6 +845,9 @@ pub struct Launch {
     /// One pane's history saved for a restart, shown again above its new
     /// shell ([`crate::saved_history`]); with `layout`, each pane's own.
     pub history: Option<String>,
+    /// One pane's program handed over by the build that restarted into
+    /// this one ([`crate::handoff`]); with `layout`, each pane's own.
+    pub live: Option<u64>,
     /// The command its shell was running before the restart, said in
     /// the faint line under that history; with `layout`, each pane's own.
     pub was_running: Option<String>,
@@ -955,6 +958,7 @@ impl WindowView {
                     settings,
                     adopt: adopt.take(),
                     history: launch.history.as_deref(),
+                    live: launch.live,
                     was_running: launch.was_running.as_deref(),
                     welcome: welcome.as_ref(),
                     font_size: config.font_size,
@@ -1006,6 +1010,7 @@ impl WindowView {
                         settings: false,
                         adopt: None,
                         history: saved.history.as_deref(),
+                        live: saved.live.as_ref().map(|l| l.id),
                         was_running: saved.command.as_deref().filter(|_| !saved.program),
                         welcome: None,
                         font_size,
@@ -2691,6 +2696,7 @@ impl WindowView {
                     settings: false,
                     adopt: None,
                     history: None,
+                    live: None,
                     was_running: None,
                     welcome: None,
                     font_size,
@@ -3272,7 +3278,12 @@ impl WindowView {
     /// foreground and whether it ran the window's program. With
     /// `history`, each pane's history too, its newest lines up to the
     /// limit, in the store's files.
-    pub fn saved_panes(&self, history: Option<(&crate::saved_history::Store, usize)>) -> Option<SavedPanes> {
+    pub fn saved_panes(
+        &self,
+        history: Option<(&crate::saved_history::Store, usize)>,
+        offer: Option<&crate::handoff::Offer>,
+    ) -> Option<SavedPanes> {
+        let window = self.id();
         self.with_state(|st| {
             if !saves_panes(st) {
                 return None;
@@ -3287,6 +3298,7 @@ impl WindowView {
                     history: history.and_then(|(store, limit)| save_history(p, store, limit)),
                     font_size: (p.font_size != default_size).then_some(p.font_size),
                     name: p.name.clone(),
+                    live: offer.filter(|_| hands_over(p)).and_then(|o| o.add(window, id)),
                 },
                 None => SavedPane::default(),
             }))
@@ -3302,6 +3314,55 @@ impl WindowView {
                 return None;
             }
             st.focused().and_then(|p| save_history(p, store, limit))
+        })
+        .flatten()
+    }
+
+    /// The program of a window with one pane, offered to the new build
+    /// as [`WindowView::saved_panes`] offers each pane's.
+    pub fn saved_live(&self, offer: &crate::handoff::Offer) -> Option<crate::reload::LiveRef> {
+        let window = self.id();
+        self.with_state(|st| {
+            if saves_panes(st) {
+                return None;
+            }
+            let pane = st.tree.focused();
+            st.focused().filter(|p| hands_over(p)).and_then(|_| offer.add(window, pane))
+        })
+        .flatten()
+    }
+
+    /// Hand pane `pane`'s program over as `id` (the new build has
+    /// connected): stop reading it, and what to send. `None` if it has
+    /// no program any more.
+    pub(crate) fn hand_over_pane(&self, pane: PaneId, id: u64) -> Option<term_pty::handoff::Item> {
+        self.with_state(|st| {
+            let limit = st.win.config.scrollback;
+            let p = st.panes.get_mut(&pane)?;
+            let pid = p.session.pid()?;
+            let tty_name = p.session.tty_name().map(str::to_string);
+            let (cols, lines, token) = {
+                let t = p.session.lock_term();
+                let token = t.state.report_token().and_then(|k| String::from_utf8(k.to_vec()).ok());
+                (t.state.cols(), t.state.lines(), token)
+            };
+            let (handed, live) = match p.session.hand_over(limit, crate::saved_history::now()) {
+                Ok(parts) => parts,
+                Err(e) => {
+                    eprintln!("terminal-decline: a pane's program wasn't handed over: {e}");
+                    return None;
+                }
+            };
+            let header = crate::handoff::Header {
+                id,
+                pid,
+                tty_name,
+                cols,
+                lines,
+                blocks: 0,
+                token,
+            };
+            Some(crate::handoff::item(&header, handed, live))
         })
         .flatten()
     }
@@ -3715,6 +3776,9 @@ struct NewPane<'a> {
     adopt: Option<crate::ctl::window::Adopt>,
     /// Its history from before a restart, to show again.
     history: Option<&'a str>,
+    /// Its program from before a restart, handed over still running
+    /// ([`crate::handoff::claim`]).
+    live: Option<u64>,
     /// The command its shell was running then.
     was_running: Option<&'a str>,
     /// The welcome line, and the update line under it
@@ -3730,7 +3794,7 @@ struct NewPane<'a> {
 }
 
 /// Start pane `n` of window `window`: its terminal and program.
-fn spawn_pane(window: usize, config: &Config, theme: &Theme, test: bool, n: NewPane) -> std::io::Result<Pane> {
+fn spawn_pane(window: usize, config: &Config, theme: &Theme, test: bool, mut n: NewPane) -> std::io::Result<Pane> {
     let m = n.metrics;
     let (cols, lines) = n.grid;
     let mut t = Term::new(cols, lines, config.scrollback, term_core::ImagePool::process());
@@ -3738,6 +3802,31 @@ fn spawn_pane(window: usize, config: &Config, theme: &Theme, test: bool, n: NewP
     t.state.set_cursor_default(config.cursor_style.shape(), config.cursor_blink);
     // Before the program starts: nothing to report yet.
     crate::config::set_term_colors(&mut t.state, theme);
+    // Its program is still running, handed over by the build that
+    // restarted into this one: carry on with it.
+    let taken = n.live.and_then(crate::handoff::claim);
+    if let Some(taken) = taken {
+        let mut t = Term::new(
+            taken.header.cols,
+            taken.header.lines,
+            config.scrollback,
+            term_core::ImagePool::process(),
+        );
+        t.state.set_ambiguous_width(config.ambiguous_width);
+        t.state.set_cursor_default(config.cursor_style.shape(), config.cursor_blink);
+        crate::config::set_term_colors(&mut t.state, theme);
+        if let Err(e) = t.restore_live(&taken.live) {
+            eprintln!("terminal-decline: a pane's screen wasn't handed over: {e:?}");
+        }
+        t.state
+            .set_report_token(taken.header.token.as_ref().and_then(|k| k.as_bytes().try_into().ok()));
+        if (taken.header.cols, taken.header.lines) != (cols, lines) {
+            t.state.resize(cols, lines);
+        }
+        let hooks = pane_hooks(window, n.id, test, n.settings);
+        let session = Session::adopt(taken.handed, pty_size(cols, lines, m), t, hooks)?;
+        return Ok(new_pane(config, n, session));
+    }
     match n.history {
         Some(name) => crate::saved_history::Store::current().restore(&mut t, name, n.was_running),
         // No history to show (the alternate screen, or none saved): the
@@ -3755,7 +3844,7 @@ fn spawn_pane(window: usize, config: &Config, theme: &Theme, test: bool, n: NewP
         crate::session::write_notice(&mut t, notice);
     }
     let mut hooks = pane_hooks(window, n.id, test, n.settings);
-    let adopted = n.adopt.map(|a| a.attach(&mut hooks));
+    let adopted = n.adopt.take().map(|a| a.attach(&mut hooks));
     // The login shell (or a command that is just a shell) gets the shell
     // integration; Settings and other programs don't.
     let mut command = n.command.clone();
@@ -3770,9 +3859,16 @@ fn spawn_pane(window: usize, config: &Config, theme: &Theme, test: bool, n: NewP
     if let Some(ready) = adopted {
         ready(&session);
     }
+    Ok(new_pane(config, n, session))
+}
+
+/// Pane `n` around its `session`.
+fn new_pane(config: &Config, n: NewPane, session: Session) -> Pane {
+    let (cols, lines) = n.grid;
+    let m = n.metrics;
     let size_labels = crate::size_labels::SizeLabels::new(&n.view, n.font_size - config.font_size);
     let strip = crate::pane_strip::PaneStrip::new(&n.view);
-    Ok(Pane {
+    Pane {
         view: n.view,
         session,
         render: n.render,
@@ -3817,7 +3913,7 @@ fn spawn_pane(window: usize, config: &Config, theme: &Theme, test: bool, n: NewP
         size_labels,
         name: n.name,
         strip,
-    })
+    }
 }
 
 /// What pane `p` is doing, as the window's title says it with the pane
@@ -3899,6 +3995,13 @@ fn command_to_restore(p: &Pane) -> Option<String> {
         crate::running::foreground_command(pid),
         running.and_then(|r| r.command.as_deref()),
     )
+}
+
+/// Whether `p`'s program goes to the new build on a restart: any that is
+/// running, but the Settings pane's (the new build's Settings is its
+/// own).
+fn hands_over(p: &Pane) -> bool {
+    !p.settings && p.session.pid().is_some()
 }
 
 /// Save `p`'s history in `store`, as [`crate::saved_history::Store::save`]

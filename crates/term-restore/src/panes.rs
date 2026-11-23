@@ -1405,6 +1405,7 @@ mod tests {
             history: (id == 3).then(|| "1-2-3.hist".into()),
             font_size: (id == 2).then_some(16.0),
             name: (id == 4).then(|| "logs".into()),
+            live: None,
         });
         assert_eq!((saved.focused, saved.zoomed), (3, Some(3)));
         let json = serde_json::to_string(&saved).unwrap();

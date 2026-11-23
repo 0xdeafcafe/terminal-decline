@@ -60,6 +60,21 @@ pub struct SavedWindow {
     /// tabs, any tab of the group.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub full_screen: bool,
+    /// Its program, still running, for the new build to take over
+    /// instead of starting a shell (docs/design/handoff.md). `None`
+    /// with panes (each pane has its own), and in files from builds
+    /// before this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live: Option<LiveRef>,
+}
+
+/// Where a pane's running program is offered to the new build, and
+/// which of the programs offered there it is.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct LiveRef {
+    /// The Unix socket's path.
+    pub socket: String,
+    pub id: u64,
 }
 
 /// A window's panes as saved: the tree with its shares, each pane's
@@ -110,6 +125,9 @@ pub struct SavedPane {
     /// Its name (Rename Pane…), shown in its title strip.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Its running program, as [`SavedWindow::live`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live: Option<LiveRef>,
 }
 
 /// Saved windows as they reopen: one list per window, its tabs in order.
@@ -493,6 +511,7 @@ mod tests {
                 command: None,
                 history: None,
                 full_screen: false,
+                live: None,
             },
             SavedWindow {
                 cwd: None,
@@ -503,6 +522,7 @@ mod tests {
                 command: None,
                 history: None,
                 full_screen: false,
+                live: None,
             },
             SavedWindow {
                 cwd: Some("/b".into()),
@@ -535,6 +555,7 @@ mod tests {
                 command: None,
                 history: None,
                 full_screen: false,
+                live: None,
             },
         ];
         std::fs::write(&path, serde_json::to_vec(&w).unwrap()).unwrap();
@@ -553,6 +574,7 @@ mod tests {
             command: None,
             history: None,
             full_screen: false,
+            live: None,
         }
     }
 

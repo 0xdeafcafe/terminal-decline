@@ -60,9 +60,20 @@ fn timed_out(what: &str) -> io::Error {
 /// Wait up to `timeout` for one taker and give it `items`. `Ok` once it
 /// said it has them all; until then the caller keeps its descriptors.
 pub fn serve(listener: &UnixListener, items: &[Item], timeout: Duration) -> io::Result<()> {
+    accept(listener, timeout)?.give(items, timeout)
+}
+
+/// A taker that has connected, and is waiting for the items.
+pub struct Taker {
+    stream: UnixStream,
+}
+
+/// Wait up to `timeout` for the taker to connect. Nothing has been given
+/// yet: a caller that never gets one has lost nothing.
+pub fn accept(listener: &UnixListener, timeout: Duration) -> io::Result<Taker> {
     let deadline = Instant::now() + timeout;
     listener.set_nonblocking(true)?;
-    let mut stream = loop {
+    let stream = loop {
         match listener.accept() {
             Ok((stream, _)) => break stream,
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
@@ -83,26 +94,34 @@ pub fn serve(listener: &UnixListener, items: &[Item], timeout: Duration) -> io::
     };
     stream.set_nonblocking(false)?;
     same_user(&stream)?;
-    let left = deadline.saturating_duration_since(Instant::now()).max(Duration::from_secs(1));
-    stream.set_write_timeout(Some(left))?;
-    stream.set_read_timeout(Some(left))?;
-    stream.write_all(MAGIC)?;
-    stream.write_all(&(items.len() as u32).to_le_bytes())?;
-    for item in items {
-        let mut frame = [0u8; 12];
-        frame[..4].copy_from_slice(&(item.header.len() as u32).to_le_bytes());
-        frame[4..].copy_from_slice(&(item.body.len() as u64).to_le_bytes());
-        send_with_fd(&stream, &frame, item.fd.as_raw_fd())?;
-        stream.write_all(&item.header)?;
-        stream.write_all(&item.body)?;
+    Ok(Taker { stream })
+}
+
+impl Taker {
+    /// Give it `items`, each step within `timeout`. `Ok` once it said it
+    /// has them all.
+    pub fn give(self, items: &[Item], timeout: Duration) -> io::Result<()> {
+        let mut stream = self.stream;
+        stream.set_write_timeout(Some(timeout))?;
+        stream.set_read_timeout(Some(timeout))?;
+        stream.write_all(MAGIC)?;
+        stream.write_all(&(items.len() as u32).to_le_bytes())?;
+        for item in items {
+            let mut frame = [0u8; 12];
+            frame[..4].copy_from_slice(&(item.header.len() as u32).to_le_bytes());
+            frame[4..].copy_from_slice(&(item.body.len() as u64).to_le_bytes());
+            send_with_fd(&stream, &frame, item.fd.as_raw_fd())?;
+            stream.write_all(&item.header)?;
+            stream.write_all(&item.body)?;
+        }
+        stream.flush()?;
+        let mut answer = [0u8; TAKEN.len()];
+        stream.read_exact(&mut answer)?;
+        if &answer != TAKEN {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "not taken"));
+        }
+        Ok(())
     }
-    stream.flush()?;
-    let mut answer = [0u8; TAKEN.len()];
-    stream.read_exact(&mut answer)?;
-    if &answer != TAKEN {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "not taken"));
-    }
-    Ok(())
 }
 
 /// Take everything the server at `path` has, each step within `timeout`.

@@ -1,6 +1,16 @@
 # Hand-off: programs keep running across a restart
 
-Status: design, with part 1 being built. Decided with Alex on 23 Nov 2026.
+Status: part 1 landed on the `keep-programs-on-restart` branch (23 Nov
+2026), part 2 designed only. Decided with Alex on 23 Nov 2026.
+
+Landed in part 1: `Terminal::save_live` / `Term::restore_live`
+(`term-core`), `Pty::hand_over` / `Pty::adopt` and the socket
+(`term-pty::handoff`), `Session::hand_over` / `Session::adopt`, the
+offer and the taker (`term-app::handoff`), `live` in the saved window
+list (`term-restore`), and `!again` in `decline.zsh`. Tested up to two
+sessions in one process; a restart between two real builds has not
+been run yet (the smoke test of §7 isn't written: under the test
+control the new build isn't started).
 
 ## 1. The problem
 
@@ -33,22 +43,27 @@ session. A restart no longer has to wait.
 
 Old app, in `restart_into_new_build`:
 
-1. Every pane's reader thread is stopped between two batches, so the
-   snapshot has everything read and nothing more is taken off the PTY.
-   Its `Pty` is disarmed: dropping it no longer hangs up on the program.
-2. Each pane with a program gives a `Live`: the master (duplicated), the
-   program's pid, the terminal device's name, the size, the report token
-   and features given to its shell, and the terminal's snapshot (§4).
-3. The socket is made and listened on. The window list is saved as now,
-   each `SavedPane` with `live: {socket, id}` beside its history file
-   and command, which stay as the fallback.
-4. The new build is started with `--restore`, as now.
-5. The old app waits up to `TAKE_TIMEOUT` (10 s) for one connection,
-   sends every `Live` (a length-prefixed JSON header and the snapshot
-   bytes, the descriptor in the same message's ancillary data), waits
-   for `taken`, and quits. Its windows are frozen meanwhile.
-6. No taker: it quits anyway. The masters close with it and the
-   programs get SIGHUP, as today.
+1. Each pane with a program is given an id. The socket is made and
+   listened on, and the window list is saved as now, each pane with
+   `live: {socket, id}` beside its history file and command, which stay
+   as the fallback.
+2. The new build is started with `--restore`, as now.
+3. The old app waits up to `TAKE_TIMEOUT` (10 s) for it to connect. Its
+   windows are frozen meanwhile. Nothing has been given up yet: with no
+   taker (an older build, one that didn't start) it quits as it does
+   today.
+4. With a taker, every pane's reader thread is stopped between two
+   batches, so the snapshot has everything read and nothing more is
+   taken off the PTY, and its `Pty` is disarmed: dropping it no longer
+   hangs up on the program.
+5. Each pane gives a `Live`: the master (duplicated), the program's pid,
+   the terminal device's name, the size, the report token given to its
+   shell, and the terminal's snapshot (§4). They are sent (a
+   length-prefixed JSON header and the snapshot bytes, the descriptor in
+   the same message's ancillary data); the old app waits for `taken`
+   and quits.
+6. A hand-over that fails part way: it quits anyway. The masters close
+   with it and the programs get SIGHUP, as today.
 
 New app, given `--restore`:
 
@@ -97,11 +112,12 @@ with OSC 4/10/11 (part 2).
 The app's own per-pane state rides in the header: whether it runs the
 user's shell or the window's program, its title override, and the token.
 The shell's environment report (what completion knows) was sent once
-and isn't again: `decline.zsh` takes `!again` on its `ESC [ 7701 ~`
-widget and reports the environment and the line afresh, which the new
-app types into every adopted shell at its prompt. Shells started
-before this build don't know it: completion there lacks commands until
-their `PATH` or aliases change.
+and isn't again, so completion in an adopted shell lacks its commands
+until its `PATH` or aliases change. `decline.zsh` takes `!again` on its
+`ESC [ 7701 ~` widget and reports the environment and the line afresh.
+The app doesn't type it yet: it may only be typed to a shell at its
+prompt, and whether an adopted shell is at its prompt isn't carried
+(part 2).
 
 ## 5. Shells outlive builds
 
@@ -148,8 +164,10 @@ decisions for after part 1 has been used.
 ## 8. Plan
 
 1. `term-core`: `save_live` / `restore_live`.
-2. `term-pty`: stoppable reader, `Pty::release`, `Pty::adopt`, the
+2. `term-pty`: stoppable reader, `Pty::hand_over`, `Pty::adopt`, the
    socket.
-3. `term-app`: `Session::release` / `Session::adopt`; the restart and
+3. `term-app`: `Session::hand_over` / `Session::adopt`; the restart and
    restore paths; `!again`.
-4. Part 2, after part 1 has run in dogfood for a while.
+4. A dogfood restart with programs running, and the smoke test.
+5. Part 2, after part 1 has run in dogfood for a while: the keeper,
+   typing `!again`, and restarts that no longer wait for `reload::busy`.

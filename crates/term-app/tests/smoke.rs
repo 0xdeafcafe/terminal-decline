@@ -360,6 +360,53 @@ fn smoke_second_tab_keeps_the_grid() {
     }
 }
 
+/// A tab moves along the bar (`move-tab`), leaves for a window of its
+/// own with its program running on (`tab-out`), and takes the other
+/// window's tab in again (`merge`).
+#[test]
+#[ignore = "opens a window; run with --run-ignored"]
+fn smoke_a_tab_moves_leaves_and_comes_back() {
+    if !have_metal() {
+        return;
+    }
+    let dir = TempDir::new("tab-move");
+    let d = dir.path().display();
+    let wait = |cond: &str| format!("i=0; while ! {{ {cond}; }} && [ $i -lt 200 ]; do sleep 0.05; i=$((i+1)); done; ");
+    let script = format!(
+        "if mkdir '{d}/first' 2>/dev/null; then \
+           echo one; {tab}{wait_two}{dump}{moved}{dump}{out}{dump}{merge}{dump}{quit}\
+         else touch '{d}/two'; fi; sleep 20",
+        tab = osc("tab"),
+        dump = osc("dump"),
+        moved = osc("move-tab 1"),
+        out = osc("tab-out"),
+        merge = osc("merge"),
+        quit = osc("quit"),
+        wait_two = wait(&format!("[ -e '{d}/two' ]")),
+    );
+    let (status, _) = decline(&dir, &script, true);
+    assert!(status.success(), "{status}");
+    let all = dumps(&dir);
+    let one: Vec<_> = all.iter().filter(|x| x["window"] == 1).collect();
+    assert_eq!(one.len(), 4, "{all:?}");
+    let at = |x: &Value| (num(x, "tabs"), num(x, "tab"));
+    assert_eq!(at(one[0]), (2.0, 0.0), "the first of two tabs: {}", one[0]);
+    assert_eq!(at(one[1]), (2.0, 1.0), "moved to the second place: {}", one[1]);
+    assert_eq!(at(one[2]), (1.0, 0.0), "in a window of its own: {}", one[2]);
+    assert!(one[2]["tab_bar"].is_null(), "{}", one[2]);
+    assert_eq!(at(one[3]), (2.0, 0.0), "the other window's tab joined it: {}", one[3]);
+    assert_eq!(one[3]["tab_bar"].as_array().map(Vec::len), Some(2), "{}", one[3]);
+    // The same program all along, at the size it had.
+    for x in &one {
+        assert!(screen(x).starts_with("one|"), "{}", screen(x));
+        assert_eq!(
+            (num(x, "lines"), num(x, "cols")),
+            (num(one[0], "lines"), num(one[0], "cols")),
+            "{x}"
+        );
+    }
+}
+
 /// What a dogfood build does after a restart (`--restore <file>`): two
 /// tabs reopen as tabs of one window, in order, each in its directory, and
 /// a plain window stays a window of its own.

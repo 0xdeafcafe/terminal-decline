@@ -421,6 +421,8 @@ pub enum Closing {
     Tab,
     /// A window, with all its tabs and their panes.
     Window,
+    /// Every tab of a window but one.
+    OtherTabs,
 }
 
 /// The names in `programs`, each once, in order, joined with commas.
@@ -441,6 +443,17 @@ pub fn close_question(what: Closing, programs: &[String]) -> (String, String) {
         Closing::Pane => "pane",
         Closing::Tab => "tab",
         Closing::Window => "window",
+        Closing::OtherTabs => {
+            let text = match programs {
+                [one] => format!("{one} is still running in one of them. Closing them ends it."),
+                _ => format!(
+                    "Programs are still running in {} of their panes ({}). Closing them ends them.",
+                    programs.len(),
+                    names(programs)
+                ),
+            };
+            return ("Close the other tabs?".into(), text);
+        }
     };
     let text = match programs {
         [one] => format!("{one} is still running in it. Closing the {what} ends it."),
@@ -824,6 +837,13 @@ mod tests {
             )
         );
         assert_eq!(close_question(Closing::Tab, &["vim".into()]).0, "Close this tab?");
+        assert_eq!(
+            close_question(Closing::OtherTabs, &["vim".into()]),
+            (
+                "Close the other tabs?".into(),
+                "vim is still running in one of them. Closing them ends it.".into()
+            )
+        );
         assert_eq!(
             close_question(Closing::Window, &["vim".into(), "top".into(), "vim".into()]).1,
             "Programs are still running in 3 of its panes (vim, top). Closing the window ends them."

@@ -3514,6 +3514,7 @@ impl WindowView {
                 with_view(id, |v| match then {
                     AfterAsk::Pane(pane) => v.close_pane(pane),
                     AfterAsk::Tab => v.close_tab(),
+                    AfterAsk::OtherTabs => v.close_others(),
                     AfterAsk::AllTabs => {
                         if let Some(window) = v.window() {
                             window.close();
@@ -3698,6 +3699,7 @@ pub(crate) fn pane_padding(config: &Config, titlebar: f64, scale: f64, rect: PxR
 enum AfterAsk {
     Pane(PaneId),
     Tab,
+    OtherTabs,
     AllTabs,
 }
 
@@ -4218,6 +4220,59 @@ impl WindowView {
         self.ivars().normal_frame.set(None);
     }
 
+    /// The tab bar's Close Other Tabs: every tab of the window but this
+    /// one, asking once with `confirm_close` while programs run in them.
+    pub(crate) fn close_other_tabs(&self) {
+        let Some(window) = self.window() else { return };
+        let ask = self.with_state(|st| st.win.config.confirm_close).unwrap_or(false);
+        let programs: Vec<String> = if ask {
+            self.other_tabs().iter().flat_map(|v| v.running_programs()).collect()
+        } else {
+            Vec::new()
+        };
+        if programs.is_empty() {
+            self.close_others();
+        } else {
+            self.ask_to_close(&window, Closing::OtherTabs, &programs, AfterAsk::OtherTabs);
+        }
+    }
+
+    fn other_tabs(&self) -> Vec<Retained<WindowView>> {
+        let Some(window) = self.window() else { return Vec::new() };
+        tab_views(&window)
+            .into_iter()
+            .filter(|v| !std::ptr::eq::<WindowView>(&**v, self))
+            .collect()
+    }
+
+    fn close_others(&self) {
+        for tab in self.other_tabs() {
+            tab.close_tab();
+        }
+    }
+
+    /// The tab bar's Rename…: the focused pane's name, which the tab says.
+    pub(crate) fn rename_tab(&self) {
+        if let Some(pane) = self.focused_pane() {
+            self.rename_pane(pane);
+        }
+    }
+
+    /// The tab moved to another window (dragged out or in, Move Tab to
+    /// New Window, Merge All Windows): it follows that window's title
+    /// row from now on, and takes its size.
+    pub(crate) fn moved_to_window(&self) {
+        let key = NSString::from_str(LAYOUT_RECT);
+        if let Some(old) = self.ivars().observed.borrow_mut().take() {
+            unsafe { old.removeObserver_forKeyPath(self, &key) };
+        }
+        if let Some(window) = self.window() {
+            unsafe { window.addObserver_forKeyPath_options_context(self, &key, NSKeyValueObservingOptions::empty(), std::ptr::null_mut()) };
+            *self.ivars().observed.borrow_mut() = Some(window);
+        }
+        self.resize();
+    }
+
     /// The tab's title: the window's while it is the tab in front.
     pub(crate) fn title(&self) -> String {
         self.ivars().title.borrow().clone()
@@ -4304,6 +4359,19 @@ impl WindowView {
                         }
                     }
                     Some(Control::Front) => bring_to_front(self.ivars().id),
+                    Some(Control::MoveTab(to)) => {
+                        if let Some(host) = TabHost::of_view(self)
+                            && let Some(from) = host.index_of(self)
+                        {
+                            host.move_tab(from, to);
+                        }
+                    }
+                    Some(Control::TabOut) => crate::app::tab_to_new_window(self, None),
+                    Some(Control::Merge) => {
+                        if let Some(host) = TabHost::of_view(self) {
+                            host.merge_all();
+                        }
+                    }
                     Some(Control::Drop(paths)) => {
                         if let Some(view) = self.focused_view() {
                             view.paste_text(&crate::desktop::dropped_text(&paths));

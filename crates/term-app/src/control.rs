@@ -9,6 +9,9 @@
 //! - `font +1` / `font -1`: change the font size by one point;
 //! - `tab`: open a new tab beside this window, running the same program;
 //! - `front`: bring this window or tab to the front;
+//! - `move-tab N`: move this tab to place N (from 0) in the tab bar;
+//! - `tab-out`: this tab to a window of its own; `merge`: every
+//!   window's tabs into this one;
 //! - `drop PATH[<tab>PATH…]`: as if those files were dragged onto the
 //!   window (paths separated by tabs, so they may hold spaces);
 //! - `close`: close the tab as its close button does (asking first with
@@ -248,6 +251,12 @@ pub enum Control {
     Tab,
     /// Bring this window or tab to the front (as a notification click does).
     Front,
+    /// Move this tab to this place in its window's tab bar, from 0.
+    MoveTab(usize),
+    /// This tab to a window of its own (Window > Move Tab to New Window).
+    TabOut,
+    /// Every window's tabs into this window (Window > Merge All Windows).
+    Merge,
     /// Files dropped on the window.
     Drop(Vec<String>),
     /// The tab's close button.
@@ -424,6 +433,9 @@ impl Control {
             "memory-pressure" => Control::MemoryPressure,
             "tab" => Control::Tab,
             "front" => Control::Front,
+            "move-tab" => Control::MoveTab(words.next()?.parse().ok()?),
+            "tab-out" => Control::TabOut,
+            "merge" => Control::Merge,
             "close" => Control::Close,
             "close-pane" => Control::ClosePane,
             "equalize" => Control::Equalize,
@@ -813,6 +825,11 @@ mod tests {
             ("tab", Some(Control::Tab)),
             ("tab 2", None),
             ("front", Some(Control::Front)),
+            ("move-tab 2", Some(Control::MoveTab(2))),
+            ("move-tab", None),
+            ("move-tab x", None),
+            ("tab-out", Some(Control::TabOut)),
+            ("merge", Some(Control::Merge)),
             ("close", Some(Control::Close)),
             ("close-pane", Some(Control::ClosePane)),
             ("drag 0 300", Some(Control::Drag { index: 0, to: 300 })),

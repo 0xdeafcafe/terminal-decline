@@ -1388,11 +1388,6 @@ impl AppDelegate {
             }
         }
 
-        let style = NSWindowStyleMask::Titled
-            | NSWindowStyleMask::Closable
-            | NSWindowStyleMask::Miniaturizable
-            | NSWindowStyleMask::Resizable
-            | NSWindowStyleMask::FullSizeContentView;
         let probe = NSRect::new(NSPoint::new(0.0, 0.0), objc2_foundation::NSSize::new(400.0, 300.0));
         let is_quick = matches!(place, Place::Quick(_));
         let title: String = match settings {
@@ -1414,51 +1409,15 @@ impl AppDelegate {
                 (window, host, view)
             }
             None => {
-                let window = match is_quick {
-                    true => quick::QuickWindow::create(mtm, probe),
-                    false => unsafe {
-                        NSWindow::initWithContentRect_styleMask_backing_defer(
-                            NSWindow::alloc(mtm),
-                            probe,
-                            style,
-                            NSBackingStoreType::Buffered,
-                            false,
-                        )
-                    },
-                };
-                unsafe { window.setReleasedWhenClosed(false) };
-                window.setTitlebarAppearsTransparent(true);
-                window.setTitleVisibility(NSWindowTitleVisibility::Hidden);
-                window.setTabbingIdentifier(&NSString::from_str(if is_quick { quick::TABBING_ID } else { TABBING_ID }));
-                // Tabs are the app's own: macOS never makes this window a
-                // tab of another, whatever System Settings prefers.
-                window.setTabbingMode(NSWindowTabbingMode::Disallowed);
-                window.setTitle(&NSString::from_str(&title));
-
+                let window = new_window(mtm, is_quick, &title, probe);
                 let titlebar = window.frame().size.height - window.contentLayoutRect().size.height;
                 let size = content_size(&config, metrics, scale, titlebar.max(0.0));
                 window.setContentSize(size);
                 let bounds = NSRect::new(NSPoint::new(0.0, 0.0), size);
-
-                let host = TabHost::new(mtm, bounds);
-                host.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable);
+                let host = install_host(mtm, &window, &config, settings, bounds);
                 let view = WindowView::new(mtm, bounds);
                 view.set_title(&title);
-                if !settings {
-                    apply_opacity(&window, &config);
-                }
-                if config.opacity < 1.0 && config.blur && !settings {
-                    let blur = NSVisualEffectView::initWithFrame(NSVisualEffectView::alloc(mtm), bounds);
-                    blur.setMaterial(NSVisualEffectMaterial::UnderWindowBackground);
-                    blur.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
-                    blur.setState(NSVisualEffectState::Active);
-                    blur.addSubview(&host);
-                    window.setContentView(Some(&blur));
-                } else {
-                    window.setContentView(Some(&host));
-                }
                 host.add(&view);
-                window.setDelegate(Some(crate::tab_host::delegate_of(&host)));
                 if let Some(pane) = view.first_responder() {
                     window.makeFirstResponder(Some(&pane));
                 }
@@ -1576,6 +1535,42 @@ impl AppDelegate {
 }
 
 impl AppDelegate {
+    fn tab_to_new_window(&self, view: &WindowView, at: Option<NSPoint>) {
+        let mtm = MainThreadMarker::from(self);
+        let (Some(old), Some(from)) = (view.window(), TabHost::of_view(view)) else {
+            return;
+        };
+        if from.count() < 2 || self.is_quick(&old) {
+            return;
+        }
+        let config = self.ivars().config.borrow().clone();
+        let frame = old.frame();
+        let bounds = NSRect::new(NSPoint::new(0.0, 0.0), from.bounds().size);
+        let window = new_window(mtm, false, &view.title(), bounds);
+        window.setFrame_display(frame, false);
+        let host = install_host(mtm, &window, &config, false, bounds);
+        from.detach(view);
+        host.adopt(view, true);
+        tab_moved(view, &window);
+        let top = frame.origin.y + frame.size.height;
+        match at {
+            // The pointer over where its tab would be, if it had a bar.
+            Some(p) => window.setFrameTopLeftPoint(NSPoint::new(p.x - 120.0, p.y + 14.0)),
+            None => window.setFrameTopLeftPoint(NSPoint::new(frame.origin.x + 22.0, top - 22.0)),
+        }
+        let center = objc2_foundation::NSNotificationCenter::defaultCenter();
+        unsafe {
+            center.addObserver_selector_name_object(
+                self,
+                sel!(windowClosed:),
+                Some(objc2_app_kit::NSWindowWillCloseNotification),
+                Some(&window),
+            )
+        };
+        crate::background::make_key_and_order_front(&window);
+        crate::view::sync_visibility_soon();
+    }
+
     /// Tabs open with a terminal in them: not Settings, nor the quick
     /// terminal.
     fn terminal_tabs(&self) -> usize {
@@ -1687,6 +1682,55 @@ fn apply_appearance(mtm: MainThreadMarker, mode: crate::theme::AppearanceMode) {
     NSApplication::sharedApplication(mtm).setAppearance(appearance.as_deref());
 }
 
+/// A window for tabs, not yet on screen: `probe` its content's place
+/// for now, the title bar transparent over the content, and macOS's own
+/// window tabs off (tabs are the app's: tab_host.rs).
+fn new_window(mtm: MainThreadMarker, quick: bool, title: &str, probe: NSRect) -> Retained<NSWindow> {
+    let style = NSWindowStyleMask::Titled
+        | NSWindowStyleMask::Closable
+        | NSWindowStyleMask::Miniaturizable
+        | NSWindowStyleMask::Resizable
+        | NSWindowStyleMask::FullSizeContentView;
+    let window = match quick {
+        true => quick::QuickWindow::create(mtm, probe),
+        false => unsafe {
+            NSWindow::initWithContentRect_styleMask_backing_defer(NSWindow::alloc(mtm), probe, style, NSBackingStoreType::Buffered, false)
+        },
+    };
+    unsafe { window.setReleasedWhenClosed(false) };
+    window.setTitlebarAppearsTransparent(true);
+    window.setTitleVisibility(NSWindowTitleVisibility::Hidden);
+    window.setTabbingIdentifier(&NSString::from_str(if quick { quick::TABBING_ID } else { TABBING_ID }));
+    // macOS never makes this window a tab of another, whatever System
+    // Settings prefers.
+    window.setTabbingMode(NSWindowTabbingMode::Disallowed);
+    window.setTitle(&NSString::from_str(title));
+    window
+}
+
+/// Give `window` a host for its tabs, `bounds` in size, as its content
+/// and its delegate, behind `config`'s blur if it asks for one (not for
+/// a window opened for Settings: `plain`).
+fn install_host(mtm: MainThreadMarker, window: &NSWindow, config: &Config, plain: bool, bounds: NSRect) -> Retained<TabHost> {
+    let host = TabHost::new(mtm, bounds);
+    host.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable);
+    if !plain {
+        apply_opacity(window, config);
+    }
+    if config.opacity < 1.0 && config.blur && !plain {
+        let blur = NSVisualEffectView::initWithFrame(NSVisualEffectView::alloc(mtm), bounds);
+        blur.setMaterial(NSVisualEffectMaterial::UnderWindowBackground);
+        blur.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
+        blur.setState(NSVisualEffectState::Active);
+        blur.addSubview(&host);
+        window.setContentView(Some(&blur));
+    } else {
+        window.setContentView(Some(&host));
+    }
+    window.setDelegate(Some(crate::tab_host::delegate_of(&host)));
+    host
+}
+
 fn apply_opacity(window: &NSWindow, config: &Config) {
     let opaque = config.opacity >= 1.0;
     if window.isOpaque() != opaque {
@@ -1711,6 +1755,35 @@ fn tab_index(tag: isize, tabs: usize) -> Option<usize> {
 
 /// The Settings pane of `window` closed, leaving other panes: Cmd+,
 /// opens a new Settings tab from now on.
+/// Whether `window` is the quick terminal's.
+pub(crate) fn is_quick_window(window: &NSWindow) -> bool {
+    let delegate = DELEGATE.with(|d| d.borrow().as_ref().and_then(|w| w.load()));
+    delegate.is_some_and(|d| d.is_quick(window))
+}
+
+/// `view`'s tab is now a tab of `window`.
+pub(crate) fn tab_moved(view: &WindowView, window: &NSWindow) {
+    let delegate = DELEGATE.with(|d| d.borrow().as_ref().and_then(|w| w.load()));
+    if let Some(delegate) = delegate {
+        for (w, v) in delegate.ivars().windows.borrow_mut().iter_mut() {
+            if std::ptr::eq::<WindowView>(&**v, view) {
+                *w = objc2::Message::retain(window);
+            }
+        }
+    }
+}
+
+/// `view`'s tab leaves its window for one of its own, the same size:
+/// with its top left at `at` on the screen (where a dragged tab was let
+/// go), else a step down and right of the window it left. Nothing in it
+/// is restarted. Not for a window's only tab.
+pub(crate) fn tab_to_new_window(view: &WindowView, at: Option<NSPoint>) {
+    let delegate = DELEGATE.with(|d| d.borrow().as_ref().and_then(|w| w.load()));
+    if let Some(delegate) = delegate {
+        delegate.tab_to_new_window(view, at);
+    }
+}
+
 /// `view`'s tab closed, its window staying open with its other tabs: it
 /// is no longer one of the app's, and no longer the Settings tab if it
 /// was.

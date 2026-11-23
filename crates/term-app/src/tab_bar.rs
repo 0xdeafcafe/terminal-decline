@@ -4,14 +4,20 @@
 //! with a view a tab on it: a status dot and what the tab does. The
 //! selected tab is cut out of the band in the terminal's own background,
 //! with a rail in the cursor colour at its leading edge. A click selects,
-//! a middle click closes, `+` opens another. The band between and beside
-//! the tabs still moves the window.
+//! a middle click closes, as does the `×` that takes the dot's place
+//! under the pointer; `+` opens another. A tab dragged along the bar
+//! moves among the others; let go off the bar it becomes a window, or
+//! joins the window whose title row it is over. A right click has the
+//! rest. The band between and beside the tabs still moves the window.
 
 use std::cell::{Cell, RefCell};
 
 use objc2::rc::{Retained, Weak};
-use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
-use objc2_app_kit::{NSBox, NSEvent, NSFont, NSLineBreakMode, NSResponder, NSTextField, NSView};
+use objc2::runtime::{AnyObject, Sel};
+use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
+use objc2_app_kit::{
+    NSBox, NSEvent, NSFont, NSLineBreakMode, NSMenu, NSMenuItem, NSResponder, NSTextField, NSTrackingArea, NSTrackingAreaOptions, NSView,
+};
 use objc2_foundation::{NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
 
 use crate::pane_strip::{Look, mix, ns_colour, plain_box};
@@ -28,6 +34,10 @@ const TRAILING: f64 = 8.0;
 const INSET: f64 = 10.0;
 const DOT: f64 = 6.0;
 const GAP: f64 = 6.0;
+/// How far a press moves before it drags its tab, and how far off the
+/// bar a drag goes before letting go takes the tab out of it, points.
+const DRAG_SLOP: f64 = 4.0;
+const TEAR: f64 = 24.0;
 /// The selected tab's rail, points.
 const RAIL: f64 = 2.0;
 /// How far the band is tinted from the background to the foreground (a
@@ -47,6 +57,17 @@ pub fn tab_width(tabs: usize, width: f64) -> f64 {
     }
     let room = (width - LEADING - PLUS - TRAILING).max(0.0);
     (room / tabs as f64).min(MAX).floor()
+}
+
+/// Which of `tabs` tabs a drag at `x` in a bar `width` wide is over;
+/// past either end, the first or the last.
+pub fn drop_index(x: f64, tabs: usize, width: f64) -> Option<usize> {
+    let each = tab_width(tabs, width);
+    if tabs == 0 || each <= 0.0 {
+        return None;
+    }
+    let at = ((x - LEADING) / each).floor().max(0.0) as usize;
+    Some(at.min(tabs - 1))
 }
 
 /// What a tab's dot says.
@@ -103,7 +124,14 @@ pub struct ItemIvars {
     band: Retained<NSBox>,
     rail: Retained<NSBox>,
     dot: Retained<NSBox>,
+    /// The `×` in the dot's place while the pointer is over the tab.
+    close: Retained<NSTextField>,
     label: Retained<NSTextField>,
+    /// Whether the pointer is over it, and whether it has a dot to show.
+    hover: Cell<bool>,
+    dotted: Cell<bool>,
+    /// Where in the window the press now held began.
+    press: Cell<Option<NSPoint>>,
 }
 
 define_class!(
@@ -143,12 +171,131 @@ define_class!(
         }
 
         #[unsafe(method(mouseDown:))]
-        fn mouse_down(&self, _event: &NSEvent) {
+        fn mouse_down(&self, event: &NSEvent) {
             let Some(host) = self.ivars().host.load() else { return };
-            match self.ivars().index.get() {
-                PLUS_INDEX => host.new_tab(),
-                i => host.select(i),
+            let i = self.ivars().index.get();
+            if i == PLUS_INDEX {
+                host.new_tab();
+                return;
             }
+            // On the `×`: close, asking as Close Tab does.
+            let x = self.convertPoint_fromView(event.locationInWindow(), None).x;
+            if self.ivars().hover.get() && x < INSET + DOT + GAP {
+                host.close_asking(i);
+                return;
+            }
+            host.select(i);
+            host.drag_from(i);
+            self.ivars().press.set(Some(event.locationInWindow()));
+        }
+
+        /// The pressed tab follows the pointer along the bar.
+        #[unsafe(method(mouseDragged:))]
+        fn mouse_dragged(&self, event: &NSEvent) {
+            let (Some(host), Some(from), Some(bar)) = (self.ivars().host.load(), self.ivars().press.get(), self.superview()) else {
+                return;
+            };
+            let now = event.locationInWindow();
+            if (now.x - from.x).abs() < DRAG_SLOP && (now.y - from.y).abs() < DRAG_SLOP {
+                return;
+            }
+            let p = bar.convertPoint_fromView(now, None);
+            let size = bar.frame().size;
+            if p.y < -TEAR || p.y > size.height + TEAR {
+                // Off the bar: where it is let go decides.
+                return;
+            }
+            if let Some(to) = drop_index(p.x, host.count(), size.width) {
+                host.drag_over(to);
+            }
+        }
+
+        #[unsafe(method(mouseUp:))]
+        fn mouse_up(&self, event: &NSEvent) {
+            let Some(host) = self.ivars().host.load() else { return };
+            if self.ivars().press.take().is_none() {
+                return;
+            }
+            let outside = self.superview().and_then(|bar| {
+                let p = bar.convertPoint_fromView(event.locationInWindow(), None);
+                let off = p.y < -TEAR || p.y > bar.frame().size.height + TEAR;
+                off.then(NSEvent::mouseLocation)
+            });
+            host.drag_ended(outside);
+        }
+
+        #[unsafe(method(mouseEntered:))]
+        fn mouse_entered(&self, _event: &NSEvent) {
+            self.ivars().hover.set(true);
+            self.show_close();
+        }
+
+        #[unsafe(method(mouseExited:))]
+        fn mouse_exited(&self, _event: &NSEvent) {
+            self.ivars().hover.set(false);
+            self.show_close();
+        }
+
+        #[unsafe(method(rightMouseDown:))]
+        fn right_mouse_down(&self, event: &NSEvent) {
+            let Some(host) = self.ivars().host.load() else { return };
+            if self.ivars().index.get() == PLUS_INDEX {
+                return;
+            }
+            let mtm = MainThreadMarker::from(self);
+            let menu = NSMenu::new(mtm);
+            menu.setAutoenablesItems(false);
+            let add = |title: &str, action: Sel, enabled: bool| {
+                let item = unsafe {
+                    NSMenuItem::initWithTitle_action_keyEquivalent(
+                        NSMenuItem::alloc(mtm),
+                        &NSString::from_str(title),
+                        Some(action),
+                        &NSString::new(),
+                    )
+                };
+                unsafe { item.setTarget(Some(self)) };
+                item.setEnabled(enabled);
+                menu.addItem(&item);
+            };
+            let several = host.count() > 1;
+            add("Close Tab", sel!(closeThisTab:), true);
+            add("Close Other Tabs", sel!(closeOtherTabs:), several);
+            menu.addItem(&NSMenuItem::separatorItem(mtm));
+            add("Move Tab to New Window", sel!(moveThisTabOut:), several);
+            add("Rename…", sel!(renameThisTab:), true);
+            NSMenu::popUpContextMenu_withEvent_forView(&menu, event, self);
+        }
+
+        #[unsafe(method(closeThisTab:))]
+        fn close_this_tab(&self, _sender: Option<&AnyObject>) {
+            if let Some(host) = self.ivars().host.load() {
+                host.close_asking(self.ivars().index.get());
+            }
+        }
+
+        #[unsafe(method(closeOtherTabs:))]
+        fn close_other_tabs(&self, _sender: Option<&AnyObject>) {
+            if let Some(tab) = self.tab() {
+                tab.close_other_tabs();
+            }
+        }
+
+        #[unsafe(method(moveThisTabOut:))]
+        fn move_this_tab_out(&self, _sender: Option<&AnyObject>) {
+            if let Some(tab) = self.tab() {
+                crate::app::tab_to_new_window(&tab, None);
+            }
+        }
+
+        /// The name of the tab's focused pane, which is what the tab says.
+        #[unsafe(method(renameThisTab:))]
+        fn rename_this_tab(&self, _sender: Option<&AnyObject>) {
+            let (Some(host), Some(tab)) = (self.ivars().host.load(), self.tab()) else {
+                return;
+            };
+            host.select_view(&tab);
+            tab.rename_tab();
         }
 
         /// A middle click closes the tab, asking as Close Tab does.
@@ -174,20 +321,49 @@ impl TabItem {
         let rail = plain_box(mtm);
         let dot = plain_box(mtm);
         dot.setCornerRadius(DOT / 2.0);
+        let close = NSTextField::labelWithString(&NSString::from_str("×"), mtm);
+        close.setFont(Some(&NSFont::systemFontOfSize(NSFont::systemFontSize())));
+        close.setHidden(true);
         let this = Self::alloc(mtm).set_ivars(ItemIvars {
             host: Weak::new(host),
             index: Cell::new(index),
             band: band.clone(),
             rail: rail.clone(),
             dot: dot.clone(),
+            close: close.clone(),
             label: label.clone(),
+            hover: Cell::new(false),
+            dotted: Cell::new(false),
+            press: Cell::new(None),
         });
         let this: Retained<TabItem> = unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
         this.addSubview(&band);
         this.addSubview(&rail);
         this.addSubview(&dot);
+        this.addSubview(&close);
         this.addSubview(&label);
+        // The pointer over it, whichever window has the keys: its rect
+        // follows the view.
+        let options =
+            NSTrackingAreaOptions::MouseEnteredAndExited | NSTrackingAreaOptions::ActiveAlways | NSTrackingAreaOptions::InVisibleRect;
+        let area = unsafe {
+            NSTrackingArea::initWithRect_options_owner_userInfo(NSTrackingArea::alloc(), NSRect::ZERO, options, Some(&this), None)
+        };
+        this.addTrackingArea(&area);
         this
+    }
+
+    /// The tab this item stands for.
+    fn tab(&self) -> Option<Retained<crate::view::WindowView>> {
+        self.ivars().host.load()?.views().get(self.ivars().index.get()).cloned()
+    }
+
+    /// The `×` in the dot's place while the pointer is over a tab.
+    fn show_close(&self) {
+        let iv = self.ivars();
+        let closing = iv.hover.get() && iv.index.get() != PLUS_INDEX;
+        iv.close.setHidden(!closing);
+        iv.dot.setHidden(closing || !iv.dotted.get());
     }
 
     /// Place it at `frame` in the bar, saying `text` after `dot` (none:
@@ -202,7 +378,16 @@ impl TabItem {
         iv.rail.setHidden(!selected);
         iv.dot
             .setFrame(NSRect::new(NSPoint::new(INSET, ((h - DOT) / 2.0).round()), NSSize::new(DOT, DOT)));
-        iv.dot.setHidden(dot.is_none());
+        iv.dotted.set(dot.is_some());
+        let close_size = iv.close.intrinsicContentSize();
+        iv.close.setFrame(NSRect::new(
+            NSPoint::new(
+                (INSET + (DOT - close_size.width) / 2.0).round(),
+                ((h - close_size.height) / 2.0).round(),
+            ),
+            close_size,
+        ));
+        self.show_close();
         let label = &iv.label;
         if label.stringValue().to_string() != text {
             label.setStringValue(&NSString::from_str(text));
@@ -217,6 +402,7 @@ impl TabItem {
         let (fg, bg) = (look.foreground, look.background);
         let ink = if selected { fg } else { mix(bg, fg, TEXT_FAINT) };
         label.setTextColor(Some(&ns_colour(ink, 1.0)));
+        iv.close.setTextColor(Some(&ns_colour(ink, 1.0)));
         iv.band.setFillColor(&ns_colour(bg, look.opacity as f64 / 255.0));
         iv.rail.setFillColor(&ns_colour(look.accent, 1.0));
         let dot_colour = match dot {
@@ -353,6 +539,23 @@ mod tests {
             "equal shares when they don't all fit at full width"
         );
         assert_eq!(tab_width(3, 50.0), 0.0, "no room: no width, never negative");
+    }
+
+    #[test]
+    fn a_drag_is_over_the_tab_under_it_or_the_nearest() {
+        let width = 1400.0;
+        assert_eq!(tab_width(3, width), MAX);
+        assert_eq!(drop_index(LEADING + 10.0, 3, width), Some(0));
+        assert_eq!(drop_index(LEADING + MAX + 1.0, 3, width), Some(1));
+        assert_eq!(drop_index(LEADING + MAX * 2.5, 3, width), Some(2));
+        assert_eq!(
+            drop_index(0.0, 3, width),
+            Some(0),
+            "left of the first tab, over the window's buttons"
+        );
+        assert_eq!(drop_index(width, 3, width), Some(2), "right of the last");
+        assert_eq!(drop_index(100.0, 0, width), None);
+        assert_eq!(drop_index(100.0, 3, 40.0), None, "no room for tabs");
     }
 
     #[test]

@@ -15,8 +15,8 @@ use std::cell::{Cell, RefCell};
 
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, ProtocolObject};
-use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
-use objc2_app_kit::{NSResponder, NSView, NSWindow, NSWindowDelegate};
+use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
+use objc2_app_kit::{NSMenuItem, NSResponder, NSView, NSWindow, NSWindowDelegate};
 use objc2_foundation::{NSNotification, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
 
 use crate::tab_bar::TabBar;
@@ -35,6 +35,8 @@ pub struct Ivars {
     tabs: RefCell<Vec<Retained<WindowView>>>,
     selected: Cell<usize>,
     bar: RefCell<Option<Retained<TabBar>>>,
+    /// The tab a press in the bar is dragging, where it is now.
+    dragging: Cell<Option<usize>>,
 }
 
 define_class!(
@@ -62,6 +64,34 @@ define_class!(
         #[unsafe(method(selectPreviousTab:))]
         fn select_previous_tab(&self, _sender: Option<&AnyObject>) {
             self.step(-1);
+        }
+
+        /// Window > Move Tab to New Window: the tab in front.
+        #[unsafe(method(moveTabToNewWindow:))]
+        fn move_tab_to_new_window(&self, _sender: Option<&AnyObject>) {
+            if let Some(tab) = self.selected() {
+                crate::app::tab_to_new_window(&tab, None);
+            }
+        }
+
+        /// Window > Merge All Windows: every window's tabs into this one.
+        #[unsafe(method(mergeAllWindows:))]
+        fn merge_all_windows(&self, _sender: Option<&AnyObject>) {
+            self.merge_all();
+        }
+
+        /// Move Tab to New Window needs a second tab to leave behind, and
+        /// Merge All Windows another window to take from.
+        #[unsafe(method(validateMenuItem:))]
+        fn validate_menu_item(&self, item: &NSMenuItem) -> bool {
+            let action = item.action();
+            if action == Some(sel!(moveTabToNewWindow:)) {
+                self.count() > 1
+            } else if action == Some(sel!(mergeAllWindows:)) {
+                !self.others().is_empty()
+            } else {
+                true
+            }
         }
     }
 
@@ -131,6 +161,7 @@ impl TabHost {
             tabs: RefCell::new(Vec::new()),
             selected: Cell::new(0),
             bar: RefCell::new(None),
+            dragging: Cell::new(None),
         });
         let host: Retained<TabHost> = unsafe { msg_send![super(this), initWithFrame: frame] };
         let bar = TabBar::new(mtm, &host);
@@ -188,17 +219,19 @@ impl TabHost {
     /// Add `view` as a tab after the selected one (the first: as the
     /// only one), behind the others until it is selected.
     pub fn add(&self, view: &WindowView) {
-        let iv = self.ivars();
-        let at = {
-            let mut tabs = iv.tabs.borrow_mut();
-            let at = if tabs.is_empty() {
-                0
-            } else {
-                (iv.selected.get() + 1).min(tabs.len())
-            };
-            tabs.insert(at, objc2::Message::retain(view));
-            at
+        let at = if self.count() == 0 {
+            0
+        } else {
+            (self.ivars().selected.get() + 1).min(self.count())
         };
+        self.insert(view, at);
+    }
+
+    /// `view` as tab `at`, behind the others unless it is the only one.
+    fn insert(&self, view: &WindowView, at: usize) {
+        let iv = self.ivars();
+        let at = at.min(self.count());
+        iv.tabs.borrow_mut().insert(at, objc2::Message::retain(view));
         // The selected tab is the same one as before.
         if at <= iv.selected.get() && self.count() > 1 {
             iv.selected.set(iv.selected.get() + 1);
@@ -269,24 +302,157 @@ impl TabHost {
     /// Close `view`'s tab, ending what runs in it; the tab beside it
     /// comes to the front. Not for the last tab: the window closes then.
     pub fn close(&self, view: &WindowView) {
+        if self.index_of(view).is_none() {
+            return;
+        }
+        view.shut_down();
+        self.take_out(view);
+        crate::app::tab_closed(view);
+    }
+
+    /// Take `view`'s tab out, running as it is, for another window
+    /// ([`TabHost::adopt`]); the tab beside it comes to the front.
+    pub fn detach(&self, view: &WindowView) {
+        self.take_out(view);
+    }
+
+    fn take_out(&self, view: &WindowView) {
         let Some(at) = self.index_of(view) else { return };
         let selected = self.ivars().selected.get();
-        view.shut_down();
+        self.ivars().dragging.set(None);
         view.removeFromSuperview();
         self.ivars().tabs.borrow_mut().remove(at);
-        crate::app::tab_closed(view);
         let n = self.count();
         if n == 0 {
             return;
         }
-        // The tab that took its place, else the one before; a tab closed
-        // behind the selected one changes nothing but the index.
+        // The tab that took its place, else the one before; a tab taken
+        // from behind the selected one changes nothing but the index.
         let next = if at < selected { selected - 1 } else { selected.min(n - 1) };
         if at == selected {
             // Nothing is selected until `select` says so.
             self.ivars().selected.set(usize::MAX);
         }
         self.select(next);
+    }
+
+    /// Take in a tab from another window ([`TabHost::detach`]) as the
+    /// last one, in front if `front`.
+    pub fn adopt(&self, view: &WindowView, front: bool) {
+        self.insert(view, self.count());
+        view.moved_to_window();
+        if front || self.count() == 1 {
+            self.select_view(view);
+        }
+    }
+
+    /// Move tab `from` to place `to`; the tab in front stays in front.
+    pub fn move_tab(&self, from: usize, to: usize) {
+        let front = self.selected();
+        {
+            let mut tabs = self.ivars().tabs.borrow_mut();
+            if from == to || from >= tabs.len() || to >= tabs.len() {
+                return;
+            }
+            let tab = tabs.remove(from);
+            tabs.insert(to, tab);
+        }
+        if let Some(front) = front
+            && let Some(i) = self.index_of(&front)
+        {
+            self.ivars().selected.set(i);
+        }
+        self.refresh_bar();
+    }
+
+    /// The other windows' hosts, the quick terminal's left out.
+    fn others(&self) -> Vec<Retained<TabHost>> {
+        let me: *const TabHost = self;
+        let hosts: Vec<Retained<TabHost>> = HOSTS.with(|h| h.borrow().iter().filter_map(|w| w.load()).collect());
+        hosts
+            .into_iter()
+            .filter(|h| !std::ptr::eq(&**h, me) && h.count() > 0)
+            .filter(|h| h.window().is_some_and(|w| !crate::app::is_quick_window(&w)))
+            .collect()
+    }
+
+    /// Every other window's tabs become tabs of this one, after its own,
+    /// and those windows close. A window showing a question is left.
+    pub fn merge_all(&self) {
+        if self.window().is_none_or(|w| crate::app::is_quick_window(&w)) {
+            return;
+        }
+        for other in self.others() {
+            let Some(window) = other.window() else { continue };
+            if window.attachedSheet().is_some() {
+                continue;
+            }
+            for tab in other.views() {
+                self.give(&tab, false);
+            }
+            window.close();
+        }
+    }
+
+    /// Move `view`'s tab from the window it is in to this one.
+    fn give(&self, view: &WindowView, front: bool) {
+        let (Some(from), Some(window)) = (TabHost::of_view(view), self.window()) else {
+            return;
+        };
+        from.detach(view);
+        self.adopt(view, front);
+        crate::app::tab_moved(view, &window);
+    }
+
+    /// A press on tab `index` in the bar: it may be dragged from here.
+    pub fn drag_from(&self, index: usize) {
+        self.ivars().dragging.set(Some(index));
+    }
+
+    /// The pressed tab is dragged over place `to` in the bar: it moves
+    /// there, the others making room.
+    pub fn drag_over(&self, to: usize) {
+        if let Some(from) = self.ivars().dragging.get()
+            && from != to
+            && to < self.count()
+        {
+            self.move_tab(from, to);
+            self.ivars().dragging.set(Some(to));
+        }
+    }
+
+    /// The press ended; with `outside`, off the bar at that point of the
+    /// screen: over another window's title row the tab joins that
+    /// window, anywhere else it becomes a window there.
+    pub fn drag_ended(&self, outside: Option<NSPoint>) {
+        let Some(index) = self.ivars().dragging.take() else { return };
+        let (Some(at), Some(tab)) = (outside, self.views().get(index).cloned()) else {
+            return;
+        };
+        let over = self.others().into_iter().find(|h| {
+            h.window().is_some_and(|w| {
+                let f = w.frame();
+                let row = h.selected().map_or(0.0, |t| t.titlebar_height());
+                at.x >= f.origin.x
+                    && at.x < f.origin.x + f.size.width
+                    && at.y <= f.origin.y + f.size.height
+                    && at.y > f.origin.y + f.size.height - row
+            })
+        });
+        match over {
+            Some(host) => {
+                let last = self.count() == 1;
+                let mine = self.window();
+                host.give(&tab, true);
+                if let Some(window) = host.window() {
+                    crate::background::make_key_and_order_front(&window);
+                }
+                if let (true, Some(mine)) = (last, mine) {
+                    mine.close();
+                }
+            }
+            None => crate::app::tab_to_new_window(&tab, Some(at)),
+        }
     }
 
     /// Every tab at the host's size, and the bar across the title row

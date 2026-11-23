@@ -9,6 +9,7 @@ use std::process::ExitStatus;
 use std::sync::{Arc, Mutex};
 
 mod command;
+pub mod handoff;
 pub mod integration;
 
 pub use command::{Command, Reports, build_argv, build_env, exec_argv, resolve_cwd};
@@ -43,6 +44,53 @@ pub struct Pty {
     /// The terminal's device path (`/dev/ttys004`), as `ttyname(0)` gives
     /// it in the program.
     tty_name: Option<String>,
+    /// Dropping it hangs up on the program; not once it was handed over
+    /// ([`Pty::hand_over`]).
+    armed: bool,
+    /// Stops the readers ([`Pty::stop_readers`]).
+    stop: std::sync::Arc<Stop>,
+}
+
+/// What stops a [`BatchReader`] between two reads: a flag, and a pipe to
+/// wake one waiting on the PTY.
+struct Stop {
+    stopped: std::sync::atomic::AtomicBool,
+    wake_read: OwnedFd,
+    wake_write: OwnedFd,
+}
+
+impl Stop {
+    fn new() -> io::Result<Stop> {
+        let mut fds = [0; 2];
+        if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let (wake_read, wake_write) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+        for fd in [&wake_read, &wake_write] {
+            unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) };
+            set_nonblocking(fd.as_raw_fd());
+        }
+        Ok(Stop {
+            stopped: std::sync::atomic::AtomicBool::new(false),
+            wake_read,
+            wake_write,
+        })
+    }
+
+    fn is_stopped(&self) -> bool {
+        self.stopped.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+/// A PTY as another process takes it over ([`Pty::hand_over`],
+/// [`Pty::adopt`]).
+#[derive(Debug)]
+pub struct Handed {
+    /// The master.
+    pub master: OwnedFd,
+    /// The program started on it.
+    pub pid: libc::pid_t,
+    pub tty_name: Option<String>,
 }
 
 /// The program's process, shared between the [`Pty`] (which hangs up on it
@@ -54,6 +102,10 @@ pub struct Child {
     pid: libc::pid_t,
     /// The raw `waitpid` status, once reaped.
     status: Arc<Mutex<Option<libc::c_int>>>,
+    /// Started by another process ([`Pty::adopt`]): not ours to reap,
+    /// and its exit status can't be had. Once it is gone it counts as
+    /// having exited with 0.
+    adopted: bool,
 }
 
 impl Child {
@@ -61,6 +113,14 @@ impl Child {
         Child {
             pid,
             status: Arc::new(Mutex::new(None)),
+            adopted: false,
+        }
+    }
+
+    fn adopted(pid: libc::pid_t) -> Child {
+        Child {
+            adopted: true,
+            ..Child::new(pid)
         }
     }
 
@@ -76,6 +136,20 @@ impl Child {
             let mut raw: libc::c_int = 0;
             if unsafe { libc::waitpid(self.pid, &mut raw, flags) } == self.pid {
                 *status = Some(raw);
+            } else if self.adopted {
+                // Not our child (in a test it may be, and was reaped
+                // above): gone is all there is to know. Its parent, or
+                // launchd once that exited, reaps it.
+                loop {
+                    let gone = unsafe { libc::kill(self.pid, 0) } != 0 && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+                    if gone {
+                        *status = Some(0);
+                    }
+                    if gone || flags & libc::WNOHANG != 0 {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
             }
         }
         status.map(ExitStatus::from_raw)
@@ -229,6 +303,49 @@ impl Pty {
             pid,
             child: Child::new(pid),
             tty_name,
+            armed: true,
+            stop: std::sync::Arc::new(Stop::new()?),
+        })
+    }
+
+    /// Carry on with a PTY another process started and handed over
+    /// ([`Pty::hand_over`]): the same program on the same terminal. Its
+    /// exit status won't be known (see [`Child`]).
+    pub fn adopt(handed: Handed) -> io::Result<Pty> {
+        unsafe {
+            libc::fcntl(handed.master.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC);
+        }
+        set_nonblocking(handed.master.as_raw_fd());
+        Ok(Pty {
+            master: handed.master,
+            pid: handed.pid,
+            child: Child::adopted(handed.pid),
+            tty_name: handed.tty_name,
+            armed: true,
+            stop: std::sync::Arc::new(Stop::new()?),
+        })
+    }
+
+    /// Stop every reader made so far: its next [`BatchReader::read`]
+    /// says [`Batch::Stopped`], at once if it is waiting. What it read
+    /// before is all that was taken off the PTY.
+    pub fn stop_readers(&self) {
+        self.stop.stopped.store(true, std::sync::atomic::Ordering::Release);
+        let byte = [1u8];
+        unsafe { libc::write(self.stop.wake_write.as_raw_fd(), byte.as_ptr().cast(), 1) };
+    }
+
+    /// Give the PTY to another process: a duplicate of the master for
+    /// it, and from now on dropping this `Pty` no longer hangs up on the
+    /// program, which lives as long as any master is open. Stop the
+    /// readers first ([`Pty::stop_readers`]).
+    pub fn hand_over(&mut self) -> io::Result<Handed> {
+        let master = self.master.try_clone()?;
+        self.armed = false;
+        Ok(Handed {
+            master,
+            pid: self.pid,
+            tty_name: self.tty_name.clone(),
         })
     }
 
@@ -253,6 +370,7 @@ impl Pty {
         Ok(BatchReader {
             file: File::from(self.master.try_clone()?),
             flooding: false,
+            stop: self.stop.clone(),
         })
     }
 
@@ -320,6 +438,9 @@ impl Pty {
 
 impl Drop for Pty {
     fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
         let child = self.child.clone();
         child.signal(libc::SIGHUP, false);
         // Reap off the main thread; force it after a grace period. Timed
@@ -356,6 +477,31 @@ fn set_nonblocking(fd: libc::c_int) {
     }
 }
 
+/// Wait until `fd` can be read or `stop` is: whether to read `fd`.
+fn wait_readable(fd: libc::c_int, stop: &Stop) -> bool {
+    let mut p = [
+        libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        },
+        libc::pollfd {
+            fd: stop.wake_read.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        },
+    ];
+    loop {
+        let r = unsafe { libc::poll(p.as_mut_ptr(), 2, -1) };
+        if r >= 0 {
+            return p[0].revents & (libc::POLLERR | libc::POLLNVAL) == 0 || p[0].revents & libc::POLLIN != 0;
+        }
+        if io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
+            return false;
+        }
+    }
+}
+
 fn wait_fd(fd: libc::c_int, events: libc::c_short) -> bool {
     let mut p = libc::pollfd { fd, events, revents: 0 };
     loop {
@@ -374,6 +520,19 @@ pub struct BatchReader {
     file: File,
     /// The last read came back full: a program is writing a flood.
     flooding: bool,
+    stop: std::sync::Arc<Stop>,
+}
+
+/// What [`BatchReader::read`] got.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Batch {
+    /// This many bytes.
+    Bytes(usize),
+    /// The program has exited.
+    Ended,
+    /// The readers were stopped ([`Pty::stop_readers`]): the program
+    /// runs on, for whoever the PTY is handed to.
+    Stopped,
 }
 
 /// What a macOS PTY hands out per read at most.
@@ -386,8 +545,17 @@ const FLOOD_SPIN: std::time::Duration = std::time::Duration::from_micros(30);
 
 impl BatchReader {
     /// Fills `buf` with whatever is available, waiting if nothing is. Returns
-    /// 0 when the program has exited.
+    /// 0 when the program has exited (or the readers were stopped).
     pub fn read_batch(&mut self, buf: &mut [u8]) -> usize {
+        match self.read(buf) {
+            Batch::Bytes(n) => n,
+            Batch::Ended | Batch::Stopped => 0,
+        }
+    }
+
+    /// As [`BatchReader::read_batch`], telling a program that exited
+    /// from readers that were stopped.
+    pub fn read(&mut self, buf: &mut [u8]) -> Batch {
         use std::io::Read;
         let fd = self.file.as_raw_fd();
         // A macOS PTY returns at most ~1 KB per read and buffers ~2 KB, so
@@ -397,10 +565,15 @@ impl BatchReader {
         // before sleeping; typing and idle never spin.
         let mut spin_until = None;
         loop {
+            if self.stop.is_stopped() {
+                return Batch::Stopped;
+            }
             match self.file.read(buf) {
+                // A PTY's end is EIO; 0 bytes is its end too.
+                Ok(0) => return Batch::Ended,
                 Ok(n) => {
                     self.flooding = n >= PTY_READ_MAX;
-                    return n;
+                    return Batch::Bytes(n);
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
                     if self.flooding {
@@ -411,13 +584,13 @@ impl BatchReader {
                         }
                         self.flooding = false;
                     }
-                    if !wait_fd(fd, libc::POLLIN) {
-                        return 0;
+                    if !wait_readable(fd, &self.stop) {
+                        return Batch::Ended;
                     }
                 }
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
                 // EIO: the program and everything it started have exited.
-                Err(_) => return 0,
+                Err(_) => return Batch::Ended,
             }
         }
     }

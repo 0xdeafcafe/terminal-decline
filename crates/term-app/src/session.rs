@@ -787,6 +787,12 @@ impl Session {
         self.pty.as_ref()?.tty_name()
     }
 
+    /// Whether the shell itself is in the foreground
+    /// ([`Pty::shell_in_foreground`]).
+    pub fn shell_in_foreground(&self) -> bool {
+        self.pty.as_ref().is_some_and(Pty::shell_in_foreground)
+    }
+
     /// The working directory of the program in the foreground.
     pub fn foreground_cwd(&self) -> Option<String> {
         self.pty.as_ref()?.foreground_cwd()

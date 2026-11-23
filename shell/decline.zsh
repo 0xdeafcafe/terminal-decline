@@ -113,7 +113,7 @@ if [[ -n ${_decline_token-} && -n ${_decline_features-} && -n $TTY ]] \
     && zmodload zsh/system 2>/dev/null \
     && builtin typeset -gH _decline_fd= \
     && sysopen -w -o cloexec -u _decline_fd -- $TTY 2>/dev/null; then
-  typeset -gH _decline_last_line= _decline_last_env=
+  typeset -gH _decline_last_line= _decline_last_env= _decline_vi=0
 
   # On each redraw of the line, before zle draws it:
   #   ESC ] 7701 ; line ; <token> ; <keymap> ; <cursor> ; <line> BEL
@@ -125,6 +125,8 @@ if [[ -n ${_decline_token-} && -n ${_decline_features-} && -n $TTY ]] \
   _decline_line() {
     emulate -L zsh -o extendedglob +o multibyte
     local keymap=$KEYMAP cursor=0 text=
+    # zsh calls the keymap keys type into `main`, vi's insert mode too.
+    [[ $keymap == main ]] && (( _decline_vi )) && keymap=viins
     if [[ $CONTEXT != start || -n $PREBUFFER ]]; then
       keymap=cont
     elif (( ${#BUFFER} > 4096 )); then
@@ -147,6 +149,10 @@ if [[ -n ${_decline_token-} && -n ${_decline_features-} && -n $TTY ]] \
   # Once per prompt, when it changed: what the shell can run and where
   # its history is.
   _decline_env() {
+    # Whether `main` is vi's insert mode (bindkey -v), for the line
+    # reports: there Esc is vi's, not the app's.
+    _decline_vi=0
+    [[ "$(bindkey -lL main 2>/dev/null)" == *viins* ]] && _decline_vi=1
     # The user's option, before emulate sets zsh's defaults here.
     local autocd=0
     [[ -o autocd ]] && autocd=1
@@ -185,7 +191,8 @@ if [[ -n ${_decline_token-} && -n ${_decline_features-} && -n $TTY ]] \
   # (_decline_tab below), which zsh inserts itself. A payload `=<line>`
   # (percent-encoded) is a restored tab's command: it becomes the whole
   # line, as typed, not as a paste (zsh draws a paste highlighted until
-  # the line is edited).
+  # the line is edited). A payload `!clear` is Esc at the prompt
+  # (escape_clears_line): the line goes, as a new one.
   _decline_take() {
     local c payload=
     while read -rk 1 c && [[ $c != $'\a' ]]; do
@@ -198,6 +205,11 @@ if [[ -n ${_decline_token-} && -n ${_decline_features-} && -n $TTY ]] \
     fi
     if [[ $payload == '='* ]]; then
       _decline_take_line ${payload#=}
+      return 0
+    fi
+    if [[ $payload == '!clear' ]]; then
+      (( HISTNO == HISTCMD )) || HISTNO=$HISTCMD
+      BUFFER=
       return 0
     fi
     _decline_take_word $payload
@@ -387,6 +399,22 @@ if [[ -n ${_decline_token-} && -n ${_decline_features-} && -n $TTY ]] \
     fi
   fi
 
+  # A line emptied while an older command was shown (Up, then deleting
+  # it) is a new line: Up then starts from the newest command again, not
+  # from where the deleted one was. Before the report, so it has the
+  # line as it is drawn.
+  _decline_newest() {
+    [[ -z $BUFFER && -z $PREBUFFER && $CONTEXT == start ]] || return 0
+    (( HISTNO == HISTCMD )) && return 0
+    # zsh keeps an edited history line as edited until a line is run:
+    # put the command back first, or Up would come to an empty line
+    # where it was.
+    zmodload -F zsh/parameter p:history 2>/dev/null && [[ -n ${history[$HISTNO]-} ]] && BUFFER=${history[$HISTNO]}
+    HISTNO=$HISTCMD
+    BUFFER=
+  }
+
+  zle -N _decline_newest
   zle -N _decline_line
   # Always: a restored tab's command comes this way too.
   zle -N _decline_take
@@ -398,6 +426,7 @@ if [[ -n ${_decline_token-} && -n ${_decline_features-} && -n $TTY ]] \
   # line-init too: a new line (the prompt's, or a continuation's) is
   # drawn before any redraw hook runs.
   add-zle-hook-widget line-init _decline_line
+  add-zle-hook-widget line-pre-redraw _decline_newest
   add-zle-hook-widget line-pre-redraw _decline_line
 fi
 

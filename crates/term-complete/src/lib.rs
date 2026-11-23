@@ -183,6 +183,12 @@ impl PaneState {
         self.open.is_some()
     }
 
+    /// Whether the list itself is showing, not only the grey suggestion
+    /// after the cursor.
+    pub fn list_showing(&self) -> bool {
+        self.open.as_ref().is_some_and(|o| !o.ghost_only)
+    }
+
     /// Close the list (the setting was turned off, the pane lost focus).
     pub fn close(&mut self) {
         self.open = None;

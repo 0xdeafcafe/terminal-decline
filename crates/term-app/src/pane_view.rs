@@ -914,6 +914,10 @@ impl PaneView {
             }
             None => {}
         }
+        // Esc at the prompt clears the line being typed.
+        if !modes.composing && self.escape_clears_line(&input) {
+            return;
+        }
         // The completion list's own keys while it is open
         // (docs/design/completion.md §9); anything else goes on.
         if !modes.composing {
@@ -958,6 +962,99 @@ impl PaneView {
                 self.with(|_, p| p.text_key = None);
             }
         }
+    }
+
+    /// What Esc does here now ([`crate::clear_line::decide`]), with the
+    /// line it would clear.
+    fn escape_at_prompt(&self) -> (crate::clear_line::Esc, Option<term_core::LineReport>) {
+        use crate::clear_line::{At, Esc, decide};
+        self.with(|win, p| {
+            let line = p.session.lock_term().state.line_report().cloned();
+            let esc = decide(At {
+                line: line.as_ref(),
+                list_showing: p.completion.list_showing(),
+                // Asked last: a system call.
+                shell_in_foreground: line.is_some() && win.config.escape_clears_line && p.session.shell_in_foreground(),
+                on: win.config.escape_clears_line,
+                confirm_over: win.config.confirm_clear_line,
+            });
+            (esc, line)
+        })
+        .unwrap_or((Esc::Pass, None))
+    }
+
+    /// Esc with no modifier at a prompt with a line typed
+    /// (`escape_clears_line`): clears it, asking first when it is long.
+    /// False when Esc is the program's.
+    fn escape_clears_line(&self, input: &KeyInput) -> bool {
+        use crate::clear_line::Esc;
+        use crate::keys::flags::{COMMAND, CONTROL, OPTION, SHIFT};
+        if input.keycode != crate::complete::keycode::ESCAPE || input.flags & (SHIFT | CONTROL | OPTION | COMMAND) != 0 {
+            return false;
+        }
+        match self.escape_at_prompt() {
+            (Esc::Pass, _) => false,
+            (Esc::Clear, _) => {
+                self.clear_line();
+                true
+            }
+            (Esc::Ask, Some(line)) => {
+                self.ask_to_clear_line(&line);
+                true
+            }
+            (Esc::Ask, None) => false,
+        }
+    }
+
+    /// Have the shell empty its line ([`crate::clear_line::CLEAR`]).
+    fn clear_line(&self) {
+        self.with(|_, p| {
+            p.completion.close();
+            p.session.mark_dirty();
+        });
+        self.send_input(crate::clear_line::CLEAR.to_vec());
+    }
+
+    /// The question before a long line is cleared, on the window. "Don't
+    /// ask again", with Clear, writes `confirm_clear_line = 0` to the
+    /// user's config.
+    fn ask_to_clear_line(&self, line: &term_core::LineReport) {
+        let Some(window) = self.window() else { return };
+        if window.attachedSheet().is_some() {
+            return;
+        }
+        let mtm = MainThreadMarker::from(self);
+        let (title, text) = crate::clear_line::question(line);
+        let alert = objc2_app_kit::NSAlert::new(mtm);
+        alert.setMessageText(&NSString::from_str(&title));
+        alert.setInformativeText(&NSString::from_str(&text));
+        alert.addButtonWithTitle(&NSString::from_str("Clear"));
+        alert.addButtonWithTitle(&NSString::from_str("Cancel"));
+        alert.setShowsSuppressionButton(true);
+        if let Some(button) = alert.suppressionButton() {
+            button.setTitle(&NSString::from_str("Don't ask again"));
+        }
+        let pane = Weak::new(self);
+        let asked = alert.clone();
+        let done = block2::RcBlock::new(move |response: objc2_app_kit::NSModalResponse| {
+            if response != objc2_app_kit::NSAlertFirstButtonReturn {
+                return;
+            }
+            let never = asked
+                .suppressionButton()
+                .is_some_and(|b| b.state() == objc2_app_kit::NSControlStateValueOn);
+            if never && let Err(e) = term_prefs::file::set_integer(&crate::paths::Paths::current().config_file(), "confirm_clear_line", 0) {
+                eprintln!("terminal-decline: can't save confirm_clear_line: {e}");
+            }
+            // Still a line to clear: it may have run or changed meanwhile.
+            if let Some(pane) = pane.load()
+                && pane.escape_at_prompt().0 != crate::clear_line::Esc::Pass
+            {
+                pane.clear_line();
+            }
+        });
+        alert.beginSheetModalForWindow_completionHandler(&window, Some(&done));
+        crate::background::hide(&alert.window());
     }
 
     /// Whether Show Completions has a line to work on: the list is on

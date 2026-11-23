@@ -278,6 +278,14 @@ impl Pty {
         Ok(())
     }
 
+    /// Whether the program started here (the shell) is itself in the
+    /// terminal's foreground: false while it runs another program, one
+    /// started from its line editor too (fzf from a key binding).
+    pub fn shell_in_foreground(&self) -> bool {
+        let pgid = unsafe { libc::tcgetpgrp(self.master.as_raw_fd()) };
+        pgid > 0 && pgid == self.pid
+    }
+
     /// The working directory of the program in the foreground, for opening a
     /// new window in the same place. macOS only; `None` elsewhere.
     #[cfg(not(target_vendor = "apple"))]

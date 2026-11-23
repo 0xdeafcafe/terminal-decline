@@ -491,6 +491,87 @@ fn zsh_takes_a_restored_command_as_the_line() {
     s.wait_for("typing after it", |s| line(s).as_deref() == Some("echo 'a b' 100% ok!"));
 }
 
+/// A line emptied while an older command is shown is a new line: Up
+/// then shows the newest command, not the one before the deleted one.
+/// `!clear` (Esc at the prompt, typed by the app) empties the line the
+/// same way, and what was typed before going up doesn't come back.
+#[test]
+fn zsh_starts_history_again_from_an_emptied_line() {
+    let home = TempDir::new("zsh-newest");
+    zsh_files(&home.0, "");
+    let reports = Reports {
+        token: TOKEN.into(),
+        features: "highlight,list".into(),
+    };
+    let mut s = Session::start_with(ZSH, &home, &[], Some(reports));
+    s.wait_for("the first prompt", |s| s.count("\x1b]133;B\x07") >= 1);
+    s.run("echo one", 2);
+    s.run("echo two", 3);
+    s.run("echo three", 4);
+    let line = |s: &Session| parsed(s).state.line_report().map(|r| r.text.clone());
+    const UP: &str = "\x1b[A";
+    // Up twice, then delete the line (Cmd+Backspace sends Ctrl+U).
+    s.send(UP);
+    s.wait_for("the newest command", |s| line(s).as_deref() == Some("echo three"));
+    s.send(UP);
+    s.wait_for("the one before", |s| line(s).as_deref() == Some("echo two"));
+    s.send("\x15");
+    s.wait_for("the emptied line", |s| line(s).as_deref() == Some(""));
+    s.send(UP);
+    s.wait_for("the newest command again", |s| line(s).as_deref() == Some("echo three"));
+    // Down is the new, empty line: the deleted command isn't in the way.
+    s.send("\x1b[B");
+    s.wait_for("the new line", |s| line(s).as_deref() == Some(""));
+    // Typed, then Up, then Esc: an empty new line, not what was typed.
+    s.send("typed");
+    s.wait_for("the typed line", |s| line(s).as_deref() == Some("typed"));
+    s.send(UP);
+    s.wait_for("the newest command over it", |s| line(s).as_deref() == Some("echo three"));
+    s.send(UP);
+    s.wait_for("the one before it", |s| line(s).as_deref() == Some("echo two"));
+    s.send("\x1b[7701~!clear\x07");
+    s.wait_for("the cleared line", |s| line(s).as_deref() == Some(""));
+    s.send(UP);
+    s.wait_for("the newest command after Esc", |s| line(s).as_deref() == Some("echo three"));
+    // The history itself is as it was.
+    s.send("\x1b[7701~!clear\x07");
+    s.wait_for("cleared again", |s| line(s).as_deref() == Some(""));
+    s.run("fc -ln -3 | tr '\\n' '|'", 5);
+    assert!(s.text().contains("echo one|echo two|echo three|"), "{:?}", s.text());
+}
+
+/// With `bindkey -v`, zsh still calls the keymap keys type into `main`:
+/// the report says vi's insert mode, so the app leaves Esc to vi.
+#[test]
+fn zsh_reports_vi_insert_mode() {
+    for (rc, keymap) in [
+        ("bindkey -v\n", term_core::Keymap::ViInsert),
+        ("bindkey -e\n", term_core::Keymap::Insert),
+    ] {
+        let home = TempDir::new("zsh-vi");
+        zsh_files(&home.0, rc);
+        let reports = Reports {
+            token: TOKEN.into(),
+            features: "highlight,list".into(),
+        };
+        let mut s = Session::start_with(ZSH, &home, &[], Some(reports));
+        s.wait_for("the first prompt", |s| s.count("\x1b]133;B\x07") >= 1);
+        s.send("ab");
+        s.wait_for("the typed line", |s| parsed(s).state.line_report().is_some_and(|r| r.text == "ab"));
+        assert_eq!(parsed(&s).state.line_report().unwrap().keymap, keymap, "{rc}");
+        if keymap == term_core::Keymap::ViInsert {
+            // Esc is vi's: command mode.
+            s.send("\x1b");
+            s.wait_for("command mode", |s| {
+                parsed(s)
+                    .state
+                    .line_report()
+                    .is_some_and(|r| r.keymap == term_core::Keymap::ViCommand)
+            });
+        }
+    }
+}
+
 /// Tab asks zsh: with several matches zsh inserts what they share, lists
 /// nothing itself, and reports them; taking one by its number has zsh
 /// insert it, quoted by zsh. With one match zsh inserts it as before.

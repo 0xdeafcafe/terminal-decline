@@ -42,6 +42,19 @@ rebinds it to `backward-kill-line`, unless your `.zshrc` bound `^U` to
 something else. A program that asks for the kitty keyboard protocol gets
 Option+arrows as keys with their Alt bit instead.
 
+Two more things in zsh, with the integration the app loads:
+
+- **Esc clears the line** being typed (`escape_clears_line`, on by
+  default). A line of more than `confirm_clear_line` characters (80), or
+  of several lines, asks first; "Don't ask again" in the question writes
+  `confirm_clear_line = 0`. Esc is left alone where it means something
+  else: with nothing typed (so Esc then a key is still Meta), in vi
+  mode, while the completion list shows (Esc closes it), and while a
+  program started from the line runs (fzf on a key binding).
+- **An emptied line is a new line.** After Up to an older command and
+  deleting it (or Esc), Up starts from the newest command again. zsh by
+  itself carries on from where the deleted command was.
+
 ## How the app loads it
 
 Only into the login shell it starts for a tab, window or pane, or a

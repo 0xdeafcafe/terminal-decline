@@ -349,6 +349,14 @@ pub struct Config {
     /// Ask before closing a window or quitting while a program other than
     /// the shell runs in the foreground.
     pub confirm_close: bool,
+    /// Esc at zsh's prompt clears the line being typed, as a new line
+    /// (Up then starts from the newest command). Only with the shell
+    /// integration, in emacs mode and with the shell itself in the
+    /// foreground: vi mode and programs get Esc as before.
+    pub escape_clears_line: bool,
+    /// Ask before Esc clears a line of more than this many characters;
+    /// 0 never asks (what "Don't ask again" in the question writes).
+    pub confirm_clear_line: u32,
     pub columns: u16,
     pub lines: u16,
     /// Program and arguments to run instead of the login shell.
@@ -559,6 +567,8 @@ impl Default for Config {
             cursor_blink: false,
             copy_on_select: false,
             confirm_close: false,
+            escape_clears_line: true,
+            confirm_clear_line: 80,
             columns: 100,
             lines: 30,
             command: Vec::new(),

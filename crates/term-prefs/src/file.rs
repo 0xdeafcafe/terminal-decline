@@ -674,6 +674,19 @@ fn list_op(array: &mut toml_edit::Array, op: &ListOp) -> Result<(), String> {
     Ok(())
 }
 
+/// Sets the top-level `key` of the config file at `path` to the integer
+/// `value`, as the preferences would: the rest of the file is kept, and
+/// a file that doesn't parse isn't written.
+pub fn set_integer(path: &Path, key: &str, value: i64) -> Result<(), String> {
+    let text = read(path).map_err(|e| e.to_string())?.unwrap_or_default();
+    let edit = Edit::Set {
+        path: vec![key.to_string()],
+        value: Value::from(value),
+    };
+    let prepared = prepare(&text, &edit, &|_| None)?;
+    write(path, &prepared.text).map_err(|e| e.to_string())
+}
+
 /// Where a write to `path` goes: the file a symlink points at, so the link
 /// stays a link.
 pub fn target(path: &Path) -> PathBuf {
